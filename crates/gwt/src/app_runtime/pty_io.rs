@@ -28,6 +28,63 @@ use super::{
     Read as _, RuntimeStopThreads, UserEvent, WindowProcessStatus,
 };
 
+/// SPEC-3431 FR-108c: how long the TUI is given to render the injected body
+/// before the submit byte arrives. Claude Code and Codex both fold a carriage
+/// return that lands in the same PTY write as the text into the text itself —
+/// the line is inserted on the prompt but never submitted — so the submit has
+/// to be a write of its own, after the TUI has settled.
+const PANE_SUBMIT_SETTLE: Duration = Duration::from_millis(400);
+
+/// Split one pane payload into the body and its submit terminator. Input that
+/// carries no terminator is not a submit and is returned whole, so raw
+/// keystroke forwarding stays byte-exact.
+fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
+    for terminator in ["\r\n", "\r", "\n"] {
+        if let Some(body) = text.strip_suffix(terminator) {
+            return (body, Some(terminator));
+        }
+    }
+    (text, None)
+}
+
+/// Write one pane payload as the TUIs expect it: the body first, then the
+/// submit byte on its own once the TUI has settled (SPEC-3431 FR-108c). The
+/// delay runs on a detached thread holding an `Arc` clone of the pane, so the
+/// event loop is never blocked and every other pane keeps streaming.
+pub(super) fn write_pane_input_then_submit(
+    pane: &Arc<Mutex<Pane>>,
+    text: &str,
+) -> Result<(), String> {
+    let (body, submit) = split_pane_submit(text);
+    if !body.is_empty() {
+        pane.lock()
+            .map_err(|error| error.to_string())
+            .and_then(|pane| {
+                pane.write_input(body.as_bytes())
+                    .map_err(|error| error.to_string())
+            })?;
+    }
+    let Some(submit) = submit else {
+        return Ok(());
+    };
+    let submit = submit.to_string();
+    let pane = Arc::clone(pane);
+    thread::spawn(move || {
+        thread::sleep(PANE_SUBMIT_SETTLE);
+        match pane.lock() {
+            Ok(pane) => {
+                if let Err(error) = pane.write_input(submit.as_bytes()) {
+                    tracing::warn!(%error, "pane submit byte could not be written");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "pane submit byte skipped: pane lock poisoned");
+            }
+        }
+    });
+    Ok(())
+}
+
 /// Complete the stop phase for every runtime before any join can block.
 fn stop_all_before_joining<I, T>(
     ids: I,
@@ -43,15 +100,6 @@ fn stop_all_before_joining<I, T>(
 }
 
 impl AppRuntime {
-    pub(crate) fn inspection_input_denied_events(&self, window_id: &str) -> Vec<OutboundEvent> {
-        let message =
-            "\r\n[gwt] This Session is inspection-only. Use Continue work before sending input.\r\n";
-        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
-            id: window_id.to_string(),
-            data_base64: base64::engine::general_purpose::STANDARD.encode(message),
-        })]
-    }
-
     /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
     /// streamed output was dropped under client queue pressure, restoring
     /// display consistency for the affected client only.
@@ -125,29 +173,9 @@ impl AppRuntime {
         window_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(window_id) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::PaneSendResult {
-                    ok: false,
-                    window_id: Some(window_id.to_string()),
-                    error: Some(
-                        "the target Session is inspection-only; use Continue work before sending input"
-                            .to_string(),
-                    ),
-                },
-            )];
-        }
         let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
-            Some(runtime) => runtime
-                .pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| {
-                    pane.write_input(text.as_bytes())
-                        .map_err(|error| error.to_string())
-                }),
+            Some(runtime) => write_pane_input_then_submit(&runtime.pane, text),
         };
 
         match write_result {
@@ -171,9 +199,6 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(id) {
-            return self.inspection_input_denied_events(id);
-        }
         let write_result = {
             let Some(runtime) = self.runtimes.get(id) else {
                 tracing::debug!(
@@ -230,14 +255,6 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
-        if self.inspection_agent_windows.contains(id) {
-            // Inspection panes must always return through `terminal_input_events`,
-            // where the immutable inspection boundary is enforced. Publishing
-            // their raw PTY handle here would let the WebSocket fast path bypass
-            // that check.
-            self.deregister_pty_writer(id);
-            return;
-        }
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -521,6 +538,42 @@ impl AppRuntime {
                 Some(message.clone()),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod submit_split_tests {
+    use super::split_pane_submit;
+
+    /// SPEC-3431 FR-108c: the body and the submit byte must be separable, so
+    /// the writer can put the carriage return in its own PTY write. A single
+    /// write of `body + CR` is what the TUIs mis-read as a literal newline.
+    #[test]
+    fn carriage_return_is_separated_from_the_body() {
+        assert_eq!(split_pane_submit("digest.\r"), ("digest.", Some("\r")));
+        assert_eq!(split_pane_submit("digest.\n"), ("digest.", Some("\n")));
+    }
+
+    /// A CRLF terminator is one submit, not a body that ends in CR: stripping
+    /// only the LF would leave a stray carriage return glued to the text.
+    #[test]
+    fn crlf_is_treated_as_a_single_submit_terminator() {
+        assert_eq!(split_pane_submit("digest.\r\n"), ("digest.", Some("\r\n")));
+    }
+
+    /// Input without a terminator is not a submit — `terminal_input` forwards
+    /// raw keystrokes through the same writer and must stay byte-exact.
+    #[test]
+    fn payload_without_a_terminator_is_written_whole() {
+        assert_eq!(split_pane_submit("partial"), ("partial", None));
+        assert_eq!(split_pane_submit(""), ("", None));
+    }
+
+    /// A bare terminator (the submit-only follow-up a caller may send) keeps an
+    /// empty body so the writer skips the first write entirely.
+    #[test]
+    fn bare_terminator_has_an_empty_body() {
+        assert_eq!(split_pane_submit("\r"), ("", Some("\r")));
     }
 }
 

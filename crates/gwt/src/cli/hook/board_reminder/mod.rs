@@ -525,18 +525,17 @@ pub fn compute_plan(
 
     let self_match_keys = build_self_match_keys(session);
     let language = resolve_narrative_language();
-    // SPEC-3248 (hooks v2 P3): the Work-state reminders (title purpose,
-    // progress summary) fire only when the resolved lane profile asks for them.
-    // Board-read injection and the memory reminder still apply — a lane that
-    // owns no Work (intake) still coordinates and records lessons. Resolved
-    // from the worktree lane file (source of truth), falling back to the env
-    // fast-path and then execution (FR-009). Replaces the SPEC-3247 ad-hoc
-    // `SessionKind::from_env()` branch.
-    let lane = super::context::HookContext::for_worktree(&session.worktree_path).lane;
+    // SPEC #3245 FR-004: the Work-state reminders (title purpose, progress
+    // summary) fire for every session — the intake lane suppression is gone.
+    // Only a terminal delivery settlement still quiets them.
     let suppress_work_state_reminders =
         terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
-    let emit_work_state_reminders =
-        lane.policy_flags.emit_work_state_reminders && !suppress_work_state_reminders;
+    // SPEC-3431 FR-064: the resident PM owns no Work item, its window title is
+    // fixed, and `workspace.update` cannot even succeed from its detached
+    // worktree (#3477). Suppress separately from the terminal-settlement path
+    // so the PM gets its own reminder rather than a settlement notice.
+    let is_resident_pm = crate::cli::hook::is_resident_pm_worktree(&session.worktree_path);
+    let emit_work_state_reminders = !suppress_work_state_reminders && !is_resident_pm;
 
     let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
@@ -553,6 +552,8 @@ pub fn compute_plan(
     if suppress_work_state_reminders {
         plan.output =
             replace_with_terminal_settlement_reminder(plan.output, intent_event, &language);
+    } else if is_resident_pm {
+        plan.output = replace_with_pm_reminder(plan.output, intent_event, &language);
     }
 
     if emit_work_state_reminders {
@@ -564,9 +565,6 @@ pub fn compute_plan(
         );
     }
 
-    // The stale/progress reminder state is still advanced for intake to keep a
-    // single, uniform compute path (no divergent intake state machine); only
-    // the Work-state *text* injection is suppressed by the guards below.
     let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
         session,
         &session.worktree_path,
@@ -612,29 +610,6 @@ pub fn compute_plan(
         &language,
     );
 
-    // SPEC-3248 (hooks v2 P4): a lane whose profile enables SessionStart
-    // onboarding gets a lane-framed 导线 prepended on SessionStart, so an
-    // intake session opens with the curation workflow (register / discuss /
-    // plan) instead of the producing-work default.
-    if intent_event == IntentBoundaryEvent::SessionStart
-        && lane.policy_flags.sessionstart_onboarding
-    {
-        plan.output = prepend_lane_onboarding(plan.output, lane, &language);
-    }
-
-    // SPEC-3248 (hooks v2 P4): a lane with the completion gate gets a soft,
-    // non-blocking Stop nudge to register the work it curated. It never blocks
-    // Stop — an intake session may legitimately end in no-action. Since P7A
-    // the hard gate owns enforcement; the nudge is skipped once the current
-    // session already holds a fresh, valid outcome so the reminder cannot
-    // contradict the recorded settlement.
-    if intent_event == IntentBoundaryEvent::Stop
-        && lane.policy_flags.completion_gate
-        && !intake_outcome_settled(&session.worktree_path, &session.id)
-    {
-        plan.output = append_intake_completion_reminder(plan.output, &language);
-    }
-
     Ok(Some(plan))
 }
 
@@ -652,6 +627,45 @@ fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -
             record.primary_session_id == session_id
                 && record.status != crate::cli::execution_state::ExecutionControlStatus::Active
         })
+}
+
+/// SPEC-3431 FR-064: swap the implementation-agent reminder for the PM's.
+/// Shares [`replace_with_terminal_settlement_reminder`]'s substitution so both
+/// stay in step when a base reminder variant is added.
+fn replace_with_pm_reminder(
+    output: HookOutput,
+    _event: IntentBoundaryEvent,
+    language: &str,
+) -> HookOutput {
+    let replacement = match texts::reminder_language(language) {
+        texts::ReminderLanguage::Ja => texts::PM_REMINDER_JA,
+        texts::ReminderLanguage::En => texts::PM_REMINDER,
+    };
+    replace_base_reminders(output, replacement)
+}
+
+fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
+    let replace_base = |text: String| {
+        [
+            texts::USER_PROMPT_REMINDER,
+            texts::USER_PROMPT_REMINDER_SHORT,
+            texts::USER_PROMPT_REMINDER_JA,
+            texts::USER_PROMPT_REMINDER_SHORT_JA,
+            texts::STOP_REMINDER,
+            texts::STOP_REMINDER_SHORT,
+            texts::STOP_REMINDER_JA,
+            texts::STOP_REMINDER_SHORT_JA,
+        ]
+        .into_iter()
+        .fold(text, |text, base| text.replace(base, replacement))
+    };
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, replace_base(text))
+        }
+        HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
+        other => other,
+    }
 }
 
 fn replace_with_terminal_settlement_reminder(
@@ -688,54 +702,6 @@ fn replace_with_terminal_settlement_reminder(
             HookOutput::hook_specific_additional_context(event, replace_base(text))
         }
         HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
-        other => other,
-    }
-}
-
-/// SPEC-3248 P7A: true when the current session already recorded a fresh,
-/// valid intake outcome (the hard gate would pass). Fail-open toward showing
-/// the nudge — unreadable state keeps the reminder.
-fn intake_outcome_settled(worktree: &std::path::Path, session_id: &str) -> bool {
-    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    match crate::cli::intake_outcome::load(&resolved) {
-        Ok(Some(state)) => state.session_id == session_id && state.has_fresh_valid_outcome(),
-        _ => false,
-    }
-}
-
-/// Append the intake completion nudge to a Stop output (SPEC-3248 P4). Stop
-/// emits `SystemMessage` (Claude Code rejects `hookSpecificOutput` on Stop), so
-/// this stays a user-facing reminder and never a `StopBlock`.
-fn append_intake_completion_reminder(output: HookOutput, language: &str) -> HookOutput {
-    let reminder = texts::intake_completion_reminder(language);
-    match output {
-        HookOutput::SystemMessage(text) => {
-            HookOutput::system_message(format!("{text}\n\n{reminder}"))
-        }
-        HookOutput::Silent => HookOutput::system_message(reminder.to_string()),
-        other => other,
-    }
-}
-
-/// Prepend a lane-specific SessionStart onboarding block (SPEC-3248 FR-011).
-/// Only lanes whose `guidance_variant` is `Curation` currently carry a distinct
-/// 导线; other lanes return the output unchanged.
-fn prepend_lane_onboarding(
-    output: HookOutput,
-    lane: &gwt_skills::LaneProfile,
-    language: &str,
-) -> HookOutput {
-    let Some(onboarding) = texts::lane_onboarding(lane, language) else {
-        return output;
-    };
-    match output {
-        HookOutput::HookSpecificAdditionalContext { event, text } => {
-            HookOutput::hook_specific_additional_context(event, format!("{onboarding}\n\n{text}"))
-        }
-        HookOutput::Silent => HookOutput::hook_specific_additional_context(
-            IntentBoundaryEvent::SessionStart,
-            onboarding.to_string(),
-        ),
         other => other,
     }
 }
@@ -844,6 +810,84 @@ mod tests {
         e.created_at = timestamp;
         e.updated_at = timestamp;
         e
+    }
+
+    /// SPEC-3431 FR-064: the resident PM gets no Work-state reminders.
+    ///
+    /// The title demand ("set title-summary as your first action, this is not
+    /// optional", re-issued every turn) outranks the PM's own contract in the
+    /// context it reads. It is also unsatisfiable: the PM runs in a detached
+    /// worktree where `workspace.update` fails with
+    /// `branch identity is unavailable` — the PM filed that as #3477 itself.
+    /// The progress-summary demand asks for an implementation/verification
+    /// digest the PM has no basis to write, and writing it would overwrite the
+    /// shared projection that belongs to the implementation agents.
+    #[test]
+    fn the_resident_pm_gets_no_work_state_reminders() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).expect("pm worktree");
+        let session = make_session(&pm_worktree, "work", "Project Manager");
+
+        let plan = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            "2026-08-06T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .expect("plan")
+        .expect("some plan");
+
+        let text = match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
+            other => panic!("expected additional context, got {other:?}"),
+        };
+        assert!(
+            !text.contains("title-summary"),
+            "the PM must not be told to set a work purpose:\n{text}"
+        );
+        assert!(
+            !text.contains("progress_summary"),
+            "the PM must not be told to write an implementation digest:\n{text}"
+        );
+        assert!(
+            !text.contains("branch / worktree"),
+            "the PM performs no git operations; the Work/Git guidance is noise:\n{text}"
+        );
+    }
+
+    /// The exemption is keyed on the PM worktree alone. An identical session
+    /// anywhere else keeps the ordinary reminder — a regression here would
+    /// silently disarm the coordination discipline for the whole fleet.
+    #[test]
+    fn an_ordinary_session_keeps_the_ordinary_reminder() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/ordinary", "Codex");
+
+        let plan = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            "2026-08-06T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .expect("plan")
+        .expect("some plan");
+
+        let text = match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
+            other => panic!("expected additional context, got {other:?}"),
+        };
+        assert!(
+            !text.contains("resident PM") && !text.contains("常駐 PM"),
+            "a non-PM worktree must never receive the PM reminder:\n{text}"
+        );
+        assert!(
+            text.contains("Board") || text.contains("board"),
+            "the ordinary coordination reminder must still be there:\n{text}"
+        );
     }
 
     #[test]
@@ -1486,97 +1530,8 @@ mod tests {
         assert_eq!(plan.next_reminders.last_injected_at, Some(now));
     }
 
-    /// SPEC-3247 FR-003 / AS-4: an intake (Curate) session must not receive the
-    /// producing-work Work reminders (title-summary AND progress-summary) — it
-    /// owns no Work. The same setup in an execution session (default signal)
-    /// still injects both. The shared Board-coordination reminder and the
-    /// memory reminder survive in intake, so intake is not silenced wholesale.
-    /// SPEC-3248 P4 (FR-011): an intake lane opens SessionStart with the
-    /// curation 导线; execution does not.
     #[test]
-    fn intake_sessionstart_prepends_curation_onboarding() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("home");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let repo = home.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        let session = make_session(&repo, "work/intake", "Codex");
-
-        // Intake (env fast-path, no lane file in the temp repo).
-        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
-        let intake = compute_plan("SessionStart", &session, Utc::now())
-            .expect("compute plan")
-            .expect("plan");
-        let intake_text = additional_context(&intake.output);
-        assert!(
-            intake_text.contains("Intake") && intake_text.contains("gwt-register-issue"),
-            "intake SessionStart must prepend the curation onboarding: {intake_text}"
-        );
-
-        // Execution: no onboarding.
-        let _exec = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "execution");
-        let exec = compute_plan("SessionStart", &session, Utc::now())
-            .expect("compute plan")
-            .expect("plan");
-        let exec_text = match &exec.output {
-            HookOutput::HookSpecificAdditionalContext { text, .. } => text.as_str(),
-            HookOutput::Silent => "",
-            other => panic!("unexpected execution output: {other:?}"),
-        };
-        assert!(
-            !exec_text.contains("gwt-register-issue"),
-            "execution SessionStart must not carry the intake onboarding: {exec_text}"
-        );
-    }
-
-    /// SPEC-3248 P4 (FR-011): an intake lane gets a soft, non-blocking Stop
-    /// nudge to register curated work; execution does not. Must be a
-    /// SystemMessage (not a StopBlock) so it never forces continuation.
-    #[test]
-    fn intake_stop_appends_completion_reminder_without_blocking() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("home");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let repo = home.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        let session = make_session(&repo, "work/intake", "Codex");
-
-        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
-        let intake = compute_plan("Stop", &session, Utc::now())
-            .expect("compute plan")
-            .expect("plan");
-        // Non-blocking: a SystemMessage, never a StopBlock.
-        let HookOutput::SystemMessage(text) = &intake.output else {
-            panic!("intake Stop completion nudge must be a SystemMessage: {intake:?}");
-        };
-        assert!(
-            text.contains("gwt-register-issue") || text.contains("gwt-register-spec"),
-            "intake Stop must nudge registration: {text}"
-        );
-
-        let _exec = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "execution");
-        let exec = compute_plan("Stop", &session, Utc::now())
-            .expect("compute plan")
-            .expect("plan");
-        let exec_text = match &exec.output {
-            HookOutput::SystemMessage(text) => text.as_str(),
-            HookOutput::Silent => "",
-            other => panic!("unexpected execution Stop output: {other:?}"),
-        };
-        assert!(
-            !exec_text.contains("Intake 完了") && !exec_text.contains("Intake completion"),
-            "execution Stop must not carry the intake completion nudge: {exec_text}"
-        );
-    }
-
-    #[test]
-    fn intake_session_suppresses_title_summary_work_reminder() {
+    fn intake_session_receives_the_same_work_reminders_as_execution() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1610,7 +1565,6 @@ mod tests {
         let progress_reminder = texts::progress_summary_reminder(&language, false, false);
 
         // Execution (signal unset -> default Execution): both Work reminders fire.
-        let _clear = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
         let exec = compute_plan("UserPromptSubmit", &session, Utc::now())
             .expect("compute plan")
             .expect("plan");
@@ -1624,32 +1578,28 @@ mod tests {
             "execution session must still receive the progress-summary Work reminder"
         );
 
-        // Intake: both producing-work reminders are suppressed, but the shared
-        // Board reminder and the memory reminder survive.
-        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
+        // SPEC #3245 FR-004 (#3379): the intake kind no longer suppresses the
+        // Work-state reminders — every session gets the identical reminder
+        // set, so guidance and reminders can never contradict each other.
         let intake = compute_plan("UserPromptSubmit", &session, Utc::now())
             .expect("compute plan")
             .expect("plan");
-        let intake_text = match &intake.output {
-            HookOutput::HookSpecificAdditionalContext { text, .. } => text.as_str(),
-            HookOutput::Silent => "",
-            other => panic!("unexpected intake output: {other:?}"),
-        };
+        let intake_text = additional_context(&intake.output);
         assert!(
-            !intake_text.contains(title_reminder),
-            "intake session must not receive the producing-work title reminder: {intake_text}"
+            intake_text.contains(title_reminder),
+            "intake-kind session must receive the same title-summary Work reminder: {intake_text}"
         );
         assert!(
-            !intake_text.contains(progress_reminder),
-            "intake session must not receive the producing-work progress reminder: {intake_text}"
+            intake_text.contains(progress_reminder),
+            "intake-kind session must receive the same progress-summary Work reminder: {intake_text}"
         );
         assert!(
             intake_text.contains("Board Post Reminder"),
-            "intake session must still receive the shared Board coordination reminder: {intake_text}"
+            "the shared Board coordination reminder stays: {intake_text}"
         );
         assert!(
             intake_text.contains("Memory Reminder"),
-            "intake session must still receive the memory reminder: {intake_text}"
+            "the memory reminder stays: {intake_text}"
         );
     }
 

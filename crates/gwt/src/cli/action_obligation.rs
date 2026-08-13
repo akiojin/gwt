@@ -20,8 +20,8 @@
 //! repo-scoped trusted store (P9b), writes under the owner write lease
 //! (T-149), direct edits hook-blocked (T-120 extension).
 //!
-//! Follow-ups (dependent): assistant commitment scanner (T-243), action
-//! bundle propagation into launches (T-246), completion-op rejection of
+//! Follow-ups (dependent): action bundle propagation into launches (T-246),
+//! completion-op rejection of
 //! open obligations (T-247), gate-doctor recovery obligations (T-248),
 //! evidence records with HEAD/revision binding (T-241 full).
 
@@ -37,6 +37,9 @@ use sha2::{Digest, Sha256};
 
 /// Worktree-relative path of the obligation state mirror.
 pub const ACTION_OBLIGATION_STATE_RELATIVE: &str = ".gwt/skill-state/action-obligations.json";
+const ACTION_OBLIGATION_REVIVAL_STATE_RELATIVE: &str =
+    ".gwt/skill-state/action-obligation-revival.json";
+const ACTION_OBLIGATION_REVIVAL_FILE: &str = "action-obligation-revival.json";
 
 /// Producing obligation kinds (T-240). Status/design questions are
 /// non-producing and never persisted.
@@ -89,6 +92,108 @@ pub struct ActionObligationState {
     /// Integrity hash (P9a convention).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ObligationRevivalOutcome {
+    Revived { kinds: Vec<ObligationKind> },
+    Deferred { reason: String },
+    PersistFailed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObligationRevivalRecord {
+    pub session_id: String,
+    pub result: ObligationRevivalOutcome,
+    pub recorded_at: DateTime<Utc>,
+    pub content_hash: String,
+}
+
+fn revival_record_hash(record: &ObligationRevivalRecord) -> String {
+    let mut canonical = record.clone();
+    canonical.content_hash.clear();
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&canonical).unwrap_or_default())
+    )
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static REVIVAL_RECORD_WRITE_FAILURES: std::cell::Cell<u8> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn set_revival_record_write_failure() {
+    set_revival_record_write_failures(1);
+}
+
+#[cfg(test)]
+pub(crate) fn set_revival_record_write_failures(count: u8) {
+    REVIVAL_RECORD_WRITE_FAILURES.with(|slot| {
+        assert!(
+            slot.replace(count) == 0,
+            "revival record failure injection must not be nested"
+        );
+    });
+}
+
+fn save_revival_record(
+    worktree: &Path,
+    session_id: &str,
+    result: &ObligationRevivalOutcome,
+) -> io::Result<()> {
+    let mut record = ObligationRevivalRecord {
+        session_id: session_id.to_string(),
+        result: result.clone(),
+        recorded_at: Utc::now(),
+        content_hash: String::new(),
+    };
+    record.content_hash = revival_record_hash(&record);
+    let serialized = serde_json::to_vec_pretty(&record)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    #[cfg(test)]
+    REVIVAL_RECORD_WRITE_FAILURES.with(|slot| {
+        let remaining = slot.get();
+        if remaining > 0 {
+            slot.set(remaining - 1);
+            return Err(io::Error::other(
+                "injected obligation revival record write failure",
+            ));
+        }
+        Ok(())
+    })?;
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        ACTION_OBLIGATION_REVIVAL_FILE,
+        &worktree.join(ACTION_OBLIGATION_REVIVAL_STATE_RELATIVE),
+        &serialized,
+    )
+}
+
+pub fn load_revival_record(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ObligationRevivalRecord>> {
+    let contents = match crate::cli::trusted_store::read(worktree, ACTION_OBLIGATION_REVIVAL_FILE)?
+    {
+        Some(contents) => contents,
+        None => return Ok(None),
+    };
+    let record = serde_json::from_str::<ObligationRevivalRecord>(&contents)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    if record.session_id != session_id
+        || record.content_hash.is_empty()
+        || record.content_hash != revival_record_hash(&record)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "action obligation revival record failed identity/integrity validation",
+        ));
+    }
+    Ok(Some(record))
 }
 
 /// Compute the integrity hash (content with the hash field emptied).
@@ -228,6 +333,24 @@ fn prompt_digest(prompt: &str) -> String {
     format!("{:x}", Sha256::digest(prompt.trim().as_bytes()))[..16].to_string()
 }
 
+/// A bare continuation request after an integrity-valid Completed execution
+/// means "finish the handoff" rather than "start more implementation". Keep
+/// this exact and contextual so explicit new implementation requests retain
+/// their ordinary Implementation obligation.
+fn classify_prompt_for_worktree(
+    worktree: &Path,
+    prompt: &str,
+    kind: ObligationKind,
+) -> ObligationKind {
+    if kind == ObligationKind::Implementation
+        && prompt.trim() == "進めて"
+        && crate::cli::execution_state::is_completed(worktree)
+    {
+        return ObligationKind::Pr;
+    }
+    kind
+}
+
 fn mark_locked(
     worktree: &Path,
     session_id: &str,
@@ -246,11 +369,15 @@ fn mark_locked(
     };
     // Re-submitting the same prompt refreshes the open obligation instead
     // of stacking duplicates.
-    if state
+    if let Some(entry) = state
         .obligations
-        .iter()
-        .any(|entry| entry.prompt_digest == digest && entry.settled.is_none())
+        .iter_mut()
+        .find(|entry| entry.prompt_digest == digest && entry.settled.is_none())
     {
+        if entry.kind == ObligationKind::Implementation && kind == ObligationKind::Pr {
+            entry.kind = ObligationKind::Pr;
+            save(worktree, &state)?;
+        }
         return Ok(());
     }
     state.obligations.push(ActionObligation {
@@ -266,15 +393,22 @@ fn mark_locked(
 /// posture as the intake marker — short bounded wait, unleased fallback,
 /// because a dropped arming fails OPEN (T-149 review convention).
 pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::Result<bool> {
-    let Some(kind) = classify_prompt(prompt) else {
+    let Some(base_kind) = classify_prompt(prompt) else {
         return Ok(false);
     };
     match crate::cli::trusted_store::with_write_lease_wait(
         worktree,
         std::time::Duration::from_millis(300),
-        || mark_locked(worktree, session_id, prompt, kind),
+        || {
+            let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
+            mark_locked(worktree, session_id, prompt, kind)
+        },
     ) {
         Err(err) if err.kind() == ErrorKind::WouldBlock => {
+            // This fail-open path cannot share the lease with execution state,
+            // but it must still avoid reusing a classification sampled before
+            // the bounded wait.
+            let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
             mark_locked(worktree, session_id, prompt, kind)?;
             Ok(true)
         }
@@ -342,15 +476,28 @@ pub fn defer_all_best_effort(worktree: &Path, session_id: &str, reason: &str) {
 /// evidence). Recovery therefore re-owes exactly the work the block
 /// parked, through the existing obligation gate — no separate Gate Doctor
 /// surface (user decision, 2026-07-28).
-pub fn revive_deferred_best_effort(worktree: &Path, session_id: &str, kinds: &[ObligationKind]) {
+pub fn revive_deferred(
+    worktree: &Path,
+    session_id: &str,
+    kinds: &[ObligationKind],
+) -> ObligationRevivalOutcome {
     let result = crate::cli::trusted_store::with_write_lease(worktree, || {
         let Some(mut state) = load(worktree)? else {
-            return Ok(());
+            return Ok(ObligationRevivalOutcome::Deferred {
+                reason: "obligation_state_missing".to_string(),
+            });
         };
-        if state.session_id != session_id || !integrity_ok(&state) {
-            return Ok(());
+        if state.session_id != session_id {
+            return Ok(ObligationRevivalOutcome::Deferred {
+                reason: "obligation_session_mismatch".to_string(),
+            });
         }
-        let mut changed = false;
+        if !integrity_ok(&state) {
+            return Ok(ObligationRevivalOutcome::Deferred {
+                reason: "obligation_integrity_failure".to_string(),
+            });
+        }
+        let mut revived = Vec::new();
         for entry in &mut state.obligations {
             let deferred = entry
                 .settled
@@ -358,97 +505,45 @@ pub fn revive_deferred_best_effort(worktree: &Path, session_id: &str, kinds: &[O
                 .is_some_and(|settlement| settlement.evidence.starts_with("deferred:"));
             if deferred && kinds.contains(&entry.kind) {
                 entry.settled = None;
-                changed = true;
+                if !revived.contains(&entry.kind) {
+                    revived.push(entry.kind);
+                }
             }
         }
-        if changed {
+        if !revived.is_empty() {
             save(worktree, &state)?;
+            return Ok(ObligationRevivalOutcome::Revived { kinds: revived });
         }
-        Ok(())
+        Ok(ObligationRevivalOutcome::Deferred {
+            reason: "no_matching_deferred_obligation".to_string(),
+        })
     });
-    if let Err(error) = result {
-        tracing::warn!(?error, "deferred obligation revival failed");
-    }
-}
-
-/// T-243 core: classify assertive completion claims in assistant prose.
-/// Deliberately narrow — only implemented/fixed and verified/tests-pass
-/// claim forms (ja+en). PR/issue mentions are excluded: they appear in
-/// historical summaries far too often to classify safely (T-243 full).
-#[must_use]
-pub fn classify_commitments(text: &str) -> Vec<ObligationKind> {
-    let lower = text.to_lowercase();
-    let mut kinds = Vec::new();
-    const IMPLEMENTED_CLAIMS: &[&str] = &[
-        "実装しました",
-        "実装済み",
-        "実装完了",
-        "修正しました",
-        "修正済み",
-        "対応済み",
-        "implemented",
-        "fixed the",
-        "has been fixed",
-    ];
-    const VERIFIED_CLAIMS: &[&str] = &[
-        "検証しました",
-        "検証済み",
-        "テストは全て",
-        "全テスト成功",
-        "verified",
-        "all tests pass",
-        "tests pass",
-        "tests are green",
-    ];
-    if IMPLEMENTED_CLAIMS.iter().any(|claim| lower.contains(claim)) {
-        kinds.push(ObligationKind::Implementation);
-    }
-    if VERIFIED_CLAIMS.iter().any(|claim| lower.contains(claim)) {
-        kinds.push(ObligationKind::Verification);
-    }
-    kinds
-}
-
-/// T-243 core: turn UNBACKED completion claims into open obligations. A
-/// claim is backed when the session's ledger holds ANY entry of that kind
-/// (open entries already block; settled entries prove the canonical
-/// evidence ran). Sessions without a ledger are skipped entirely — the
-/// scanner never invents context (fail-open for pre-P11 flows). Returns
-/// the kinds it newly opened.
-pub fn mark_unbacked_commitments(
-    worktree: &Path,
-    session_id: &str,
-    claimed: &[ObligationKind],
-) -> io::Result<Vec<ObligationKind>> {
-    if claimed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(state) = load(worktree)? else {
-        return Ok(Vec::new());
-    };
-    if state.session_id != session_id || !integrity_ok(&state) {
-        return Ok(Vec::new());
-    }
-    let mut opened = Vec::new();
-    for kind in claimed {
-        if state.obligations.iter().any(|entry| entry.kind == *kind) {
-            continue;
-        }
-        let synthetic = format!("assistant-commitment:{}", kind.as_str());
-        match crate::cli::trusted_store::with_write_lease_wait(
-            worktree,
-            std::time::Duration::from_millis(300),
-            || mark_locked(worktree, session_id, &synthetic, *kind),
-        ) {
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                mark_locked(worktree, session_id, &synthetic, *kind)?;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(?error, "deferred obligation revival failed");
+            ObligationRevivalOutcome::PersistFailed {
+                error: error.to_string(),
             }
-            Err(err) => return Err(err),
-            Ok(()) => {}
         }
-        opened.push(*kind);
+    };
+    match save_revival_record(worktree, session_id, &outcome) {
+        Ok(()) => outcome,
+        Err(error) => {
+            tracing::warn!(?error, "obligation revival outcome persistence failed");
+            let persist_failed = ObligationRevivalOutcome::PersistFailed {
+                error: format!("obligation revival outcome persistence failed: {error}"),
+            };
+            if let Err(fallback_error) = save_revival_record(worktree, session_id, &persist_failed)
+            {
+                tracing::warn!(
+                    ?fallback_error,
+                    "obligation revival persistence-failure audit could not be saved"
+                );
+            }
+            persist_failed
+        }
     }
-    Ok(opened)
 }
 
 /// T-247: completion/ready operations refuse while producing obligations
@@ -566,6 +661,200 @@ mod tests {
         );
     }
 
+    fn materialize_execution(
+        worktree: &Path,
+        owner_number: u64,
+        session_id: &str,
+        completed: bool,
+    ) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: owner_number,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize action-obligation execution");
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize action-obligation generation ledger");
+        if completed {
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    worktree,
+                    session_id,
+                    crate::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("complete action-obligation execution"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn prompt_classification_respects_completed_handoff_context() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let active = tempfile::tempdir().expect("Active obligation repository");
+        materialize_execution(active.path(), 3442, "session-active-handoff", false);
+        mark_from_prompt(active.path(), "session-active-handoff", "進めて").unwrap();
+        assert_eq!(
+            open_kinds(active.path(), "session-active-handoff"),
+            vec![ObligationKind::Implementation],
+        );
+
+        let completed = tempfile::tempdir().expect("Completed obligation repository");
+        materialize_execution(completed.path(), 3443, "session-completed-handoff", true);
+        mark_from_prompt(completed.path(), "session-completed-handoff", "進めて").unwrap();
+        assert_eq!(
+            open_kinds(completed.path(), "session-completed-handoff"),
+            vec![ObligationKind::Pr],
+            "an ambiguous continuation in Completed is PR handoff work",
+        );
+
+        mark_from_prompt(
+            completed.path(),
+            "session-completed-handoff",
+            "バグを修正して",
+        )
+        .unwrap();
+        assert_eq!(
+            open_kinds(completed.path(), "session-completed-handoff"),
+            vec![ObligationKind::Pr, ObligationKind::Implementation],
+            "an explicit new implementation request must not be consumed by PR handoff",
+        );
+
+        let unmanaged = tempfile::tempdir().expect("unmanaged obligation directory");
+        mark_from_prompt(unmanaged.path(), "session-unmanaged", "進めて").unwrap();
+        assert_eq!(
+            open_kinds(unmanaged.path(), "session-unmanaged"),
+            vec![ObligationKind::Implementation],
+        );
+    }
+
+    #[test]
+    fn completed_handoff_classification_is_rechecked_under_the_write_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("transitioning obligation repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let session_id = "session-transitioning-handoff";
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            3442,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize Active execution before prompt classification");
+
+        let transitioning_worktree = worktree.path().to_path_buf();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            let mut execution = crate::cli::execution_state::load(&transitioning_worktree)
+                .expect("load execution during classification race")
+                .expect("execution exists during classification race");
+            execution.status = crate::cli::execution_state::ExecutionControlStatus::Completed;
+            execution.settled_at = Some(Utc::now());
+            crate::cli::execution_state::save(&transitioning_worktree, &execution)
+                .expect("complete flat execution while the prompt writer owns the lease");
+        });
+
+        mark_from_prompt(worktree.path(), session_id, "進めて")
+            .expect("classify prompt after acquiring the write lease");
+        assert_eq!(
+            open_kinds(worktree.path(), session_id),
+            vec![ObligationKind::Pr],
+            "classification must use the execution state protected by the write lease",
+        );
+    }
+
+    #[test]
+    fn ambiguous_handoff_does_not_trust_tampered_completed_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("tampered Completed obligation repository");
+        let session_id = "session-tampered-completed-handoff";
+        materialize_execution(worktree.path(), 3442, session_id, true);
+
+        let mut tampered = crate::cli::execution_state::load(worktree.path())
+            .expect("load Completed execution before tampering")
+            .expect("Completed execution exists");
+        tampered.content_hash = "tampered-completed-authority".to_string();
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path())
+            .expect("trusted worktree directory")
+            .join("execution-control.json");
+        std::fs::write(
+            trusted,
+            serde_json::to_vec_pretty(&tampered).expect("serialize tampered authority"),
+        )
+        .expect("tamper Completed authority fixture");
+
+        mark_from_prompt(worktree.path(), session_id, "進めて")
+            .expect("classify prompt with tampered Completed authority");
+        assert_eq!(
+            open_kinds(worktree.path(), session_id),
+            vec![ObligationKind::Implementation],
+            "only integrity-valid Completed authority may reclassify an ambiguous prompt",
+        );
+    }
+
+    #[test]
+    fn completed_handoff_reclassifies_same_digest_open_implementation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let completed = tempfile::tempdir().expect("Completed obligation repository");
+        let session_id = "session-completed-retry";
+        materialize_execution(completed.path(), 3442, session_id, true);
+
+        mark_locked(
+            completed.path(),
+            session_id,
+            "進めて",
+            ObligationKind::Implementation,
+        )
+        .expect("seed pre-fix open Implementation obligation");
+        mark_from_prompt(completed.path(), session_id, "進めて")
+            .expect("retry Completed handoff prompt");
+
+        let state = load(completed.path()).unwrap().unwrap();
+        assert_eq!(
+            state.obligations.len(),
+            1,
+            "retry must not stack a duplicate"
+        );
+        assert_eq!(
+            open_kinds(completed.path(), session_id),
+            vec![ObligationKind::Pr]
+        );
+    }
+
     // T-239/T-242 core: producing prompts open obligations; matching
     // canonical evidence settles them; prose settles nothing.
     #[test]
@@ -621,64 +910,6 @@ mod tests {
             .contains("deferred: execution.blocked"));
     }
 
-    // T-243 core: only assertive completion claims classify; requests,
-    // status text, and historical PR mentions stay out.
-    #[test]
-    fn commitment_classifier_is_narrow() {
-        assert_eq!(
-            classify_commitments("バグを修正しました。全テスト成功です。"),
-            vec![ObligationKind::Implementation, ObligationKind::Verification]
-        );
-        assert_eq!(
-            classify_commitments("The fix has been fixed and all tests pass."),
-            vec![ObligationKind::Implementation, ObligationKind::Verification]
-        );
-        assert!(classify_commitments("バグを修正してください").is_empty());
-        assert!(classify_commitments("テストを実行して確認します").is_empty());
-        assert!(classify_commitments("PR #3308 マージ済み / 関連 95 GREEN").is_empty());
-        assert!(classify_commitments("fmt / clippy PASS").is_empty());
-    }
-
-    // T-243 core: unbacked claims open obligations; backed claims and
-    // ledger-less sessions never do.
-    #[test]
-    fn unbacked_commitments_open_obligations_backed_ones_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        // No ledger at all → the scanner invents nothing.
-        assert!(
-            mark_unbacked_commitments(dir.path(), "sess-1", &[ObligationKind::Implementation],)
-                .unwrap()
-                .is_empty()
-        );
-
-        // Ledger exists (producing prompt) and implementation evidence is
-        // settled → an implementation claim is backed; a verification
-        // claim is not and opens the obligation.
-        mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
-        settle_kinds_best_effort(
-            dir.path(),
-            "sess-1",
-            &[ObligationKind::Implementation],
-            "verify.run vr-x",
-        );
-        let opened = mark_unbacked_commitments(
-            dir.path(),
-            "sess-1",
-            &[ObligationKind::Implementation, ObligationKind::Verification],
-        )
-        .unwrap();
-        assert_eq!(opened, vec![ObligationKind::Verification]);
-        assert_eq!(
-            open_kinds(dir.path(), "sess-1"),
-            vec![ObligationKind::Verification]
-        );
-        // Re-scanning does not stack duplicates.
-        let opened =
-            mark_unbacked_commitments(dir.path(), "sess-1", &[ObligationKind::Verification])
-                .unwrap();
-        assert!(opened.is_empty());
-    }
-
     // T-247: the refusal helper lists open kinds and honors exclusions.
     #[test]
     fn open_obligation_refusal_lists_kinds_and_honors_exclusions() {
@@ -710,7 +941,16 @@ mod tests {
     // untouched.
     #[test]
     fn revive_deferred_reopens_only_deferred_kinds() {
+        // The revival record round-trips through the HOME-scoped trusted-store
+        // mirror; a parallel test swapping HOME mid-test loses the record
+        // (issue #3411). Hold the env lock and pin a private HOME.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
         mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
         // Implementation settles with real evidence; the issue update is
@@ -729,10 +969,16 @@ mod tests {
         );
         assert!(open_kinds(dir.path(), "sess-1").is_empty());
 
-        revive_deferred_best_effort(
+        let outcome = revive_deferred(
             dir.path(),
             "sess-1",
             &[ObligationKind::IssueUpdate, ObligationKind::Pr],
+        );
+        assert_eq!(
+            outcome,
+            ObligationRevivalOutcome::Revived {
+                kinds: vec![ObligationKind::IssueUpdate]
+            }
         );
         assert_eq!(
             open_kinds(dir.path(), "sess-1"),
@@ -741,11 +987,92 @@ mod tests {
         );
 
         // Cross-session revival is a no-op.
-        revive_deferred_best_effort(dir.path(), "sess-other", &[ObligationKind::IssueUpdate]);
+        assert_eq!(
+            revive_deferred(dir.path(), "sess-other", &[ObligationKind::IssueUpdate]),
+            ObligationRevivalOutcome::Deferred {
+                reason: "obligation_session_mismatch".to_string()
+            }
+        );
         assert_eq!(
             open_kinds(dir.path(), "sess-1"),
             vec![ObligationKind::IssueUpdate]
         );
+        let recorded = load_revival_record(dir.path(), "sess-other")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recorded.result,
+            ObligationRevivalOutcome::Deferred {
+                reason: "obligation_session_mismatch".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn revive_deferred_reports_persist_failed_truthfully() {
+        // Same trusted-store mirror isolation as
+        // `revive_deferred_reopens_only_deferred_kinds` (issue #3411).
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::create_dir_all(state_path(dir.path()).parent().unwrap()).unwrap();
+        fs::write(state_path(dir.path()), "{corrupt").unwrap();
+
+        let outcome = revive_deferred(dir.path(), "sess-corrupt", &[ObligationKind::IssueUpdate]);
+
+        assert!(matches!(
+            outcome,
+            ObligationRevivalOutcome::PersistFailed { .. }
+        ));
+        let recorded = load_revival_record(dir.path(), "sess-corrupt")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            recorded.result,
+            ObligationRevivalOutcome::PersistFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn revival_record_write_failure_cannot_report_revived() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
+        settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::IssueUpdate],
+            "deferred: execution.blocked (offline)",
+        );
+        set_revival_record_write_failure();
+
+        let outcome = revive_deferred(dir.path(), "sess-1", &[ObligationKind::IssueUpdate]);
+
+        assert!(
+            matches!(outcome, ObligationRevivalOutcome::PersistFailed { .. }),
+            "a missing durable revival outcome must never be reported as revived: {outcome:?}"
+        );
+        assert_eq!(
+            open_kinds(dir.path(), "sess-1"),
+            vec![ObligationKind::IssueUpdate],
+            "the state mutation may be visible, but the caller receives a truthful persistence failure"
+        );
+        let record = load_revival_record(dir.path(), "sess-1")
+            .unwrap()
+            .expect("the retry records the persistence failure for execution.status");
+        assert!(matches!(
+            record.result,
+            ObligationRevivalOutcome::PersistFailed { .. }
+        ));
     }
 
     // No-secrets: raw prompts never persist, only digests.

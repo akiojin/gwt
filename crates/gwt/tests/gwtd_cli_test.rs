@@ -119,6 +119,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let mut session = Session::new(&project_root, branch, AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(project_root.clone());
+    session.linked_issue_number = Some(3412);
     assert!(
         session.repo_hash.is_some(),
         "fixture origin must set repo hash"
@@ -160,6 +161,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let mut event = WorkEvent::new(WorkEventKind::Start, work_id, now);
     event.title = Some("Fixture Work".to_string());
     event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = Some("Issue #3412".to_string());
     event.agent_session_id = Some(session_id.to_string());
     event.agent_id = Some("codex".to_string());
     event.display_name = Some("Codex".to_string());
@@ -558,7 +560,11 @@ fn generated_hook_subcommands(corpus: &str) -> BTreeSet<String> {
         .collect();
     let tokens: Vec<&str> = flattened.split_whitespace().collect();
     let references_hook_bin = |token: &str| {
-        token.contains("gwtd") || token.contains("gwt_bin") || token.contains("GWT_HOOK_BIN")
+        let normalized = token.to_ascii_lowercase();
+        normalized.contains("gwtd")
+            || normalized.contains("gwt_bin")
+            || normalized.contains("gwtbin")
+            || normalized.contains("gwt_hook_bin")
     };
     let is_subcommand = |token: &str| {
         let mut chars = token.chars();
@@ -662,6 +668,7 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
 
 /// Walk up from the gwt crate dir to the repository root that owns the
 /// committed managed-hook settings (`.claude/settings.json`).
+#[cfg(unix)]
 fn repo_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -672,6 +679,7 @@ fn repo_root() -> std::path::PathBuf {
 
 /// Collect every committed managed-hook `command` string that invokes the
 /// repo-owned `gwt-self-improvement-stop` hook (Claude + Codex transports).
+#[cfg(unix)]
 fn committed_self_improvement_stop_commands() -> Vec<String> {
     let root = repo_root();
     let mut commands = Vec::new();
@@ -714,6 +722,7 @@ fn committed_self_improvement_stop_commands() -> Vec<String> {
 /// (stderr/exit ignored). A `HookOutput::StopBlock` from a current binary exits 0
 /// and writes its decision JSON to stdout, so a graceful wrapper that drops
 /// stderr and forces exit 0 still surfaces a real block.
+#[cfg(unix)]
 #[test]
 fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
     let commands = committed_self_improvement_stop_commands();

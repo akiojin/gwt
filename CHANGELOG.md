@@ -1,6 +1,551 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.78.1] - 2026-08-12
+
+### Bug Fixes
+
+- **hooks:** Codex hooks の監査対象と自己修復対象のパス集合を一致させる
+- **launch:** Provenance 未解決時は legacy Session 移行を skip して launch を継続する
+- **issue-monitor:** Scan の probe を claim 候補に限定し commit を独立 budget で実行する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3474 の作業状態を記録
+- **work:** Issue #3474 の視覚検証完了を記録
+- **work:** Issue #3474 の完了状態を記録
+- **work:** Develop worktree の Work event を記録する
+
+
+## [9.78.0] - 2026-08-12
+
+### Bug Fixes
+
+- Harden Windows official provider launches
+- **workspace:** Rebind continued sessions to canonical work
+- **agent:** Keep launch status config cross-platform
+- **agent:** Address Windows launch review findings
+- Stabilize browser check hook fallback
+- Converge browser check hook authority
+- **hooks:** 並行する Codex hook 再生成を安定化する
+- **workspace:** 子 Work が projection の owner/agents を継承表示する不具合を修正 (#3455)
+- **launch:** Resume / Continue 起動で Skip Permissions を新規起動と同じ設定源から引き継ぐ (#3462)
+- **monitor:** GUI scheduled scan から自律起動を駆動する
+- **monitor:** Authority leaseの回収と競合を直列化する
+- **monitor:** Corrective駆動のレビュー指摘を解消する
+- **monitor:** Fallback期限を外側へ継承する
+- **monitor:** GUI fallbackのロック待機を制限する
+- **hooks:** Hook-authority スクリプトの rg 依存を除去し rg 不在環境での fail-open を防ぐ (#3398)
+
+### Features
+
+- **workspace:** Closed owner の滞留 Work を整理する work_prune を追加 (#3448)
+- **workspace:** 孤児化した worktree placeholder の整理と対象プロジェクト指定を work_prune に追加 (#3448)
+- **gui:** Issues ビューと Issue Monitor を単一 Issue サーフェスへ統合する (#3461)
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 3398 continuation events
+- **work:** Record Issue 3398 resume
+- **work:** #3455 検証中の Work event bookkeeping
+- **work:** #3455/#3448 作業中の Work event bookkeeping
+- **work:** Issue #3505 の実行前調査を記録する
+- **work:** Issue #3505 の検証完了を記録する
+- **work:** Issue #3505 のterminal receiptを記録する
+- **ci:** Retrigger checks for PR #3520 after ETXTBSY test flake
+- **work:** Issue 3461 の blocker を記録する
+- **work:** Issue #3461 の Work event を記録する
+- **work:** Issue #3461 の配信状態を記録する
+
+### Testing
+
+- Stabilize workspace proxy loss coverage
+- **core:** Gate Windows registry path regression
+- **hooks:** Managed assets の hook audit テストから host rg 依存を除去する (#3398)
+
+
+## [9.77.0] - 2026-08-11
+
+### Bug Fixes
+
+- **pm:** Wake prompt と PM 送達の CR を独立した書き込みにして submit を成立させる (SPEC #3431 FR-108c / T-218)
+
+### Documentation
+
+- **agents:** GUI/フロントエンド変更で Headed ブラウザ E2E テストを必須化する
+- **pm:** FR-108(a) の harness スケジューラ契約を PM guidance へ追補する (SPEC #3431 T-202)
+
+### Features
+
+- **pm:** FR-111 PM 特権の pane メッセージ送達 pm.message.send を実装する (SPEC #3431 T-206)
+
+
+## [9.76.0] - 2026-08-10
+
+### Bug Fixes
+
+- Enforce worktree marker and badge boundaries
+- Account for minimap cell border
+- **gui:** Scheduled tick の挿入で cfg(unix) 属性が board registry から外れたのを修正する
+
+### Features
+
+- **pm:** 常駐ループの穴 3 件を塞ぎ GUI に scheduled scan tick を実装する (SPEC #3431 FR-108〜110 / #3505)
+
+### Miscellaneous Tasks
+
+- **work:** Record develop pane work events
+- **work:** Record verification progress
+- **work:** Record issue 3384 completion
+- **work:** SPEC #3431 常駐ループ修正 slice の terminal Work event を記録する
+- **work:** SPEC #3431 常駐ループ修正 slice の terminal Work event を記録する
+
+### Refactor
+
+- Adopt Rust worktree-form vocabulary
+- Adopt frontend worktree-form vocabulary
+
+### Testing
+
+- Enforce worktree badge overflow coverage
+- Align minimap tooltip worktree form coverage
+- **gwt:** Git 依存の wizard branch 解決テストに env lock を追加して並走 flake を止める
+
+## [9.75.1] - 2026-08-09
+
+### Bug Fixes
+
+- **pm:** Bare リポジトリ層構成で PM worktree 作成が失敗し PM が無言不起動になるのを修正する (#3497)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3431 M-A slice の terminal Work event を記録する
+- **work:** Issue #3497 修正 slice の Work event を記録する
+
+### Testing
+
+- **pm:** Stop/failover の IPC 層 failure injection と残 matrix を固定する (SPEC #3431 T-087d/T-080/T-081)
+- **index:** Deadline-reap fake runner の cold-start 競合 flake を根治する
+- **gwt:** HOME 依存の issue monitor テストに env lock を追加して並走 flake を止める
+
+## [9.75.0] - 2026-08-09
+
+### Bug Fixes
+
+- **pm:** PM ウィンドウが PM だと名乗るようにする (SPEC #3431 FR-020)
+- **pm:** Gwt-pm ガイダンスを配布後の choke point で生成する (SPEC #3431 T-052)
+- **pm:** PM 契約を FR-015/016/017 に整合させる (SPEC #3431)
+- **pane:** Pane.* を所有プロジェクトにスコープする (SPEC #3431 前提)
+- **camera:** ウィンドウのフレーミングをローカル経路に統一する (SPEC #3431 FR-019)
+- **pm:** PM を実装エージェント向け hook の対象から外す (SPEC #3431 FR-029)
+- **pm:** テスト属性の重複を解消する (SPEC #3431)
+- **issue-monitor:** 死んだエージェントのスロットを必ず解放する (SPEC #3431 FR-030)
+- **issue-monitor:** ウィンドウを閉じる操作を有界なリトライにする (SPEC #3431 FR-031)
+- **issue-monitor:** 正常終了したエージェントのスロットも解放する (SPEC #3431 FR-032)
+- **workspace:** SPEC 起点で起動したエージェントの Work owner 表記を揃える (SPEC #3431 FR-070)
+- **pm:** レビュー検出 3 件を修正する (SPEC #3431 FR-021/FR-012)
+- **daemon:** Windows の subscribe stub を timeout_seconds 追加後の呼び出しに一致させる (SPEC #3431 FR-025)
+
+### Documentation
+
+- **pm:** PM エージェントの利用者向け説明と launch_now の agent 導線を追加 (SPEC #3431)
+- **pm:** モジュール doc を起動プロファイル導入後の実装に合わせる (SPEC #3431)
+- **pm:** 2026-08-07 の信頼性要件を FR-064〜069 へ採番し直す (SPEC #3431 T-085)
+
+### Features
+
+- **pm:** PM 登録レジストリと pm.status 診断 op を追加 (SPEC #3431)
+- **pm:** Gwt-pm guidance skill の canonical source を追加 (SPEC #3431)
+- **pm:** Pm.status に FR-014 の会計可視化を追加 (SPEC #3431)
+- **pm:** PM ペインのシングルトン spawn gate と自動起動を実装 (SPEC #3431)
+- **pm:** Close/crash 弁別と backoff 付き自動復旧を実装 (SPEC #3431)
+- **pm:** PM worktree のライフサイクル管理を追加 (SPEC #3431)
+- **pm:** Launch_now op と ScanNow control を追加 (SPEC #3431 Phase 3)
+- **pm:** PM 特権による Issue Monitor 非対称境界の適用除外 (SPEC #3431 Phase 4)
+- **pm:** PM ウィンドウの識別子と PM 起動イベントを追加 (SPEC #3431 FR-018〜020 backend)
+- **pm:** PM ランチャーと PM ウィンドウ識別の UI を追加 (SPEC #3431 FR-018〜022)
+- **pm:** PM に他エージェントの読み取り専用観測を与える (SPEC #3431 FR-023〜025)
+- **pm:** PM の起動プロファイルをプロジェクト単位で保持する (SPEC #3431 FR-026)
+- **pm:** PM 設定パネルとエージェント選択 UI を追加 (SPEC #3431 FR-026)
+- **pm:** PM を常に skip-permissions で起動する (SPEC #3431 FR-028)
+- **pm:** Issue の更新・整理とエージェント常時監視を契約に加える (SPEC #3431)
+- **pm:** PM に pane.close を解禁する (SPEC #3431 FR-031)
+- **issue-monitor:** 停滞を観測可能にする活動時刻を追加する (SPEC #3431 FR-033)
+- **issue-monitor:** レートリミットのスロットを解放し PM 契約に停滞対処を書く (SPEC #3431 FR-034)
+- **issue-monitor:** 実装エージェントを identity 一致で停止する操作を追加する (SPEC #3431 FR-033)
+- **issue-monitor:** PM から呼べる停止操作 issue.monitor.stop を公開する (SPEC #3431 FR-033)
+- **issue-monitor:** 起動中エージェントの failover 再起動を PM に公開する (SPEC #3431 FR-029〜031)
+- **pm:** 常駐ループを Stop hook で駆動する (SPEC #3431 FR-012/FR-035)
+- **pm:** Park した PM を Monitor イベントで起こす daemon wake 経路 (SPEC #3431 T-093/FR-012)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3431 の work イベントを記録
+- **work:** Develop 取り込み後の Work 権限補正イベントを記録
+- **work:** SPEC #3431 配信 slice の terminal Work event を記録する
+
+### Testing
+
+- **pm:** NeedsHuman の GUI 非依存な projection 可視性を固定 (SPEC #3431)
+
+## [9.74.0] - 2026-08-07
+
+### Bug Fixes
+
+- **issue-monitor:** Claim 再照合と refresh 上限を修正
+- **autonomous:** 確認待ちを NeedsHuman へ即時 handoff して active slot を解放する
+- **issue-monitor:** Needs_human / not_ready / hold_excluded の行バッジが Queued と表示される
+- **launch:** SessionStart readiness を進捗ベースの上限付き期限に変更
+
+### Documentation
+
+- **skills:** Parked question handoff の JSON operations を gwt-agent skill に追記
+
+### Features
+
+- **issue-monitor:** Readiness と hold 除外を実装
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3460 の完了状態を記録
+- **work:** Issue #3478 の作業イベントを記録
+- **work:** Issue #3478 の完了状態を記録
+- **work:** Issue #3478 の完了 Work event を記録
+- **work:** Issue #3475 の完了状態を記録
+
+### Refactor
+
+- **issue-monitor:** 共有実行状態の型契約を追加
+
+### Styling
+
+- **autonomous:** Restart 復元テストの整形を rustfmt に合わせる
+
+### Testing
+
+- **action-obligation:** Revival記録テストを隔離
+- **autonomous:** 停止中の質問表示を実ブラウザ E2E で固定する
+
+## [9.73.1] - 2026-08-05
+
+### Bug Fixes
+
+- **ci:** Prepare Release に発行元 PAT を配線しリリース準備を通す
+- Prevent terminal output starvation
+- Add content-free terminal latency tracing
+- Bound workspace hydration and projection
+- Reduce latency across prompt submission and navigation
+- **gui:** Keep session resume projections process-free
+- **gui:** Make background projections converge
+- **gui:** Invalidate topology at materialization
+- **gui:** Converge knowledge and topology refresh
+- **index:** 非ブロッキング検索の修復予約と型付き失敗分類を実装する
+- **knowledge:** 検索劣化を静音化し選択を cache-backed detail-only にする
+- **gui:** 選択を同期プレビュー化し selection generation でフェンスする
+- **gui:** Semantic 検索の静音無期限リトライとローカル即時フォールバックを実装する
+- **gui:** Knowledge Bridge の semantic 検索ステータス表示を除去する
+- **index:** 監査 P0/P1 を解消し検索試行の境界と静音性を強化する
+- **gui:** 選択/リトライの世代フェンスを強化し TOCTOU 送信を排除する
+- **gui:** PR の選択を従来の full-load 経路に維持する
+- **core:** Windows deadline spawn の resume をプロセススコープ化する
+- **index:** Retry metadata を private wire envelope へ移し公開型を保つ
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 3170 completion
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record workspace backfill
+- **spec-3170:** 旧ブランチ内容を origin/develop 基準へ揃える
+- **work:** SPEC-3170 検証フェーズの work イベントを記録する
+- **work:** SPEC-3170 の PR handoff 前 Work イベントを記録する
+- **work:** SPEC-3170 の Work を完了として記録する
+
+### Testing
+
+- 高負荷時のターミナル入力遅延を検証する
+- Separate prompt SLA from shared-suite watchdog
+- Isolate ordered navigation process contract
+- **gui:** 選択即応と静音リトライのブラウザ契約を固定する
+- 負荷依存で偽陽性になるテスト予算を実測値ベースへ是正する
+- **workspace:** Host probe がリクエストを読み切ってから応答する
+- **core:** Fixture のクレート汚染と home 解決レースを止める
+
+## [9.73.0] - 2026-08-05
+
+### Bug Fixes
+
+- **hooks:** Worktree ローカルのバイナリ固定を防ぐ
+- **hooks:** Runtime selectorの境界条件を補強する
+- **launch:** 滞留 generation による起動拒否に holder と回復導線を含める
+- **governance:** Make recovery diagnostics executable
+- **governance:** Close recovery authority gaps
+- **governance:** Validate recovery owner authority
+- **governance:** Enforce continuation predecessor CAS
+- **governance:** Reject activated takeover suffix retries
+- **governance:** Recovery authority transaction を厳密化
+- **governance:** Preserve recovery projection boundaries
+- **pr:** Allow completed lifecycle receipt handoff
+
+### Features
+
+- **governance:** Semantic effect の観測を追加
+
+### Miscellaneous Tasks
+
+- **work:** Correct resumed work handoff
+
+### Testing
+
+- **hooks:** Health envelopeテストの実行環境を固定する
+- **hooks:** Health fixture の実行環境を固定する
+- **hooks:** Projection fixture に安定版バイナリを設定する
+- **hooks:** Self-heal fixture を環境非依存にする
+
+## [9.72.1] - 2026-08-03
+
+### Bug Fixes
+
+- **issue-monitor:** RecoveryBlocked fixture の同期を決定化
+
+## [9.72.0] - 2026-08-03
+
+### Bug Fixes
+
+- **issue-monitor:** Use authority daemon state
+- **issue-monitor:** Preserve agent status authority boundaries
+- **execution:** Repair の authority 判定を統一
+- **workspace:** Recovery authority 判定を統一
+- **workspace:** Commit時の履歴判定を統一
+
+### Features
+
+- **issue-monitor:** Add agent queue operations
+- **hooks:** Workflow-policy から owner guard と intake code-edit guard を撤去 (SPEC #3245 T-101..T-103)
+- **hooks:** Intake completion Stop gate を撤去し capture 配線を単純化 (SPEC #3245 T-104)
+- **skills:** Reduced skill set と lane 別 guidance/reminder 分岐を撤去 (SPEC #3245 T-105/T-106)
+- **skills:** 登録テンプレートを autonomous 適格既定へ (SPEC #3245 Stage B T-121..T-124)
+- **lane:** Lane 機構本体を撤去し worktree 形態判定へ一本化 (SPEC #3245 Stage C T-131..T-137)
+
+### Miscellaneous Tasks
+
+- **work:** Record resumed work events
+- **work:** Record issue 3357 verification
+- **work:** SPEC #3245 delivery settlement の Work event bookkeeping
+- **work:** PR handoff 中の Work event bookkeeping
+- **work:** Finalize issue 3357 handoff
+- **work:** Issue #2359 の実行イベントを記録
+- **work:** SPEC 2359 の完了状態を記録
+- **work:** Record resumed release session work event
+
+### Testing
+
+- **hooks:** Intake シグナルが hook dispatch 挙動を変えないことを統合固定 (SPEC #3245 T-107)
+- **cli:** Action_obligation revival テストを scoped HOME + env lock で隔離
+- **policy:** Align monitor ops with unified execution
+- **issue-monitor:** Remove redundant projection borrow
+
+## [9.71.2] - 2026-08-03
+
+### Bug Fixes
+
+- **workspace:** Reconcile rolling Host authority
+- **workspace:** Validate confirm-only close ledger
+- **runtime:** Reject continuation redirects
+- **launch:** ReboundCurrent の resume 回復を Active authority として install し、monitor 再起動の無限失敗を解消する
+
+### Miscellaneous Tasks
+
+- **work:** Record work event backfill
+
+## [9.71.1] - 2026-08-01
+
+### Bug Fixes
+
+- **launch:** Inspection（観察専用）モードを機構ごと全廃し、全 Resume 経路を即入力可能にする
+- **workspace:** Durable Session から Work projection を復旧
+- **workspace:** 旧Hostで同一Session更新を安全に継続
+- **workspace:** Split-root回復時の旧状態を保全
+- **workspace:** 回復境界のレビュー指摘を解消
+
+### Miscellaneous Tasks
+
+- **work:** Record work event backfill
+
+## [9.71.0] - 2026-07-31
+
+### Bug Fixes
+
+- **terminal:** リサイズ後の履歴snapshotを欠落なく保持する
+- **terminal:** 最小幅のwide履歴snapshotを安全に再生する
+- **terminal:** Reveal失敗時のviewport refreshを再armする
+- **terminal:** Viewport再試行の回復契約を維持する
+- **terminal:** Viewport pendingの権威状態を分離する
+- **index:** Allow automatic indexing opt-out
+- **perf:** Keep projections off GUI hot paths
+- **index:** Restore real E5 batch search
+- **agent:** Reuse trusted Bun package cache for launches
+- **perf:** Batch Work event projection ingestion
+- **perf:** Move startup and probes off GUI hot paths
+- **gui:** Preserve resize and render state under races
+- **gui:** ウィンドウD&Dのスナップバックとミニマップ未反映を解消する(#3364)
+- **gui:** RenderWorkspaceのrender key確定を同期成功後へ移し描画例外を隔離・可視化する
+- **gui:** Retry render after telemetry failures
+- **gui:** Process_line/logブロードキャストを消費windowの存在時のみに抑制する (#3366)
+- **gui:** Bound process line backpressure queue
+- **startup:** Keep project indexing off GUI front door (#3170)
+- **agent:** Preserve cache fast path after runner health
+- **gui:** Avoid Git fallback during execution diagnosis
+- **guidance:** Route integrity-failed recovery to execution.repair
+- **gui:** Preserve geometry and projection convergence
+
+### Features
+
+- **resume:** Recover producing authority on automatic resume launches
+
+### Miscellaneous Tasks
+
+- **work:** Record performance issue coordination
+- **work:** Record final verification handoff
+- **work:** Record final verification events
+- **work:** Record concurrent coordination events
+- **work:** Record concurrent agent events
+- **work:** Record final verification progress
+- **work:** Settle final coordination events
+- **work:** Preserve concurrent workflow events
+- **work:** Record final user verification
+- **work:** Record performance delivery
+- **work:** Record review handoff
+
+### Testing
+
+- **gui:** Cover content-fenced resize finalization
+- **gwt:** Retry saved-port rebind races (#3386)
+- **gui:** Cover live briefing dismissal (#2796)
+- **gui:** Align briefing live check with hydration (#2796)
+- **gui:** Resize gestureの並列テストを安定化する
+- **gui:** Harden performance regression coverage
+
+## [9.70.0] - 2026-07-29
+
+### Bug Fixes
+
+- **agent:** Enforce monotonic capability generation
+- **execution:** Harden generation authority
+- **agent:** Fence stale pane execution bindings
+- **verification:** Authenticate execution evidence writers
+- **agent:** Linearize pane input with execution leases
+- **workspace:** Align inspection permission state
+- **workspace:** Harden continuation recovery
+- Preserve legacy blocked execution transactions
+- Recover fresh execution transactions after restart
+- Harden durable recovery identity
+- **workspace:** Enforce singleton work surface
+- **session:** Preserve unchanged startup records
+- **startup:** Defer project index bootstrap
+- エージェント起動と作業継続の権限境界を強化
+- Linked worktree の作業継続を安定化
+- **hooks:** Owner guardの誤blockを解消しStop gate要求操作の通過をinvariant固定する
+- **terminal:** Semantic snapshot とPTYグリッドの一貫性を保つ
+- **issue-monitor:** コンテナルートのGitHub操作を正規化する
+- **skills:** Make user verification handoffs actionable
+- **issue-monitor:** Preserve merged state during persist rebase
+- 検証計画の権限引数を統合
+- PR レビューで判明した実行境界を強化
+- **launch:** Intake worktreeをfreshなorigin baseで実体化しstale skillsを自己修復する (#3374)
+- Harden issue monitor side-effect authority
+- Harden issue monitor claim and control authority
+- Make issue monitor scans deadline integral
+- Harden issue monitor launch delivery transactions
+- Reconcile issue monitor failure deliveries
+- **issue-monitor:** Linearize durable launch delivery
+- **issue-monitor:** Keep autonomous retry single-path
+- **issue-monitor:** コンテナルートの autonomous loop 正規化を回帰テストで固定する
+- **issue-monitor:** Origin/HEAD 未設定を scan 失敗にせず autonomous loop を継続する
+- **gui:** 添付進捗が Queued 100% のまま残る不具合を修正
+- **gui:** 添付進捗キューの hard cap を維持する
+- **issue-monitor:** ライフサイクルを所有プロジェクトへ分離する
+- **issue-monitor:** Close durable recovery authority gaps
+- **gwt-git:** Windows ローカルパスから repo 名を導出できるようにする
+- **gwt-core:** Windows のファイルロック競合を移植可能に扱う
+- **gwt:** Issue Monitor authority fence の Windows ロック競合を WouldBlock に正規化する
+- **gwt-core:** Index coordinator の登録ロックを shared に戻す
+- **gwt-core:** Windows で登録ロックと JSONL 修復が失敗する問題を直す
+- **lane:** Resolve session kind from the worktree lane file before env
+
+### Documentation
+
+- **verification:** Avoid private rustdoc links
+
+### Features
+
+- **agent:** Persist execution generation binding
+- **execution:** Add owner generation ledger
+- **execution:** Scope verification evidence to generation
+- **agent:** Rotate durable capability epochs
+- **agent:** Enforce current execution binding authority
+- **agent:** Bind producing launches to execution generation
+- **workspace:** Coordinate execution commit with Work state
+- **workspace:** Continue completed work in new executions
+- Continue Work with fresh execution generations
+- **hooks:** Prompt-to-action obligation gateをexecution laneに追加する
+- **hooks:** Completion/Ready操作がopen obligationを拒否する(T-247 core)
+- **hooks:** 導出surfaceのCoverage Mapをplan recordへ永続化する(T-131 core)
+- **hooks:** Trusted store破損時にactionableな修復導線を提示する(T-177 core)
+- **hooks:** Assistant commitment scannerで裏付けなき完了宣言をblockする(T-243 core)
+- **hooks:** Wget/PowerShellのGitHub API mutationをsink分類に追加する(P10 transport拡張)
+- **hooks:** Trusted storeのGC/retentionとlegacy importを追加する(T-181/T-182 core)
+- **hooks:** Phase Launch Packetをlaunch時に生成する(T-275 staged core)
+- **hooks:** Execution.reopenがdefer済みissue/pr義務を復活させる(T-248 absorbed core)
+- 実行リカバリーのデッドロックを解消する
+- **execution:** Add read-only execution.status JSON operation
+
+### Miscellaneous Tasks
+
+- **work:** Issue #2359 の完了状態を同期する
+- **work:** Preserve workspace backfill event
+- **agent:** Export execution binding APIs
+- **work:** Record issue 2359 continuation progress
+- **work:** Record workspace backfill
+- **work:** SPEC-2359 の実行 owner を正本へ収束
+- **work:** Work イベントジャーナルを記録する
+- **work:** Record issue 3348 work projection
+- **work:** Persist SPEC-3350 backfill events
+- **work:** SPEC-2359 の backfill event を記録
+- **work:** SPEC #2359 の追跡イベントを記録
+- **work:** Issue #3315 の実行状態を同期する
+- **work:** Issue #3315 の統合状態を記録する
+- **work:** Issue #3315 の検証確定を記録する
+- **work:** Issue #3315 の追跡履歴を確定する
+- **work:** 視覚確認環境の起動記録を保存する
+- **work:** Issue #3041 の Work 項目を記録する
+- **gwt:** Windows ビルドの clippy 警告を解消する
+- **work:** Issue 3290のWorkイベントbackfillを保存する
+- **work:** Develop を取り込み events.jsonl を統合する
+- **work:** Events.jsonl の重複追記を取り消す
+
+### Testing
+
+- **workspace:** Align continuation launch fixtures
+- 起動権限境界の検証契約を修正
+- **issue-monitor:** Isolate bare repo fixture cwd
+- **agent:** Probe redaction fixture を決定的にする
+- 実在する sibling gwtd で launch fixture を構成
+- **issue-monitor:** Isolate process-wide test fixtures
+- **start-work:** Isolate deadline git fixture
+- **issue-monitor:** Isolate abort fixture blocking slots
+- **issue-monitor:** Isolate GUI remote scan probe
+- **issue-monitor:** Separate launch capacity from scan health
+- **issue-monitor:** Scan hang からの自己回復と fresh launch の delivery ACK を回帰テストで固定する
+- **gui:** 添付進捗の操作単位集約を厳密化
+- **gwt:** Bookkeeping パス判定テストの OS 前提を修正する
+- **lane:** Pin intake lane-file preservation for env-less rematerialization
+
 ## [9.69.1] - 2026-07-27
 
 ### Bug Fixes

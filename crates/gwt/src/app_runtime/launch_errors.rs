@@ -246,6 +246,9 @@ impl AppRuntime {
         let issue_monitor_issue_number = launch_feedback_context
             .as_ref()
             .and_then(|context| context.issue_monitor_issue_number);
+        let issue_monitor_delivery_id = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_delivery_id.clone());
         let issue_monitor_project_root = launch_feedback_context
             .as_ref()
             .and_then(|context| context.issue_monitor_project_root.clone())
@@ -262,10 +265,11 @@ impl AppRuntime {
             );
             events.push(terminal_output);
             if let Some(issue_number) = issue_monitor_issue_number {
-                events.extend(self.issue_monitor_launch_failed_events(
+                events.extend(self.issue_monitor_launch_failed_delivery_events(
                     issue_monitor_project_root.as_deref(),
                     issue_number,
                     &detail,
+                    issue_monitor_delivery_id.as_deref(),
                 ));
             }
             return events;
@@ -286,10 +290,11 @@ impl AppRuntime {
             ));
         }
         if let Some(issue_number) = issue_monitor_issue_number {
-            events.extend(self.issue_monitor_launch_failed_events(
+            events.extend(self.issue_monitor_launch_failed_delivery_events(
                 issue_monitor_project_root.as_deref(),
                 issue_number,
                 &detail,
+                issue_monitor_delivery_id.as_deref(),
             ));
         }
         events

@@ -14,19 +14,22 @@
 
 use std::path::Path;
 
-use super::{context::HookContext, envelope::stop_hook_active_from, HookEvent, HookOutput};
+use super::{envelope::stop_hook_active_from, HookOutput};
 use crate::cli::action_obligation;
 
-/// UserPromptSubmit entry: arm typed obligations for producing prompts in
-/// execution lanes (intake lanes have their own artifact gate). A missing
-/// or unparsable prompt arms nothing — unclassifiable input must not
-/// over-block (conservative bias, opposite of the intake dirty marker).
+/// UserPromptSubmit entry: arm typed obligations for producing prompts. A
+/// missing or unparsable prompt arms nothing — unclassifiable input must not
+/// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
-    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
+    // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
+    // Every settlement path (all-passing `verify.run`, `pr.*`) requires
+    // production artifacts the PM's contract forbids it from creating, so
+    // arming one leaves it blocked at Stop with no exit but a false
+    // `execution.blocked`. Never arm rather than block-then-excuse.
+    if super::is_resident_pm_worktree(worktree) {
         return;
     }
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -59,53 +62,12 @@ pub fn handle_with_input(
         return HookOutput::Silent;
     }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
-        return HookOutput::Silent;
-    }
     let Some(session) = current_session else {
         return HookOutput::Silent;
     };
     let open = action_obligation::open_kinds(&resolved, session.trim());
     if open.is_empty() {
-        // T-243 core: no open obligations — scan the latest assistant
-        // message for completion claims with no ledger backing. An
-        // unbacked "implemented"/"verified" claim opens the matching
-        // obligation and blocks through this same gate; claims backed by
-        // settled evidence pass. Unparsable transcripts and ledger-less
-        // sessions fail open.
-        let claimed = HookEvent::read_from_str(input)
-            .ok()
-            .flatten()
-            .and_then(|event| event.transcript_path)
-            .map(|transcript| {
-                super::execution_completion_stop_check::transcript_path_for_worktree(
-                    &resolved,
-                    &transcript,
-                )
-            })
-            .and_then(|path| {
-                super::execution_completion_stop_check::read_transcript_tail(&path).ok()
-            })
-            .and_then(|tail| super::execution_completion_stop_check::latest_assistant_text(&tail))
-            .map(|text| action_obligation::classify_commitments(&text))
-            .unwrap_or_default();
-        let opened =
-            action_obligation::mark_unbacked_commitments(&resolved, session.trim(), &claimed)
-                .unwrap_or_default();
-        if opened.is_empty() {
-            return HookOutput::Silent;
-        }
-        let kinds = opened
-            .iter()
-            .map(|kind| kind.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return HookOutput::stop_block(format!(
-            "The latest assistant message claims completed work with no recorded evidence: [{kinds}] (assistant commitment scanner, SPEC-3248 T-243).
-             Prose is not evidence. Back the claim with the canonical operations — register the matrix with `verify.plan` (derive:true) and produce an all-passing `verify.run` — or, if the work is genuinely blocked, run `execution.blocked` with a non-empty `params.reason`.
-             Claims backed by recorded evidence pass this gate automatically."
-        ));
+        return HookOutput::Silent;
     }
     let kinds = open
         .iter()
@@ -126,12 +88,10 @@ pub fn handle_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
 
-    fn mk_worktree(profile: &gwt_skills::LaneProfile) -> tempfile::TempDir {
+    fn mk_worktree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-        write_lane_file(dir.path(), profile).unwrap();
         dir
     }
 
@@ -139,7 +99,7 @@ mod tests {
     // the block routes to canonical operations and the deferral path.
     #[test]
     fn open_obligations_block_until_settled() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
 
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
@@ -165,13 +125,78 @@ mod tests {
         );
     }
 
-    // T-243 core: an unbacked completion claim in the latest assistant
-    // message blocks; the same claim backed by settled evidence passes.
+    /// SPEC-3431 FR-064: the resident PM never arms a producing obligation.
+    ///
+    /// The settlement paths are an all-passing `verify.run`, `issue.comment` /
+    /// `issue.spec.edit`, or `pr.*`. The PM's contract forbids it from touching
+    /// production code or PRs at all — implementation is always performed by
+    /// agents the Issue Monitor launches — so an implementation obligation is
+    /// **structurally unsettleable** for the PM and its only exit is filing a
+    /// false `execution.blocked` every turn. Observed live: the gate was
+    /// already arming against the running PM session.
     #[test]
-    fn unbacked_assistant_claims_block_until_evidence_exists() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
-        // Ledger exists: the producing prompt opened (and evidence settled)
-        // an implementation obligation.
+    fn the_resident_pm_never_arms_a_producing_obligation() {
+        // GWT_SESSION_ID is process-global; without this these two tests race
+        // each other and whichever loses reads the other's session id.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(pm_worktree.join(".gwt")).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        handle_user_prompt_submit(
+            &pm_worktree,
+            &serde_json::json!({ "prompt": "#3457 を修正して" }).to_string(),
+        );
+
+        assert_eq!(
+            handle_with_input(&pm_worktree, "{}", Some("pm-session")),
+            HookOutput::Silent,
+            "the PM must not be blocked by an obligation it cannot settle"
+        );
+    }
+
+    /// The exemption is keyed on the PM worktree alone: an ordinary agent in
+    /// any other worktree keeps the gate exactly as it was.
+    #[test]
+    fn an_ordinary_worktree_still_arms_obligations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree();
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "sess-ordinary",
+        );
+
+        handle_user_prompt_submit(
+            dir.path(),
+            &serde_json::json!({ "prompt": "バグを修正して" }).to_string(),
+        );
+
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-ordinary")),
+                HookOutput::StopBlock { .. }
+            ),
+            "non-PM sessions must keep the prompt-to-action gate"
+        );
+    }
+
+    // SPEC-3393 P4: assistant prose is not gate state. Historical summaries
+    // and legitimate completion reports pass when no structured obligation is
+    // open, even when they contain completion keywords.
+    #[test]
+    fn completion_prose_does_not_create_an_obligation() {
+        let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
         action_obligation::settle_kinds_best_effort(
             dir.path(),
@@ -189,32 +214,8 @@ mod tests {
         let input =
             serde_json::json!({ "transcript_path": transcript.to_string_lossy() }).to_string();
 
-        let output = handle_with_input(dir.path(), &input, Some("sess-1"));
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected StopBlock, got {output:?}");
-        };
-        assert!(reason.contains("no recorded evidence"), "{reason}");
-        assert!(reason.contains("verification"), "{reason}");
-
-        // Settling the verification evidence backs the claim — the same
-        // transcript now passes.
-        action_obligation::settle_kinds_best_effort(
-            dir.path(),
-            "sess-1",
-            &[action_obligation::ObligationKind::Verification],
-            "verify.run vr-y",
-        );
         assert_eq!(
             handle_with_input(dir.path(), &input, Some("sess-1")),
-            HookOutput::Silent
-        );
-
-        // Ledger-less sessions are never scanned.
-        let bare = mk_worktree(&EXECUTION_PROFILE);
-        let input =
-            serde_json::json!({ "transcript_path": transcript.to_string_lossy() }).to_string();
-        assert_eq!(
-            handle_with_input(bare.path(), &input, Some("sess-1")),
             HookOutput::Silent
         );
     }
@@ -223,7 +224,7 @@ mod tests {
     // stop_hook_active, and intake lanes stay silent.
     #[test]
     fn fail_open_contracts_hold() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
             HookOutput::Silent
@@ -242,15 +243,16 @@ mod tests {
             HookOutput::Silent
         );
 
-        let intake = mk_worktree(&INTAKE_PROFILE);
-        action_obligation::mark_from_prompt(intake.path(), "sess-1", "実装して").unwrap();
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _kind = gwt_core::test_support::ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
-        assert_eq!(
-            handle_with_input(intake.path(), "{}", Some("sess-1")),
-            HookOutput::Silent
+        // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
+        // armed obligation blocks Stop in every worktree the same way.
+        let former_intake = mk_worktree();
+        action_obligation::mark_from_prompt(former_intake.path(), "sess-1", "実装して").unwrap();
+        assert!(
+            matches!(
+                handle_with_input(former_intake.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "obligations gate uniformly after the lane removal"
         );
     }
 }

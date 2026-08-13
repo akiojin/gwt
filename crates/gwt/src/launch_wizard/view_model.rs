@@ -98,9 +98,9 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
             show_execution_mode: false,
-            show_skip_permissions: show_manual_setup
-                && self.launch_target_is_agent()
-                && self.mode == "normal",
+            // Issue #3462: the toggle stays visible for Resume / Continue so
+            // the inherited preference is both editable and honored.
+            show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
             show_fast_mode,
             show_codex_fast_mode: show_manual_setup
                 && self.launch_target_is_agent()
@@ -2188,9 +2188,10 @@ mod tests {
         });
 
         let view = state.view();
+        // Issue #3462: Quick Start Resume inherits the entry's preference.
         assert!(
-            !view.skip_permissions,
-            "inspection Resume must not advertise a permission bypass"
+            view.skip_permissions,
+            "Quick Start Resume must advertise the inherited Skip Permissions preference"
         );
 
         match state.completion.as_ref() {
@@ -2199,10 +2200,10 @@ mod tests {
                     assert_eq!(config.command, custom_path.display().to_string());
                     assert_eq!(config.display_name, "Claude Proxy");
                     assert!(config.args.contains(&"--resume".to_string()));
-                    assert!(!config.skip_permissions);
+                    assert!(config.skip_permissions);
                     assert!(
-                        !config.args.contains(&"--unsafe".to_string()),
-                        "Quick Start inspection Resume must suppress permission bypass"
+                        config.args.contains(&"--unsafe".to_string()),
+                        "Quick Start Resume must carry the custom agent skip-permissions args"
                     );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),

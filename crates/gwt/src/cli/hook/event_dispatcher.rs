@@ -8,8 +8,8 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    action_obligation_stop_check, board_reminder, diagnostics, execution_completion_stop_check,
-    execution_control_stop_check, intake_completion_stop_check, skill_build_spec_stop_check,
+    action_obligation_stop_check, autonomous_question_guard, board_reminder, diagnostics,
+    execution_control_stop_check, pm_loop_stop_check, skill_build_spec_stop_check,
     skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
     work_event_settlement_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
     IntentBoundaryEvent,
@@ -66,6 +66,14 @@ fn handle_session_start(
         IntentBoundaryEvent::SessionStart,
         session_start_diagnostic,
     );
+    // Issue #3478 (AC-1/AC-2): deliver the autonomous decision policy at the
+    // intent boundary so the agent resolves reversible choices itself instead
+    // of reaching for a question tool.
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::SessionStart,
+        autonomous_decision_policy_context(),
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -74,6 +82,16 @@ fn handle_session_start(
         IntentBoundaryEvent::SessionStart,
         pending_goal,
     ))
+}
+
+/// The autonomous decision policy for this session, or `None` for every
+/// human-driven launch (which must stay byte-identical to before).
+fn autonomous_decision_policy_context() -> Option<String> {
+    crate::autonomous_handoff::autonomous_execution_context_from_env(|name| {
+        std::env::var(name).ok()
+    })
+    .as_ref()
+    .map(crate::autonomous_handoff::autonomous_decision_policy)
 }
 
 fn handle_user_prompt_submit(
@@ -96,19 +114,23 @@ fn handle_user_prompt_submit(
             tracing::warn!(?error, "workspace-identity hook step failed");
         }
     });
-    // SPEC-3248 P7A (FR-016): mark the intake artifact requirement dirty for
-    // curation/producing prompts. Fail-open state writer.
-    run_value(event, "intake-outcome-required-since", || {
-        intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
-    });
     // SPEC-3248 P11 (T-240 core): producing prompts in execution lanes arm
     // typed action obligations. Fail-open state writer.
     run_value(event, "action-obligation-record", || {
         action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
+    // SPEC-3431 FR-012: user contact re-arms the PM's resident-loop budget.
+    run_value(event, "pm-loop-reset", || {
+        pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::UserPromptSubmit,
+        autonomous_decision_policy_context(),
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -120,18 +142,22 @@ fn handle_user_prompt_submit(
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
-    let execution_binding = run_step(event, "execution-binding", || {
-        crate::daemon_runtime::authorize_managed_mutating_hook(input)
-    })?;
-    if execution_binding != HookOutput::Silent {
-        return Ok(execution_binding);
-    }
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward(input)
     })?;
+    // Issue #3478 (FR-025): the question guard runs before every other policy.
+    // A question tool call must be converted while it is still refusable — any
+    // later check that returns first would let the provider open the question
+    // UI and hold the Issue Monitor slot until the stuck timeout.
+    let question_guard = run_step(event, "autonomous-question-guard", || {
+        autonomous_question_guard::handle_with_input(input)
+    })?;
+    if question_guard != HookOutput::Silent {
+        return Ok(question_guard);
+    }
     run_step(event, "workflow-policy", || {
         workflow_policy::handle_with_input(input)
     })
@@ -170,11 +196,15 @@ fn handle_stop(
         board_reminder::handle_with_input(event, input)
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
-    // wins and the remaining checks must NOT run. This matters since the
-    // intake completion gate (SPEC-3248 P7A) has a persistent side effect
-    // (self-improvement auto-capture) that must only fire for the block the
-    // agent actually sees.
-    let stop_checks: [(&str, StopCheck<'_>); 9] = [
+    // wins and the remaining checks must NOT run.
+    let stop_checks: [(&str, StopCheck<'_>); 8] = [
+        // SPEC-3431 FR-012: the resident PM's loop driver runs first — for the
+        // PM every other stop gate is either exempt (FR-029) or fail-open, and
+        // the loop continuation must not be shadowed by one of them.
+        (
+            "pm-loop-stop-check",
+            Box::new(|| pm_loop_stop_check::handle_with_input(worktree_root, input)),
+        ),
         (
             "skill-discussion-stop-check",
             Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
@@ -199,18 +229,6 @@ fn handle_stop(
             "skill-register-spec-stop-check",
             Box::new(|| {
                 skill_register_spec_stop_check::handle_with_input(
-                    worktree_root,
-                    input,
-                    current_session,
-                )
-            }),
-        ),
-        // SPEC-3248 P7A (FR-014): intake completion hard gate. Runs before
-        // completed-stop recording like every entry in this chain.
-        (
-            "intake-completion-stop-check",
-            Box::new(|| {
-                intake_completion_stop_check::handle_with_input(
                     worktree_root,
                     input,
                     current_session,
@@ -252,10 +270,6 @@ fn handle_stop(
                     current_session,
                 )
             }),
-        ),
-        (
-            "execution-completion-stop-check",
-            Box::new(|| execution_completion_stop_check::handle_with_input(worktree_root, input)),
         ),
     ];
     for (handler, check) in stop_checks {
@@ -383,6 +397,110 @@ mod tests {
         assert!(status.success(), "git init failed");
     }
 
+    /// Issue #3478 (AC-3): the question guard runs on PreToolUse, and it must
+    /// win over the later policy checks so a question can never reach a
+    /// waiting UI while some other guard debates the same call.
+    #[test]
+    fn pre_tool_use_converts_an_autonomous_question_before_any_other_policy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let session_id = "session-question-guard";
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, session_id);
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+        let _autonomous_issue =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3478");
+
+        let input = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Delete the release tag?"}]}
+        });
+        let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+            .expect("PreToolUse output");
+
+        let HookOutput::PreToolUsePermission { summary, .. } = output else {
+            panic!("expected the autonomous question to be denied");
+        };
+        assert_eq!(
+            summary,
+            crate::cli::hook::autonomous_question_guard::QUESTION_HANDOFF_SUMMARY
+        );
+    }
+
+    /// AC-6 non-regression: without the autonomous markers the same question
+    /// tool passes straight through.
+    #[test]
+    fn pre_tool_use_leaves_a_human_driven_question_alone() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+        let _autonomous_issue =
+            ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+
+        let input = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Which option do you prefer?"}]}
+        });
+        let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+            .expect("PreToolUse output");
+
+        assert_eq!(output, HookOutput::Silent);
+    }
+
+    /// AC-1/AC-2: the decision policy reaches the agent at every intent
+    /// boundary, so it survives context compaction.
+    #[test]
+    fn session_start_injects_the_autonomous_decision_policy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-policy");
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+        let _autonomous_issue =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3478");
+
+        let output =
+            handle_with_input("SessionStart", "{}", worktree.path(), None).expect("hook output");
+
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+            panic!("expected additional context carrying the autonomous policy");
+        };
+        assert!(
+            text.contains("Autonomous execution policy (Issue #3478)"),
+            "{text}"
+        );
+        assert!(text.contains("Question tools are blocked"), "{text}");
+    }
+
     #[test]
     fn pending_discussion_goal_context_is_appended_to_user_prompt_submit_output() {
         let output = append_pending_discussion_goal_context(
@@ -443,75 +561,149 @@ mod tests {
     }
 
     #[test]
-    fn pre_tool_use_denies_unproven_managed_mutation_before_runtime_side_effects() {
+    fn pre_tool_use_keeps_recovery_reachable_for_stale_binding_without_a_host_bridge() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
-        let runtime_path = worktree.path().join("runtime").join("state.json");
-        let _home = ScopedEnvVar::set("HOME", worktree.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
-        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-hook-fence");
-        let _runtime_path =
-            ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, runtime_path.as_os_str());
-        let _forward_url = ScopedEnvVar::set(
-            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
-            "http://127.0.0.1:45123/internal/hook-live",
-        );
-        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
-        let input = serde_json::json!({
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": "crates/gwt/src/lib.rs",
-                "old_string": "old",
-                "new_string": "new"
-            }
-        })
-        .to_string();
-
-        let output = handle_with_input("PreToolUse", &input, worktree.path(), None)
-            .expect("managed mutation denial");
-
-        let HookOutput::PreToolUsePermission { detail, .. } = output else {
-            panic!("unproven managed mutation must be denied");
+        init_git_repo(worktree.path());
+        let remote_status = gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/stale-policy.git",
+            ])
+            .current_dir(worktree.path())
+            .status()
+            .expect("git remote add");
+        assert!(remote_status.success(), "git remote add failed");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let sessions_dir = home.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "work/issue-3394", AgentId::Codex);
+        session.linked_issue_number = Some(3394);
+        let session_id = session.id.clone();
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3394,
         };
-        assert!(detail.contains("Continue work"), "{detail}");
+        session.save(&sessions_dir).unwrap();
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            &session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let current =
+            crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
+                .unwrap()
+                .unwrap();
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session_id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity: current,
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&sessions_dir).unwrap();
+        let takeover = crate::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: "stale-policy-fixture".to_string(),
+            principal_id: "test-host".to_string(),
+            work_id: Some(format!("work-session-{session_id}")),
+            source: Some("continue-work:resume".to_string()),
+            from_session_id: session_id.clone(),
+            to_session_id: "replacement-session".to_string(),
+            reason: "test stale predecessor".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        crate::cli::execution_state::prepare_generation_takeover(worktree.path(), owner, &takeover)
+            .unwrap();
+        crate::cli::execution_state::activate_generation_takeover(
+            worktree.path(),
+            owner,
+            &takeover,
+        )
+        .unwrap();
         assert!(
-            !runtime_path.exists(),
-            "binding authorization must run before runtime-state or forwarding side effects"
+            !crate::cli::execution_state::current_active_execution_binding_matches(
+                worktree.path(),
+                owner,
+                &session_id,
+                &session.execution_binding.as_ref().unwrap().identity,
+            )
+            .unwrap()
         );
-    }
-
-    #[test]
-    fn pre_tool_use_denies_managed_mutation_when_bridge_pair_is_missing() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let worktree = tempfile::tempdir().unwrap();
-        let runtime_path = worktree.path().join("runtime").join("state.json");
-        let _home = ScopedEnvVar::set("HOME", worktree.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
-        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-hook-no-bridge");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
         let _runtime_path =
             ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, runtime_path.as_os_str());
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
-        let input = serde_json::json!({
-            "tool_name": "apply_patch",
-            "tool_input": { "patch": "*** Begin Patch" }
-        })
-        .to_string();
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
 
-        let output = handle_with_input("PreToolUse", &input, worktree.path(), None)
-            .expect("managed mutation denial");
-
-        let HookOutput::PreToolUsePermission { detail, .. } = output else {
-            panic!("managed Session without a Host bridge must deny mutation");
-        };
-        assert!(detail.contains("Continue work"), "{detail}");
+        for input in [
+            serde_json::json!({
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": "crates/gwt/src/lib.rs",
+                    "old_string": "old",
+                    "new_string": "new"
+                }
+            }),
+            serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": "crates/gwt/src/lib.rs",
+                    "content": "replacement"
+                }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "git add crates/gwt/src/lib.rs" }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "cargo test -p gwt --lib" }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+                }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.continue\",\"params\":{\"operation_id\":\"recover-stale-binding\"}}\nJSON"
+                }
+            }),
+        ] {
+            let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+                .expect("PreToolUse output");
+            assert_eq!(
+                output,
+                HookOutput::Silent,
+                "general issue-owned work must not depend on Host binding availability: {input}"
+            );
+        }
         assert!(
-            !runtime_path.exists(),
-            "the missing bridge must deny before runtime-state side effects"
+            runtime_path.exists(),
+            "removing the binding step must preserve later runtime-state handling"
         );
     }
 
@@ -563,13 +755,12 @@ mod tests {
         assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
     }
 
-    // SPEC-3248 P7A (T-095): managed-hook lifecycle for the intake artifact
-    // gate — a curation prompt marks the requirement dirty, Stop blocks while
-    // no fresh outcome exists (auto-capturing one self-improvement
-    // candidate), a valid outcome clears the block, and the next prompt makes
-    // that outcome stale so Stop blocks again (updating the same candidate).
+    // SPEC #3245 FR-001 / AC-1: the intake completion hard gate is removed.
+    // A session that registers nothing stops exactly like an execution
+    // session — no artifact outcome requirement, no auto-capture. Uniform
+    // gates (e.g. the P11 obligation gate) apply to everyone equally.
     #[test]
-    fn intake_artifact_gate_lifecycle_blocks_until_fresh_outcome() {
+    fn intake_shaped_stop_never_hits_the_artifact_gate() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -587,7 +778,6 @@ mod tests {
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::INTAKE_PROFILE).unwrap();
 
         let prompt_input = serde_json::json!({
             "prompt": "このバグ報告を Issue に登録して",
@@ -600,7 +790,6 @@ mod tests {
         })
         .to_string();
 
-        // 1. Curation prompt marks the artifact requirement dirty.
         handle_with_input(
             "UserPromptSubmit",
             &prompt_input,
@@ -609,78 +798,24 @@ mod tests {
         )
         .expect("prompt hook output");
 
-        // 2. Stop without an outcome blocks and captures one candidate.
         let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
             .expect("stop hook output");
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected intake artifact gate StopBlock, got {output:?}");
-        };
-        assert!(reason.contains("Intake artifact gate"), "{reason}");
-        let candidates = crate::cli::improvement::candidate_public_values(worktree.path());
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(
-            candidates[0].get("occurrences").and_then(|v| v.as_u64()),
-            Some(0),
-            "legacy intake capture must not fabricate a typed occurrence"
-        );
-        assert_eq!(
-            candidates[0]
-                .get("legacy_occurrence_count")
-                .and_then(|v| v.as_u64()),
-            Some(1)
-        );
-
-        // 3. A valid Issue/SPEC outcome clears the block.
-        crate::cli::intake_outcome::record_outcome(
-            worktree.path(),
-            &session_id,
-            crate::cli::intake_outcome::IntakeOutcome {
-                kind: crate::cli::intake_outcome::IntakeOutcomeKind::IssueCreated,
-                number: Some(4242),
-                reason: None,
-                source_operation: "issue.create".to_string(),
-                recorded_at: chrono::Utc::now(),
-            },
-        )
-        .unwrap();
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
+        // The uniform prompt-to-action obligation gate (SPEC-3248 P11) may
+        // legitimately fire — exactly as it would for an execution session.
+        // What must never fire again is the removed intake artifact gate.
+        if let HookOutput::StopBlock { reason } = &output {
+            assert!(
+                !reason.contains("Intake artifact gate"),
+                "the removed intake artifact gate must not contribute: {reason}"
+            );
+            assert!(
+                reason.contains("Producing obligations"),
+                "only the uniform obligation gate may block here: {reason}"
+            );
+        }
         assert!(
-            !matches!(output, HookOutput::StopBlock { .. }),
-            "fresh valid outcome must pass Stop, got {output:?}"
-        );
-
-        // 4. A later prompt makes the outcome stale; Stop blocks again and
-        //    updates the same candidate (stable dedupe).
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        handle_with_input(
-            "UserPromptSubmit",
-            &prompt_input,
-            worktree.path(),
-            Some(&session_id),
-        )
-        .expect("prompt hook output");
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected stale-outcome StopBlock, got {output:?}");
-        };
-        assert!(
-            reason.contains("predates the latest user prompt"),
-            "{reason}"
-        );
-        let candidates = crate::cli::improvement::candidate_public_values(worktree.path());
-        assert_eq!(candidates.len(), 1, "dedupe must keep one candidate");
-        assert_eq!(
-            candidates[0].get("occurrences").and_then(|v| v.as_u64()),
-            Some(0),
-            "legacy intake recapture must not fabricate typed occurrences"
-        );
-        assert_eq!(
-            candidates[0]
-                .get("legacy_occurrence_count")
-                .and_then(|v| v.as_u64()),
-            Some(2)
+            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
+            "no auto-capture side effect may fire for the removed gate"
         );
     }
 
@@ -705,7 +840,6 @@ mod tests {
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE).unwrap();
 
         // Launch materialization wrote the record (plain Issue — no
         // build.start was ever called, T-109).
@@ -747,77 +881,8 @@ mod tests {
         );
     }
 
-    // SPEC-3248 P7A review follow-up: stop-checks are evaluated lazily — when
-    // an earlier gate (gwt-discussion) produces the StopBlock, the intake
-    // completion gate must NOT run, so its auto-capture side effect fires
-    // only for blocks the agent actually sees.
     #[test]
-    fn earlier_stop_block_skips_intake_gate_side_effects() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let worktree = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", worktree.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
-        let sessions_dir = worktree.path().join(".gwt").join("sessions");
-        let mut session = Session::new(worktree.path(), "intake/curate", AgentId::ClaudeCode);
-        session.agent_session_id = Some("agent-intake".to_string());
-        let session_id = session.id.clone();
-        session.save(&sessions_dir).unwrap();
-        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
-        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
-        let _runtime_env = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
-        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
-        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
-        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::INTAKE_PROFILE).unwrap();
-
-        // Arm the intake gate (dirty marker, no outcome) AND leave an active
-        // discussion with a pending question so the discussion gate blocks
-        // first.
-        crate::cli::intake_outcome::mark_required_since(
-            worktree.path(),
-            &session_id,
-            chrono::Utc::now(),
-        )
-        .unwrap();
-        let discussions = worktree.path().join(".gwt/work/discussions.md");
-        std::fs::create_dir_all(discussions.parent().unwrap()).unwrap();
-        std::fs::write(
-            &discussions,
-            "## Discussion TODO\n\n\
-             ### Proposal A - Hook-driven resume [active]\n\
-             - Summary: Keep unfinished discussion state in the local artifact.\n\
-             - Next Question: Should SessionStart surface the resume proposal?\n",
-        )
-        .unwrap();
-
-        let stop_input = serde_json::json!({
-            "session_id": "agent-intake",
-            "stop_hook_active": false,
-        })
-        .to_string();
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected discussion StopBlock, got {output:?}");
-        };
-        assert!(
-            reason.contains("Discussion is still"),
-            "discussion gate must win: {reason}"
-        );
-        assert!(
-            !reason.contains("Intake artifact gate"),
-            "intake gate must not contribute: {reason}"
-        );
-        assert!(
-            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
-            "intake auto-capture must not fire when an earlier gate blocks"
-        );
-    }
-
-    #[test]
-    fn stop_blocks_push_only_completion_claim_without_pr_evidence() {
+    fn stop_allows_legitimate_completion_report_without_scanning_prose() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -849,11 +914,9 @@ mod tests {
         let output = handle_with_input("Stop", &input, worktree.path(), Some(&session_id))
             .expect("hook output");
 
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected push-only completion StopBlock, got {output:?}");
-        };
-        assert!(reason.contains("PR"), "{reason}");
-        assert!(reason.contains("push-only"), "{reason}");
-        assert!(reason.contains("gwt-manage-pr"), "{reason}");
+        assert!(
+            !matches!(output, HookOutput::StopBlock { .. }),
+            "legitimate completion prose must not be interpreted as gate state: {output:?}"
+        );
     }
 }

@@ -341,9 +341,12 @@ impl AppRuntime {
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        // SPEC #3431 FR-070: this must be the spelling the durable execution
+        // binding produces, not a display label. `workspace.ensure` compares
+        // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
         let owner_label = match linked_issue_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
-            LinkedIssueKind::Spec => format!("SPEC #{issue_number}"),
+            LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };
         let workspace_resume_context = Some(linked_issue_workspace_context(
             project_root,
@@ -788,6 +791,71 @@ impl AppRuntime {
             );
         }
 
+        // Linked Resume is an authority-producing continuation. Route it
+        // through the same coordinator as the Workspace Continue action so
+        // the resumed pane is either rebound to the current generation or
+        // launched with one Prepared successor. Legacy unlinked Sessions keep
+        // the observation-only resume path below.
+        let linked_session = gwt_agent::Session::load_and_migrate(
+            &self.sessions_dir.join(format!("{session_id}.toml")),
+        )
+        .ok()
+        .filter(|session| session.linked_issue_number.is_some());
+        if let Some(linked_session) = linked_session {
+            if agent_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some_and(|requested| {
+                    linked_session
+                        .resume_session_id_for(Some(requested))
+                        .as_deref()
+                        != Some(requested)
+                })
+            {
+                return reply_error(
+                    "The requested Session id is not resumable; use the Work Resume picker or start a new Work.".to_string(),
+                );
+            }
+            let work_id =
+                gwt_core::workspace_projection::load_workspace_work_items(&tab.project_root)
+                    .ok()
+                    .flatten()
+                    .and_then(|projection| {
+                        projection
+                            .work_items
+                            .into_iter()
+                            .find(|work| {
+                                work.agents
+                                    .iter()
+                                    .any(|agent| agent.session_id == linked_session.id)
+                            })
+                            .map(|work| work.id)
+                    })
+                    .unwrap_or_else(|| format!("work-session-{}", linked_session.id));
+            let branch =
+                (!linked_session.branch.trim().is_empty()).then(|| linked_session.branch.clone());
+            let mut events =
+                self.continue_work_events(client_id, operation_id.clone(), work_id, bounds);
+            let failure = events.iter().find_map(|outbound| match &outbound.event {
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                    message,
+                    ..
+                } => Some(
+                    message
+                        .clone()
+                        .unwrap_or_else(|| "Resume continuation failed".to_string()),
+                ),
+                _ => None,
+            });
+            if let Some(message) = failure {
+                return reply_error(message);
+            }
+            events.push(started_ack(&session_id, branch));
+            return events;
+        }
+
         if let Some((window_id, live_gwt_session)) = self
             .active_agent_sessions
             .iter()
@@ -903,6 +971,10 @@ impl AppRuntime {
         if let Some(linked) = session.linked_issue_number {
             builder = builder.linked_issue_number(linked);
         }
+        if let Some(provenance) = session.tool_runtime_provenance.clone() {
+            builder = builder.tool_runtime_provenance(provenance);
+        }
+        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         // Resume the specific Session (conversation UUID) the user clicked when
         // one was requested; otherwise resume the Work's latest conversation.
@@ -943,15 +1015,10 @@ impl AppRuntime {
         // instead of falling back to the agent's default display name.
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
-        let resume_context_root = if session_worktree_exists {
-            session.worktree_path.as_path()
-        } else {
-            project_root.as_path()
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            &project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -1109,15 +1176,10 @@ impl AppRuntime {
         }
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
-        let resume_context_root = if session.worktree_path.as_path().exists() {
-            session.worktree_path.as_path()
-        } else {
-            project_root.as_path()
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            &project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -1803,47 +1865,237 @@ impl AppRuntime {
         profiles.with_repo_local(fallback_profile)
     }
 
+    #[cfg(test)]
     pub(crate) fn auto_launch_issue_monitor_request_events_for_project(
         &mut self,
         project_root: &Path,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
+        self.auto_launch_issue_monitor_delivery_events_for_project(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auto_launch_issue_monitor_delivery_events(
+        &mut self,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return self.issue_monitor_launch_failed_delivery_events(
+                None,
+                issue_number,
+                "Project tab not found",
+                delivery_id.as_deref(),
+            );
+        };
+        self.auto_launch_issue_monitor_delivery_events_for_project(
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+            delivery_id,
+        )
+    }
+
+    pub(crate) fn auto_launch_issue_monitor_delivery_events_for_project(
+        &mut self,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let mut recovery_events = Vec::new();
+        if let Some(delivery_id) = delivery_id.as_deref() {
+            match self
+                .issue_monitor_launch_deliveries
+                .get(delivery_id)
+                .cloned()
+            {
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id,
+                    started_at,
+                }) => {
+                    let window_exists = self.tracked_window_exists(&window_id);
+                    if window_exists
+                        && started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL
+                    {
+                        return Vec::new();
+                    }
+                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                    self.pending_launch_feedback_contexts.remove(&window_id);
+                    self.inflight_launches
+                        .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+                    if window_exists {
+                        recovery_events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { window_id }) => {
+                    return self.issue_monitor_launch_completed_delivery_events(
+                        project_root,
+                        issue_number,
+                        &window_id,
+                        Some(delivery_id),
+                    );
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::Launched { window_id }) => {
+                    return self.issue_monitor_launch_succeeded_delivery_events(
+                        project_root,
+                        issue_number,
+                        &window_id,
+                        Some(delivery_id),
+                    );
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message }) => {
+                    return self.issue_monitor_launch_failed_delivery_events(
+                        Some(project_root),
+                        issue_number,
+                        &message,
+                        Some(delivery_id),
+                    );
+                }
+                None => {}
+            }
+            if let Some((window_id, was_materialized, _)) =
+                self.existing_issue_monitor_delivery_window(project_root, issue_number, delivery_id)
+            {
+                match self.claim_issue_monitor_launch_delivery(
+                    project_root,
+                    issue_number,
+                    delivery_id,
+                    &window_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return recovery_events,
+                    Err(error) => {
+                        recovery_events.extend(self.issue_monitor_control_error_events(
+                            None,
+                            error,
+                            "reclaim-launch-delivery-window",
+                            Some(issue_number),
+                        ));
+                        return recovery_events;
+                    }
+                }
+                if !was_materialized {
+                    recovery_events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                } else {
+                    let Some((window_id, materialized, workspace_durable)) = self
+                        .existing_issue_monitor_delivery_window(
+                            project_root,
+                            issue_number,
+                            delivery_id,
+                        )
+                    else {
+                        return recovery_events;
+                    };
+                    return if materialized && workspace_durable {
+                        self.issue_monitor_launch_succeeded_delivery_events(
+                            project_root,
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    } else {
+                        self.issue_monitor_launch_completed_delivery_events(
+                            project_root,
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    };
+                }
+            }
+        }
         match self.silent_issue_monitor_launch_events_for_project(
             project_root,
             issue_number,
             linked_issue_kind,
             None,
             None,
+            delivery_id.clone(),
         ) {
-            Ok(Some(events)) => events,
+            Ok(Some(events)) => {
+                recovery_events.extend(events);
+                recovery_events
+            }
             Ok(None) => {
                 if self.launch_wizard.is_some() {
-                    return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                        level: "info".to_string(),
-                        message: "Issue Monitor settings are already open".to_string(),
-                        issue_number: Some(issue_number),
-                    })];
+                    recovery_events.push(OutboundEvent::broadcast(
+                        BackendEvent::IssueMonitorToast {
+                            level: "info".to_string(),
+                            message: "Issue Monitor settings are already open".to_string(),
+                            issue_number: Some(issue_number),
+                        },
+                    ));
+                    return recovery_events;
                 }
-                self.open_issue_monitor_configure_wizard_events_for_project(
-                    "__issue_monitor__",
-                    project_root,
-                    issue_number,
-                    linked_issue_kind,
-                )
-                .into_iter()
-                .map(|mut event| {
-                    if matches!(event.target, DispatchTarget::Client(_)) {
-                        event.target = DispatchTarget::Broadcast;
-                    }
-                    event
-                })
-                .collect()
+                recovery_events.extend(
+                    self.open_issue_monitor_configure_wizard_events_for_project(
+                        "__issue_monitor__",
+                        project_root,
+                        issue_number,
+                        linked_issue_kind,
+                    )
+                    .into_iter()
+                    .map(|mut event| {
+                        if matches!(event.target, DispatchTarget::Client(_)) {
+                            event.target = DispatchTarget::Broadcast;
+                        }
+                        event
+                    })
+                    .collect::<Vec<_>>(),
+                );
+                recovery_events
             }
             Err(error) => {
-                self.issue_monitor_launch_failed_events(Some(project_root), issue_number, &error)
+                recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
+                    Some(project_root),
+                    issue_number,
+                    &error,
+                    delivery_id.as_deref(),
+                ));
+                recovery_events
             }
         }
+    }
+
+    fn existing_issue_monitor_delivery_window(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: &str,
+    ) -> Option<(String, bool, bool)> {
+        let tab_id = self.issue_monitor_tab_id_for_project_root(project_root)?;
+        let tab = self.tab(&tab_id)?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &tab.project_root,
+        ))
+        .ok()?;
+        let delivery = prefs.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        })?;
+        let bound_window_id = delivery.materializer_window_id.as_deref()?;
+        let window_id = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .map(|window| combined_window_id(&tab_id, &window.id))
+            .find(|window_id| window_id == bound_window_id)?;
+        Some((
+            window_id,
+            delivery.materialized_window_id.as_deref() == Some(bound_window_id),
+            delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
+        ))
     }
 
     /// SPEC #3200 Option A: handle a daemon `review_dispatch` — prepare the
@@ -1883,6 +2135,7 @@ impl AppRuntime {
             dispatch.linked_issue_kind,
             Some(prompt),
             review_model,
+            None,
         ) {
             Ok(Some(events)) => events,
             Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
@@ -1908,24 +2161,54 @@ impl AppRuntime {
         linked_issue_kind: gwt::LinkedIssueKind,
         review_prompt: Option<String>,
         review_model: Option<String>,
+        delivery_id: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
         else {
             return Err("Project tab not found".to_string());
         };
-        let Some(tab) = self.tab(&tab_id) else {
-            return Err("Project tab not found".to_string());
+        let (project_kind, migration_pending, project_root, proposed_window_id) = {
+            let Some(tab) = self.tab(&tab_id) else {
+                return Err("Project tab not found".to_string());
+            };
+            (
+                tab.kind,
+                tab.migration_pending,
+                tab.project_root.clone(),
+                combined_window_id(
+                    &tab_id,
+                    &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+                ),
+            )
         };
-        if tab.kind != gwt::ProjectKind::Git {
+        if let Some(delivery_id) = delivery_id.as_deref() {
+            match self.claim_issue_monitor_launch_delivery(
+                &project_root,
+                issue_number,
+                delivery_id,
+                &proposed_window_id,
+            ) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Some(Vec::new())),
+                Err(error) => {
+                    return Ok(Some(self.issue_monitor_control_error_events(
+                        None,
+                        error,
+                        "claim-launch-delivery",
+                        Some(issue_number),
+                    )));
+                }
+            }
+        }
+        if project_kind != gwt::ProjectKind::Git {
             return Err("Issue Monitor launch requires a Git project".to_string());
         }
-        if tab.migration_pending {
+        if migration_pending {
             return Err(
                 "Complete the project migration before launching monitored Issue work".to_string(),
             );
         }
 
-        let project_root = tab.project_root.clone();
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
         if previous_profiles.preferred_profile().is_none() {
@@ -1956,6 +2239,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                delivery_id.clone(),
             )? {
                 return Ok(Some(events));
             }
@@ -1996,6 +2280,10 @@ impl AppRuntime {
         .map(|prefs| prefs.autonomous_mode)
         .unwrap_or(false);
         launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // Issue #3478 (AC-1): the unattended agent must know it is unattended,
+        // so its hooks can convert a confirmation question into a NeedsHuman
+        // handoff instead of letting it hold this slot until the stuck timeout.
+        launch_request.set_autonomous_execution_context(autonomous_mode, issue_number);
         // SPEC #3200 FR-015: apply the distinct review model for the review agent.
         if let (Some(model), LaunchWizardLaunchRequest::Agent(config)) =
             (&review_model_override, &mut launch_request)
@@ -2026,6 +2314,7 @@ impl AppRuntime {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
+            issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.clone()),
         };
         let mut events = match launch_request {
@@ -2063,6 +2352,7 @@ impl AppRuntime {
         project_root: &Path,
         target_branch: &str,
         issue_number: u64,
+        delivery_id: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
         else {
@@ -2078,15 +2368,21 @@ impl AppRuntime {
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok(None);
         }
-        let resume_context_root = if session.worktree_path.as_path().exists() {
-            session.worktree_path.as_path()
-        } else {
-            project_root
-        };
+        // Issue #3478 (AC-5): a parked question that a human answered resumes
+        // this exact session with the answer as its first prompt, so the work
+        // continues with the decision context it was parked on. Taken once —
+        // a later resume of the same session must not replay a stale answer.
+        if let Some(prompt) = gwt::take_autonomous_resume_prompt_from_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+            issue_number,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ) {
+            config.args.push(prompt);
+        }
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
         let launch_index = self
             .tab(tab_id)
@@ -2104,6 +2400,7 @@ impl AppRuntime {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
+            issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.to_path_buf()),
         };
         let mut events = self.spawn_agent_window_with_feedback_at_geometry(
@@ -2437,6 +2734,7 @@ impl AppRuntime {
                         "Launch Agent".to_string()
                     },
                     issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+                    issue_monitor_delivery_id: None,
                     issue_monitor_project_root: issue_monitor_project_root.clone(),
                 });
                 let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
@@ -2508,7 +2806,7 @@ impl AppRuntime {
         }
     }
 
-    fn save_issue_monitor_profile_from_launch_request(
+    pub(super) fn save_issue_monitor_profile_from_launch_request(
         &mut self,
         mut session: LaunchWizardSession,
         save_context: IssueMonitorProfileSaveContext,
@@ -2534,16 +2832,36 @@ impl AppRuntime {
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
-        if let Err(error) = gwt::mutate_issue_monitor_prefs_recovering(
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
+        let saved = gwt::mutate_issue_monitor_prefs_recovering(
             &prefs_path,
             &gwt::IssueMonitorPrefs::recovery_default(),
             |prefs| {
-                prefs.launch_profile = Some(launch_profile);
+                if prefs.advance_effect_authority_epoch().is_some() {
+                    prefs.launch_profile = Some(launch_profile);
+                    true
+                } else {
+                    false
+                }
             },
-        ) {
-            session.wizard.error = Some(format!("Failed to save Issue Monitor settings: {error}"));
-            self.launch_wizard = Some(session);
-            return vec![self.launch_wizard_state_outbound()];
+        );
+        match saved {
+            Ok((_, true)) => {}
+            Ok((_, false)) => {
+                session.wizard.error = Some(
+                    "Failed to save Issue Monitor settings: authority epoch overflow".to_string(),
+                );
+                self.launch_wizard = Some(session);
+                return vec![self.launch_wizard_state_outbound()];
+            }
+            Err(error) => {
+                session.wizard.error =
+                    Some(format!("Failed to save Issue Monitor settings: {error}"));
+                self.launch_wizard = Some(session);
+                return vec![self.launch_wizard_state_outbound()];
+            }
         }
         let mut events = vec![
             self.launch_wizard_state_broadcast(None),
@@ -3110,6 +3428,9 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_does_not_report_branch_zero_for_detached_nondefault_branch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");

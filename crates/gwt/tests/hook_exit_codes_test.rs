@@ -423,3 +423,71 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
     assert_eq!(runtime_state.status, "Idle");
     assert_eq!(runtime_state.source_event, "Stop");
 }
+
+// SPEC #3245 AC-1/AC-4 (T-107): the lane mechanism is gone — a leftover
+// `.gwt/session-kind.json` from a pre-removal worktree is inert. PreToolUse
+// lets a production edit through and Stop does not block, with or without
+// the stale file.
+#[test]
+fn stale_lane_file_does_not_alter_hook_dispatch_behavior() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
+
+    fn run(stale_lane_file: bool, event: &str, stdin: String) -> (i32, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        if stale_lane_file {
+            // SPEC #3245 FR-007: a leftover pre-removal lane file is inert.
+            let lane = tmp.path().join(".gwt/session-kind.json");
+            std::fs::create_dir_all(lane.parent().unwrap()).unwrap();
+            std::fs::write(&lane, r#"{"version":1,"id":"intake"}"#).unwrap();
+        }
+        let mut env = TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = tmp.path().to_path_buf();
+        env.stdin = stdin;
+        let code = dispatch(
+            &mut env,
+            &argv(&["gwt", "__internal", "daemon-hook", "event", event]),
+        );
+        (code, String::from_utf8(env.stdout).unwrap())
+    }
+
+    let edit_stdin = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "crates/gwt/src/lib.rs",
+            "old_string": "a",
+            "new_string": "b"
+        }
+    })
+    .to_string();
+    let stop_stdin = serde_json::json!({
+        "session_id": "agent-x",
+        "stop_hook_active": false
+    })
+    .to_string();
+
+    for stale_lane_file in [true, false] {
+        let (code, stdout) = run(stale_lane_file, "PreToolUse", edit_stdin.clone());
+        assert_eq!(
+            code, 0,
+            "a production edit must pass (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"deny\""),
+            "no code-edit guard may fire (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+
+        let (code, stdout) = run(stale_lane_file, "Stop", stop_stdin.clone());
+        assert_ne!(
+            code, 2,
+            "Stop must not block (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"decision\":\"block\""),
+            "no Stop gate may fire (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+    }
+}

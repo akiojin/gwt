@@ -12,24 +12,24 @@
 //! sibling files and consume these types.
 
 pub mod action_obligation_stop_check;
+pub mod autonomous_question_guard;
 pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
-pub mod context;
 pub mod coordination_event;
 pub mod diagnostics;
+pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
-pub mod execution_completion_stop_check;
 pub mod execution_control_stop_check;
 pub mod forward;
 pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
-pub mod intake_completion_stop_check;
+pub mod pm_loop_stop_check;
 pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;
@@ -41,6 +41,7 @@ pub mod state_file_stop_check;
 pub mod work_event_settlement_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
+pub(crate) use workspace_identity::register_session_in_projection;
 pub mod worktree;
 
 use std::io::{self, Read};
@@ -51,6 +52,23 @@ pub use envelope::{HookOutput, IntentBoundaryEvent};
 pub(crate) use identity::{
     resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookSessionId, RawHookEvent,
 };
+
+/// SPEC-3431 FR-064: whether this hook is running for the resident PM.
+///
+/// The PM receives a byte-identical managed asset set to every other agent,
+/// including the hooks — but it is not an implementation agent. It never
+/// touches production code, never opens PRs, owns no Work item, and its window
+/// title is fixed. Reminders and gates written for implementation sessions
+/// either demand impossible settlements or bury the PM's actual contract under
+/// instructions that outrank it.
+///
+/// Keyed on the worktree path rather than an environment variable, for the
+/// same reason `worktree_form::is_ephemeral_intake_worktree` is: the decision
+/// must be deterministic per worktree so an ambient value from another session
+/// can never redirect policy.
+pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
+    crate::pm_registry::is_pm_worktree(&gwt_core::paths::resolve_current_worktree_root(worktree))
+}
 
 /// Every hook name exposed via `gwtd hook <name>`.
 ///
@@ -283,12 +301,13 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match event_dispatcher::handle_with_input(
+            let dispatch_result = event_dispatcher::handle_with_input(
                 event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
-            ) {
+            );
+            match dispatch_result {
                 Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -310,13 +329,14 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match provider_event::handle_with_input(
+            let dispatch_result = provider_event::handle_with_input(
                 provider,
                 native_event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
-            ) {
+            );
+            match dispatch_result {
                 Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -499,7 +519,7 @@ mod tests {
             .0;
 
         assert!(
-            !front_door.contains("bootstrap_project_index_for_path"),
+            !front_door.contains("bootstrap_project_index_for_"),
             "GUI front door must not block server startup on Project Index bootstrap"
         );
     }

@@ -191,6 +191,8 @@ struct PreparedOutbound {
     class: QueueClass,
 }
 
+const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
+
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id) = match event {
@@ -208,6 +210,57 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         repair_pane_id,
         class: queue_class_for_kind(kind),
     }
+}
+
+/// Serialize private Knowledge wire metadata without changing the public
+/// `BackendEvent` construction/destructuring shape.
+fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
+    let mut prepared = prepare_outbound(&outbound.event);
+    let Some(metadata) = outbound.knowledge_wire_metadata.as_ref() else {
+        return prepared;
+    };
+    let mut payload = serde_json::to_value(&outbound.event).expect("backend event value");
+    let object = payload
+        .as_object_mut()
+        .expect("internally tagged backend event must serialize as an object");
+    match metadata {
+        crate::app_runtime::KnowledgeWireMetadata::SemanticRetry(semantic_retry) => {
+            if !matches!(
+                outbound.event,
+                gwt::BackendEvent::KnowledgeSearchResults { .. }
+            ) || !semantic_retry.retryable
+                || !matches!(
+                    semantic_retry.error_code.as_str(),
+                    "INDEX_NOT_READY" | "SEARCH_UNAVAILABLE"
+                )
+                || semantic_retry.retry_after_ms != KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS
+            {
+                return prepared;
+            }
+            object.insert(
+                "semantic_retry".to_string(),
+                serde_json::to_value(semantic_retry).expect("knowledge semantic retry value"),
+            );
+        }
+        crate::app_runtime::KnowledgeWireMetadata::NonSemanticError => {
+            if !matches!(
+                outbound.event,
+                gwt::BackendEvent::KnowledgeError {
+                    request_id: Some(_),
+                    query: Some(_),
+                    ..
+                }
+            ) {
+                return prepared;
+            }
+            object.insert(
+                "error_domain".to_string(),
+                serde_json::Value::String("non_semantic".to_string()),
+            );
+        }
+    }
+    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared
 }
 
 struct QueuedOutbound {
@@ -564,7 +617,7 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
-            let prepared = prepare_outbound(&outbound.event);
+            let prepared = prepare_outbound_event(&outbound);
             match outbound.target {
                 DispatchTarget::Broadcast => {
                     for (client_id, queue, receives_broadcasts) in &snapshot {
@@ -909,7 +962,22 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
         }
         Err(_) => return AgentDurableAuthority::Unavailable,
     };
-    if session.execution_binding.as_ref() != Some(binding) {
+    if session.execution_binding.as_ref() != Some(binding)
+        || session.repo_hash.as_deref() != Some(binding.repo_hash.as_str())
+        || session.linked_issue_number != Some(binding.owner_number)
+    {
+        return AgentDurableAuthority::Stale;
+    }
+    let session_project_root = session
+        .project_state_root
+        .as_deref()
+        .filter(|root| !root.as_os_str().is_empty())
+        .unwrap_or(&session.worktree_path);
+    let session_project_root = match dunce::canonicalize(session_project_root) {
+        Ok(path) => gwt_core::paths::normalize_windows_child_process_path(&path),
+        Err(_) => return AgentDurableAuthority::Unavailable,
+    };
+    if session_project_root != principal.canonical_project_root {
         return AgentDurableAuthority::Stale;
     }
     let owner_kind = match binding.owner_kind.as_str() {
@@ -931,26 +999,7 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
         Ok(false) => return AgentDurableAuthority::Stale,
         Err(_) => return AgentDurableAuthority::Unavailable,
     }
-
-    let probe_id = Uuid::new_v4().to_string();
-    let request = gwt::AgentExecutionBindingProbeRequest {
-        schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
-        operation_id: format!("pane-dispatch-{probe_id}"),
-        nonce: format!("pane-nonce-{probe_id}"),
-    };
-    match gwt::probe_authenticated_execution_binding(
-        principal.canonical_project_root(),
-        principal.session_id(),
-        binding,
-        &format!("pane-host-{probe_id}"),
-        request,
-    ) {
-        Ok(_) => AgentDurableAuthority::Current,
-        Err(error) if error.code == AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => {
-            AgentDurableAuthority::Stale
-        }
-        Err(_) => AgentDurableAuthority::Unavailable,
-    }
+    AgentDurableAuthority::Current
 }
 
 async fn durable_agent_execution_authority_async(
@@ -1217,7 +1266,7 @@ impl AgentCapabilityRegistry {
         token: &str,
         expected_binding: &gwt_agent::SessionExecutionBinding,
     ) -> Result<(), String> {
-        self.promote_to_active(token, expected_binding, false)
+        self.promote_to_active(token, expected_binding, false, false)
     }
 
     fn promote_inspection(
@@ -1225,7 +1274,15 @@ impl AgentCapabilityRegistry {
         token: &str,
         expected_binding: &gwt_agent::SessionExecutionBinding,
     ) -> Result<(), String> {
-        self.promote_to_active(token, expected_binding, true)
+        self.promote_to_active(token, expected_binding, true, false)
+    }
+
+    fn promote_continuation(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<(), String> {
+        self.promote_to_active(token, expected_binding, true, true)
     }
 
     fn promote_to_active(
@@ -1233,6 +1290,7 @@ impl AgentCapabilityRegistry {
         token: &str,
         expected_binding: &gwt_agent::SessionExecutionBinding,
         allow_inspection: bool,
+        allow_active_replacement: bool,
     ) -> Result<(), String> {
         let mut state = self
             .inner
@@ -1276,6 +1334,13 @@ impl AgentCapabilityRegistry {
                 Ok(())
             }
             AgentExecutionAuthority::Active(binding) if binding.as_ref() == expected_binding => {
+                Ok(())
+            }
+            AgentExecutionAuthority::Active(_) if allow_active_replacement => {
+                let mut promoted = principal;
+                promoted.execution_authority =
+                    AgentExecutionAuthority::Active(Box::new(expected_binding.clone()));
+                state.principals_by_token.insert(issued_token, promoted);
                 Ok(())
             }
             AgentExecutionAuthority::Inspection
@@ -2016,6 +2081,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             "/internal/execution-binding-probe",
             post(execution_binding_probe_handler),
         )
+        .route(
+            "/internal/execution-continuation",
+            post(execution_continuation_handler),
+        )
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route(
             "/internal/work-terminalization",
@@ -2445,7 +2514,9 @@ async fn workspace_update_handler(
     };
 
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
-        return execution_binding_error_response();
+        return execution_binding_error_response(
+            "workspace_update_requires_active_execution_authority",
+        );
     };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
@@ -2498,7 +2569,9 @@ async fn work_terminalization_handler(
     };
 
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
-        return execution_binding_error_response();
+        return execution_binding_error_response(
+            "work_terminalization_requires_active_execution_authority",
+        );
     };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
@@ -2564,10 +2637,12 @@ async fn execution_binding_probe_handler(
     };
     // This route authorizes agent-initiated producing mutation. Prepared
     // authority is observation-only until the coordinator commits and
-    // promotes the bearer, so it must never receive a successful receipt
-    // through the same endpoint used by PreToolUse.
+    // promotes the bearer, so this probe must never hand it a successful
+    // receipt.
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
-        return execution_binding_error_response();
+        return execution_binding_error_response(
+            "execution_binding_probe_requires_active_execution_authority",
+        );
     };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
@@ -2600,7 +2675,76 @@ async fn execution_binding_probe_handler(
     }
 }
 
-fn execution_binding_error_response() -> Response {
+async fn execution_continuation_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<gwt::AgentExecutionContinuationRequest>,
+) -> Response {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+    let project_root = grant.principal().canonical_project_root().to_path_buf();
+    let session_id = grant.principal().session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let operation = tokio::task::spawn_blocking(move || {
+        gwt::continue_authenticated_execution(&mutation_project_root, &session_id, request)
+    })
+    .await;
+    let (receipt, binding) = match operation {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            return workspace_update_error_response(
+                workspace_update_error_status(error.code),
+                error,
+            );
+        }
+        Err(_) => {
+            return workspace_update_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                AgentWorkspaceUpdateError {
+                    code: AgentWorkspaceUpdateErrorCode::Internal,
+                    message: "Host continuation task failed before a response was produced"
+                        .to_string(),
+                },
+            );
+        }
+    };
+    if state
+        .agent_capabilities
+        .promote_continuation(&grant.token, &binding)
+        .is_err()
+        || !state
+            .agent_capabilities
+            .refresh_grant(&grant)
+            .is_some_and(|current| current.principal().active_execution_binding() == Some(&binding))
+    {
+        return workspace_update_error_response(
+            StatusCode::CONFLICT,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                message:
+                    "agent capability changed before continuation authority could be published"
+                        .to_string(),
+            },
+        );
+    }
+    state
+        .proxy
+        .send(UserEvent::WorkspaceProjectionChanged { project_root });
+    Json(receipt).into_response()
+}
+
+fn execution_binding_error_response(diagnostic_reason: &'static str) -> Response {
+    tracing::warn!(
+        reason = diagnostic_reason,
+        "Host-managed operation rejected an execution binding"
+    );
     workspace_update_error_response(
         StatusCode::CONFLICT,
         AgentWorkspaceUpdateError {
@@ -2612,11 +2756,36 @@ fn execution_binding_error_response() -> Response {
     )
 }
 
+#[derive(Serialize)]
+struct AgentWorkspaceUpdateErrorResponse {
+    code: AgentWorkspaceUpdateErrorCode,
+    reason: &'static str,
+    message: String,
+}
+
 fn workspace_update_error_response(
     status: StatusCode,
     error: AgentWorkspaceUpdateError,
 ) -> Response {
-    (status, Json(error)).into_response()
+    let reason = match error.code {
+        AgentWorkspaceUpdateErrorCode::InvalidRequest => "invalid_request",
+        AgentWorkspaceUpdateErrorCode::RelaunchRequired => "relaunch_required",
+        AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => "authority_mismatch",
+        AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => "workspace_ensure_required",
+        AgentWorkspaceUpdateErrorCode::ProvenanceMismatch => "provenance_mismatch",
+        AgentWorkspaceUpdateErrorCode::IdentityConflict => "identity_conflict",
+        AgentWorkspaceUpdateErrorCode::TransactionConflict => "transaction_conflict",
+        AgentWorkspaceUpdateErrorCode::Internal => "internal",
+    };
+    (
+        status,
+        Json(AgentWorkspaceUpdateErrorResponse {
+            code: error.code,
+            reason,
+            message: error.message,
+        }),
+    )
+        .into_response()
 }
 
 struct AgentPaneSessionScope {
@@ -3276,8 +3445,8 @@ mod tests {
     };
     use futures_util::{Sink, SinkExt, StreamExt};
     use gwt::{
-        AttachmentProgressPhase, BackendEvent, FrontendEvent, RuntimeHookEvent,
-        RuntimeHookEventKind,
+        AttachmentProgressPhase, BackendEvent, FrontendEvent, KnowledgeKind,
+        KnowledgeSemanticRetry, RuntimeHookEvent, RuntimeHookEventKind,
     };
     use gwt_core::test_support::ScopedEnvVar;
     use reqwest::StatusCode as HttpStatusCode;
@@ -3293,12 +3462,13 @@ mod tests {
 
     use super::{
         agent_bridge_bind_ip, bearer_token, handle_frontend_message, prepare_outbound,
-        queue_class_for_kind, send_agent_self_close_acceptance, websocket_origin_authorized,
-        AgentCapabilityGrant, AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
-        AgentPaneSessionScope, AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub,
-        ClientQueue, ClientSessionScope, DrainStep, EmbeddedServer, HookForwardTarget,
-        PreparedOutbound, QueueClass, ScopedFrontendRequest, ServerState, DRAIN_LOW_WATER,
-        LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        prepare_outbound_event, queue_class_for_kind, send_agent_self_close_acceptance,
+        websocket_origin_authorized, AgentCapabilityGrant, AgentCapabilityIssuer,
+        AgentCapabilityRegistry, AgentFrontendRequest, AgentPaneSessionScope,
+        AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub, ClientQueue,
+        ClientSessionScope, DrainStep, EmbeddedServer, HookForwardTarget, PreparedOutbound,
+        QueueClass, ScopedFrontendRequest, ServerState, DRAIN_LOW_WATER,
+        KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     struct FailingMessageSink;
@@ -3637,6 +3807,58 @@ mod tests {
         let mut mismatched = binding;
         mismatched.identity.ledger_head_hash.push_str("-mismatch");
         assert!(registry.promote_inspection(&token, &mismatched).is_err());
+    }
+
+    #[test]
+    fn continuation_promotion_can_replace_only_the_current_bearers_active_binding() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let predecessor = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-continuation".to_string(),
+            repo_hash: "repo-continuation".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3393,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-predecessor".to_string(),
+                binding_id: "binding-predecessor".to_string(),
+                ledger_head_hash: "head-predecessor".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let token = registry
+            .issue_bound(project.path(), "session-continuation", predecessor.clone())
+            .expect("Active capability");
+        let stale = AgentCapabilityGrant::new(
+            token.clone(),
+            registry.authenticate(&token).expect("authenticate bearer"),
+        );
+        let mut successor = predecessor;
+        successor.identity.generation_id = "generation-successor".to_string();
+        successor.identity.binding_id = "binding-successor".to_string();
+        successor.identity.ledger_head_hash = "head-successor".to_string();
+        successor.capability_generation = 2;
+
+        assert!(
+            registry.promote_inspection(&token, &successor).is_err(),
+            "ordinary inspection promotion cannot replace Active authority"
+        );
+        registry
+            .promote_continuation(&token, &successor)
+            .expect("validated continuation may replace Active authority");
+        let current = registry
+            .refresh_grant(&stale)
+            .expect("same current bearer refreshes after continuation");
+        assert_eq!(
+            current.principal().active_execution_binding(),
+            Some(&successor)
+        );
+
+        let rotated = registry
+            .issue_bound(project.path(), "session-continuation", successor.clone())
+            .expect("rotate bearer");
+        assert_ne!(rotated, token);
+        assert!(registry.promote_continuation(&token, &successor).is_err());
     }
 
     #[test]
@@ -5116,6 +5338,7 @@ mod tests {
         assert_eq!(response.status(), HttpStatusCode::CONFLICT);
         let error: serde_json::Value = response.json().expect("binding probe error");
         assert_eq!(error["code"], "execution_binding_mismatch");
+        assert_eq!(error["reason"], "authority_mismatch");
         assert!(events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5789,6 +6012,240 @@ mod tests {
             }
         }
         (payloads, repairs)
+    }
+
+    fn knowledge_search_results() -> BackendEvent {
+        BackendEvent::KnowledgeSearchResults {
+            id: "tab-1::issue-1".to_string(),
+            knowledge_kind: KnowledgeKind::Issue,
+            query: "silent recovery".to_string(),
+            request_id: 7,
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: true,
+        }
+    }
+
+    fn semantic_retry_directive() -> KnowledgeSemanticRetry {
+        KnowledgeSemanticRetry {
+            error_code: "SEARCH_UNAVAILABLE".to_string(),
+            retryable: true,
+            retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+        }
+    }
+
+    #[test]
+    fn client_hub_injects_exact_semantic_retry_metadata_on_knowledge_search_wire() {
+        let hub = ClientHub::default();
+        let queue = hub.register("knowledge-client".to_string());
+        hub.dispatch(vec![OutboundEvent::reply_with_knowledge_semantic_retry(
+            "knowledge-client",
+            knowledge_search_results(),
+            Some(semantic_retry_directive()),
+        )]);
+
+        let (payloads, repairs) = drain_all(&queue);
+        assert!(repairs.is_empty());
+        assert_eq!(payloads.len(), 1);
+        let value: serde_json::Value =
+            serde_json::from_str(&payloads[0]).expect("knowledge search wire payload");
+        let directive = value
+            .get("semantic_retry")
+            .expect("typed retry directive on outbound wire");
+        assert_eq!(
+            directive
+                .get("error_code")
+                .and_then(serde_json::Value::as_str),
+            Some("SEARCH_UNAVAILABLE")
+        );
+        assert_eq!(
+            directive
+                .get("retryable")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            directive
+                .get("retry_after_ms")
+                .and_then(serde_json::Value::as_u64),
+            Some(KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS)
+        );
+        assert_eq!(
+            directive.as_object().map(serde_json::Map::len),
+            Some(3),
+            "wire directive must contain no raw diagnostic: {directive}"
+        );
+    }
+
+    #[test]
+    fn client_hub_omits_absent_semantic_retry_metadata() {
+        let hub = ClientHub::default();
+        let queue = hub.register("knowledge-client".to_string());
+        hub.dispatch(vec![OutboundEvent::reply_with_knowledge_semantic_retry(
+            "knowledge-client",
+            knowledge_search_results(),
+            None,
+        )]);
+
+        let (payloads, _) = drain_all(&queue);
+        assert_eq!(payloads.len(), 1);
+        let value: serde_json::Value =
+            serde_json::from_str(&payloads[0]).expect("knowledge search wire payload");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "None metadata must be absent from the wire: {value}"
+        );
+    }
+
+    #[test]
+    fn outbound_marks_correlated_nonsemantic_knowledge_errors_on_the_private_wire() {
+        let outbound = OutboundEvent::reply_with_nonsemantic_knowledge_error(
+            "knowledge-client",
+            BackendEvent::KnowledgeError {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                request_id: Some(7),
+                query: Some("silent recovery".to_string()),
+                message: "failed to read issue cache".to_string(),
+            },
+        );
+
+        let prepared = prepare_outbound_event(&outbound);
+        let value: serde_json::Value =
+            serde_json::from_str(&prepared.payload).expect("knowledge error wire payload");
+        assert_eq!(
+            value
+                .get("error_domain")
+                .and_then(serde_json::Value::as_str),
+            Some("non_semantic")
+        );
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "non-semantic errors must never carry retry metadata: {value}"
+        );
+    }
+
+    #[test]
+    fn outbound_wire_accepts_both_allowlisted_semantic_retry_codes() {
+        for error_code in ["INDEX_NOT_READY", "SEARCH_UNAVAILABLE"] {
+            let outbound = OutboundEvent::reply_with_knowledge_semantic_retry(
+                "knowledge-client",
+                knowledge_search_results(),
+                Some(KnowledgeSemanticRetry {
+                    error_code: error_code.to_string(),
+                    retryable: true,
+                    retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+                }),
+            );
+            let prepared = prepare_outbound_event(&outbound);
+            let value: serde_json::Value =
+                serde_json::from_str(&prepared.payload).expect("knowledge search wire payload");
+            assert_eq!(
+                value
+                    .get("semantic_retry")
+                    .and_then(|directive| directive.get("error_code"))
+                    .and_then(serde_json::Value::as_str),
+                Some(error_code)
+            );
+        }
+    }
+
+    #[test]
+    fn outbound_wire_omits_invalid_semantic_retry_directives() {
+        let cases = [
+            (
+                "unknown code",
+                KnowledgeSemanticRetry {
+                    error_code: "FUTURE_CODE".to_string(),
+                    retryable: true,
+                    retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+                },
+            ),
+            (
+                "non-retryable flag",
+                KnowledgeSemanticRetry {
+                    error_code: "INDEX_NOT_READY".to_string(),
+                    retryable: false,
+                    retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+                },
+            ),
+            (
+                "zero delay",
+                KnowledgeSemanticRetry {
+                    error_code: "SEARCH_UNAVAILABLE".to_string(),
+                    retryable: true,
+                    retry_after_ms: 0,
+                },
+            ),
+            (
+                "unexpected delay",
+                KnowledgeSemanticRetry {
+                    error_code: "SEARCH_UNAVAILABLE".to_string(),
+                    retryable: true,
+                    retry_after_ms: 30_000,
+                },
+            ),
+        ];
+
+        for (case, directive) in cases {
+            let outbound = OutboundEvent::reply_with_knowledge_semantic_retry(
+                "knowledge-client",
+                knowledge_search_results(),
+                Some(directive),
+            );
+            let prepared = prepare_outbound_event(&outbound);
+            let value: serde_json::Value =
+                serde_json::from_str(&prepared.payload).expect("knowledge search wire payload");
+            assert!(
+                value.get("semantic_retry").is_none(),
+                "{case} must not cross the wire: {value}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "requires KnowledgeSearchResults")]
+    fn outbound_rejects_semantic_retry_metadata_for_non_knowledge_events() {
+        let _ = OutboundEvent::reply_with_knowledge_semantic_retry(
+            "knowledge-client",
+            BackendEvent::KnowledgeError {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                request_id: Some(7),
+                query: Some("silent recovery".to_string()),
+                message: "visible non-semantic failure".to_string(),
+            },
+            Some(semantic_retry_directive()),
+        );
+    }
+
+    #[test]
+    fn prepare_outbound_ignores_invalid_private_metadata_defensively() {
+        let outbound = OutboundEvent {
+            target: crate::DispatchTarget::Client("knowledge-client".to_string()),
+            event: BackendEvent::KnowledgeError {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                request_id: Some(7),
+                query: Some("silent recovery".to_string()),
+                message: "visible non-semantic failure".to_string(),
+            },
+            knowledge_wire_metadata: Some(
+                crate::app_runtime::KnowledgeWireMetadata::SemanticRetry(semantic_retry_directive()),
+            ),
+        };
+        let prepared = prepare_outbound_event(&outbound);
+        let value: serde_json::Value =
+            serde_json::from_str(&prepared.payload).expect("non-knowledge wire payload");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "defensive serializer must ignore invalid metadata: {value}"
+        );
+        assert!(
+            value.get("error_domain").is_none(),
+            "legacy/untyped errors must not gain a non-semantic marker: {value}"
+        );
     }
 
     // SPEC-2359 W-17 (FR-394/FR-395): queue pressure must never disconnect a

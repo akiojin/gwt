@@ -11,6 +11,11 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
+const workspaceRenderSyncSource = readFileSync(
+  resolve(here, "../workspace-render-sync.js"),
+  "utf8",
+);
 // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (state, interaction
 // guard, builders, renderLaunchWizard, chrome listeners) moved from app.js
 // to launch-wizard-surface.js; wizard render/source patterns are pinned
@@ -57,6 +62,11 @@ const projectShellSurfaceSource = readFileSync(
   resolve(here, "../project-shell-surface.js"),
   "utf8",
 );
+const fleetMinimapSource = readFileSync(resolve(here, "../fleet-minimap.js"), "utf8");
+const windowWorktreeFormPath = resolve(here, "../window-worktree-form.js");
+const windowWorktreeFormSource = existsSync(windowWorktreeFormPath)
+  ? readFileSync(windowWorktreeFormPath, "utf8")
+  : "";
 const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
@@ -555,46 +565,105 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
   );
 });
 
-test("workspace windows expose lane badges as a separate contract from agent color", () => {
-  assert.match(
-    appSource,
-    /from "\/window-lane-identity\.js"/,
-    "app.js must import lane identity helpers",
+test("workspace windows expose semantic worktree badges separately from agent color", () => {
+  assert.ok(
+    existsSync(windowWorktreeFormPath),
+    "semantic worktree form adapter must exist as its own module",
   );
   assert.match(
     appSource,
-    /class="window-lane-badge"/,
-    "titlebar template must include a lane badge separate from the role badge",
+    /from "\/window-worktree-form\.js"/,
+    "app.js must import worktree form helpers",
   );
   assert.match(
     appSource,
-    /applyWindowLaneData\(element,\s*windowData\)/,
-    "window root must carry data-lane-kind",
+    /class="window-worktree-badge"/,
+    "titlebar template must include a worktree badge separate from the role badge",
   );
   assert.match(
     appSource,
-    /appendRenderKeyPart\(parts,\s*windowLaneKind\(windowData\)\)/,
-    "workspace window render keys must use the same lane normalization as the badge",
+    /applyWindowWorktreeData\(element,\s*windowData\)/,
+    "window root must carry data-worktree-form",
+  );
+  assert.match(
+    appSource,
+    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(windowData\)\)/,
+    "workspace window render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     projectShellSurfaceSource,
-    /window-list-lane/,
-    "window list rows must include the same lane badge contract",
+    /window-list-worktree/,
+    "window list rows must include the same worktree badge contract",
   );
   assert.match(
     projectShellSurfaceSource,
-    /appendRenderKeyPart\(parts,\s*windowLaneKind\(entry\)\)/,
-    "window list render keys must use the same lane normalization as the badge",
+    /class="window-worktree-badge window-list-worktree"[^>]*role="img"/,
+    "window list worktree badges must expose an image role for their accessible name",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /badgeElement\.setAttribute\("role",\s*"img"\)/,
+    "visible titlebar worktree badges must expose an image role",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /badgeElement\.removeAttribute\("role"\)/,
+    "hidden titlebar worktree badges must remove their image role",
+  );
+  assert.match(
+    projectShellSurfaceSource,
+    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(entry\)\)/,
+    "window list render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     inlineStyle,
-    /\.window-lane-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
-    "lane badges must use Operator tokens, not raw colors",
+    /\.window-worktree-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
+    "worktree badges must use Operator tokens, not raw colors",
   );
   assert.match(
     frontendStyle,
-    /\.fleet-minimap__cell\[data-lane-symbol\]::before/,
-    "minimap cells must render a compact lane marker",
+    /\.fleet-minimap__cell\[data-worktree-symbol\]::before/,
+    "minimap cells must render a compact worktree marker",
+  );
+  assert.match(
+    fleetMinimapSource,
+    /const WORKTREE_MARKER_MIN_CELL_SIZE = 17;/,
+    "minimap marker footprint must have one semantic 17px boundary",
+  );
+  assert.match(
+    fleetMinimapSource,
+    /width >= WORKTREE_MARKER_MIN_CELL_SIZE[\s\S]*height >= WORKTREE_MARKER_MIN_CELL_SIZE/,
+    "minimap cells must apply the marker boundary on both dimensions",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /lane_kind[\s\S]*laneKind[\s\S]*"intake"[\s\S]*"execution"/,
+    "only the adapter must understand the legacy backend wire vocabulary",
+  );
+});
+
+test("old lane identity vocabulary is absent from production presentation wiring", () => {
+  const consumerSource = `${appSource}\n${projectShellSurfaceSource}\n${fleetMinimapSource}`;
+  const presentationSource = `${consumerSource}\n${frontendStyle}`;
+  assert.equal(
+    existsSync(resolve(here, "../window-lane-identity.js")),
+    false,
+    "the retired lane identity module must not return during base merges",
+  );
+  assert.doesNotMatch(
+    consumerSource,
+    /window-lane-identity|WindowLane|windowLane|cellLane|lane_kind|laneKind/,
+    "legacy lane wiring must be confined to the worktree-form adapter",
+  );
+  assert.doesNotMatch(
+    presentationSource,
+    /window-lane-badge|window-list-lane|data-lane-(?:kind|label|symbol)/,
+    "old lane classes and data attributes must leave production presentation wiring",
+  );
+  assert.doesNotMatch(
+    presentationSource,
+    /Intake lane|Execution lane|Unknown lane/,
+    "old user-facing lane copy must leave production presentation wiring",
   );
 });
 
@@ -1653,9 +1722,12 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
 
 test("renderWorkspace refreshes operator telemetry when windows mount/unmount (SPEC-3038)", () => {
   const body = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the recompute is the render guard's `recompute` hook, which
+  // runs even when a per-window sync step throws — the badge / empty state /
+  // minimap must not freeze behind a poisoned window.
   assert.match(
     body,
-    /recomputeOperatorTelemetry\(\)/,
+    /recompute:\s*recomputeOperatorTelemetry/,
     "window-count badge + empty state must update when windows mount/unmount",
   );
 });
@@ -4198,10 +4270,23 @@ test("Recent Projects render key ignores workspace state", () => {
 
 test("viewport-only workspace_state skips unchanged window reconciliation", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the rendered-key slot lives inside workspaceRenderSync so an
+  // exception mid-sync leaves the key uncommitted (the next workspace_state
+  // retries instead of freezing behind the diff skip).
   assert.match(
     appSource,
-    /let\s+renderedWorkspaceWindowsKey\s*=/,
-    "app.js must track the last reconciled Workspace Windows shell key",
+    /import\s*\{\s*createWorkspaceRenderSync\s*\}\s*from\s*"\/workspace-render-sync\.js"/,
+    "app.js must import the render-key sync guard",
+  );
+  assert.match(
+    appSource,
+    /const\s+workspaceRenderSync\s*=\s*createWorkspaceRenderSync\s*\(/,
+    "app.js must own one workspace render sync guard instance",
+  );
+  assert.match(
+    workspaceRenderSyncSource,
+    /if\s*\(\s*renderedKey\s*===\s*key\s*\)\s*\{\s*return\s*\{\s*skipped:\s*true/,
+    "the render guard must skip an unchanged window key before any sync work",
   );
   assert.match(
     appSource,
@@ -4222,11 +4307,9 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
   const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
   const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
-  const keyIndex = renderWorkspaceBody.indexOf(
-    "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
-  );
+  const keyIndex = renderWorkspaceBody.indexOf("workspaceRenderSync.render({");
   const guardIndex = renderWorkspaceBody.indexOf(
-    "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
+    "key: workspaceWindowsRenderKey(workspace)",
   );
   const classifyIndex = renderWorkspaceBody.indexOf(
     "classifyProjectWindowVisibility",
@@ -4234,6 +4317,12 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
   const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
+  const syncGuardIndex = workspaceRenderSyncSource.indexOf('guard("sync"');
+  const recomputeGuardIndex = workspaceRenderSyncSource.indexOf('guard("recompute"');
+  const afterSyncGuardIndex = workspaceRenderSyncSource.indexOf('guard("after_sync"');
+  const commitWindowKeyIndex = workspaceRenderSyncSource.indexOf(
+    "renderedKey = key;",
+  );
 
   assert.notEqual(
     nextViewportIndex,
@@ -4266,12 +4355,13 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
   assert.ok(
     guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
-    "unchanged window key must return before reconciliation and focus activation",
+    "reconciliation and focus activation must run inside the guarded render call",
   );
-  assert.match(
-    renderWorkspaceBody.slice(guardIndex, classifyIndex),
-    /return\s*;/,
-    "unchanged window key guard must return before reconciliation",
+  assert.ok(
+    commitWindowKeyIndex > syncGuardIndex &&
+      commitWindowKeyIndex > recomputeGuardIndex &&
+      commitWindowKeyIndex > afterSyncGuardIndex,
+    "workspace render sync must commit the window key only after reconciliation, telemetry, and focus all succeed",
   );
 });
 
@@ -5153,13 +5243,19 @@ test("titlebar click focuses on single click and only frames on double click", (
 });
 
 test("body and terminal single click focus the window without moving the camera", () => {
-  // focusWindowRemotely without {center:true} sends focus_window WITHOUT bounds
-  // (camera unchanged); the body/terminal mousedown handlers use that path.
+  // focusWindowRemotely is highlight + z-order only and never moves the
+  // camera; the body/terminal mousedown handlers use that path.
+  //
+  // It used to take a `{center}` option that attached `bounds` so the backend
+  // would compute a viewport. That viewport never arrived: viewport-sync
+  // adopts a server viewport once per scope and discards the rest (SPEC-2008
+  // FR-095, per-viewer camera), so the option was dead and three affordances
+  // silently did nothing. Camera moves now go through `requestWindowFrame`.
   const focusRemoteBody = extractFunctionBody(appSource, "focusWindowRemotely");
-  assert.match(
+  assert.doesNotMatch(
     focusRemoteBody,
-    /if\s*\(\s*center\s*\)\s*payload\.bounds\s*=\s*visibleBounds\(\)/,
-    "focusWindowRemotely must only attach bounds when explicitly centering",
+    /bounds/,
+    "focusWindowRemotely must never attach bounds",
   );
   // The non-terminal body click and terminal-root / overlay click all focus
   // only (no center → no camera move). Pinned as source patterns since these
@@ -5243,9 +5339,12 @@ test("Workspace visibility classification reuses direct id sets", () => {
     /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
     "renderWorkspace must not allocate an active window id array before classification",
   );
+  // Issue #3365: the set is assigned inside the guarded sync callback (the
+  // declaration lives outside so afterSync can reuse it), and topmost focus
+  // reads it optionally because a failed sync may have left it unset.
   assert.match(
     renderWorkspaceBody,
-    /const\s+activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
+    /activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
     "renderWorkspace must derive active window ids as a Set once",
   );
   assert.match(
@@ -5255,7 +5354,7 @@ test("Workspace visibility classification reuses direct id sets", () => {
   );
   assert.match(
     renderWorkspaceBody,
-    /topmostId\s*&&\s*activeWindowIdSet\.has\s*\(\s*topmostId\s*\)/,
+    /topmostId\s*&&\s*activeWindowIdSet\?\.has\s*\(\s*topmostId\s*\)/,
     "renderWorkspace must reuse the active id set for topmost focus membership",
   );
 });

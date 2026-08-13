@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorPriorityPosition {
+    Head,
+    Index(usize),
+}
+
 /// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
@@ -103,6 +109,69 @@ pub enum IssueCommand {
         issue_number: u64,
         reviewed_sha: String,
         verdict_raw: String,
+    },
+    MonitorStatus {
+        project_root: Option<std::path::PathBuf>,
+    },
+    MonitorPriorityMove {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        position: IssueMonitorPriorityPosition,
+    },
+    MonitorPrioritySet {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+    },
+    MonitorConfigSet {
+        project_root: Option<std::path::PathBuf>,
+        enabled: Option<bool>,
+        autonomous_mode: Option<bool>,
+        max_active: Option<usize>,
+    },
+    /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
+    /// priority head and ask for one immediate scan. Never launches directly.
+    MonitorLaunchNow {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+    },
+    /// SPEC-3431 FR-033: the PM's stop instruction — revoke one launch's
+    /// authority and slot without requeueing or relaunching it.
+    ///
+    /// The identity components are optional on the wire and required against
+    /// the live state: a materializing launch is identified by its delivery, a
+    /// running one by its window. Omitting a component the monitor holds is a
+    /// mismatch, not a wildcard.
+    MonitorStop {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        reason: String,
+        claim_id: Option<String>,
+        delivery_id: Option<String>,
+        window_id: Option<String>,
+    },
+    /// SPEC-3431 FR-029〜031: revoke one launch and requeue its issue at the
+    /// head so the currently saved launch profile picks it up.
+    ///
+    /// Same identity contract as [`Self::MonitorStop`]; the difference is the
+    /// outcome, not the gate.
+    MonitorFailover {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        reason: String,
+        claim_id: Option<String>,
+        delivery_id: Option<String>,
+        window_id: Option<String>,
+    },
+    /// Issue #3478 (AC-9): list the questions autonomous executions are parked
+    /// on, so a human can see what is blocking the queue.
+    MonitorQuestions {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3478 (AC-5): register a human answer for one parked question.
+    MonitorQuestionAnswer {
+        project_root: Option<std::path::PathBuf>,
+        handoff_id: String,
+        answer: String,
     },
 }
 

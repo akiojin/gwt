@@ -26,45 +26,28 @@ const DIRECT_STOP_SETTLEMENT_RESERVE: Duration = Duration::from_millis(750);
 
 pub fn handle_with_input<E: CliEnv>(env: &mut E, input: &str) -> HookOutput {
     let deadline = CaptureBudgetProfile::StrictStop.resolution_deadline();
-    let worktree_root = env.repo_path().to_path_buf();
-    // SPEC-3248 (hooks v2 P3): whether this Stop gate fires is a lane policy,
-    // resolved from the worktree lane file (source of truth) via the shared
-    // HookContext. A lane whose profile disables `self_improvement_stop`
-    // (intake today) suppresses the gate. Replaces the SPEC-3247 ad-hoc
-    // `SessionKind::from_env().is_intake()` branch.
-    let suppress = !super::context::HookContext::for_worktree(&worktree_root)
-        .lane
-        .policy_flags
-        .self_improvement_stop;
-    evaluate_with_deadline(env, stop_hook_active_from(input), suppress, &deadline)
+    evaluate_with_deadline(env, stop_hook_active_from(input), &deadline)
 }
 
-/// Decide the self-improvement Stop block.
+/// Decide the self-improvement Stop output.
 ///
-/// SPEC-3247 FR-003 / AS-4 → SPEC-3248 (hooks v2): this is a producing-work Stop
-/// gate. A lane whose profile disables `self_improvement_stop` (intake today)
-/// must never be forced to handle improvement candidates before stopping, so
-/// `suppressed_by_lane` short-circuits to [`HookOutput::Silent`] alongside the
-/// existing `stop_hook_active` / non-gwt-repo guards.
-pub fn evaluate_with_env<E: CliEnv>(
-    env: &mut E,
-    stop_hook_active: bool,
-    suppressed_by_lane: bool,
-) -> HookOutput {
+/// SPEC-3247 FR-003 / AS-4: this is a producing-work Stop gate guarded by the
+/// existing `stop_hook_active` / non-gwt-repo checks. The lane suppression
+/// branch was removed by SPEC #3245 (FR-007) — every session evaluates the
+/// same way.
+pub fn evaluate_with_env<E: CliEnv>(env: &mut E, stop_hook_active: bool) -> HookOutput {
     let deadline = CaptureBudgetProfile::StrictStop.resolution_deadline();
-    evaluate_with_deadline(env, stop_hook_active, suppressed_by_lane, &deadline)
+    evaluate_with_deadline(env, stop_hook_active, &deadline)
 }
 
 fn evaluate_with_deadline<E: CliEnv>(
     env: &mut E,
     stop_hook_active: bool,
-    suppressed_by_lane: bool,
     deadline: &ResolutionDeadline,
 ) -> HookOutput {
     evaluate_with_deadline_and_reserve(
         env,
         stop_hook_active,
-        suppressed_by_lane,
         deadline,
         DIRECT_STOP_SETTLEMENT_RESERVE,
     )
@@ -79,25 +62,24 @@ fn evaluate_with_deadline<E: CliEnv>(
 pub fn evaluate_with_deadline_and_reserve<E: CliEnv>(
     env: &mut E,
     stop_hook_active: bool,
-    suppressed_by_lane: bool,
     deadline: &ResolutionDeadline,
     settlement_reserve: Duration,
 ) -> HookOutput {
     let worktree_root = env.repo_path().to_path_buf();
-    if stop_hook_active || suppressed_by_lane {
+    if stop_hook_active {
         return HookOutput::Silent;
     }
     match is_gwt_repository_with_deadline(&worktree_root, deadline) {
         Ok(true) => {}
         Ok(false) => return HookOutput::Silent,
-        Err(failure) => return repository_probe_failure_block(failure),
+        Err(failure) => return repository_probe_failure_warning(failure),
     }
     let _operation_deadline =
         gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline.expires_at());
 
     let candidates = match load_stop_candidates(&worktree_root) {
         Ok(candidates) => candidates,
-        Err(failure) => return evaluation_failure_block(deadline, failure),
+        Err(failure) => return evaluation_failure_warning(deadline, failure),
     };
     let mut attempt_failure = None;
     if let Some(candidate_id) = select_pending_owner_status_candidate(&candidates) {
@@ -140,7 +122,7 @@ pub fn evaluate_with_deadline_and_reserve<E: CliEnv>(
             }
             render_stop_result(&candidates)
         }
-        Err(failure) => evaluation_failure_block(deadline, failure),
+        Err(failure) => evaluation_failure_warning(deadline, failure),
     }
 }
 
@@ -334,15 +316,20 @@ fn render_stop_result(candidates: &[StopCandidate]) -> HookOutput {
     HookOutput::StopBlock { reason }
 }
 
-fn evaluation_failure_block(
+fn evaluation_failure_warning(
     deadline: &ResolutionDeadline,
     failure: StopEvaluationFailure,
 ) -> HookOutput {
     if deadline.remaining("direct Stop state evaluation").is_err() {
-        HookOutput::StopBlock {
-            reason: "High-confidence gwt self-improvement state could not be evaluated.\n\n- state-evaluation: state=blocked reason=timeout subcode=none remediation=RETRY_WITHIN_BUDGET\n\nRetry action: release the contended resource, then rerun the direct Stop hook."
-                .to_string(),
-        }
+        tracing::warn!(
+            failure_kind = "state-evaluation",
+            reason = "timeout",
+            remediation = "RETRY_WITHIN_BUDGET",
+            "self-improvement Stop infrastructure warning"
+        );
+        HookOutput::system_message(
+            "Self-improvement warning: state could not be evaluated.\n\n- state-evaluation: severity=warning reason=timeout subcode=none remediation=RETRY_WITHIN_BUDGET\n\nStop is not blocked by this infrastructure failure.",
+        )
     } else {
         let (artifact, reason, remediation, retry_action) = match failure {
             StopEvaluationFailure::OwnerProjection => (
@@ -358,11 +345,15 @@ fn evaluation_failure_block(
                 "repair the candidate store",
             ),
         };
-        HookOutput::StopBlock {
-            reason: format!(
-                "High-confidence gwt self-improvement state could not be evaluated.\n\n- {artifact}: state=blocked reason={reason} subcode=none remediation={remediation}\n\nRetry action: {retry_action}, then rerun the direct Stop hook."
-            ),
-        }
+        tracing::warn!(
+            failure_kind = artifact,
+            reason,
+            remediation,
+            "self-improvement Stop infrastructure warning"
+        );
+        HookOutput::system_message(format!(
+            "Self-improvement warning: state could not be evaluated.\n\n- {artifact}: severity=warning reason={reason} subcode=none remediation={remediation}\n\nSuggested action: {retry_action}. Stop is not blocked by this infrastructure failure."
+        ))
     }
 }
 
@@ -419,8 +410,12 @@ fn origin_remote_url(
     worktree_root: &Path,
     deadline: &ResolutionDeadline,
 ) -> Result<Option<String>, RepositoryProbeFailure> {
-    let root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
-    let root = root.to_str().ok_or(RepositoryProbeFailure::Routing)?;
+    // `git -C` accepts any path inside the worktree. Resolving the toplevel
+    // first would launch an additional, unbounded Git process before the
+    // strict Stop deadline can be enforced.
+    let root = worktree_root
+        .to_str()
+        .ok_or(RepositoryProbeFailure::Routing)?;
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
         &hub,
@@ -448,16 +443,20 @@ fn origin_remote_url(
     Ok((!value.is_empty()).then_some(value))
 }
 
-fn repository_probe_failure_block(failure: RepositoryProbeFailure) -> HookOutput {
+fn repository_probe_failure_warning(failure: RepositoryProbeFailure) -> HookOutput {
     let reason = match failure {
         RepositoryProbeFailure::Timeout => "timeout",
         RepositoryProbeFailure::Routing => "routing",
     };
-    HookOutput::StopBlock {
-        reason: format!(
-            "High-confidence gwt self-improvement state could not be evaluated.\n\n- repository-probe: state=blocked reason={reason} subcode=none remediation=RETRY_REPOSITORY_PROBE\n\nRetry action: restore repository access, then rerun the direct Stop hook."
-        ),
-    }
+    tracing::warn!(
+        failure_kind = "repository-probe",
+        reason,
+        remediation = "RETRY_REPOSITORY_PROBE",
+        "self-improvement Stop infrastructure warning"
+    );
+    HookOutput::system_message(format!(
+        "Self-improvement warning: repository state could not be evaluated.\n\n- repository-probe: severity=warning reason={reason} subcode=none remediation=RETRY_REPOSITORY_PROBE\n\nSuggested action: restore repository access. Stop is not blocked by this infrastructure failure."
+    ))
 }
 
 fn blocked_reason_token(reason: BlockedReason) -> &'static str {
@@ -779,13 +778,13 @@ mod tests {
     }
 
     #[test]
-    fn owner_projection_failure_has_its_own_typed_remediation() {
+    fn owner_projection_failure_is_a_non_blocking_typed_warning() {
         let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
 
-        let HookOutput::StopBlock { reason } =
-            super::evaluation_failure_block(&deadline, StopEvaluationFailure::OwnerProjection)
+        let HookOutput::SystemMessage(reason) =
+            super::evaluation_failure_warning(&deadline, StopEvaluationFailure::OwnerProjection)
         else {
-            panic!("owner projection failure must block");
+            panic!("owner projection failure must warn without blocking");
         };
 
         assert!(reason.contains("reason=local-commit"), "{reason}");
@@ -849,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_store_lock_contention_returns_a_timeout_block_within_the_deadline() {
+    fn candidate_store_lock_contention_returns_a_timeout_warning_within_the_deadline() {
         let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -892,10 +891,10 @@ mod tests {
             ResolutionDeadline::new(Duration::from_millis(50), Duration::from_millis(250));
         let started = std::time::Instant::now();
 
-        let output = evaluate_with_deadline(&mut env, false, false, &deadline);
+        let output = evaluate_with_deadline(&mut env, false, &deadline);
 
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("contended candidate store must block");
+        let HookOutput::SystemMessage(reason) = output else {
+            panic!("contended candidate store must warn without blocking");
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
         assert!(started.elapsed() < Duration::from_secs(1));

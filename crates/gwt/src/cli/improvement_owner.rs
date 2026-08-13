@@ -88,6 +88,16 @@ impl ContractRoutingRegistry {
 
     fn current() -> Self {
         Self::new(vec![
+            ContractRouteMapping {
+                contract_id: super::improvement_contract::MANAGED_HOOK_GATE_ID.to_string(),
+                contract_schema_revision:
+                    super::improvement_contract::MANAGED_HOOK_CONTRACT_REVISION,
+                failure_code: super::improvement_contract::MANAGED_HOOK_FAILURE_CODE.to_string(),
+                expected_outcome: super::improvement_contract::MANAGED_HOOK_EXPECTED_OUTCOME
+                    .to_string(),
+                routing_basis_revision: 1,
+                disposition: ContractRouteDisposition::ImplementationGap,
+            },
             #[cfg(test)]
             ContractRouteMapping {
                 contract_id: "coordination.board-status".to_string(),
@@ -7894,8 +7904,27 @@ mod tests {
         }
     }
 
+    /// Budget for success-path resolutions.
+    ///
+    /// Each attempt runs several git subprocesses (repository privacy context)
+    /// plus Board and store I/O, so a budget sized for an idle machine turns
+    /// into spurious `Timeout` / `CONTEXT_INCOMPLETE` failures once the whole
+    /// crate runs in parallel. Tests that assert timeout behavior construct
+    /// their own tight deadlines instead of using this helper.
     fn resolution_deadline() -> ResolutionDeadline {
-        ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5))
+        ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30))
+    }
+
+    /// Deadline for assertion-phase readbacks.
+    ///
+    /// A test's `resolution_deadline` is the budget the code under test spends;
+    /// by the time the assertions run it is largely (and legitimately)
+    /// consumed. Reusing it for readbacks makes the assertion fail with
+    /// `Timeout` whenever the machine is loaded, which reports a test-harness
+    /// budget as a production defect. Readbacks observe already-persisted
+    /// state, so they get their own generous budget.
+    fn readback_deadline() -> ResolutionDeadline {
+        ResolutionDeadline::new(Duration::from_secs(30), Duration::from_secs(60))
     }
 
     const MERGE_COMMIT_SHA: &str = "1111111111111111111111111111111111111111";
@@ -10242,7 +10271,7 @@ mod tests {
             .fetch_issue(
                 &RepositoryIdentity::gwt_upstream(),
                 IssueNumber(78),
-                &deadline,
+                &readback_deadline(),
             )
             .expect("created owner readback");
         assert_eq!(readback.title, expected_payload.title);
@@ -10471,7 +10500,7 @@ mod tests {
                 .list_comments(
                     &RepositoryIdentity::gwt_upstream(),
                     IssueNumber(owner_number),
-                    &deadline,
+                    &readback_deadline(),
                 )
                 .expect("comment readback");
             assert_eq!(comments.items().len(), 1);
@@ -10484,7 +10513,7 @@ mod tests {
                 .fetch_issue(
                     &RepositoryIdentity::gwt_upstream(),
                     IssueNumber(owner_number),
-                    &deadline,
+                    &readback_deadline(),
                 )
                 .expect("owner readback");
             assert_eq!(readback.body, original_body);
@@ -10494,12 +10523,13 @@ mod tests {
                 body.contains("was linked") && body.contains(&format!("#{owner_number}"))
             }));
 
+            let retry_deadline = resolution_deadline();
             let retry_preflight = owner_resolution_preflight(
                 &mut env,
                 &mut candidate,
                 &ContractRoutingRegistry::default(),
                 &NoSemanticOwnerAdvisor,
-                &deadline,
+                &retry_deadline,
             )
             .expect("retry owner preflight");
             let OwnerPreflightOutcome::Active {
@@ -10513,7 +10543,7 @@ mod tests {
                 &mut candidate,
                 &owner,
                 &comments,
-                &deadline,
+                &retry_deadline,
             )
             .expect_err("successful candidates require a new OwnerResolving lease");
             assert!(matches!(
@@ -10532,7 +10562,7 @@ mod tests {
                     .list_comments(
                         &RepositoryIdentity::gwt_upstream(),
                         IssueNumber(owner_number),
-                        &deadline,
+                        &readback_deadline(),
                     )
                     .expect("retry comment readback")
                     .items()
@@ -10775,7 +10805,7 @@ mod tests {
             .list_comments(
                 &RepositoryIdentity::gwt_upstream(),
                 IssueNumber(47),
-                &deadline,
+                &readback_deadline(),
             )
             .expect("comment readback");
         assert_eq!(comments.items().len(), 4);
@@ -10896,7 +10926,7 @@ mod tests {
             .list_comments(
                 &RepositoryIdentity::gwt_upstream(),
                 IssueNumber(49),
-                &deadline,
+                &readback_deadline(),
             )
             .expect("historical owner comments")
             .items()
@@ -13376,10 +13406,12 @@ mod tests {
         );
         FileExt::unlock(&board_lock).expect("release Board lock");
 
-        let retry_deadline =
-            ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(2));
+        // The tight budgets above are the contract under test (a contended
+        // Board lock must time out and release the claim). This recovery leg
+        // only has to succeed, so it gets a generous budget instead of making
+        // the assertion contingent on machine speed.
         let delivered =
-            retry_pending_owner_status_with_deadline(&mut env, candidate_id, &retry_deadline)
+            retry_pending_owner_status_with_deadline(&mut env, candidate_id, &readback_deadline())
                 .expect("immediate retry after timeout");
         assert_eq!(
             delivered.owner_status_delivered_generation,
@@ -13406,7 +13438,7 @@ mod tests {
 
         let result = {
             let _operation_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                Instant::now() + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(10),
             );
             deliver_pending_owner_status(&mut env, &mut candidate)
         };
@@ -13475,7 +13507,7 @@ mod tests {
         });
         assert!(
             worker_b_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(30))
                 .expect("busy worker B must return before Board unlock"),
             "busy worker B should be a successful no-op"
         );

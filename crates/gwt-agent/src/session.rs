@@ -208,6 +208,75 @@ pub enum SessionPathState {
     Error(io::Error),
 }
 
+/// Path-independent package runner used for one versioned tool launch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRuntimeRunnerKind {
+    Npx,
+}
+
+/// Why gwt resolved an exact package version for one tool launch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRuntimeResolutionReason {
+    RequestedSelector,
+    InstalledFallback,
+    LegacyMigration,
+}
+
+/// Durable, non-secret provenance for a versioned tool launch.
+///
+/// Absolute executable paths are intentionally excluded so a Session can be
+/// resumed after the npm installation or machine-local PATH changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolRuntimeProvenance {
+    pub schema_version: u32,
+    pub official_package: String,
+    pub requested_selector: String,
+    pub resolved_exact_version: String,
+    pub runner_kind: ToolRuntimeRunnerKind,
+    pub resolution_reason: ToolRuntimeResolutionReason,
+}
+
+impl ToolRuntimeProvenance {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+}
+
+/// Select the machine-independent command identity stored in a [`Session`].
+///
+/// Targeted Windows Host package launches execute the absolute `npx.cmd` path
+/// selected by the launch environment, but that machine-local path must not
+/// become durable Session state. All other launch configurations retain their
+/// existing command unchanged.
+#[must_use]
+pub fn durable_session_launch_command(config: &LaunchConfig) -> String {
+    if !cfg!(windows)
+        || config.runtime_target != LaunchRuntimeTarget::Host
+        || !matches!(config.agent_id, AgentId::Codex | AgentId::ClaudeCode)
+    {
+        return config.command.clone();
+    }
+
+    let Some(provenance) = config.tool_runtime_provenance.as_ref() else {
+        return config.command.clone();
+    };
+    if config.agent_id.package_name() != Some(provenance.official_package.as_str()) {
+        return config.command.clone();
+    }
+
+    let command_name = Path::new(&config.command)
+        .file_name()
+        .and_then(|name| name.to_str());
+    match provenance.runner_kind {
+        ToolRuntimeRunnerKind::Npx
+            if command_name.is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd")) =>
+        {
+            "npx.cmd".to_string()
+        }
+        _ => config.command.clone(),
+    }
+}
+
 /// Inspect one Session path while preserving present-but-unreadable entries.
 #[must_use]
 pub fn inspect_session_path(path: &Path) -> SessionPathState {
@@ -247,6 +316,8 @@ pub struct Session {
     pub session_history: Vec<AgentSessionHistoryEntry>,
     pub status: AgentStatus,
     pub tool_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_runtime_provenance: Option<ToolRuntimeProvenance>,
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_level: Option<String>,
@@ -266,7 +337,7 @@ pub struct Session {
     pub docker_service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_runtime_binding: Option<DockerRuntimeBinding>,
-    /// Optional producing authority projection. Legacy and Inspection Resume
+    /// Optional producing authority projection. Legacy and unbound Resume
     /// Sessions keep this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<SessionExecutionBinding>,
@@ -362,6 +433,7 @@ impl Session {
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
             tool_version: None,
+            tool_runtime_provenance: None,
             model: None,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
@@ -405,6 +477,7 @@ impl Session {
         let mut session = Self::new(worktree_path, branch, config.agent_id.clone());
         session.display_name = config.display_name.clone();
         session.tool_version = config.tool_version.clone();
+        session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
         session.model = config.model.clone();
         session.reasoning_level = config.reasoning_level.clone();
         session.session_mode = config.session_mode;
@@ -415,7 +488,7 @@ impl Session {
         session.docker_service = config.docker_service.clone();
         session.docker_lifecycle_intent = config.docker_lifecycle_intent;
         session.linked_issue_number = config.linked_issue_number;
-        session.launch_command = config.command.clone();
+        session.launch_command = durable_session_launch_command(config);
         session.launch_args = config.args.clone();
         session.windows_shell = config.windows_shell;
         session.update_status(AgentStatus::Running);
@@ -1496,7 +1569,7 @@ pub fn persist_session_execution_binding(
 /// one producing Session.
 ///
 /// Every Host issuance gets a distinct durable epoch under the per-Session
-/// lock. Inspection/legacy Sessions have no producing binding and therefore
+/// lock. Unbound/legacy Sessions have no producing binding and therefore
 /// cannot be promoted implicitly by capability issuance.
 pub fn rotate_session_execution_capability(
     sessions_dir: &Path,
@@ -1506,7 +1579,7 @@ pub fn rotate_session_execution_capability(
         let mut binding = session.execution_binding.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "Inspection or legacy Session has no producing execution binding",
+                "Session has no producing execution binding",
             )
         })?;
         binding.capability_generation =
@@ -1580,6 +1653,7 @@ mod tests {
         assert!(session.agent_session_id.is_none());
         assert!(session.project_state_root.is_none());
         assert!(session.tool_version.is_none());
+        assert!(session.tool_runtime_provenance.is_none());
         assert!(session.model.is_none());
         assert!(session.reasoning_level.is_none());
         assert!(!session.skip_permissions);
@@ -1824,7 +1898,7 @@ display_name = "Codex"
         let loaded: Session = toml::from_str(legacy).expect("deserialize legacy Session");
         assert!(
             loaded.execution_binding.is_none(),
-            "legacy and Inspection Resume sessions must remain non-producing"
+            "legacy and unbound Resume sessions must remain non-producing"
         );
         assert!(
             !toml::to_string(&loaded)
@@ -2284,7 +2358,7 @@ display_name = "Codex"
         );
 
         persist_session_execution_binding(dir.path(), &session_id, None)
-            .expect("clear producing binding for Inspection Resume");
+            .expect("clear producing binding for an unbound Resume");
         assert!(Session::load(&path)
             .expect("reload cleared Session")
             .execution_binding
@@ -2423,7 +2497,7 @@ display_name = "Codex"
         let unbound_path = dir.path().join(format!("{unbound_id}.toml"));
         let before = fs::read_to_string(&unbound_path).expect("read unbound Session");
         let error = rotate_session_execution_capability(dir.path(), &unbound_id)
-            .expect_err("Inspection Session cannot receive producing capability");
+            .expect_err("an unbound Session cannot receive producing capability");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
             fs::read_to_string(&unbound_path).expect("read unchanged unbound Session"),
@@ -2905,6 +2979,33 @@ display_name = "Claude Code"
         );
         assert_eq!(loaded.workflow_bypass, Some(WorkflowBypass::Release));
         assert_eq!(loaded.display_name, "Gemini CLI (legacy)");
+    }
+
+    #[test]
+    fn tool_runtime_provenance_roundtrips_without_absolute_runner_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::new("/tmp/wt", "feature/npx-plan", AgentId::Codex);
+        session.tool_version = Some("latest".to_string());
+        session.tool_runtime_provenance = Some(ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@openai/codex".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "0.116.0".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+        });
+
+        session.save(dir.path()).expect("save Session");
+        let path = dir.path().join(format!("{}.toml", session.id));
+        let persisted = std::fs::read_to_string(&path).expect("read Session");
+        let loaded = Session::load(&path).expect("load Session");
+
+        assert_eq!(
+            loaded.tool_runtime_provenance,
+            session.tool_runtime_provenance
+        );
+        assert!(persisted.contains("resolved_exact_version = \"0.116.0\""));
+        assert!(!persisted.contains("C:\\\\Program Files\\\\nodejs\\\\npx.cmd"));
     }
 
     #[test]
@@ -3635,6 +3736,113 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_from_launch_config_does_not_persist_absolute_targeted_npx_runner() {
+        for (agent_id, package) in [
+            (AgentId::Codex, "@openai/codex"),
+            (AgentId::ClaudeCode, "@anthropic-ai/claude-code"),
+        ] {
+            let mut config = crate::AgentLaunchBuilder::new(agent_id)
+                .working_dir(r"C:\worktree")
+                .branch("feature/npx-plan")
+                .version("latest")
+                .build();
+            config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
+            config.tool_runtime_provenance = Some(ToolRuntimeProvenance {
+                schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+                official_package: package.to_string(),
+                requested_selector: "latest".to_string(),
+                resolved_exact_version: "0.122.0".to_string(),
+                runner_kind: ToolRuntimeRunnerKind::Npx,
+                resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+            });
+
+            let session = Session::from_launch_config(r"C:\worktree", "feature/npx-plan", &config);
+            let sessions_dir = tempfile::tempdir().expect("sessions dir");
+            session.save(sessions_dir.path()).expect("persist Session");
+            let persisted =
+                std::fs::read_to_string(sessions_dir.path().join(format!("{}.toml", session.id)))
+                    .expect("read persisted Session");
+
+            assert_eq!(session.launch_command, "npx.cmd");
+            assert_eq!(config.command, r"C:\Program Files\nodejs\npx.cmd");
+            assert!(persisted.contains("launch_command = \"npx.cmd\""));
+            assert!(!persisted.contains("Program Files"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_from_launch_config_preserves_absolute_runner_outside_targeted_provenance() {
+        let absolute_npx = r"C:\Program Files\nodejs\npx.cmd";
+        let mut without_provenance = crate::AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(r"C:\worktree")
+            .branch("feature/npx-plan")
+            .version("latest")
+            .build();
+        without_provenance.command = absolute_npx.to_string();
+
+        let mut unrelated = crate::AgentLaunchBuilder::new(AgentId::Gemini)
+            .working_dir(r"C:\worktree")
+            .branch("feature/npx-plan")
+            .version("latest")
+            .build();
+        unrelated.command = absolute_npx.to_string();
+        unrelated.tool_runtime_provenance = Some(ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@google/gemini-cli".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "0.1.0".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+        });
+
+        let mut container = crate::AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(r"C:\worktree")
+            .branch("feature/npx-plan")
+            .version("latest")
+            .build();
+        container.command = absolute_npx.to_string();
+        container.runtime_target = LaunchRuntimeTarget::Docker;
+        container.tool_runtime_provenance = Some(ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@openai/codex".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "0.122.0".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+        });
+
+        for config in [&without_provenance, &unrelated, &container] {
+            let session = Session::from_launch_config(r"C:\worktree", "feature/npx-plan", config);
+            assert_eq!(session.launch_command, absolute_npx);
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn session_from_launch_config_preserves_non_windows_runner_path() {
+        let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir("/tmp/worktree")
+            .branch("feature/npx-plan")
+            .version("latest")
+            .build();
+        config.command = "/opt/node/bin/npx".to_string();
+        config.tool_runtime_provenance = Some(ToolRuntimeProvenance {
+            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@openai/codex".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "0.122.0".to_string(),
+            runner_kind: ToolRuntimeRunnerKind::Npx,
+            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+        });
+
+        let session = Session::from_launch_config("/tmp/worktree", "feature/npx-plan", &config);
+
+        assert_eq!(session.launch_command, "/opt/node/bin/npx");
     }
 
     #[test]

@@ -276,13 +276,28 @@ PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ
 選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
-## Issue Monitor
+## Issue サーフェスと Issue Monitor
 
-Issue Monitor はプロジェクトの open な GitHub Issue を監視し、エージェント作業に
-変換します。既定（human-gated）モードでは候補を inbox に取り込み、Issue ごとに
-`Launch` を押すと、gwt が起動時に `work/issue-N` のブランチ/worktree を作成し、
-`gwt-execute #N` でエージェントを開始します。起動失敗はエラーとともに inbox に残り、
-`Launch now` で明示的に再試行できます。
+Add Window から `Issue` を開くと、キャッシュ済み GitHub Issue の閲覧と Issue
+Monitor の操作を単一サーフェスで行えます。各行には実行状態、キュー位置、除外理由が
+表示され、ツールバーから同時実行数、monitor の起動状態、Autonomous モード、Quick
+issue 登録を操作できます。従来の `issue_monitor` preset もこの正本 Issue
+サーフェスを開きます。
+
+Monitor はプロジェクトの open な GitHub Issue を監視し、エージェント作業に変換します。
+既定（human-gated）モードでは候補を Issue キューに取り込み、行の `Launch now` を
+押すと、gwt が起動時に `work/issue-N` のブランチ/worktree を作成し、
+`gwt-execute #N` でエージェントを開始します。起動失敗は実行状態として Issue 行に
+残ります。
+
+Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`、
+`issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
+キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
+モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
+`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。各 operation
+は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
+Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
+反映されます。
 
 ### Autonomous モード（opt-in）
 
@@ -290,7 +305,7 @@ Autonomous モードはループ全体を無人で実行します: 適格 Issue 
 独立レビュー → 強い自動ゲート → 自動マージ。**既定では無効**で、**二段階の
 opt-in** が必要です:
 
-1. Issue Monitor ツールバーの `Autonomous` トグルを有効化（プロジェクト単位）。
+1. Issue サーフェスの `Autonomous` トグルを有効化（プロジェクト単位）。
 2. 自律処理したい各 Issue に `auto-merge` ラベルを付与。
 
 さらに、機械検証可能な受け入れ基準（本文の `## Acceptance Criteria`
@@ -311,6 +326,27 @@ NeedsHuman エスカレーション）はトーストとして表示され、永
 調整可能な上限（試行回数・stuck/idle タイムアウト・再試行バックオフ・レビュー
 モデル）はプロジェクト単位で永続化されます。human-gated の基礎は SPEC
 [#3165](https://github.com/akiojin/gwt/issues/3165) を参照してください。
+
+## PM エージェント
+
+各プロジェクトには常駐の **PM エージェント**ペインが 1 つ起動します。これが
+ユーザーの唯一の対話窓口です。自然言語で要望を伝えると、PM が Issue への分解・
+登録・design-required Issue の計画策定・意味的な実行順序の決定・Issue Monitor
+への起動指示までを行います。進捗の報告と `NeedsHuman` エスカレーションの提示も
+同じ会話の中で行われます。
+
+PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
+スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
+担うため、多重起動の防止機構はそのまま維持されます。
+
+- プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
+  クラッシュループを防ぐバックオフが働きます。
+- Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
+  PM だけです。他のエージェントセッションは GUI 操作が必要です。マージ判断は
+  影響を受けません — 上記の強い自動ゲートが引き続きすべてのマージを決めます。
+
+設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
 
 ## Knowledge、Search、Managed Skills
 
@@ -344,6 +380,24 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
+
+### Hook ファイルの所有権
+
+- gwt は `.claude/settings.local.json` をマシンローカルファイルとして再生成し、
+  Git 除外も gwt が管理します。
+- gwt は `.codex/hooks.json` を作成またはマージしますが、`.gitignore` にも
+  `info/exclude` にも追加しません。
+- `.codex/hooks.json` を version 管理するかどうかはリポジトリ側の決定です。
+  ファイルが既に存在する場合、gwt は gwt-managed hook エントリだけを差し替え、
+  user hook と無関係な top-level 設定は保持します。
+- version 管理する場合は移植可能な `gwtd` fallback を維持し、マシンローカルの
+  絶対パスをコミットしないでください。再生成は
+  `GWT_HOOK_BIN=gwtd cargo run -p gwt-skills --example regenerate_hook_settings -- worktree-local`
+  で行います。
+- launch 以外では、gwt は Codex の hook discovery 先を両方
+  （worktree ローカルの `.codex/hooks.json` と repo root 側の workspace-home
+  コピー）所有します。hook health の報告と self-heal は常に同じファイル集合を
+  対象にします。
 
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に

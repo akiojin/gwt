@@ -919,6 +919,7 @@ mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 worktree_fingerprint: String::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
@@ -1038,6 +1039,363 @@ mod tests {
         assert_eq!(env.pr_create_call_log.len(), 1);
         assert_eq!(env.pr_edit_call_log.len(), 1);
         assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
+    #[test]
+    fn pr_create_accepts_completed_lifecycle_receipt_and_handoff_prompt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "session-completed-settled-handoff";
+        let active_identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, active_identity.clone());
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+
+        fixture.append_event("terminal-update-awaiting-delivery");
+        let pending_receipt = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            true,
+        )
+        .expect("record the terminal Work update before delivery");
+        assert!(pending_receipt.obligation_open);
+        assert!(!pending_receipt.status.is_settled());
+        fixture.stage_events();
+        fixture.commit("chore(work): record terminal Work event");
+        fixture.push();
+
+        let receipt = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            false,
+        )
+        .expect("persist settled Active-generation Work receipt");
+        assert!(receipt.status.is_settled());
+        assert!(!receipt.obligation_open);
+        assert_eq!(receipt.execution_binding, Some(active_identity.clone()));
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut verify_out = String::new();
+        assert_eq!(
+            crate::cli::verification_record::run(
+                &mut env,
+                crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: vec!["git --version".to_string()],
+                    derive: false,
+                },
+                &mut verify_out,
+            )
+            .expect("register canonical verification plan"),
+            0,
+            "{verify_out}",
+        );
+        verify_out.clear();
+        assert_eq!(
+            crate::cli::verification_record::run(
+                &mut env,
+                crate::cli::verification_record::VerifyCommand::Run {
+                    commands: vec!["git --version".to_string()],
+                },
+                &mut verify_out,
+            )
+            .expect("run canonical verification"),
+            0,
+            "{verify_out}",
+        );
+
+        let mut completion_out = String::new();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut completion_out,
+            )
+            .expect("complete generation through the canonical command"),
+            0,
+            "{completion_out}",
+        );
+        let completed_identity = crate::cli::execution_state::current_execution_binding(
+            &fixture.repo,
+            crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 42,
+            },
+        )
+        .expect("read completed generation binding")
+        .expect("completed generation binding");
+        assert_eq!(
+            active_identity.generation_id,
+            completed_identity.generation_id
+        );
+        assert_eq!(active_identity.binding_id, completed_identity.binding_id);
+        assert_ne!(
+            active_identity.ledger_head_hash,
+            completed_identity.ledger_head_hash
+        );
+        let diagnosis = crate::cli::execution_state::diagnose(&fixture.repo, Some(session_id));
+        assert_eq!(
+            diagnosis.work_event_receipt_matches_current_generation,
+            Some(true),
+            "Completed diagnosis must accept the authentic Active lifecycle prefix",
+        );
+
+        crate::cli::action_obligation::mark_from_prompt(&fixture.repo, session_id, "進めて")
+            .expect("record Completed handoff prompt");
+        let events_path = fixture.repo.join(".gwt/work/events.jsonl");
+        let events_before = std::fs::read(&events_path).expect("read Work events before PR");
+        env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("completed settled handoff"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut out,
+            )
+            .expect("create Ready PR from settled Completed generation"),
+            0,
+            "{out}",
+        );
+
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert!(crate::cli::action_obligation::open_kinds(&fixture.repo, session_id).is_empty());
+        assert_eq!(
+            std::fs::read(&events_path).expect("read Work events after PR"),
+            events_before,
+            "post-completion handoff must not append a terminal Work event",
+        );
+        assert_eq!(
+            crate::cli::execution_state::current_execution_binding(
+                &fixture.repo,
+                crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 42,
+                },
+            )
+            .expect("read binding after PR")
+            .expect("binding after PR"),
+            completed_identity,
+            "PR handoff must not create or rewrite an execution generation",
+        );
+    }
+
+    #[test]
+    fn pr_mutation_rejects_missing_unsettled_or_unauthorized_receipt_before_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "session-receipt-pretransport";
+        let active_identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, active_identity.clone());
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_created_pr(seeded_pr());
+
+        let assert_refused_before_dispatch = |env: &mut crate::cli::TestEnv, case: &str| {
+            let mut out = String::new();
+            let code = run(
+                env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: format!("receipt case: {case}"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: true,
+                },
+                &mut out,
+            )
+            .expect("run receipt pretransport gate");
+            assert_eq!(code, 2, "{case}: {out}");
+            assert!(
+                env.pr_create_call_log.is_empty(),
+                "{case}: rejected receipt reached external PR dispatch",
+            );
+        };
+
+        let missing_diagnosis = crate::cli::execution_state::diagnose(&fixture.repo, None);
+        assert_eq!(missing_diagnosis.work_event_receipt_generation_id, None);
+        assert_eq!(
+            missing_diagnosis.work_event_receipt_matches_current_generation, None,
+            "status must represent the absence of a receipt without claiming authority",
+        );
+        assert!(
+            crate::cli::verification_record::work_event_settlement_refusal(&fixture.repo).is_some(),
+            "the mutation gate must refuse a missing receipt when the Work log exists",
+        );
+        assert_refused_before_dispatch(&mut env, "missing");
+
+        let valid = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            false,
+        )
+        .expect("persist valid generation-scoped receipt");
+        assert!(valid.status.is_settled());
+        let mut cases = Vec::new();
+
+        let mut foreign = valid.clone();
+        foreign.session_id = "session-receipt-foreign".to_string();
+        cases.push(("foreign", foreign));
+
+        let mut different_generation = valid.clone();
+        different_generation
+            .execution_binding
+            .as_mut()
+            .expect("valid receipt is generation-bound")
+            .generation_id = "generation-foreign".to_string();
+        cases.push(("different-generation", different_generation));
+
+        let mut arbitrary_head = valid.clone();
+        arbitrary_head
+            .execution_binding
+            .as_mut()
+            .expect("valid receipt is generation-bound")
+            .ledger_head_hash = "arbitrary-ledger-head".to_string();
+        cases.push(("arbitrary-head", arbitrary_head));
+
+        let mut unbound = valid.clone();
+        unbound.execution_binding = None;
+        cases.push(("unbound", unbound));
+
+        for (case, receipt) in cases {
+            crate::cli::verification_record::persist_work_event_settlement_record(
+                &fixture.repo,
+                &receipt,
+            )
+            .expect("persist unauthorized receipt fixture");
+            assert_refused_before_dispatch(&mut env, case);
+        }
+
+        crate::cli::verification_record::persist_work_event_settlement_record(
+            &fixture.repo,
+            &valid,
+        )
+        .expect("restore valid receipt before unsettled case");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("complete the receipt-owning generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        assert_eq!(
+            crate::cli::execution_state::diagnose(&fixture.repo, Some(session_id))
+                .work_event_receipt_matches_current_generation,
+            Some(true),
+            "the unsettled case must start from an authentic Completed lifecycle prefix",
+        );
+        fixture.append_event("terminal-update-not-delivered");
+        assert_refused_before_dispatch(&mut env, "unsettled");
+        let unsettled_diagnosis = crate::cli::execution_state::diagnose(&fixture.repo, None);
+        assert_eq!(
+            unsettled_diagnosis.work_event_receipt_matches_current_generation,
+            Some(true),
+            "status must preserve authentic lifecycle-prefix authority while settlement is blocked",
+        );
+        assert_eq!(unsettled_diagnosis.settlement_severity, "blocked");
+    }
+
+    #[test]
+    fn pr_mutation_rejects_predecessor_receipt_before_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let predecessor_session = "session-receipt-predecessor";
+        initialize_pr_generation_authority(&fixture.repo, predecessor_session);
+        let receipt = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            predecessor_session,
+            false,
+        )
+        .expect("persist predecessor Work receipt");
+        assert!(receipt.status.is_settled());
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                predecessor_session,
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("complete predecessor generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let successor_session = "session-receipt-successor";
+        let request = crate::cli::execution_state::SuccessorRequest {
+            operation_id: "operation-receipt-successor".to_string(),
+            principal_id: "principal-receipt-successor".to_string(),
+            work_id: Some("work-receipt-successor".to_string()),
+            source: "continue-work".to_string(),
+            session_binding_id: "binding-receipt-successor".to_string(),
+            initial_session_id: successor_session.to_string(),
+            entrypoint: "continue-work".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        crate::cli::execution_state::prepare_successor(&fixture.repo, owner, &request)
+            .expect("prepare successor generation");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate successor generation");
+        let successor_identity =
+            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+                .expect("read successor generation binding")
+                .expect("successor generation binding exists");
+        persist_pr_generation_session(&fixture.repo, successor_session, successor_identity);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            successor_session,
+        );
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("predecessor receipt"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: true,
+                },
+                &mut out,
+            )
+            .expect("run predecessor receipt gate"),
+            2,
+            "{out}",
+        );
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "a predecessor receipt must be rejected before external dispatch",
+        );
     }
 
     #[test]
@@ -1175,6 +1533,7 @@ mod tests {
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },
@@ -1277,6 +1636,7 @@ mod tests {
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },

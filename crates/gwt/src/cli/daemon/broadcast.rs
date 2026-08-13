@@ -1,4 +1,4 @@
-//! Daemon-side broadcast hub used by Phase H1+ runtime ownership migration.
+//! Daemon-side event hub used by Phase H1+ runtime ownership migration.
 //!
 //! [`BroadcastHub`] keeps a `tokio::sync::broadcast` channel per logical
 //! event channel ("board", "runtime-status", ...). When a per-connection
@@ -6,14 +6,19 @@
 //! the hub for a receiver. Daemon-side code paths (Board projection writer,
 //! runtime status aggregator, hook event router) call
 //! [`BroadcastHub::publish`] to fan a single payload out to all subscribers.
+//! Issue Monitor controls are commands rather than notifications, so they use
+//! a separate single-worker queue. A bounded admission semaphore covers both
+//! queued and in-flight commands; acceptance alone is not an ACK. Each caller
+//! receives a completion receipt that resolves only after the worker commits
+//! the corresponding durable transaction or rejects it explicitly.
 //!
-//! The hub is intentionally small: one mutex around a `HashMap<String,
-//! broadcast::Sender<DaemonFrame>>`. Phase H1 wired the Board
-//! projection writer through `daemon_publisher::publish_event` to
-//! `BroadcastHub::publish("board", ...)`. Phase H2-H4 will layer
-//! `runtime-output` / `runtime-status` / `runtime-hook` /
-//! `launch-complete` channels onto the same primitive without
-//! re-deriving the synchronization boundary.
+//! The notification registry remains one mutex around a `HashMap<String,
+//! broadcast::Sender<DaemonFrame>>`; the single-consumer control queue is an
+//! independent field. Phase H1 wired the Board projection writer through
+//! `daemon_publisher::publish_event` to `BroadcastHub::publish("board", ...)`.
+//! Phase H2-H4 layer `runtime-output` / `runtime-status` / `runtime-hook` /
+//! `launch-complete` notifications onto that broadcast primitive without
+//! changing the control queue's lossless contract.
 
 #![cfg(unix)]
 
@@ -23,21 +28,134 @@ use std::{
 };
 
 use gwt_core::daemon::DaemonFrame;
-use tokio::sync::broadcast;
+use serde_json::Value;
+use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 
 /// Default per-channel capacity. 64 is enough headroom for a burst of
 /// Board projection events without forcing slow subscribers to drop
 /// frames (subscribers that do fall behind get a `RecvError::Lagged`).
 pub(super) const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 
-/// Multi-channel broadcast registry shared by all per-connection tasks.
+/// Issue Monitor controls are commands whose daemon ACK confirms the exact
+/// control transaction was durably committed. Keep them off the lossy
+/// broadcast rings.
+const ISSUE_MONITOR_CONTROL_CAPACITY: usize = 64;
+
+struct IssueMonitorControlQueue {
+    sender: mpsc::Sender<IssueMonitorControlRequest>,
+    receiver: Mutex<Option<mpsc::Receiver<IssueMonitorControlRequest>>>,
+    state: watch::Sender<IssueMonitorControlState>,
+    admission: Arc<Semaphore>,
+}
+
+impl IssueMonitorControlQueue {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::channel(ISSUE_MONITOR_CONTROL_CAPACITY);
+        Self {
+            sender,
+            receiver: Mutex::new(Some(receiver)),
+            state: watch::channel(IssueMonitorControlState::Starting).0,
+            admission: Arc::new(Semaphore::new(ISSUE_MONITOR_CONTROL_CAPACITY)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssueMonitorControlState {
+    Starting,
+    Ready,
+    RecoveryBlocked,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssueMonitorControlQueueError {
+    RecoveryBlocked,
+    Closed,
+    Rejected,
+    Busy,
+}
+
+impl IssueMonitorControlQueueError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::RecoveryBlocked => {
+                crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+            }
+            Self::Closed => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CLOSED_ERROR,
+            Self::Rejected => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_REJECTED_ERROR,
+            Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
+        }
+    }
+}
+
+pub(crate) struct IssueMonitorControlCompletion {
+    sender: Option<oneshot::Sender<Result<(), IssueMonitorControlQueueError>>>,
+    _admission: OwnedSemaphorePermit,
+}
+
+impl IssueMonitorControlCompletion {
+    pub(crate) fn commit(mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Ok(()));
+        }
+    }
+
+    pub(crate) fn reject(mut self, error: IssueMonitorControlQueueError) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Err(error));
+        }
+    }
+}
+
+pub(crate) struct IssueMonitorControlRequest {
+    frame: DaemonFrame,
+    completion: IssueMonitorControlCompletion,
+}
+
+impl IssueMonitorControlRequest {
+    #[cfg(test)]
+    pub(crate) fn frame(&self) -> &DaemonFrame {
+        &self.frame
+    }
+
+    pub(crate) fn into_parts(self) -> (DaemonFrame, IssueMonitorControlCompletion) {
+        (self.frame, self.completion)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit(self) {
+        self.completion.commit();
+    }
+
+    #[cfg(test)]
+    fn reject_closed(self) {
+        self.completion
+            .reject(IssueMonitorControlQueueError::Closed);
+    }
+}
+
+/// Runtime notification registry plus the dedicated Issue Monitor command
+/// queue, shared by all per-connection tasks.
 ///
 /// Cheap to clone via [`Arc`] — internal mutation is guarded by a
 /// single short-lived [`Mutex`]. Channels are created on-demand the
 /// first time `subscribe` or `publish` references them.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct BroadcastHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<DaemonFrame>>>>,
+    issue_monitor_controls: Arc<IssueMonitorControlQueue>,
+    issue_monitor_status: Arc<Mutex<Option<Value>>>,
+}
+
+impl Default for BroadcastHub {
+    fn default() -> Self {
+        Self {
+            channels: Arc::new(Mutex::new(HashMap::new())),
+            issue_monitor_controls: Arc::new(IssueMonitorControlQueue::new()),
+            issue_monitor_status: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl BroadcastHub {
@@ -53,6 +171,141 @@ impl BroadcastHub {
             .entry(channel.to_string())
             .or_insert_with(|| broadcast::channel(DEFAULT_CHANNEL_CAPACITY).0);
         sender.subscribe()
+    }
+
+    /// Claim the sole lossless Issue Monitor control receiver. Until the
+    /// worker calls this, publishers fail closed instead of ACKing a command
+    /// that no active worker has accepted.
+    pub(crate) fn take_issue_monitor_control_receiver(
+        &self,
+    ) -> Option<mpsc::Receiver<IssueMonitorControlRequest>> {
+        if *self.issue_monitor_controls.state.borrow() != IssueMonitorControlState::Starting {
+            return None;
+        }
+        let receiver = self
+            .issue_monitor_controls
+            .receiver
+            .lock()
+            .expect("Issue Monitor control receiver mutex poisoned")
+            .take()?;
+        self.issue_monitor_controls
+            .state
+            .send_replace(IssueMonitorControlState::Ready);
+        Some(receiver)
+    }
+
+    pub(crate) fn mark_issue_monitor_control_recovery_blocked(&self) {
+        self.issue_monitor_controls
+            .receiver
+            .lock()
+            .expect("Issue Monitor control receiver mutex poisoned")
+            .take();
+        self.issue_monitor_controls
+            .state
+            .send_replace(IssueMonitorControlState::RecoveryBlocked);
+    }
+
+    pub(crate) fn close_issue_monitor_controls(&self) {
+        self.issue_monitor_controls
+            .state
+            .send_replace(IssueMonitorControlState::Closed);
+        *self
+            .issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned") = None;
+    }
+
+    /// Replace the daemon-owned atomic projection consumed by agent status
+    /// requests. The worker calls this from the same immutable monitor borrow
+    /// used for frontend status/inbox publication.
+    pub(crate) fn set_issue_monitor_status(&self, status: Value) {
+        *self
+            .issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned") = Some(status);
+    }
+
+    /// Read the latest projection only while the Issue Monitor worker is the
+    /// live control authority. Recovery-blocked workers retain their GUI
+    /// diagnostics, but must fail closed for agent status requests.
+    pub(crate) fn issue_monitor_status(&self) -> Option<Value> {
+        if !matches!(
+            *self.issue_monitor_controls.state.borrow(),
+            IssueMonitorControlState::Ready
+        ) {
+            return None;
+        }
+        self.issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned")
+            .clone()
+    }
+
+    /// Admit one command and await its durable completion receipt. Successful
+    /// return is the ACK boundary: the worker has committed the exact control
+    /// transaction. Full admission rejects immediately instead of retaining an
+    /// unbounded connection/task waiter outside the mpsc queue.
+    pub(crate) async fn publish_issue_monitor_control(
+        &self,
+        frame: DaemonFrame,
+    ) -> Result<(), IssueMonitorControlQueueError> {
+        let receipt = self.enqueue_issue_monitor_control(frame).await?;
+        receipt
+            .await
+            .unwrap_or(Err(IssueMonitorControlQueueError::Closed))
+    }
+
+    pub(crate) async fn enqueue_issue_monitor_control(
+        &self,
+        frame: DaemonFrame,
+    ) -> Result<
+        oneshot::Receiver<Result<(), IssueMonitorControlQueueError>>,
+        IssueMonitorControlQueueError,
+    > {
+        let mut state = self.issue_monitor_controls.state.subscribe();
+        match *state.borrow() {
+            IssueMonitorControlState::RecoveryBlocked => {
+                return Err(IssueMonitorControlQueueError::RecoveryBlocked);
+            }
+            IssueMonitorControlState::Closed => {
+                return Err(IssueMonitorControlQueueError::Closed);
+            }
+            IssueMonitorControlState::Starting | IssueMonitorControlState::Ready => {}
+        }
+        let admission = Arc::clone(&self.issue_monitor_controls.admission)
+            .try_acquire_owned()
+            .map_err(|_| IssueMonitorControlQueueError::Busy)?;
+        loop {
+            let current = *state.borrow_and_update();
+            match current {
+                IssueMonitorControlState::Starting => {
+                    state
+                        .changed()
+                        .await
+                        .map_err(|_| IssueMonitorControlQueueError::Closed)?;
+                }
+                IssueMonitorControlState::Ready => break,
+                IssueMonitorControlState::RecoveryBlocked => {
+                    return Err(IssueMonitorControlQueueError::RecoveryBlocked);
+                }
+                IssueMonitorControlState::Closed => {
+                    return Err(IssueMonitorControlQueueError::Closed);
+                }
+            }
+        }
+        let (completion, receipt) = oneshot::channel();
+        self.issue_monitor_controls
+            .sender
+            .send(IssueMonitorControlRequest {
+                frame,
+                completion: IssueMonitorControlCompletion {
+                    sender: Some(completion),
+                    _admission: admission,
+                },
+            })
+            .await
+            .map_err(|_| IssueMonitorControlQueueError::Closed)?;
+        Ok(receipt)
     }
 
     /// Publish `frame` to every subscriber currently registered on
@@ -106,7 +359,10 @@ mod tests {
     use serde_json::json;
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-    use super::{BroadcastHub, DEFAULT_CHANNEL_CAPACITY};
+    use super::{
+        BroadcastHub, IssueMonitorControlQueueError, DEFAULT_CHANNEL_CAPACITY,
+        ISSUE_MONITOR_CONTROL_CAPACITY,
+    };
 
     #[test]
     fn subscribe_creates_channel_lazily() {
@@ -254,5 +510,214 @@ mod tests {
             }
             other => panic!("expected event frame after lag recovery, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_admission_is_bounded_until_receipt_resolves() {
+        let hub = BroadcastHub::new();
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("single issue monitor worker receiver");
+        let mut receipts = Vec::with_capacity(ISSUE_MONITOR_CONTROL_CAPACITY);
+        for seq in 0..ISSUE_MONITOR_CONTROL_CAPACITY {
+            receipts.push(
+                hub.enqueue_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: json!({"seq": seq}),
+                })
+                .await
+                .expect("admission remains available"),
+            );
+        }
+        let overflow = tokio::time::timeout(
+            Duration::from_millis(50),
+            hub.enqueue_issue_monitor_control(DaemonFrame::Ack),
+        )
+        .await
+        .expect("full admission rejects without waiting");
+        assert!(matches!(overflow, Err(IssueMonitorControlQueueError::Busy)));
+
+        let first = receiver.recv().await.expect("first admitted request");
+        assert!(matches!(
+            first.frame(),
+            DaemonFrame::Event { payload, .. } if *payload == json!({"seq": 0})
+        ));
+        first.commit();
+        receipts
+            .remove(0)
+            .await
+            .expect("first receipt sender remains live")
+            .expect("first request commits");
+        let final_receipt = hub
+            .enqueue_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: json!({"seq": ISSUE_MONITOR_CONTROL_CAPACITY}),
+            })
+            .await
+            .expect("resolved receipt releases one admission");
+
+        for (expected, receipt) in (1..ISSUE_MONITOR_CONTROL_CAPACITY).zip(receipts) {
+            let request = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+                .await
+                .expect("control receive timed out")
+                .expect("control queue remains open");
+            assert!(matches!(
+                request.frame(),
+                DaemonFrame::Event { payload, .. }
+                    if *payload == json!({"seq": expected})
+            ));
+            request.commit();
+            receipt
+                .await
+                .expect("receipt sender remains live")
+                .expect("request commits");
+        }
+        let final_request = receiver.recv().await.expect("final admitted request");
+        assert!(matches!(
+            final_request.frame(),
+            DaemonFrame::Event { payload, .. }
+                if *payload == json!({"seq": ISSUE_MONITOR_CONTROL_CAPACITY})
+        ));
+        final_request.commit();
+        final_receipt
+            .await
+            .expect("final receipt sender remains live")
+            .expect("final request commits");
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_queue_requires_one_live_worker_and_commit() {
+        let hub = BroadcastHub::new();
+        let frame = DaemonFrame::Event {
+            channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+            payload: json!({"enabled": true}),
+        };
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("worker claims the receiver once");
+        assert!(hub.take_issue_monitor_control_receiver().is_none());
+        let publish = tokio::spawn({
+            let hub = hub.clone();
+            let frame = frame.clone();
+            async move { hub.publish_issue_monitor_control(frame).await }
+        });
+        let request = receiver.recv().await.expect("ready worker receives frame");
+        assert_eq!(request.frame(), &frame);
+        assert!(!publish.is_finished(), "commit receipt is still pending");
+        request.commit();
+        publish
+            .await
+            .expect("publisher joins")
+            .expect("ready worker commits the frame");
+
+        drop(receiver);
+        assert!(
+            hub.publish_issue_monitor_control(frame).await.is_err(),
+            "closed worker receiver rejects the frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_starting_waits_for_ready_and_commit_receipt() {
+        let hub = BroadcastHub::new();
+        let frame = DaemonFrame::Event {
+            channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+            payload: json!({"enabled": false}),
+        };
+        let publish = tokio::spawn({
+            let hub = hub.clone();
+            let frame = frame.clone();
+            async move { hub.publish_issue_monitor_control(frame).await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !publish.is_finished(),
+            "Starting waits for worker initialization instead of forcing fallback"
+        );
+
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("valid startup claims receiver and becomes Ready");
+        let request = receiver.recv().await.expect("worker receives request");
+        assert_eq!(request.frame(), &frame);
+        assert!(
+            !publish.is_finished(),
+            "mpsc enqueue alone must not complete the publisher"
+        );
+        request.commit();
+
+        assert!(publish.await.expect("publisher joins").is_ok());
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_starting_resolves_to_recovery_blocked_or_closed() {
+        let recovery_hub = BroadcastHub::new();
+        recovery_hub.set_issue_monitor_status(json!({"queue": []}));
+        let recovery_publish = tokio::spawn({
+            let hub = recovery_hub.clone();
+            async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
+        });
+        tokio::task::yield_now().await;
+        recovery_hub.mark_issue_monitor_control_recovery_blocked();
+        let recovery_error = recovery_publish
+            .await
+            .expect("recovery publisher joins")
+            .expect_err("recovery blocks controls");
+        assert_eq!(
+            recovery_error.message(),
+            crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+        );
+        assert!(
+            recovery_hub.issue_monitor_status().is_none(),
+            "recovery-blocked worker must not expose a normal agent status projection"
+        );
+        assert_eq!(
+            recovery_hub
+                .publish_issue_monitor_control(DaemonFrame::Ack)
+                .await
+                .expect_err("terminal recovery state rejects immediately")
+                .message(),
+            crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+        );
+
+        let closed_hub = BroadcastHub::new();
+        let closed_publish = tokio::spawn({
+            let hub = closed_hub.clone();
+            async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
+        });
+        tokio::task::yield_now().await;
+        closed_hub.close_issue_monitor_controls();
+        assert!(closed_publish
+            .await
+            .expect("closed publisher joins")
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_shutdown_rejects_uncommitted_receipts() {
+        let hub = BroadcastHub::new();
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("worker receiver");
+        let first = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
+        });
+        let second = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
+        });
+
+        let first_request = receiver.recv().await.expect("first queued request");
+        let second_request = receiver.recv().await.expect("second queued request");
+        receiver.close();
+        hub.close_issue_monitor_controls();
+        first_request.reject_closed();
+        second_request.reject_closed();
+
+        assert!(first.await.expect("first publisher joins").is_err());
+        assert!(second.await.expect("second publisher joins").is_err());
     }
 }

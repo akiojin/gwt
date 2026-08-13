@@ -1,97 +1,41 @@
 //! `gwtd hook workflow-policy` — hook-driven workflow gating.
 //!
-//! v1 keeps the policy deliberately narrow:
+//! The policy is deliberately narrow:
 //!
 //! - reuse the existing consolidated Bash safety policy first
 //! - block worktree escape, branch-switching, and direct GitHub workflow CLI
 //!   commands before they reach the tool runtime
-//! - keep read-only exploration, transport operations, verification, and
-//!   explicit low-risk bookkeeping non-blocking
-//! - block mutating implementation work until an owner Issue/SPEC is linked
-//! - block implementation-state changes when a linked SPEC owner is known but
-//!   its plan/tasks sections are not ready
+//! - block direct edits of trusted execution/evidence state files
+//! - require the Agent Workspace identity (title) before work starts
+//! - hold a pending gwt-discussion Goal Start until it is handled
+//!
+//! Owner/SPEC linkage and lane membership never gate tool calls: the owner
+//! guard and the intake lane code-edit guard were removed by SPEC #3245
+//! (FR-002 / FR-009) after their default-deny classification kept
+//! false-positive-blocking legitimate ownerless work. SPEC-first / TDD
+//! discipline is carried by skills and guidance, not by this hook.
 
-use std::{
-    collections::HashMap,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::{io::Read, path::Path};
 
-use gwt_agent::{
-    session::{Session, GWT_SESSION_ID_ENV},
-    types::WorkflowBypass,
-};
-use gwt_core::{
-    paths::{gwt_cache_dir, gwt_sessions_dir},
-    workspace_projection::load_workspace_projection,
-};
-use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
-use serde::Deserialize;
+use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
+use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
 
 use crate::discussion_resume::PendingDiscussionGoal;
 
-use super::{block_bash_policy, HookError, HookEvent, HookOutput};
+use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutput};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkflowOwner {
-    Unknown,
-    Issue(u64),
-    Spec(u64),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowContext {
-    pub owner: WorkflowOwner,
-    pub has_plan: bool,
-    pub has_tasks: bool,
-    pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
     pub pending_discussion_goal: Option<PendingDiscussionGoal>,
 }
 
 impl WorkflowContext {
+    /// A context with nothing pending. The name survives from the removed
+    /// owner-resolution era so the extensive hook test corpus keeps reading
+    /// naturally; it is exactly `Self::default()`.
     pub fn unknown() -> Self {
-        Self {
-            owner: WorkflowOwner::Unknown,
-            has_plan: false,
-            has_tasks: false,
-            bypass: None,
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
-    }
-
-    pub fn plain_issue(issue_number: u64) -> Self {
-        Self {
-            owner: WorkflowOwner::Issue(issue_number),
-            has_plan: false,
-            has_tasks: false,
-            bypass: None,
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
-    }
-
-    pub fn spec_issue(issue_number: u64, has_plan: bool, has_tasks: bool) -> Self {
-        Self {
-            owner: WorkflowOwner::Spec(issue_number),
-            has_plan,
-            has_tasks,
-            bypass: None,
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
-    }
-
-    pub fn with_bypass(bypass: WorkflowBypass) -> Self {
-        Self {
-            owner: WorkflowOwner::Unknown,
-            has_plan: false,
-            has_tasks: false,
-            bypass: Some(bypass),
-            title_summary_missing: false,
-            pending_discussion_goal: None,
-        }
+        Self::default()
     }
 
     pub fn with_title_summary_missing(mut self, missing: bool) -> Self {
@@ -105,27 +49,19 @@ impl WorkflowContext {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct IssueBranchLinkStore {
-    branches: HashMap<String, u64>,
-}
-
 pub fn evaluate_with_context(
     event: &HookEvent,
     worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
-    let safety = block_bash_policy::evaluate(event, worktree_root)?;
+    effect_classifier::observe_event(event, worktree_root);
+    let safety = block_bash_policy::evaluate_without_observation(event, worktree_root)?;
     if safety != HookOutput::Silent {
         return Ok(safety);
     }
     let trusted_state = evaluate_trusted_state_write_guard(event)?;
     if trusted_state != HookOutput::Silent {
         return Ok(trusted_state);
-    }
-    let lane_code_edit = evaluate_lane_code_edit_guard(event, worktree_root)?;
-    if lane_code_edit != HookOutput::Silent {
-        return Ok(lane_code_edit);
     }
     let title_summary = evaluate_title_summary_guard(event, context.title_summary_missing)?;
     if title_summary != HookOutput::Silent {
@@ -136,15 +72,11 @@ pub fn evaluate_with_context(
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
     }
-    let owner = evaluate_owner_guard(event, worktree_root, context)?;
-    if owner != HookOutput::Silent {
-        return Ok(owner);
-    }
     Ok(HookOutput::Silent)
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
-    let context = resolve_workflow_context(worktree_root)
+    let context = WorkflowContext::default()
         .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
         .with_pending_discussion_goal(
             crate::discussion_resume::load_pending_goal(worktree_root)
@@ -168,70 +100,6 @@ pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
     evaluate(&event, &root)
 }
 
-/// How long an armed workflow bypass stays effective. A `/release` run
-/// (including transient CI reruns) finishes well within this window; after it
-/// a forgotten disarm must not leave the owner guard permanently silent.
-const WORKFLOW_BYPASS_TTL_SECS: i64 = 6 * 60 * 60;
-
-/// A bypass counts only while its arm timestamp is fresh. Missing or stale
-/// `workflow_bypass_armed_at` fails closed.
-fn effective_workflow_bypass(
-    session: &Session,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<WorkflowBypass> {
-    let bypass = session.workflow_bypass?;
-    let armed_at = session.workflow_bypass_armed_at?;
-    let age_secs = now.signed_duration_since(armed_at).num_seconds();
-    ((0..=WORKFLOW_BYPASS_TTL_SECS).contains(&age_secs)).then_some(bypass)
-}
-
-fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
-    let session = load_session_from_env();
-    let bypass = session
-        .as_ref()
-        .and_then(|s| effective_workflow_bypass(s, chrono::Utc::now()));
-
-    let Some(issue_number) = session
-        .as_ref()
-        .and_then(|session| session.linked_issue_number)
-        .or_else(|| resolve_issue_from_linkage_store(worktree_root, session.as_ref()))
-    else {
-        let mut ctx = WorkflowContext::unknown();
-        ctx.bypass = bypass;
-        return ctx;
-    };
-
-    let Some(cache_root) = crate::issue_cache::issue_cache_root_for_repo_path(worktree_root) else {
-        let mut ctx = WorkflowContext::plain_issue(issue_number);
-        ctx.bypass = bypass;
-        return ctx;
-    };
-    let cache = Cache::new(cache_root);
-    let Some(entry) = cache.load_entry(IssueNumber(issue_number)) else {
-        let mut ctx = WorkflowContext::plain_issue(issue_number);
-        ctx.bypass = bypass;
-        return ctx;
-    };
-    if !entry
-        .snapshot
-        .labels
-        .iter()
-        .any(|label| label == "gwt-spec")
-    {
-        let mut ctx = WorkflowContext::plain_issue(issue_number);
-        ctx.bypass = bypass;
-        return ctx;
-    }
-
-    let mut ctx = WorkflowContext::spec_issue(
-        issue_number,
-        has_nonempty_section(&entry.spec_body, "plan"),
-        has_nonempty_section(&entry.spec_body, "tasks"),
-    );
-    ctx.bypass = bypass;
-    ctx
-}
-
 fn load_session_from_env() -> Option<Session> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV).ok()?;
     let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
@@ -242,6 +110,15 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
+    // The title requirement is meaningful only for the same Session/container
+    // that workspace.update itself can mutate. A stale ambient Session must
+    // not brick an unrelated cwd, repository, or branch before the user can
+    // inspect and recover it.
+    if crate::agent_project_state::resolve_session_work_mutation_target(worktree_root, &session.id)
+        .is_err()
+    {
+        return Ok(false);
+    }
     let projection_root = if session.worktree_path.exists() {
         session.worktree_path.as_path()
     } else {
@@ -330,77 +207,6 @@ Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{
     Ok(HookOutput::Silent)
 }
 
-fn evaluate_owner_guard(
-    event: &HookEvent,
-    worktree_root: &Path,
-    context: &WorkflowContext,
-) -> Result<HookOutput, HookError> {
-    if context.bypass.is_some() {
-        return Ok(HookOutput::Silent);
-    }
-
-    match context.owner {
-        WorkflowOwner::Unknown => {
-            if !requires_owner_for_mutating_work(event, worktree_root) {
-                return Ok(HookOutput::Silent);
-            }
-            Ok(HookOutput::pre_tool_use_permission(
-                "Owner Issue/SPEC is required before implementation",
-                "This tool call changes mutating implementation work, but no owner Issue/SPEC is linked to the current agent session.\n\n\
-Start or link a Work Item first through `gwt-register-issue`, then execute it with `gwt-execute #N`. If the Work Item has the `gwt-spec` design-required tag and its plan/tasks are incomplete, run `gwt-plan-spec` before implementation. Read-only exploration, explicit goal/workspace/Board bookkeeping, verification commands, transport-only commands, docs/chore edits, and low-risk worktree-local `touch`/`rm` file operations remain allowed.",
-            ))
-        }
-        WorkflowOwner::Issue(_) => Ok(HookOutput::Silent),
-        WorkflowOwner::Spec(number) if context.has_plan && context.has_tasks => {
-            let _ = number;
-            Ok(HookOutput::Silent)
-        }
-        WorkflowOwner::Spec(number) => {
-            if !requires_spec_plan_tasks(event, worktree_root) {
-                return Ok(HookOutput::Silent);
-            }
-            let detail = format!(
-                "Work Item #{number} has the `gwt-spec` design-required tag, but its cached `plan` and `tasks` sections are not both non-empty. Run `gwt-plan-spec #{number}` before changing implementation state, then resume execution with `gwt-execute #{number}`."
-            );
-            Ok(HookOutput::pre_tool_use_permission(
-                "Owner SPEC needs plan and tasks before implementation",
-                detail,
-            ))
-        }
-    }
-}
-
-/// SPEC-3248 P4 (FR-011): a lane whose profile sets `block_production_code_edits`
-/// (intake today) may not edit production source. It registers Issues/SPECs and
-/// leaves implementation to Execute-lane sessions. Bookkeeping under `.gwt/` and
-/// `tasks/`, and documentation/guidance edits, stay allowed. Fail-open: if the
-/// target path cannot be determined, the edit is not blocked.
-fn evaluate_lane_code_edit_guard(
-    event: &HookEvent,
-    worktree_root: &Path,
-) -> Result<HookOutput, HookError> {
-    let lane = crate::cli::hook::context::HookContext::for_worktree(worktree_root).lane;
-    if !lane.policy_flags.block_production_code_edits || !is_mutating_work_event(event) {
-        return Ok(HookOutput::Silent);
-    }
-    let paths = event_target_paths(event);
-    if paths.is_empty()
-        || paths
-            .iter()
-            .all(|path| is_intake_editable_path(path, worktree_root))
-    {
-        return Ok(HookOutput::Silent);
-    }
-    Ok(HookOutput::pre_tool_use_permission(
-        "Intake (Curate) sessions do not edit production code",
-        "This is a Curate (intake) session: it registers Issues/SPECs and does not implement. \
-Editing production source is blocked here. Register the work \
-through `gwt-register-issue`, add design artifacts through `gwt-plan-spec` when the Work Item has the `gwt-spec` tag, \
-and let an Execute-lane session run `gwt-execute #N`. \
-Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
-    ))
-}
-
 /// SPEC-3248 P9a (T-120): the execution/evidence state files are written
 /// only by their canonical gwtd operations. Direct edits through the file
 /// tools are blocked in every lane — an edited record would fail integrity
@@ -409,10 +215,14 @@ Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
 /// path-based blocking and remain covered by the integrity hashes.)
 const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
     "execution-control.json",
+    "execution-generation-pointer.json",
+    "generation-ledger.json",
+    "execution-repair-audit.json",
     "verification-run.json",
     "verification-plan.json",
     "intake-outcome.json",
     "action-obligations.json",
+    "action-obligation-revival.json",
 ];
 
 fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, HookError> {
@@ -442,66 +252,11 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
         "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.reopen` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.repair` / `execution.reopen` for execution authority, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
-/// Paths an intake session may still edit: gwt bookkeeping (`.gwt/`, `tasks/`)
-/// and documentation/guidance. Everything else inside the worktree is treated
-/// as production source and blocked.
-fn is_intake_editable_path(path: &str, worktree_root: &Path) -> bool {
-    if is_documentation_or_guidance_path(path, worktree_root) {
-        return true;
-    }
-    let candidate = Path::new(path);
-    let relative = candidate
-        .strip_prefix(worktree_root)
-        .unwrap_or(candidate)
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(part) => part.to_str(),
-            _ => None,
-        })
-        .next();
-    matches!(relative, Some(".gwt") | Some("tasks"))
-}
-
-fn requires_owner_for_mutating_work(event: &HookEvent, worktree_root: &Path) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => {
-            !event_targets_ownerless_editable_paths(event, worktree_root)
-        }
-        Some("Bash") => event
-            .command()
-            .is_some_and(|command| !command_segments_are_ownerless_safe(command, worktree_root)),
-        _ => false,
-    }
-}
-
-/// Documentation/guidance, worktree bookkeeping (`.gwt/`, `tasks/`), and the
-/// session scratchpad under `<temp>/claude/` are ownerless-editable
-/// (issue #3356): none of them is production source, and the intake Stop
-/// gate's own settlement flows stage payloads there. Everything else —
-/// including source files staged elsewhere under the OS temp dir — still
-/// needs an owner.
-fn event_targets_ownerless_editable_paths(event: &HookEvent, worktree_root: &Path) -> bool {
-    let paths = event_target_paths(event);
-    !paths.is_empty()
-        && paths.iter().all(|path| {
-            is_intake_editable_path(path, worktree_root)
-                || Path::new(path).starts_with(std::env::temp_dir().join("claude"))
-        })
-}
-
-fn event_targets_documentation_or_guidance(event: &HookEvent, worktree_root: &Path) -> bool {
-    let paths = event_target_paths(event);
-    !paths.is_empty()
-        && paths
-            .iter()
-            .all(|path| is_documentation_or_guidance_path(path, worktree_root))
-}
-
-fn event_target_paths(event: &HookEvent) -> Vec<String> {
+pub(crate) fn event_target_paths(event: &HookEvent) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(path) = event
         .tool_input
@@ -545,242 +300,6 @@ fn apply_patch_target_paths(patch: &str) -> Vec<String> {
                 .map(ToOwned::to_owned)
         })
         .collect()
-}
-
-fn is_documentation_or_guidance_path(path: &str, worktree_root: &Path) -> bool {
-    let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
-    let path = Path::new(path);
-    let relative = if path.is_absolute() {
-        if is_plan_mode_plan_file(path) {
-            return true;
-        }
-        let Ok(relative) = path.strip_prefix(worktree_root) else {
-            return false;
-        };
-        relative
-    } else {
-        path
-    };
-    let normalized = relative.to_string_lossy();
-    normalized == "README.md"
-        || normalized == "README.ja.md"
-        || normalized == "AGENTS.md"
-        || normalized == "CLAUDE.md"
-        || normalized.starts_with("docs/")
-        || normalized.starts_with("tasks/")
-        || normalized.ends_with(".md")
-}
-
-/// Claude Code plan mode writes its plan to `~/.claude/plans/*.md` and that
-/// file is the only edit surface plan mode allows; treat it as documentation
-/// so ownerless sessions can still plan.
-fn is_plan_mode_plan_file(path: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-    else {
-        return false;
-    };
-    path.starts_with(home.join(".claude").join("plans"))
-        && path.extension().is_some_and(|ext| ext == "md")
-}
-
-fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> bool {
-    if command_segments_are_goal_safe(command) {
-        return true;
-    }
-    // Redirects into the worktree-local `.gwt/` directory are intake
-    // bookkeeping (issue #3265) — `jq ... > .gwt/work/...` stages envelope
-    // payloads without touching production source. Everything else that
-    // writes a file still needs an owner.
-    if !super::segments::output_redirect_file_targets(command)
-        .iter()
-        .all(|target| is_worktree_gwt_bookkeeping_target(target, worktree_root))
-    {
-        return false;
-    }
-    if is_standalone_json_envelope_command(command) {
-        return true;
-    }
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-        && segments
-            .iter()
-            .all(|segment| is_ownerless_safe_segment(segment, worktree_root))
-}
-
-fn is_ownerless_safe_segment(segment: &str, worktree_root: &Path) -> bool {
-    is_loop_scaffolding_segment(segment)
-        || is_read_only_segment(segment)
-        || is_transport_segment(segment)
-        || is_verification_segment(segment)
-        || is_goal_bookkeeping_segment(segment)
-        || is_workspace_identity_update_segment(segment)
-        || is_board_post_segment(segment)
-        || is_low_risk_worktree_file_op_segment(segment, worktree_root)
-        // A bare `gwtd` reading its JSON envelope from stdin — the sink of a
-        // `jq ... | gwtd` pipeline — is transport, exactly like the sanctioned
-        // standalone heredoc envelope (issue #3265).
-        || is_gwtd_only_segment(segment)
-}
-
-/// Pure loop/conditional scaffolding (`for x in a b c`, bare `done` / `fi`)
-/// is neutral: the loop body segments are classified on their own, so the
-/// scaffold itself must not force an owner (issue #3356). Command
-/// substitution disqualifies — it hides an inner command inside the word
-/// list.
-fn is_loop_scaffolding_segment(segment: &str) -> bool {
-    let trimmed = segment.trim();
-    if trimmed.contains("$(") || trimmed.contains('`') {
-        return false;
-    }
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    match tokens.as_slice() {
-        ["done" | "fi" | "esac" | "else" | "then" | "do"] => true,
-        ["for", _var, "in", rest @ ..] => !rest.is_empty(),
-        _ => false,
-    }
-}
-
-/// A redirect target counts as bookkeeping only inside the worktree-local
-/// `.gwt/` directory: a relative path whose first component is `.gwt`, or an
-/// absolute path under `<worktree>/.gwt/`. Parent traversal never qualifies,
-/// and neither does the trusted execution/evidence state, which has canonical
-/// writers only.
-///
-/// The hook sees the redirect word before the shell applies quote removal,
-/// expansion, and globbing, so a target still carrying shell metacharacters
-/// cannot be resolved to a path — `.gwt/'..'/src/lib.rs` and `.gwt/$OUT` both
-/// escape the directory once bash is done with them. Those fail closed.
-fn is_worktree_gwt_bookkeeping_target(target: &str, worktree_root: &Path) -> bool {
-    if target.contains([
-        '\'', '"', '\\', '$', '`', '*', '?', '[', ']', '{', '}', '~', '!',
-    ]) {
-        return false;
-    }
-    let path = Path::new(target);
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return false;
-    }
-    // P9a trusted state mirror: `execution.*` / `verify.*` own these files.
-    if target.to_lowercase().contains(".gwt/skill-state/") {
-        return false;
-    }
-    if path.is_absolute() {
-        return path.starts_with(worktree_root.join(".gwt"));
-    }
-    matches!(
-        path.components().next(),
-        Some(std::path::Component::Normal(first)) if first == ".gwt"
-    )
-}
-
-fn is_low_risk_worktree_file_op_segment(segment: &str, worktree_root: &Path) -> bool {
-    let tokens = segment_tokens(segment);
-    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
-        return false;
-    };
-    match command_name.as_str() {
-        "touch" => {
-            let paths = tokens.iter().skip(1).copied().collect::<Vec<_>>();
-            !paths.is_empty()
-                && paths
-                    .iter()
-                    .all(|path| path_is_worktree_local(path, worktree_root))
-        }
-        "rm" => {
-            let paths = tokens
-                .iter()
-                .skip(1)
-                .copied()
-                .filter(|token| !token.starts_with('-'))
-                .collect::<Vec<_>>();
-            !paths.is_empty()
-                && paths
-                    .iter()
-                    .all(|path| path_is_worktree_local(path, worktree_root))
-        }
-        _ => false,
-    }
-}
-
-fn path_is_worktree_local(path: &str, worktree_root: &Path) -> bool {
-    let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return path.starts_with(worktree_root);
-    }
-    !path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-}
-
-fn requires_spec_plan_tasks(event: &HookEvent, worktree_root: &Path) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => {
-            !event_targets_documentation_or_guidance(event, worktree_root)
-        }
-        Some("Bash") => event
-            .command()
-            .is_some_and(command_requires_spec_plan_tasks),
-        _ => false,
-    }
-}
-
-fn command_requires_spec_plan_tasks(command: &str) -> bool {
-    if is_read_only_exploration_event(&HookEvent {
-        tool_name: Some("Bash".to_string()),
-        tool_input: Some(serde_json::json!({ "command": command })),
-        transcript_path: None,
-        cwd: None,
-    }) || command_segments_are_goal_safe(command)
-        || is_standalone_json_envelope_command(command)
-        || command_segments_are_transport_only(command)
-        || command_segments_are_verification_only(command)
-    {
-        return false;
-    }
-
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-}
-
-fn command_segments_are_transport_only(command: &str) -> bool {
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty() && segments.iter().all(|segment| is_transport_segment(segment))
-}
-
-fn is_transport_segment(segment: &str) -> bool {
-    let tokens = segment_tokens(segment);
-    matches!(tokens.as_slice(), ["git", "push", ..])
-}
-
-fn command_segments_are_verification_only(command: &str) -> bool {
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-        && segments
-            .iter()
-            .all(|segment| is_verification_segment(segment))
-}
-
-fn is_verification_segment(segment: &str) -> bool {
-    let tokens = segment_tokens(segment);
-    matches!(
-        tokens.as_slice(),
-        ["cargo", "test", ..]
-            | ["cargo", "clippy", ..]
-            | ["cargo", "fmt", ..]
-            | ["cargo", "build", ..]
-            | ["cargo", "check", ..]
-            | ["bun", "test", ..]
-            | ["bunx", "markdownlint-cli", ..]
-            | ["npm", "test", ..]
-            | ["pnpm", "test", ..]
-            | ["yarn", "test", ..]
-    )
 }
 
 pub(crate) fn is_mutating_work_event(event: &HookEvent) -> bool {
@@ -944,7 +463,15 @@ fn is_read_only_json_envelope_command(command: &str) -> bool {
         .is_some_and(is_read_only_json_envelope_operation)
 }
 
-fn json_envelope_operation(command: &str) -> Option<String> {
+pub(crate) fn json_envelope_operation(command: &str) -> Option<String> {
+    let value = json_envelope(command)?;
+    value
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
     let segments = super::segments::split_command_segments(command);
     if segments.len() != 1
         || !segments
@@ -954,14 +481,10 @@ fn json_envelope_operation(command: &str) -> Option<String> {
         return None;
     }
     let json = extract_json_object(command)?;
-    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    value
-        .get("operation")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
+    serde_json::from_str::<serde_json::Value>(json).ok()
 }
 
-fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
@@ -978,6 +501,7 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.read"
             | "issue.spec.section"
             | "issue.spec.list"
+            | "issue.monitor.status"
             | "pr.current"
             | "pr.view"
             | "pr.checks"
@@ -990,9 +514,12 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "index.status"
             | "diagnostics.cpu"
             | "daemon.status"
+            | "execution.status"
+            | "execution.continue"
             | "hook.health"
             | "pane.list"
             | "pane.read"
+            | "pm.status"
             | "search"
     )
 }
@@ -1031,7 +558,7 @@ fn has_file_output_redirection(command: &str) -> bool {
     !super::segments::output_redirect_file_targets(command).is_empty()
 }
 
-fn is_read_only_segment(segment: &str) -> bool {
+pub(crate) fn is_read_only_segment(segment: &str) -> bool {
     let tokens = segment_tokens(segment);
     let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
         return true;
@@ -1057,8 +584,8 @@ fn is_read_only_segment(segment: &str) -> bool {
     }
 }
 
-/// Read-only `gh` queries used by release monitoring. Everything else stays
-/// owner-gated (`gh run rerun`, `gh release create`, ...); note that a
+/// Read-only `gh` queries used by release monitoring. Everything else remains
+/// classified as mutating (`gh run rerun`, `gh release create`, ...); note that a
 /// separate block-bash policy independently restricts `gh pr` / `gh issue` /
 /// `gh run view` regardless of owner state.
 fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
@@ -1068,7 +595,7 @@ fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
     )
 }
 
-fn segment_tokens(segment: &str) -> Vec<&str> {
+pub(crate) fn segment_tokens(segment: &str) -> Vec<&str> {
     let raw = segment.split_whitespace().collect::<Vec<_>>();
     let mut start = 0;
     while raw
@@ -1124,7 +651,7 @@ fn is_env_assignment(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn normalize_command_name(token: &str) -> String {
+pub(crate) fn normalize_command_name(token: &str) -> String {
     let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
     // Skills resolve gwtd through `resolve_gwt_bin` and invoke it as
     // `"$GWT_BIN"`; treat that documented convention as the gwtd command so
@@ -1140,6 +667,20 @@ fn normalize_command_name(token: &str) -> String {
 }
 
 fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
+    let mut subcommand_index = 0;
+    loop {
+        match tokens.get(subcommand_index).copied() {
+            Some("-C" | "-c") if tokens.get(subcommand_index + 1).is_some() => {
+                subcommand_index += 2;
+            }
+            Some("--no-pager" | "-P") => {
+                subcommand_index += 1;
+            }
+            Some("-C" | "-c") => return false,
+            _ => break,
+        }
+    }
+    let tokens = &tokens[subcommand_index..];
     match tokens {
         ["cat-file" | "diff" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "rev-list"
         | "rev-parse" | "show" | "status", ..] => true,
@@ -1350,173 +891,14 @@ fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
     }
 }
 
-fn resolve_issue_from_linkage_store(
-    worktree_root: &Path,
-    session: Option<&Session>,
-) -> Option<u64> {
-    let repo_hash = crate::index_worker::detect_repo_hash(worktree_root)?;
-    let store_path = gwt_cache_dir()
-        .join("issue-links")
-        .join(format!("{}.json", repo_hash.as_str()));
-    let bytes = std::fs::read(&store_path).ok()?;
-    let store: IssueBranchLinkStore = serde_json::from_slice(&bytes).ok()?;
-    let branch = resolve_branch_name(worktree_root, session)?;
-    store.branches.get(&branch).copied()
-}
-
-fn resolve_branch_name(worktree_root: &Path, session: Option<&Session>) -> Option<String> {
-    if let Some(branch) = session
-        .map(|session| session.branch.trim())
-        .filter(|branch| !branch.is_empty())
-    {
-        return Some(branch.to_string());
-    }
-
-    gwt_git::Repository::discover(worktree_root)
-        .ok()?
-        .current_branch()
-        .ok()?
-}
-
-fn has_nonempty_section(spec_body: &SpecBody, name: &str) -> bool {
-    spec_body
-        .sections
-        .get(&SectionName(name.to_string()))
-        .is_some_and(|content| !content.trim().is_empty())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs};
-
-    use gwt_agent::{session::Session, types::AgentId};
-    use gwt_github::{
-        client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
-        Cache,
-    };
 
     use super::*;
-
-    use gwt_core::test_support::ScopedEnvVar;
-
-    fn init_repo(repo: &Path) {
-        fs::create_dir_all(repo).expect("create repo");
-        let mut init_cmd = gwt_core::process::hidden_command("git");
-        init_cmd.args(["init", "--quiet"]).current_dir(repo);
-        gwt_core::process::scrub_git_env(&mut init_cmd);
-        let init = init_cmd.output().expect("git init");
-        assert!(init.status.success(), "git init failed");
-
-        let mut remote_cmd = gwt_core::process::hidden_command("git");
-        remote_cmd
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/repo.git",
-            ])
-            .current_dir(repo);
-        gwt_core::process::scrub_git_env(&mut remote_cmd);
-        let remote = remote_cmd.output().expect("git remote add");
-        assert!(remote.status.success(), "git remote add failed");
-
-        let mut branch_cmd = gwt_core::process::hidden_command("git");
-        branch_cmd
-            .args(["checkout", "-b", "feature/coverage"])
-            .current_dir(repo);
-        gwt_core::process::scrub_git_env(&mut branch_cmd);
-        let branch = branch_cmd.output().expect("git checkout");
-        assert!(branch.status.success(), "git checkout failed");
-    }
-
-    fn issue_snapshot(number: u64, labels: &[&str], body: &str) -> IssueSnapshot {
-        IssueSnapshot {
-            number: IssueNumber(number),
-            title: format!("Issue {number}"),
-            body: body.to_string(),
-            labels: labels.iter().map(|label| (*label).to_string()).collect(),
-            state: IssueState::Open,
-            updated_at: UpdatedAt::new("2026-04-20T00:00:00Z"),
-            comments: Vec::new(),
-        }
-    }
-
-    fn spec_body_with_plan_and_tasks() -> &'static str {
-        r#"<!-- gwt-spec id=2001 version=1 -->
-<!-- sections:
-spec=body
-plan=body
-tasks=body
--->
-<!-- artifact:spec BEGIN -->
-Coverage requirements.
-<!-- artifact:spec END -->
-
-<!-- artifact:plan BEGIN -->
-1. Add tests.
-<!-- artifact:plan END -->
-
-<!-- artifact:tasks BEGIN -->
-- [ ] Enforce pre-push coverage.
-<!-- artifact:tasks END -->
-"#
-    }
-
-    fn write_issue_links(repo_path: &Path, links: &[(&str, u64)]) {
-        let repo_hash = crate::index_worker::detect_repo_hash(repo_path).expect("repo hash");
-        let path = gwt_cache_dir()
-            .join("issue-links")
-            .join(format!("{}.json", repo_hash.as_str()));
-        fs::create_dir_all(path.parent().expect("issue-links dir"))
-            .expect("create issue-links dir");
-        let branches = links
-            .iter()
-            .map(|(branch, number)| ((*branch).to_string(), *number))
-            .collect::<HashMap<_, _>>();
-        fs::write(
-            path,
-            serde_json::to_vec(&serde_json::json!({ "branches": branches })).expect("json"),
-        )
-        .expect("write issue links");
-    }
 
     // Issue #3265: the `.gwt/` bookkeeping allowance resolves the redirect
     // word the hook sees, which is *before* the shell expands it. Anything
     // that could still expand elsewhere fails closed.
-    #[test]
-    fn gwt_bookkeeping_target_accepts_only_literal_worktree_paths() {
-        let root = Path::new("/worktree");
-        for target in [
-            ".gwt/work/register-spec/envelope.json",
-            "/worktree/.gwt/work/out.json",
-        ] {
-            assert!(
-                is_worktree_gwt_bookkeeping_target(target, root),
-                "{target} is worktree-local bookkeeping"
-            );
-        }
-        for target in [
-            ".gwt/../src/lib.rs",
-            ".gwt/'..'/src/lib.rs",
-            ".gwt/\"../\"src/lib.rs",
-            ".gwt/\\../src/lib.rs",
-            ".gwt/$OUT",
-            ".gwt/${OUT}",
-            ".gwt/`id`",
-            ".gwt/*.json",
-            "~/.gwt/out.json",
-            "src/generated.rs",
-            "/elsewhere/.gwt/out.json",
-            ".gwt/skill-state/execution-control.json",
-            super::super::segments::UNRESOLVED_REDIRECT_TARGET,
-        ] {
-            assert!(
-                !is_worktree_gwt_bookkeeping_target(target, root),
-                "{target} must not count as bookkeeping"
-            );
-        }
-    }
-
     #[test]
     fn handle_with_input_ignores_empty_and_rejects_invalid_json() {
         assert_eq!(
@@ -1553,84 +935,15 @@ Coverage requirements.
     }
 
     #[test]
-    fn lane_code_edit_guard_blocks_intake_production_edits_allows_bookkeeping() {
-        let repo = tempfile::tempdir().expect("repo");
-        let edit_event = |path: &std::path::Path| HookEvent {
-            tool_name: Some("Edit".to_string()),
-            tool_input: Some(serde_json::json!({ "file_path": path.to_str().unwrap() })),
-            transcript_path: None,
-            cwd: None,
-        };
-        let src = repo.path().join("crates/gwt/src/main.rs");
-        let bookkeeping = repo.path().join(".gwt/work/events.jsonl");
-
-        // Intake lane (from the lane file): block production source, allow the
-        // .gwt/ bookkeeping path.
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
-        assert!(
-            matches!(
-                evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
-                HookOutput::PreToolUsePermission { .. }
-            ),
-            "intake must not edit production source"
-        );
-        assert_eq!(
-            evaluate_lane_code_edit_guard(&edit_event(&bookkeeping), repo.path()).expect("guard"),
-            HookOutput::Silent,
-            "intake may edit .gwt bookkeeping"
-        );
-
-        // Execution lane: no code-edit block.
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::EXECUTION_PROFILE)
-            .expect("execution lane");
-        assert_eq!(
-            evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
-            HookOutput::Silent,
-            "execution may edit production code"
-        );
-    }
-
-    // Issue #3265: plan mode requires writing `~/.claude/plans/*.md`, and
-    // gwt-discussion requires plan mode inside intake sessions — the lane
-    // guard must never block that write.
-    #[test]
-    fn lane_code_edit_guard_allows_plan_mode_plan_file_in_intake() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("home");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let repo = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
-
-        let plan_path = home.path().join(".claude/plans/issue-3265-fix.md");
-        let event = HookEvent {
-            tool_name: Some("Write".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": plan_path.to_string_lossy(),
-                "content": "# Plan",
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-        assert_eq!(
-            evaluate_lane_code_edit_guard(&event, repo.path()).expect("guard"),
-            HookOutput::Silent,
-            "intake sessions must be able to write plan-mode plan files"
-        );
-    }
-
-    // SPEC-3248 P9a (T-120): direct edits to the execution/evidence state
-    // files are blocked in every lane; normal files pass through this guard.
-    #[test]
     fn trusted_state_write_guard_blocks_direct_edits_in_all_lanes() {
         for state_file in [
             ".gwt/skill-state/execution-control.json",
+            ".gwt/skill-state/execution-generation-pointer.json",
             ".gwt/skill-state/verification-run.json",
             ".gwt/skill-state/verification-plan.json",
             ".gwt/skill-state/intake-outcome.json",
             ".gwt/skill-state/action-obligations.json",
+            ".gwt/skill-state/action-obligation-revival.json",
         ] {
             let event = HookEvent {
                 tool_name: Some("Edit".to_string()),
@@ -1711,62 +1024,9 @@ Coverage requirements.
         );
     }
 
-    // SPEC-3248 P7A (T-076): the intake lane still blocks production code
-    // edits while the standalone gwtd JSON envelope operations that settle
-    // curation — Issue/SPEC ops, `intake.outcome.record`,
-    // `improvement.capture`, and `memory.add` — pass the lane guard.
-    #[test]
-    fn intake_lane_allows_curation_json_operations_while_blocking_code_edits() {
-        let repo = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
-
-        let bash_event = |command: &str| HookEvent {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({ "command": command })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        for operation in [
-            "issue.create",
-            "issue.comment",
-            "issue.spec.create",
-            "issue.spec.edit",
-            "intake.outcome.record",
-            "improvement.capture",
-            "memory.add",
-        ] {
-            let command = format!(
-                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
-            );
-            assert_eq!(
-                evaluate_lane_code_edit_guard(&bash_event(&command), repo.path()).expect("guard"),
-                HookOutput::Silent,
-                "intake must allow standalone JSON operation {operation}"
-            );
-        }
-
-        // Production source edits stay blocked alongside the allowlist.
-        let edit_event = HookEvent {
-            tool_name: Some("Edit".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": repo.path().join("crates/gwt/src/main.rs").to_str().unwrap()
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-        assert!(
-            matches!(
-                evaluate_lane_code_edit_guard(&edit_event, repo.path()).expect("guard"),
-                HookOutput::PreToolUsePermission { .. }
-            ),
-            "intake must still block production code edits"
-        );
-    }
-
-    // #3356 invariant: every operation a Stop gate names as its settlement
-    // path MUST pass the full PreToolUse chain in an ownerless session —
-    // changing either side alone recreates the registration deadlock.
+    // SPEC-3248 P7A (T-076), amended by SPEC #3245: standalone gwtd JSON
+    // envelope operations that settle curation and execution remain silent
+    // after the lane/owner guards were removed.
     #[test]
     fn stop_gate_settlement_operations_pass_ownerless() {
         let bash_event = |command: &str| HookEvent {
@@ -1778,7 +1038,6 @@ Coverage requirements.
 
         // Intake artifact gate settlement paths (FR-017).
         let intake = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(intake.path(), &gwt_skills::INTAKE_PROFILE).expect("lane");
         for operation in [
             "issue.create",
             "issue.comment",
@@ -1804,8 +1063,6 @@ Coverage requirements.
         // Execution-side gates (execution control, obligations, evidence,
         // PR handoff) advertise these operations in their block messages.
         let execution = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(execution.path(), &gwt_skills::EXECUTION_PROFILE)
-            .expect("lane");
         for operation in [
             "verify.plan",
             "verify.run",
@@ -1833,12 +1090,11 @@ Coverage requirements.
         }
     }
 
-    // #3356: read-only loops and sanctioned bookkeeping writes must not
-    // require an owner; production source stays owner-gated.
+    // #3356 / SPEC #3245: read-only loops, bookkeeping writes, and production
+    // writes all stay silent after the owner guard removal.
     #[test]
     fn ownerless_read_only_loops_and_bookkeeping_writes_pass() {
         let repo = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::EXECUTION_PROFILE).expect("lane");
         let context = WorkflowContext::unknown();
 
         for command in [
@@ -1887,20 +1143,66 @@ Coverage requirements.
                 "bookkeeping write must pass ownerless: {path}"
             );
         }
-        // Production source stays owner-gated.
-        let blocked = write_event(
+        // SPEC #3245 FR-009: production source writes are no longer
+        // owner-gated either — every surface above and below evaluates the
+        // same way for ownerless sessions.
+        let production = write_event(
             repo.path()
                 .join("crates/gwt/src/main.rs")
                 .to_string_lossy()
                 .to_string(),
         );
-        assert!(
-            matches!(
-                evaluate_with_context(&blocked, repo.path(), &context).expect("guard"),
-                HookOutput::PreToolUsePermission { .. }
-            ),
-            "production source writes still need an owner"
+        assert_eq!(
+            evaluate_with_context(&production, repo.path(), &context).expect("guard"),
+            HookOutput::Silent,
+            "production source writes must pass ownerless after the owner guard removal"
         );
+    }
+
+    #[test]
+    fn issue_monitor_json_operations_have_the_expected_policy_classification() {
+        assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
+        for operation in [
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            // SPEC-3431 FR-006: launch_now mutates priority order, so it is
+            // not read-only — but it must stay ownerless-safe like its siblings.
+            "issue.monitor.launch_now",
+            // SPEC-3431 FR-033: stop revokes a launch's authority and slot.
+            "issue.monitor.stop",
+            // SPEC-3431 FR-029〜031: failover revokes it and requeues.
+            "issue.monitor.failover",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown();
+        for operation in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            "issue.monitor.launch_now",
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": command})),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(&event, repo.path(), &context).expect("policy"),
+                HookOutput::Silent,
+                "operation must pass the ownerless execution policy: {operation}"
+            );
+        }
     }
 
     #[test]
@@ -2042,6 +1344,42 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_execution_status_before_identity_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_pm_status_before_identity_is_set() {
+        // SPEC-3431: pm.status is read-only diagnostics and must work before
+        // the session identity or an owner is established.
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
     fn title_summary_guard_allows_read_only_git_config_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
@@ -2073,6 +1411,30 @@ Coverage requirements.
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_read_only_git_after_global_options() {
+        for command in [
+            "git -C /tmp/repository log -1",
+            "git -c color.ui=false status --short",
+            "git --no-pager log -1",
+            "git -P show --stat HEAD",
+            "git -C /tmp/repository -c color.ui=false --no-pager log -1",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -2253,6 +1615,8 @@ Coverage requirements.
             }
         }
 
+        let repo = tempfile::tempdir().expect("repo");
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2264,7 +1628,7 @@ Coverage requirements.
 
         let output = evaluate_with_context(
             &event,
-            std::path::Path::new("."),
+            repo.path(),
             &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
@@ -2293,7 +1657,7 @@ Coverage requirements.
         assert_eq!(
             evaluate_with_context(
                 &allowed,
-                std::path::Path::new("."),
+                repo.path(),
                 &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
@@ -2314,7 +1678,7 @@ Coverage requirements.
             assert_eq!(
                 evaluate_with_context(
                     &allowed,
-                    std::path::Path::new("."),
+                    repo.path(),
                     &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
@@ -2322,243 +1686,5 @@ Coverage requirements.
                 "{command}"
             );
         }
-    }
-
-    #[test]
-    fn owner_guard_allows_read_only_exploration_without_owner() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({
-                "command": "rg -n WorkflowContext crates/gwt/src"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        assert_eq!(
-            evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
-                .expect("guard output"),
-            HookOutput::Silent
-        );
-    }
-
-    #[test]
-    fn owner_guard_blocks_mutating_tools_without_owner() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Edit".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": "crates/gwt/src/lib.rs"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        let output = evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
-            .expect("guard output");
-        let HookOutput::PreToolUsePermission {
-            summary, detail, ..
-        } = output
-        else {
-            panic!("expected owner guard");
-        };
-        assert!(summary.contains("Owner Issue/SPEC"), "{summary}");
-        assert!(detail.contains("mutating implementation work"), "{detail}");
-        assert!(detail.contains("gwt-execute"), "{detail}");
-        assert!(!detail.contains("gwt-fix-issue"), "{detail}");
-        assert!(!detail.contains("gwt-build-spec"), "{detail}");
-    }
-
-    #[test]
-    fn owner_guard_requires_plan_and_tasks_for_spec_owner() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Write".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": "crates/gwt/src/lib.rs"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        let output = evaluate_with_context(
-            &event,
-            repo.path(),
-            &WorkflowContext::spec_issue(1935, true, false),
-        )
-        .expect("guard output");
-        let HookOutput::PreToolUsePermission { detail, .. } = output else {
-            panic!("expected SPEC plan/tasks guard");
-        };
-        assert!(detail.contains("Work Item #1935"), "{detail}");
-        assert!(detail.contains("`plan` and `tasks`"), "{detail}");
-        assert!(detail.contains("gwt-plan-spec"), "{detail}");
-        assert!(detail.contains("gwt-execute"), "{detail}");
-        assert!(!detail.contains("gwt-build-spec"), "{detail}");
-
-        assert_eq!(
-            evaluate_with_context(
-                &event,
-                repo.path(),
-                &WorkflowContext::spec_issue(1935, true, true),
-            )
-            .expect("guard output"),
-            HookOutput::Silent
-        );
-
-        let transport = HookEvent {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({
-                "command": "git push origin develop"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-        assert_eq!(
-            evaluate_with_context(
-                &transport,
-                repo.path(),
-                &WorkflowContext::spec_issue(1935, false, true),
-            )
-            .expect("transport output"),
-            HookOutput::Silent
-        );
-    }
-
-    #[test]
-    fn owner_guard_honors_workflow_bypass() {
-        let repo = tempfile::tempdir().expect("repo");
-        let event = HookEvent {
-            tool_name: Some("Write".to_string()),
-            tool_input: Some(serde_json::json!({
-                "file_path": "CHANGELOG.md"
-            })),
-            transcript_path: None,
-            cwd: None,
-        };
-
-        assert_eq!(
-            evaluate_with_context(
-                &event,
-                repo.path(),
-                &WorkflowContext::with_bypass(WorkflowBypass::Chore),
-            )
-            .expect("guard output"),
-            HookOutput::Silent
-        );
-    }
-
-    #[test]
-    fn resolve_workflow_context_uses_session_cache_and_linkage_store() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _lock = crate::cli::fake_gh_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-
-        let repo = home.path().join("repo");
-        init_repo(&repo);
-
-        let cache_root =
-            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
-        let cache = Cache::new(cache_root);
-        cache
-            .write_snapshot(&issue_snapshot(41, &["bug"], "plain issue body"))
-            .expect("write plain issue");
-        cache
-            .write_snapshot(&issue_snapshot(
-                42,
-                &["gwt-spec", "phase/in-progress"],
-                spec_body_with_plan_and_tasks(),
-            ))
-            .expect("write spec issue");
-
-        let mut session = Session::new(&repo, "feature/coverage", AgentId::Codex);
-        session.linked_issue_number = Some(42);
-        session.workflow_bypass = Some(WorkflowBypass::Chore);
-        session.workflow_bypass_armed_at = Some(chrono::Utc::now());
-        session.save(&gwt_sessions_dir()).expect("save session");
-        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
-
-        let context = resolve_workflow_context(&repo);
-        assert_eq!(context.owner, WorkflowOwner::Spec(42));
-        assert!(context.has_plan);
-        assert!(context.has_tasks);
-        assert_eq!(context.bypass, Some(WorkflowBypass::Chore));
-
-        let loaded = load_session_from_env().expect("session from env");
-        assert_eq!(loaded.id, session.id);
-
-        write_issue_links(&repo, &[("feature/coverage", 41)]);
-        session.linked_issue_number = None;
-        session.save(&gwt_sessions_dir()).expect("update session");
-
-        let linked_issue = resolve_issue_from_linkage_store(&repo, Some(&session));
-        assert_eq!(linked_issue, Some(41));
-        assert_eq!(
-            resolve_branch_name(&repo, Some(&session)).as_deref(),
-            Some("feature/coverage")
-        );
-
-        let plain_context = resolve_workflow_context(&repo);
-        assert_eq!(plain_context.owner, WorkflowOwner::Issue(41));
-        assert!(!plain_context.has_plan);
-        assert!(!plain_context.has_tasks);
-
-        let spec_body = gwt_github::body::SpecBody::parse(spec_body_with_plan_and_tasks(), &[])
-            .expect("parse spec body");
-        assert!(has_nonempty_section(&spec_body, "plan"));
-        assert!(has_nonempty_section(&spec_body, "tasks"));
-        assert!(!has_nonempty_section(&spec_body, "notes"));
-    }
-
-    #[test]
-    fn workflow_bypass_is_effective_only_within_ttl() {
-        let repo = tempfile::tempdir().expect("tempdir");
-        let mut session = Session::new(repo.path(), "develop", AgentId::ClaudeCode);
-        let now = chrono::Utc::now();
-
-        session.workflow_bypass = Some(WorkflowBypass::Release);
-        session.workflow_bypass_armed_at = Some(now - chrono::Duration::hours(1));
-        assert_eq!(
-            effective_workflow_bypass(&session, now),
-            Some(WorkflowBypass::Release),
-            "fresh arm must be effective"
-        );
-
-        session.workflow_bypass_armed_at =
-            Some(now - chrono::Duration::seconds(WORKFLOW_BYPASS_TTL_SECS + 1));
-        assert_eq!(
-            effective_workflow_bypass(&session, now),
-            None,
-            "stale arm must expire"
-        );
-
-        session.workflow_bypass_armed_at = None;
-        assert_eq!(
-            effective_workflow_bypass(&session, now),
-            None,
-            "bypass without an arm timestamp fails closed"
-        );
-
-        session.workflow_bypass_armed_at = Some(now + chrono::Duration::hours(1));
-        assert_eq!(
-            effective_workflow_bypass(&session, now),
-            None,
-            "future arm timestamps fail closed"
-        );
-
-        session.workflow_bypass = None;
-        session.workflow_bypass_armed_at = Some(now);
-        assert_eq!(
-            effective_workflow_bypass(&session, now),
-            None,
-            "timestamp without a bypass stays disarmed"
-        );
     }
 }

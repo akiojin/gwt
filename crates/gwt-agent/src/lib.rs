@@ -39,8 +39,9 @@ pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::LaunchEnvironment;
 pub use launch::{
-    canonical_launch_args, normalize_launch_args, resolve_host_npx_fallback_executable,
-    resolve_runner, AgentLaunchBuilder, ExecutionLaunchIntent, LaunchConfig, ResolvedRunner,
+    apply_host_bunx_cache_fast_path, canonical_launch_args, normalize_launch_args,
+    resolve_host_npx_fallback_executable, resolve_runner, AgentLaunchBuilder,
+    ExecutionLaunchIntent, LaunchConfig, ResolvedRunner,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
@@ -51,16 +52,17 @@ pub use prepare::{
     resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe_and_repair,
     resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
     HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
-    PreparedAgentLaunch, PreparedProcessLaunch, WindowsNpxCacheRepairCandidate,
+    PreparedAgentLaunch, PreparedProcessLaunch, ResolvedHostPackagePlan,
+    WindowsNpxCacheRepairCandidate,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
     PresetDefinition, PresetError, PresetId,
 };
 pub use session::{
-    current_thread_holds_session_lease, inspect_session_path, persist_agent_session_id,
-    persist_session_completed_stop, persist_session_execution_binding, persist_session_hook_event,
-    persist_session_restore_window_on_startup, persist_session_status,
+    current_thread_holds_session_lease, durable_session_launch_command, inspect_session_path,
+    persist_agent_session_id, persist_session_completed_stop, persist_session_execution_binding,
+    persist_session_hook_event, persist_session_restore_window_on_startup, persist_session_status,
     remove_session_if_execution_identity_matches,
     remove_session_if_execution_identity_matches_or_missing_with,
     remove_session_if_execution_identity_matches_with, reset_runtime_state_dir,
@@ -71,7 +73,8 @@ pub use session::{
     with_session_lease_wait, with_session_path_lease, with_session_path_lease_wait,
     AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionBindingIdentity,
     PendingDiscussionResume, Session, SessionExecutionBinding, SessionExecutionIdentity,
-    SessionPathState, SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    SessionPathState, SessionRuntimeState, ToolRuntimeProvenance, ToolRuntimeResolutionReason,
+    ToolRuntimeRunnerKind, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
 };

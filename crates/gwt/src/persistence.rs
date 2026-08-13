@@ -94,11 +94,13 @@ impl WindowState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowLaneKind {
-    Intake,
-    Execution,
+pub enum WindowWorktreeForm {
+    #[serde(rename = "intake")]
+    Ephemeral,
+    #[serde(rename = "execution")]
+    BranchBacked,
     #[default]
+    #[serde(rename = "unknown")]
     Unknown,
 }
 
@@ -133,11 +135,12 @@ pub struct PersistedWindowState {
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub agent_color: Option<AgentColor>,
-    /// Wire/view-model lane identity for agent windows. This is computed for
-    /// frontend chrome and defaults to `unknown` for restored windows where no
-    /// live launch/session signal is available.
-    #[serde(default)]
-    pub lane_kind: WindowLaneKind,
+    /// Worktree form for agent windows. This is computed for frontend chrome
+    /// and defaults to `unknown` for restored windows where no live
+    /// launch/session signal is available. The legacy wire field name remains
+    /// stable for downgrade compatibility.
+    #[serde(default, rename = "lane_kind")]
+    pub worktree_form: WindowWorktreeForm,
     /// Canvas-local tab group id. Windows with the same group id render as
     /// tabs in one floating chrome; ungrouped windows keep legacy behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,6 +150,12 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
+    /// window, recomputed per broadcast from the durable PM registration. It
+    /// is never deserialized from disk — a stored flag would drift from
+    /// `pm.json` — matching the `agent_color` wire-only convention above.
+    #[serde(default, skip_deserializing)]
+    pub is_pm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -239,10 +248,11 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                is_pm: false,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -264,10 +274,11 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                is_pm: false,
             },
         ],
         next_z_index: 3,
@@ -371,6 +382,56 @@ pub fn save_workspace_state(
     }
     let content = serde_json::to_string_pretty(state)?;
     atomic_write(path, content.as_bytes())
+}
+
+/// Persist a workspace snapshot with a crash-durable acceptance boundary.
+/// Unlike [`save_workspace_state`], scratch-file and parent-directory sync
+/// failures are returned so callers cannot ACK a durable launch delivery
+/// before the exact window is recoverable after restart.
+pub fn save_workspace_state_durable(
+    path: &Path,
+    state: &PersistedWindowCanvasState,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        gwt_core::paths::ensure_dir(parent)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    let content = serde_json::to_string_pretty(state)?;
+    durable_atomic_write_with_parent_sync(path, content.as_bytes(), sync_parent_directory)
+}
+
+fn durable_atomic_write_with_parent_sync(
+    target: &Path,
+    bytes: &[u8],
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "durable workspace target has no parent directory",
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(target).map_err(|error| error.error)?;
+    sync_parent(target)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    // std::fs::File cannot open directory handles portably on Windows. The
+    // scratch file itself is still sync_all'd before the atomic replacement.
+    Ok(())
 }
 
 /// Write `bytes` to `target` via a sibling temp file + rename so callers never
@@ -601,10 +662,11 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -626,10 +688,11 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 6,
@@ -638,6 +701,25 @@ mod tests {
         save_workspace_state(&path, &state).expect("save should succeed");
         let loaded = load_workspace_state(&path).expect("load");
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn durable_workspace_write_surfaces_post_rename_parent_sync_failure() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let state = default_workspace_state();
+        let content = serde_json::to_string_pretty(&state).expect("serialize workspace");
+
+        let error = durable_atomic_write_with_parent_sync(&path, content.as_bytes(), |_| {
+            Err(std::io::Error::other("injected parent sync failure"))
+        })
+        .expect_err("post-rename durability failure must remain visible");
+
+        assert!(error.to_string().contains("injected parent sync failure"));
+        assert_eq!(
+            load_workspace_state(&path).expect("rename completed before sync failure"),
+            state
+        );
     }
 
     #[test]
@@ -673,6 +755,83 @@ mod tests {
         assert!(loaded.windows[0].tab_group_id.is_none());
         assert!(!loaded.windows[0].tab_group_active);
         assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+    }
+
+    #[test]
+    fn load_workspace_state_maps_legacy_lane_wire_to_worktree_form() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-intake",
+      "title": "Ephemeral Agent",
+      "preset": "agent",
+      "geometry": { "x": 0.0, "y": 0.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true,
+      "lane_kind": "intake"
+    },
+    {
+      "id": "agent-execution",
+      "title": "Branch-backed Agent",
+      "preset": "agent",
+      "geometry": { "x": 20.0, "y": 20.0, "width": 640.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true,
+      "lane_kind": "execution"
+    },
+    {
+      "id": "agent-unknown",
+      "title": "Restored Agent",
+      "preset": "agent",
+      "geometry": { "x": 40.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 3,
+      "status": "stopped",
+      "persist": true,
+      "lane_kind": "unknown"
+    }
+  ],
+  "next_z_index": 4
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("legacy lane wire load");
+        assert_eq!(
+            loaded
+                .windows
+                .iter()
+                .map(|window| window.worktree_form)
+                .collect::<Vec<_>>(),
+            vec![
+                WindowWorktreeForm::Ephemeral,
+                WindowWorktreeForm::BranchBacked,
+                WindowWorktreeForm::Unknown,
+            ]
+        );
+
+        let serialized = serde_json::to_value(&loaded).expect("reserialize workspace");
+        let windows = serialized["windows"]
+            .as_array()
+            .expect("serialized windows");
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window["lane_kind"].as_str().expect("legacy lane value"))
+                .collect::<Vec<_>>(),
+            vec!["intake", "execution", "unknown"]
+        );
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.get("worktree_form").is_none()),
+            "canonical Rust field name must not leak into the legacy wire format"
+        );
     }
 
     // SPEC-2008 FR-097: the canvas window model dropped manual
@@ -877,10 +1036,11 @@ mod tests {
                 dynamic_title_detail: None,
                 agent_id: Some("claude".into()),
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                is_pm: false,
             }],
             next_z_index: 2,
         };
@@ -967,10 +1127,11 @@ mod tests {
             dynamic_title_detail: None,
             agent_id: Some("claude".into()),
             agent_color: Some(AgentColor::Yellow),
-            lane_kind: WindowLaneKind::Unknown,
+            worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         assert!(
@@ -1040,10 +1201,11 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "file-tree-1".to_string(),
@@ -1065,10 +1227,11 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 3,
@@ -1278,10 +1441,11 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -1303,10 +1467,11 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 3,

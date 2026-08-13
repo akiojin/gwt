@@ -1,7 +1,7 @@
 use crate::{
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowCanvasState, PersistedWindowState,
-        WindowGeometry, WindowLaneKind, WindowPlacement, WindowProcessStatus,
+        WindowGeometry, WindowPlacement, WindowProcessStatus, WindowWorktreeForm,
     },
     preset::WindowPreset,
     protocol::{ArrangeMode, FocusCycleDirection},
@@ -353,6 +353,10 @@ impl WindowCanvasState {
         self.push_window_with_geometry(preset, title, persist, geometry)
     }
 
+    pub fn next_window_id_preview(&self, preset: WindowPreset) -> String {
+        self.next_window_id(preset)
+    }
+
     fn push_window_with_geometry(
         &mut self,
         preset: WindowPreset,
@@ -375,10 +379,11 @@ impl WindowCanvasState {
             dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
-            lane_kind: WindowLaneKind::Unknown,
+            worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -1262,10 +1267,11 @@ mod tests {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                is_pm: false,
             }],
             next_z_index: 2,
         });

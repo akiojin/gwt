@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt,
+    ffi::{OsStr, OsString},
+    fmt, io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -16,6 +17,21 @@ use gwt_core::{
     worktree_hash::compute_worktree_hash,
 };
 use serde::Serialize;
+
+const DISABLE_BACKGROUND_INDEX_ENV: &str = "GWT_DISABLE_BACKGROUND_INDEX";
+
+/// SPEC-3170 FR-073/FR-074: emergency opt-out shared by every automatic
+/// project-index bootstrap entry. Explicit search, status refresh, and manual
+/// rebuild paths do not consult this policy.
+pub fn automatic_background_index_disabled() -> bool {
+    automatic_background_index_disabled_value(
+        std::env::var_os(DISABLE_BACKGROUND_INDEX_ENV).as_deref(),
+    )
+}
+
+fn automatic_background_index_disabled_value(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
 
 /// Determine `RepoHash` for the given repository root by shelling out to
 /// `git remote get-url origin`. Returns `None` if no origin is configured.
@@ -33,6 +49,11 @@ pub struct ProjectIndexGitContext {
 }
 
 pub fn project_index_git_context(project_root: &Path) -> Option<ProjectIndexGitContext> {
+    if gwt_core::operation_deadline::current().is_some() {
+        return project_index_git_context_result(project_root)
+            .ok()
+            .flatten();
+    }
     if !project_root.exists() {
         return None;
     }
@@ -47,11 +68,39 @@ pub fn project_index_git_context(project_root: &Path) -> Option<ProjectIndexGitC
     })
 }
 
+pub(crate) fn project_index_git_context_for_search(
+    project_root: &Path,
+) -> io::Result<Option<ProjectIndexGitContext>> {
+    project_index_git_context_result(project_root)
+}
+
+fn project_index_git_context_result(
+    project_root: &Path,
+) -> io::Result<Option<ProjectIndexGitContext>> {
+    if !project_root.exists() {
+        return Ok(None);
+    }
+    let current_worktree_root = resolve_current_git_worktree_root_result(project_root)?;
+    let Some(repo_root) = resolve_main_git_worktree_root_result(project_root)?
+        .or_else(|| current_worktree_root.clone())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ProjectIndexGitContext {
+        repo_root,
+        current_worktree_root,
+    }))
+}
+
 pub fn resolve_project_index_repo_root(project_root: &Path) -> Option<PathBuf> {
     project_index_git_context(project_root).map(|context| context.repo_root)
 }
 
 pub fn default_project_index_worktree_root(project_root: &Path) -> Option<PathBuf> {
+    if gwt_core::operation_deadline::current().is_some() {
+        let context = project_index_git_context_result(project_root).ok()??;
+        return default_project_index_worktree_root_from_context(&context).ok();
+    }
     let context = project_index_git_context(project_root)?;
     if context.current_worktree_root.is_some() {
         return context.current_worktree_root;
@@ -59,6 +108,27 @@ pub fn default_project_index_worktree_root(project_root: &Path) -> Option<PathBu
     process_cwd_worktree_root_for_repo(&context.repo_root)
         .or_else(|| first_active_worktree_path(&context.repo_root))
         .or(Some(context.repo_root))
+}
+
+pub(crate) fn default_project_index_worktree_root_for_search(
+    context: &ProjectIndexGitContext,
+) -> io::Result<PathBuf> {
+    default_project_index_worktree_root_from_context(context)
+}
+
+fn default_project_index_worktree_root_from_context(
+    context: &ProjectIndexGitContext,
+) -> io::Result<PathBuf> {
+    if let Some(current_worktree_root) = &context.current_worktree_root {
+        return Ok(current_worktree_root.clone());
+    }
+    if let Some(cwd_worktree) = process_cwd_worktree_root_for_repo_result(&context.repo_root)? {
+        return Ok(cwd_worktree);
+    }
+    if let Some(active_worktree) = first_active_worktree_path_result(&context.repo_root)? {
+        return Ok(active_worktree);
+    }
+    Ok(context.repo_root.clone())
 }
 
 pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), String> {
@@ -776,16 +846,28 @@ fn collect_current_worktree_probe_inputs(
 /// Returned entries pair each worktree's canonicalized path with its branch
 /// label and pre-computed `worktree_hash`.
 pub fn list_worktree_probe_inputs(repo_root: &Path) -> Result<Vec<WorktreeProbeInput>, String> {
+    if gwt_core::operation_deadline::current().is_some() {
+        return list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string());
+    }
     let output = gwt_core::process::hidden_command("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
         .output()
-        .map_err(|err| err.to_string())?;
+        .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-
     parse_worktree_probe_inputs(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn list_worktree_probe_inputs_result(repo_root: &Path) -> io::Result<Vec<WorktreeProbeInput>> {
+    let output = run_project_index_git_probe(repo_root, &["worktree", "list", "--porcelain"])?;
+    if !output.success() {
+        return Err(io::Error::other(output.stderr.trim().to_string()));
+    }
+
+    parse_worktree_probe_inputs(&output.stdout)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn parse_worktree_probe_inputs(stdout: &str) -> Result<Vec<WorktreeProbeInput>, String> {
@@ -1009,6 +1091,15 @@ const INDEX_HEAVY_LEASE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How long a joined caller waits for the shared job outcome.
 const INDEX_SHARED_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+fn index_wait_timeout(limit: Duration, operation: &str) -> Result<Duration, String> {
+    let Some(deadline) = gwt_core::operation_deadline::ensure_remaining(operation)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(limit);
+    };
+    Ok(limit.min(deadline.saturating_duration_since(Instant::now())))
+}
+
 /// Result of a coordinated index job (SPEC #1939 Phase 70 FR-382).
 #[derive(Debug)]
 pub(crate) enum CoordinatedRun<T> {
@@ -1051,15 +1142,19 @@ pub(crate) fn run_coordinated_index_job<T>(
     };
     // One retry when the previous owner vanished without publishing.
     for _ in 0..2 {
+        let admission_timeout =
+            index_wait_timeout(INDEX_JOB_ADMISSION_TIMEOUT, "index job admission")?;
         let admission = coordinator
-            .request_job(&key, priority, INDEX_JOB_ADMISSION_TIMEOUT)
+            .request_job(&key, priority, admission_timeout)
             .map_err(|err| format!("index job admission failed: {err}"))?;
         match admission {
             JobAdmission::Owner(guard) => {
                 let mut yields: u32 = 0;
                 loop {
+                    let heavy_timeout =
+                        index_wait_timeout(INDEX_HEAVY_LEASE_TIMEOUT, "index heavy lease")?;
                     let heavy = guard
-                        .acquire_heavy(INDEX_HEAVY_LEASE_TIMEOUT)
+                        .acquire_heavy(heavy_timeout)
                         .map_err(|err| format!("index heavy lease failed: {err}"))?;
                     let step = build();
                     drop(heavy);
@@ -1086,7 +1181,9 @@ pub(crate) fn run_coordinated_index_job<T>(
                             // before re-queueing; acquire_heavy then defers
                             // for as long as higher-priority claimants stay
                             // pending (FR-383).
-                            std::thread::sleep(Duration::from_millis(50));
+                            let yield_pause =
+                                index_wait_timeout(Duration::from_millis(50), "index build yield")?;
+                            std::thread::sleep(yield_pause);
                         }
                         Err(message) => {
                             guard
@@ -1100,8 +1197,10 @@ pub(crate) fn run_coordinated_index_job<T>(
                 }
             }
             JobAdmission::Joined(waiter) => {
+                let shared_wait =
+                    index_wait_timeout(INDEX_SHARED_JOB_WAIT_TIMEOUT, "shared index job wait")?;
                 let outcome = waiter
-                    .wait(INDEX_SHARED_JOB_WAIT_TIMEOUT)
+                    .wait(shared_wait)
                     .map_err(|err| format!("shared index job wait failed: {err}"))?;
                 match outcome {
                     JobOutcome::Completed => return Ok(CoordinatedRun::Coalesced),
@@ -1139,6 +1238,97 @@ pub fn manual_rebuild_runner(
     )
 }
 
+fn run_rebuild_runner_observing_deadline(
+    context: &crate::cli::index::runtime::IndexContext,
+    action: crate::cli::index::runtime::RebuildAction,
+    qos: &str,
+) -> io::Result<gwt_core::process_console::SpawnOutput> {
+    let args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+
+    gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
+    gwt_core::process_console::spawn_logged_blocking(
+        &gwt_core::process_console::ProcessConsoleHub::new(),
+        gwt_core::process_console::ProcessKind::IndexRunner,
+        context.python.clone(),
+        &args,
+        gwt_core::process_console::SpawnOptions::new(format!(
+            "project index rebuild {}",
+            action.label
+        ))
+        .current_dir(&context.project_root)
+        .forward_output(false),
+    )
+}
+
+enum RebuildRunnerOutput {
+    Canonical(std::process::Output),
+    Deadline(gwt_core::process_console::SpawnOutput),
+}
+
+impl RebuildRunnerOutput {
+    fn success(&self) -> bool {
+        match self {
+            Self::Canonical(output) => output.status.success(),
+            Self::Deadline(output) => output.success(),
+        }
+    }
+
+    fn stdout(&self) -> &[u8] {
+        match self {
+            Self::Canonical(output) => &output.stdout,
+            Self::Deadline(output) => output.stdout.as_bytes(),
+        }
+    }
+
+    fn exit_status(&self) -> String {
+        match self {
+            Self::Canonical(output) => output.status.to_string(),
+            Self::Deadline(output) => output
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+        }
+    }
+
+    fn failure(&self) -> String {
+        match self {
+            Self::Canonical(output) => crate::cli::index::runtime::format_runner_failure(output),
+            Self::Deadline(output) => format_rebuild_runner_failure(output),
+        }
+    }
+}
+
+fn run_rebuild_runner_for_target(
+    context: &crate::cli::index::runtime::IndexContext,
+    action: crate::cli::index::runtime::RebuildAction,
+    qos: &str,
+) -> Result<RebuildRunnerOutput, String> {
+    if gwt_core::operation_deadline::current().is_none() {
+        return crate::cli::index::runtime::run_runner_rebuild(context, action, qos)
+            .map(RebuildRunnerOutput::Canonical)
+            .map_err(|error| error.to_string());
+    }
+    run_rebuild_runner_observing_deadline(context, action, qos)
+        .map(RebuildRunnerOutput::Deadline)
+        .map_err(|error| error.to_string())
+}
+
+fn format_rebuild_runner_failure(output: &gwt_core::process_console::SpawnOutput) -> String {
+    let stderr = output.stderr.trim();
+    let stdout = output.stdout.trim();
+    let detail = match (stderr.is_empty(), stdout.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => stdout.to_string(),
+        (false, true) => stderr.to_string(),
+        (false, false) => format!("{stderr}; stdout={stdout}"),
+    };
+    let exit = output
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    format!("runner exit={exit} detail={detail}\n")
+}
+
 /// Resolve an `IndexContext` for the requested `(project_root,
 /// worktree_hash?)` and invoke the runner via the same path used by
 /// `gwt index rebuild`, gated by the host-wide index coordinator so
@@ -1150,11 +1340,22 @@ pub fn rebuild_index_target(
     worktree_hash: Option<&str>,
     priority: JobPriority,
 ) -> Result<(), String> {
-    use crate::cli::index::runtime::{
-        format_runner_failure, resolve_index_context, run_runner_rebuild, RebuildAction,
-    };
+    use crate::cli::index::runtime::{resolve_index_context, RebuildAction};
 
     let mut ctx = resolve_index_context(project_root).map_err(|err| err.to_string())?;
+    #[cfg(test)]
+    if [
+        "GWT_INDEX_TEST_REBUILD_HANG",
+        "GWT_INDEX_TEST_REBUILD_FAILURE",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).as_deref() == Some(OsStr::new("1")))
+    {
+        // Keep the deadline fixture away from the user's shared project-index
+        // runtime. The local runner seam launches this test binary only.
+        ctx.python = std::env::current_exe().map_err(|err| err.to_string())?;
+        ctx.runner = PathBuf::from("--ignored");
+    }
     if let Some(target_hash) = worktree_hash {
         let inputs = list_worktree_probe_inputs(&ctx.project_root)?;
         let target = inputs
@@ -1238,20 +1439,20 @@ pub fn rebuild_index_target(
                 action = rebuild_action,
                 "project index rebuild started"
             );
-            let output = run_runner_rebuild(&ctx, action, qos).map_err(|err| err.to_string())?;
+            let output = run_rebuild_runner_for_target(&ctx, action, qos)?;
             tracing::info!(
                 target: "gwt::index",
                 scope = rebuild_label,
                 worktree_hash = %rebuild_worktree_hash,
                 action = rebuild_action,
                 elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
-                exit_status = %output.status,
+                exit_status = %output.exit_status(),
                 "project index rebuild completed"
             );
-            if !output.status.success() {
-                return Err(format_runner_failure(&output));
+            if !output.success() {
+                return Err(output.failure());
             }
-            if runner_payload_yielded(&output.stdout) {
+            if runner_payload_yielded(output.stdout()) {
                 tracing::info!(
                     target: "gwt::index",
                     scope = rebuild_label,
@@ -1714,6 +1915,65 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     Ok(())
 }
 
+fn run_project_index_git_probe(
+    current_dir: &Path,
+    git_args: &[&str],
+) -> io::Result<gwt_core::process_console::SpawnOutput> {
+    gwt_core::operation_deadline::ensure_remaining("project index git probe")?;
+
+    #[cfg(test)]
+    let (program, args) = if std::env::var_os("GWT_INDEX_TEST_GIT_SPAWN_FAILURE").as_deref()
+        == Some(OsStr::new("1"))
+    {
+        (
+            OsString::from("gwt-definitely-missing-git-fixture"),
+            Vec::new(),
+        )
+    } else if std::env::var_os("GWT_INDEX_TEST_GIT_HANG").as_deref() == Some(OsStr::new("1")) {
+        if let Some(delay_ms) = std::env::var("GWT_INDEX_TEST_GIT_PRESPAWN_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        #[cfg(windows)]
+        let command = (
+            OsString::from("powershell.exe"),
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("Start-Sleep -Seconds 4"),
+            ],
+        );
+        #[cfg(not(windows))]
+        let command = (
+            OsString::from("sh"),
+            vec![OsString::from("-c"), OsString::from("sleep 4")],
+        );
+        command
+    } else {
+        (
+            OsString::from("git"),
+            git_args.iter().map(OsString::from).collect::<Vec<_>>(),
+        )
+    };
+    #[cfg(not(test))]
+    let (program, args) = (
+        OsString::from("git"),
+        git_args.iter().map(OsString::from).collect::<Vec<_>>(),
+    );
+
+    gwt_core::process_console::spawn_logged_blocking(
+        &gwt_core::process_console::ProcessConsoleHub::new(),
+        gwt_core::process_console::ProcessKind::Git,
+        program,
+        &args,
+        gwt_core::process_console::SpawnOptions::new(format!("git {}", git_args.join(" ")))
+            .current_dir(current_dir)
+            .forward_output(false),
+    )
+}
+
 fn resolve_current_git_worktree_root(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
@@ -1733,12 +1993,86 @@ fn resolve_current_git_worktree_root(path: &Path) -> Option<PathBuf> {
     Some(canonicalize_path(PathBuf::from(root)))
 }
 
+fn resolve_current_git_worktree_root_result(path: &Path) -> io::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let output = run_project_index_git_probe(path, &["rev-parse", "--show-toplevel"])?;
+    if !output.success() {
+        return Ok(None);
+    }
+    let root = output.stdout.trim();
+    if root.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(normalize_git_root(PathBuf::from(root))))
+}
+
+fn resolve_main_git_worktree_root_result(path: &Path) -> io::Result<Option<PathBuf>> {
+    let output = run_project_index_git_probe(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    if !output.success() {
+        return Ok(first_child_bare_repository(path).map(normalize_git_root));
+    }
+    let common_dir = PathBuf::from(output.stdout.trim());
+    if common_dir.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let repo_root = if common_dir.file_name().and_then(OsStr::to_str) == Some(".git") {
+        let Some(parent) = common_dir.parent() else {
+            return Ok(None);
+        };
+        parent.to_path_buf()
+    } else {
+        common_dir
+    };
+    Ok(Some(normalize_git_root(repo_root)))
+}
+
+fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(repo_path)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.join("HEAD").exists()
+                && path.join("objects").exists()
+                && path.join("refs").exists()
+        })
+        .min()
+}
+
 fn first_active_worktree_path(repo_root: &Path) -> Option<PathBuf> {
     list_worktree_probe_inputs(repo_root)
         .ok()?
         .into_iter()
         .next()
         .map(|input| input.path)
+}
+
+fn first_active_worktree_path_result(repo_root: &Path) -> io::Result<Option<PathBuf>> {
+    Ok(list_worktree_probe_inputs_result(repo_root)?
+        .into_iter()
+        .next()
+        .map(|input| input.path))
+}
+
+fn process_cwd_worktree_root_for_repo_result(repo_root: &Path) -> io::Result<Option<PathBuf>> {
+    let cwd = std::env::current_dir()?;
+    let Some(cwd_worktree) = resolve_current_git_worktree_root_result(&cwd)? else {
+        return Ok(None);
+    };
+    let Some(cwd_repo_root) = resolve_main_git_worktree_root_result(&cwd_worktree)? else {
+        return Ok(None);
+    };
+    if canonicalize_path(cwd_repo_root) == canonicalize_path(repo_root.to_path_buf()) {
+        Ok(Some(cwd_worktree))
+    } else {
+        Ok(None)
+    }
 }
 
 fn process_cwd_worktree_root_for_repo(repo_root: &Path) -> Option<PathBuf> {
@@ -1776,6 +2110,10 @@ fn canonicalize_path(path: PathBuf) -> PathBuf {
     dunce::canonicalize(&path).unwrap_or(path)
 }
 
+fn normalize_git_root(path: PathBuf) -> PathBuf {
+    gwt_core::paths::normalize_windows_child_process_path(&canonicalize_path(path))
+}
+
 pub(crate) fn project_index_python_path() -> PathBuf {
     gwt_core::runtime::project_index_python_path()
 }
@@ -1785,6 +2123,89 @@ mod tests {
     use super::*;
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn automatic_background_index_opt_out_is_exact() {
+        assert!(automatic_background_index_disabled_value(Some(
+            std::ffi::OsStr::new("1")
+        )));
+        assert!(!automatic_background_index_disabled_value(None));
+        assert!(!automatic_background_index_disabled_value(Some(
+            std::ffi::OsStr::new("true")
+        )));
+        assert!(!automatic_background_index_disabled_value(Some(
+            std::ffi::OsStr::new("0")
+        )));
+    }
+
+    #[test]
+    #[ignore = "spawned only by the deadline-aware rebuild runner fixture"]
+    fn rebuild_runner_hang_fixture() {
+        if std::env::var_os("GWT_INDEX_TEST_REBUILD_HANG").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        let marker = std::env::var_os("GWT_INDEX_TEST_REBUILD_MARKER")
+            .map(PathBuf::from)
+            .expect("rebuild marker path");
+        std::fs::write(marker, b"started").expect("write rebuild marker");
+        std::thread::sleep(Duration::from_secs(12));
+    }
+
+    #[test]
+    #[ignore = "spawned only by the canonical rebuild runner fixture"]
+    fn rebuild_runner_failure_fixture() {
+        if std::env::var_os("GWT_INDEX_TEST_REBUILD_FAILURE").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        println!("fixture stdout");
+        eprintln!("fixture stderr");
+        std::process::exit(7);
+    }
+
+    #[test]
+    fn project_index_git_context_does_not_fall_through_an_expired_deadline() {
+        let checkout_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() - Duration::from_millis(1),
+        );
+
+        assert!(
+            project_index_git_context(&checkout_root).is_none(),
+            "an expired git probe must not reuse an earlier raw probe result"
+        );
+    }
+
+    #[test]
+    fn no_deadline_manual_rebuild_uses_canonical_cli_runner() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo directory");
+        init_git_repo_with_origin(&repo);
+        let _failure = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_FAILURE", "1");
+        crate::cli::index::runtime::reset_legacy_rebuild_runner_calls();
+
+        let error = manual_rebuild_runner(&repo, IndexRebuildScope::Issues, None)
+            .expect_err("fixture runner must fail");
+
+        assert!(
+            crate::cli::index::runtime::legacy_rebuild_runner_calls() >= 1,
+            "no-deadline manual rebuild must retain the canonical CLI runner"
+        );
+        // ExitStatus Display is platform-specific: "exit code: 7" on
+        // Windows, "exit status: 7" on Unix. Assert the invariant parts.
+        assert!(
+            error.starts_with("runner exit=") && error.contains("7") && error.contains(" detail="),
+            "legacy ExitStatus formatting changed: {error}"
+        );
+    }
 
     struct FixtureEnvGuard {
         previous: Option<String>,
@@ -1989,6 +2410,9 @@ detached
 
     #[test]
     fn default_project_index_worktree_root_prefers_process_cwd_worktree_for_workspace_home() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let (bare, _develop) = make_bare_workspace_with_origin(temp.path());
         let active = temp.path().join("work").join("active");
@@ -2013,6 +2437,83 @@ detached
             canonicalize_path(active),
             "workspace home should use the already-running worktree before the first listed worktree"
         );
+    }
+
+    #[test]
+    fn deadline_default_worktree_matches_public_workspace_home_fallbacks() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        {
+            let temp = tempfile::tempdir().expect("active workspace tempdir");
+            let (bare, _develop) = make_bare_workspace_with_origin(temp.path());
+            let active = temp.path().join("work").join("active");
+            std::fs::create_dir_all(active.parent().expect("active parent"))
+                .expect("active parent");
+            run_git_at(
+                &bare,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "work/active-parity",
+                    active.to_str().unwrap(),
+                    "develop",
+                ],
+            );
+            let _cwd = CurrentDirGuard::set(&active);
+            let expected = default_project_index_worktree_root(temp.path())
+                .expect("public active default root");
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                Instant::now() + Duration::from_secs(10),
+            );
+            let actual = default_project_index_worktree_root(temp.path())
+                .expect("deadline active default root");
+
+            assert_eq!(canonicalize_path(actual), canonicalize_path(expected));
+        }
+
+        {
+            let temp = tempfile::tempdir().expect("first workspace tempdir");
+            let (_bare, develop) = make_bare_workspace_with_origin(temp.path());
+            let outside = tempfile::tempdir().expect("outside cwd");
+            let _cwd = CurrentDirGuard::set(outside.path());
+            let expected = default_project_index_worktree_root(temp.path())
+                .expect("public first-active default root");
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                Instant::now() + Duration::from_secs(10),
+            );
+            let actual = default_project_index_worktree_root(temp.path())
+                .expect("deadline first-active default root");
+
+            assert_eq!(
+                canonicalize_path(actual),
+                canonicalize_path(expected.clone())
+            );
+            assert_eq!(canonicalize_path(develop), canonicalize_path(expected));
+        }
+    }
+
+    #[test]
+    fn deadline_aware_git_context_matches_public_resolver_path_semantics() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bare, linked_worktree) = make_bare_workspace_with_origin(temp.path());
+        let standalone = temp.path().join("standalone");
+        std::fs::create_dir_all(&standalone).expect("standalone repo");
+        init_git_repo_with_origin(&standalone);
+
+        for path in [&standalone, &linked_worktree, &bare, temp.path()] {
+            let expected = project_index_git_context(path).expect("public git context");
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                Instant::now() + Duration::from_secs(10),
+            );
+            let actual = project_index_git_context_for_search(path)
+                .expect("deadline-aware git probe")
+                .expect("deadline-aware git context");
+
+            assert_eq!(actual, expected, "context mismatch for {}", path.display());
+        }
     }
 
     #[test]
@@ -2896,6 +3397,9 @@ detached
     #[test]
     fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         let started = tmp.path().join("owner-started");
         let started_for_thread = started.clone();

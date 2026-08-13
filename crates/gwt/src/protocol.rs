@@ -221,6 +221,29 @@ pub enum FrontendEvent {
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
+    /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
+    /// resident PM pane if it is not running, then frames it in the viewport.
+    OpenPmAgent {
+        #[serde(default)]
+        bounds: Option<WindowGeometry>,
+    },
+    /// SPEC-3431 FR-026: opt the active project in or out of PM auto-start.
+    /// Governs the next project open only — it never stops a live PM.
+    SetPmAutoStart {
+        enabled: bool,
+    },
+    /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
+    /// pane is untouched; applying the change is the explicit restart below.
+    SetPmLaunchProfile {
+        agent_id: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        reasoning: Option<String>,
+    },
+    /// SPEC-3431 FR-026: stop the live PM and bring it back on the configured
+    /// profile. Starts a NEW conversation — a history cannot cross agents.
+    RestartPmAgent,
     OpenProjectDialog,
     SelectCloneProjectParent,
     GithubRepositorySearch {
@@ -338,6 +361,16 @@ pub enum FrontendEvent {
     /// window id so the event can only target the caller's own pane.
     PaneSendInput {
         session_id: String,
+        text: String,
+    },
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
+    /// agent pane of the same project. Carries the PM's own session id so the
+    /// server re-verifies the live PM principal immediately before the
+    /// injection; the general self-only contract of
+    /// [`FrontendEvent::PaneSendInput`] is unchanged for every other caller.
+    PmPaneSendInput {
+        pm_session_id: String,
+        window_id: String,
         text: String,
     },
     PasteImage {
@@ -1184,6 +1217,66 @@ pub struct WorkspaceHistoryAgentView {
 
 pub type WorkAgentView = WorkspaceHistoryAgentView;
 
+/// Read-only execution diagnosis shared by the CLI status operation and the
+/// Workspace detail surface. String fields preserve the stable snake_case wire
+/// values produced by the execution state machine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExecutionDiagnosisView {
+    #[serde(default = "default_execution_diagnosis_schema_version")]
+    pub schema_version: u32,
+    pub ecr_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_verification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    pub binding_state: String,
+    pub binding_cause: String,
+    pub verification_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trivial_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_update_applicable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_update_applicability_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_revival: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_repair: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_event_receipt_generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_event_receipt_matches_current_generation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<serde_json::Value>,
+    pub settlement_severity: String,
+    #[serde(default)]
+    pub settlement_obligation_open: bool,
+    #[serde(default)]
+    pub open_obligations: Vec<String>,
+    #[serde(default)]
+    pub available_recoveries: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn default_execution_diagnosis_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExecutionContainerView {
     pub branch: Option<String>,
@@ -1191,6 +1284,8 @@ pub struct WorkspaceExecutionContainerView {
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnosis: Option<WorkspaceExecutionDiagnosisView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1314,6 +1409,8 @@ pub struct ActiveWorkspaceWorkView {
     pub close_blocked_reason: Option<String>,
     #[serde(default)]
     pub agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_diagnosis: Option<WorkspaceExecutionDiagnosisView>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -1341,6 +1438,10 @@ pub struct ActiveWorkItemView {
     pub blocked_agents: usize,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    /// Worktree-specific managed-hook health. Unlike the projection-level
+    /// compatibility field, this is audited against this row's exact worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
@@ -1476,6 +1577,18 @@ pub struct RuntimeHealthProcessView {
     pub focus_window_id: Option<String>,
 }
 
+/// SPEC-3431 FR-026: one agent the PM may be configured to run as.
+///
+/// Deliberately a two-field view rather than the Launch Wizard's `AgentOption`:
+/// the PM picker offers no version pinning, no custom agents, and no Docker
+/// target, because the only agents that can resolve the `$gwt-pm` bootstrap
+/// prompt are the ones with a managed skills mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PmAgentOption {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -1544,6 +1657,21 @@ pub enum BackendEvent {
     PaneCloseAccepted {
         request_id: String,
         window_id: String,
+    },
+    /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
+    /// active project tab.
+    ///
+    /// `configured_*` is what the NEXT PM start will use; `running_*` is what
+    /// the live conversation actually is. They are separate fields on purpose —
+    /// the panel's "restart to apply" affordance exists precisely because a
+    /// profile change cannot migrate a running conversation.
+    PmStatus {
+        auto_start: bool,
+        configured_agent_id: String,
+        configured_model: Option<String>,
+        running_agent_id: Option<String>,
+        is_running: bool,
+        agent_options: Vec<PmAgentOption>,
     },
     IssueMonitorStatus {
         status: IssueMonitorStatusView,
@@ -2260,6 +2388,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "process_line",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "terminal_snapshot",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -2278,6 +2411,13 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
+    // the newest one matters.
+    BackendEventPolicy::new(
+        "pm_status",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
         "issue_monitor_status",
@@ -2711,6 +2851,7 @@ impl BackendEvent {
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
+            BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
@@ -2869,6 +3010,28 @@ mod tests {
         IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
         ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn knowledge_search_results_retains_the_baseline_rust_shape() {
+        // SPEC #1939 FR-407 — the public Rust event remains source-compatible
+        // with legacy clients. Optional retry metadata belongs to the private
+        // outbound wire envelope, not this public enum variant.
+        let event = BackendEvent::KnowledgeSearchResults {
+            id: "tab-1::issue-1".to_string(),
+            knowledge_kind: crate::knowledge_bridge::KnowledgeKind::Issue,
+            query: "silent recovery".to_string(),
+            request_id: 7,
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: true,
+        };
+        let value = serde_json::to_value(&event).expect("serialize baseline event");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "direct event serialization must retain the baseline wire shape: {value}"
+        );
+    }
 
     #[test]
     fn pane_send_input_deserializes_session_scoped_injection_contract() {
@@ -3317,6 +3480,13 @@ mod tests {
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
+        let process_line = backend_event_policy("process_line").expect("process_line policy");
+        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
+        assert_eq!(
+            process_line.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
         let workspace_state =
             backend_event_policy("workspace_state").expect("workspace_state policy");
         assert_eq!(
@@ -3414,6 +3584,64 @@ mod tests {
     }
 
     #[test]
+    fn workspace_execution_diagnosis_serializes_and_legacy_container_remains_compatible() {
+        let legacy: super::WorkspaceExecutionContainerView =
+            serde_json::from_value(serde_json::json!({
+                "branch": "work/3393",
+                "worktree_path": "/repo/work/3393",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": null
+            }))
+            .expect("deserialize legacy execution container");
+        assert_eq!(legacy.diagnosis, None);
+
+        let diagnosed: super::WorkspaceExecutionContainerView =
+            serde_json::from_value(serde_json::json!({
+                "branch": "work/3393",
+                "worktree_path": "/repo/work/3393",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": null,
+                "diagnosis": {
+                    "ecr_status": "blocked",
+                    "owner_kind": "spec",
+                    "owner_number": 3393,
+                    "blocked_reason": "verification evidence is stale",
+                    "missing_verification": "user confirmation",
+                    "generation_id": "generation-2",
+                    "binding_state": "stale",
+                    "binding_cause": "current_session_not_authorized",
+                    "verification_state": "stale_fingerprint",
+                    "settlement": {"blocked": "missing_upstream"},
+                    "settlement_severity": "warning",
+                    "settlement_obligation_open": true,
+                    "open_obligations": ["user_verification"],
+                    "available_recoveries": ["verify.run", "execution.reopen"],
+                    "warnings": ["Host status is temporarily unavailable"]
+                }
+            }))
+            .expect("deserialize diagnosed execution container");
+
+        let diagnosis = diagnosed.diagnosis.expect("diagnosis");
+        assert_eq!(diagnosis.ecr_status, "blocked");
+        assert_eq!(diagnosis.binding_state, "stale");
+        assert_eq!(diagnosis.settlement_severity, "warning");
+        assert_eq!(
+            diagnosis.available_recoveries,
+            vec!["verify.run", "execution.reopen"]
+        );
+
+        let serialized = serde_json::to_value(diagnosis).expect("serialize diagnosis");
+        assert_eq!(
+            serialized["blocked_reason"],
+            "verification evidence is stale"
+        );
+        assert_eq!(serialized["verification_state"], "stale_fingerprint");
+        assert_eq!(serialized["settlement_severity"], "warning");
+    }
+
+    #[test]
     fn active_work_projection_uses_distinct_wire_event_from_canvas_workspace_state() {
         let event = BackendEvent::ActiveWorkProjection {
             projection: Box::new(super::ActiveWorkProjectionView {
@@ -3478,6 +3706,7 @@ mod tests {
                     blocked_agents: 0,
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    managed_hook_health: None,
                     pr_number: Some(2538),
                     pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
                     pr_state: Some("OPEN".to_string()),

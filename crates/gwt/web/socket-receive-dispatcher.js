@@ -50,6 +50,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "knowledge_bridge_state",
     "system_status",
     "issue_monitor_status",
+    "pm_status",
   ]),
 );
 
@@ -63,6 +64,11 @@ export function createSocketReceiveDispatcher({
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
   shouldTrace,
+  // Issue #3365 — continuing past a throwing receive() is the right
+  // resilience call, but the failure must not stay console-only. The
+  // dispatcher reports each swallowed error here so the app can surface a
+  // user-visible degradation notice.
+  onReceiveError,
 } = {}) {
   if (typeof receive !== "function") {
     throw new TypeError(
@@ -153,6 +159,13 @@ export function createSocketReceiveDispatcher({
           eventKind,
           error,
         );
+        if (typeof onReceiveError === "function") {
+          try {
+            onReceiveError(error, eventKind);
+          } catch (_) {
+            // The error reporter must never take down the event path.
+          }
+        }
       }
       cursor += 1;
       if (cursor < ready.length && nowImpl() - start > budgetMs) {

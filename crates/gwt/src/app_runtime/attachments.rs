@@ -689,9 +689,6 @@ impl AppRuntime {
         file_count: usize,
         filename: Option<String>,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(&window_id) {
-            return self.inspection_input_denied_events(&window_id);
-        }
         let mut events = vec![AttachmentProgressUpdate::new(
             window_id.clone(),
             operation_id.clone(),
@@ -736,9 +733,6 @@ impl AppRuntime {
         mime_type: &str,
         filename: Option<&str>,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(id) {
-            return self.inspection_input_denied_events(id);
-        }
         let Some(address) = self.window_lookup.get(id).cloned() else {
             tracing::debug!(window_id = %id, "image paste dropped: window not found");
             return Vec::new();
@@ -800,9 +794,6 @@ impl AppRuntime {
         operation_id: Option<String>,
         upload: UploadedImagePasteOperation,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(&id) {
-            return self.inspection_input_denied_events(&id);
-        }
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             tracing::debug!(window_id = %id, "uploaded image paste dropped: window not found");
             return Vec::new();
@@ -919,9 +910,6 @@ impl AppRuntime {
         filename: Option<&str>,
         size: u64,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(id) {
-            return self.inspection_input_denied_events(id);
-        }
         let Some(address) = self.window_lookup.get(id).cloned() else {
             tracing::debug!(window_id = %id, "uploaded image paste dropped: window not found");
             return Vec::new();
@@ -986,9 +974,6 @@ impl AppRuntime {
         operation_id: Option<String>,
         files: Vec<gwt::FileAttachment>,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(&id) {
-            return self.inspection_input_denied_events(&id);
-        }
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             tracing::debug!(window_id = %id, "file attachment dropped: window not found");
             return Vec::new();
@@ -1127,9 +1112,6 @@ impl AppRuntime {
         id: &str,
         files: Vec<gwt::FileAttachment>,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(id) {
-            return self.inspection_input_denied_events(id);
-        }
         let Some(address) = self.window_lookup.get(id).cloned() else {
             tracing::debug!(window_id = %id, "file attachment dropped: window not found");
             return Vec::new();

@@ -420,7 +420,33 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        self.close_window_events_with_monitor_notification(id, true)
+    }
+
+    /// Close a window whose Issue Monitor lifecycle transition was already
+    /// committed by the daemon or the fail-closed local fallback. Re-entering
+    /// the normal window-closed hook here would publish a second control for
+    /// the same lifecycle edge and could requeue the just-failed issue.
+    pub(crate) fn close_window_after_issue_monitor_finalize_events(
+        &mut self,
+        id: &str,
+    ) -> Vec<OutboundEvent> {
+        self.close_window_events_with_monitor_notification(id, false)
+    }
+
+    fn close_window_events_with_monitor_notification(
+        &mut self,
+        id: &str,
+        notify_issue_monitor: bool,
+    ) -> Vec<OutboundEvent> {
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
+        // SPEC-3431 FR-013: snapshot the closing window's session while the
+        // active entry still exists — an explicit close of the PM pane is an
+        // intentional stop and clears the durable PM registration below.
+        let closing_session_id = self
+            .active_agent_sessions
+            .get(id)
+            .map(|session| session.session_id.clone());
         self.clear_agent_window_startup_restore(id);
         self.stop_window_runtime(id);
         self.remove_window_state_tracking(id);
@@ -433,14 +459,32 @@ impl AppRuntime {
         ) {
             return Vec::new();
         }
+        let pm_deregistered = match (
+            closing_session_id.as_deref(),
+            issue_monitor_project_root.as_ref(),
+        ) {
+            (Some(session_id), Some(project_root)) => {
+                self.deregister_pm_for_closed_window(project_root, session_id)
+            }
+            _ => false,
+        };
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
+        // SPEC-3431 FR-026: closing the PM is a PM state change, so the
+        // settings panel has to hear about it or it keeps offering a restart
+        // for a pane that is already gone.
+        if pm_deregistered {
+            events.extend(self.pm_status_broadcast_events());
+        }
         if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }
-        if let Some(project_root) = issue_monitor_project_root {
-            events
-                .extend(self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]));
+        if notify_issue_monitor {
+            if let Some(project_root) = issue_monitor_project_root {
+                events.extend(
+                    self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]),
+                );
+            }
         }
         events
     }

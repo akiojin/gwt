@@ -51,8 +51,8 @@ const ROOT_MODULES = new Set([
   "hotkey.js",
   "improvement-inbox-surface.js",
   "index-settings-panel.js",
-  // SPEC-3165 — Issue Monitor surface.
-  "issue-monitor-surface.js",
+  // SPEC-3431 FR-026 — PM settings panel.
+  "pm-settings-panel.js",
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",
@@ -82,8 +82,8 @@ const ROOT_MODULES = new Set([
   // SPEC-3015 — generated protocol enum contract + extracted window runtime
   // state helpers.
   "protocol-enums.js",
-  // SPEC-3214 — shared Intake/Execution lane identity helpers.
-  "window-lane-identity.js",
+  // SPEC-3245 — shared semantic worktree form presentation helpers.
+  "window-worktree-form.js",
   "window-runtime-state.js",
   // SPEC #2780 — Release Notes window opened from #app-version label.
   "release-notes-window.js",
@@ -92,6 +92,9 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E4) — Settings windows surface.
   "settings-surface.js",
   "socket-receive-dispatcher.js",
+  // Issue #3365 — render-key exception safety + degradation banner.
+  "workspace-render-sync.js",
+  "render-degradation-banner.js",
   // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
   "terminal-attachments.js",
   "terminal-copy-shortcut.js",

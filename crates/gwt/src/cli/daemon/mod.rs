@@ -47,11 +47,33 @@ pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
             Ok(DaemonCommand::Status)
         }
         Some("subscribe") => {
-            let channels: Vec<String> = args[1..].to_vec();
+            let mut channels = Vec::new();
+            let mut timeout_seconds = None;
+            let mut rest = args[1..].iter();
+            while let Some(arg) = rest.next() {
+                if arg == "--timeout-seconds" {
+                    let value = rest.next().ok_or(CliParseError::Usage)?;
+                    let seconds: u64 = value
+                        .parse()
+                        .map_err(|_| CliParseError::InvalidNumber(value.clone()))?;
+                    if seconds == 0 {
+                        return Err(CliParseError::InvalidValue {
+                            flag: "--timeout-seconds",
+                            reason: "must be at least 1 second",
+                        });
+                    }
+                    timeout_seconds = Some(seconds);
+                } else {
+                    channels.push(arg.clone());
+                }
+            }
             if channels.is_empty() {
                 return Err(CliParseError::Usage);
             }
-            Ok(DaemonCommand::Subscribe { channels })
+            Ok(DaemonCommand::Subscribe {
+                channels,
+                timeout_seconds,
+            })
         }
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
@@ -73,7 +95,10 @@ pub(super) fn run<E: CliEnv>(
     match cmd {
         DaemonCommand::Start => start_daemon(env, out),
         DaemonCommand::Status => report_status(env, out),
-        DaemonCommand::Subscribe { channels } => subscribe_command(env, channels, out),
+        DaemonCommand::Subscribe {
+            channels,
+            timeout_seconds,
+        } => subscribe_command(env, channels, timeout_seconds, out),
     }
 }
 
@@ -175,6 +200,7 @@ fn probe_daemon_endpoint(
 fn subscribe_command<E: CliEnv>(
     env: &mut E,
     channels: Vec<String>,
+    timeout_seconds: Option<u64>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let scope = resolve_scope(env)?;
@@ -239,11 +265,26 @@ fn subscribe_command<E: CliEnv>(
             }
         }
 
+        // FR-025: a bounded run ends on a wall-clock deadline, not a per-read
+        // timeout. Busy channels deliver frames continuously, so a per-read
+        // timeout would never fire and the caller would never get its turn
+        // back.
+        let deadline = timeout_seconds
+            .map(|seconds| tokio::time::Instant::now() + std::time::Duration::from_secs(seconds));
         loop {
-            let frame: DaemonFrame = client
-                .read_frame()
-                .await
-                .map_err(|err| config_error(format!("read event failed: {err}")))?;
+            let frame: DaemonFrame = match deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline, client.read_frame()).await {
+                        Ok(frame) => frame
+                            .map_err(|err| config_error(format!("read event failed: {err}")))?,
+                        Err(_) => return Ok(0),
+                    }
+                }
+                None => client
+                    .read_frame()
+                    .await
+                    .map_err(|err| config_error(format!("read event failed: {err}")))?,
+            };
             let line = serde_json::to_string(&frame)
                 .map_err(|err| config_error(format!("serialize event failed: {err}")))?;
             writeln!(writer, "{line}")
@@ -256,6 +297,7 @@ fn subscribe_command<E: CliEnv>(
 fn subscribe_command<E: CliEnv>(
     _env: &mut E,
     _channels: Vec<String>,
+    _timeout_seconds: Option<u64>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     out.push_str(
@@ -365,7 +407,8 @@ mod tests {
         assert_eq!(
             cmd,
             DaemonCommand::Subscribe {
-                channels: vec!["board".to_string(), "runtime-status".to_string()]
+                channels: vec!["board".to_string(), "runtime-status".to_string()],
+                timeout_seconds: None,
             }
         );
     }
@@ -374,6 +417,34 @@ mod tests {
     fn parse_rejects_subscribe_without_channels() {
         let err = parse(&[s("subscribe")]).unwrap_err();
         assert!(matches!(err, CliParseError::Usage));
+    }
+
+    /// SPEC-3431 FR-025: an unattended agent runs subscribe → reconcile in a
+    /// loop, so it needs the read to end on its own. Without this the read
+    /// loop never returns and "run a bounded subscribe" is an instruction the
+    /// runtime cannot honor.
+    #[test]
+    fn parse_recognises_subscribe_timeout() {
+        let cmd =
+            parse(&[s("subscribe"), s("board"), s("--timeout-seconds"), s("30")]).expect("parse");
+        assert_eq!(
+            cmd,
+            DaemonCommand::Subscribe {
+                channels: vec!["board".to_string()],
+                timeout_seconds: Some(30),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rejects_a_zero_or_unparsable_subscribe_timeout() {
+        for value in ["0", "-1", "soon"] {
+            assert!(
+                parse(&[s("subscribe"), s("board"), s("--timeout-seconds"), s(value)]).is_err(),
+                "timeout {value} must be rejected"
+            );
+        }
+        assert!(parse(&[s("subscribe"), s("board"), s("--timeout-seconds")]).is_err());
     }
 
     #[test]
@@ -428,6 +499,7 @@ mod tests {
             uptime_seconds: 12,
             broadcast_channels: 2,
             connections: 1,
+            issue_monitor: None,
         };
         let formatted = format_probe_result(&Ok(status));
         #[cfg(unix)]

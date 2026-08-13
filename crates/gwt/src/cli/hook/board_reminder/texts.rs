@@ -237,6 +237,30 @@ Work lifecycle は終端 delivery settlement 中です。coordination と blocke
 
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
 
+/// SPEC-3431 FR-064: what the resident PM is told at an intent boundary.
+///
+/// Replaces the implementation-agent reminder wholesale. That text tells an
+/// agent to post its own work-phase transitions to the Board, to keep a Work
+/// item current, and not to create branches — none of which apply to a PM that
+/// owns no Work, performs no git operations, and reports to the user in
+/// conversation (FR-017). Leaving it in place buries the PM's actual contract
+/// under ~4KB of instructions that outrank it every turn.
+pub(super) const PM_REMINDER: &str = "# Project Manager\n\
+\n\
+You are this project's resident PM. Your operating contract is the `gwt-pm` skill; it outranks generic agent guidance.\n\
+\n\
+Report to the user in conversation, at milestones, as a digest (`needs_human` and fatal failures immediately). Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
+\n\
+Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running.";
+
+pub(super) const PM_REMINDER_JA: &str = "# Project Manager\n\
+\n\
+あなたはこのプロジェクトの常駐 PM です。行動規範は `gwt-pm` skill であり、一般の agent 向け指示より優先されます。\n\
+\n\
+報告はユーザーとの会話で、節目ごとに digest として行います（`needs_human` と致命的失敗は即時）。`board.post` は他 agent へ話しかけるときだけ mention 付きで使い、`board.show` は他 agent の自己申告を読むために使います。自分の作業 phase を Board に流さないでください。\n\
+\n\
+毎周回、`issue.monitor.status` を取り直して照合し、動いている agent を確認します。";
+
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion です。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
 
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
@@ -323,61 +347,6 @@ pub(super) fn user_prompt_reminder(lang: ReminderLanguage, short: bool) -> &'sta
         (ReminderLanguage::En, false) => USER_PROMPT_REMINDER,
     }
 }
-
-/// Lane-specific SessionStart onboarding (SPEC-3248 FR-011). Curation lanes
-/// (intake) open with the register / discuss / plan 导线; producing-work lanes
-/// have no distinct onboarding (they keep the default reminder flow).
-pub(super) fn lane_onboarding(
-    lane: &gwt_skills::LaneProfile,
-    language: &str,
-) -> Option<&'static str> {
-    match lane.guidance_variant {
-        gwt_skills::GuidanceVariant::Curation => Some(match reminder_language(language) {
-            ReminderLanguage::Ja => INTAKE_ONBOARDING_JA,
-            ReminderLanguage::En => INTAKE_ONBOARDING,
-        }),
-        gwt_skills::GuidanceVariant::ProducingWork => None,
-    }
-}
-
-/// Intake completion nudge shown on Stop (SPEC-3248 P4, FR-011). A soft,
-/// non-blocking reminder — an intake session may legitimately end in no-action,
-/// so this promotes registration without forcing it.
-pub(super) fn intake_completion_reminder(language: &str) -> &'static str {
-    match reminder_language(language) {
-        ReminderLanguage::Ja => INTAKE_COMPLETION_REMINDER_JA,
-        ReminderLanguage::En => INTAKE_COMPLETION_REMINDER,
-    }
-}
-
-pub(super) const INTAKE_COMPLETION_REMINDER: &str = "# Intake completion\n\n\
-Before stopping this intake session: register the work you curated \
-through `gwt-register-issue` (plain Issue or `gwt-spec` design-required Issue \
-after `gwt-discussion`), or state explicitly that no action is needed. Intake produces \
-GitHub Issues — do not stop with curated-but-unregistered work.";
-
-pub(super) const INTAKE_COMPLETION_REMINDER_JA: &str = "# Intake 完了\n\n\
-この intake セッションを停止する前に、curate した作業を登録してください\
-（plain Issue も `gwt-spec` design-required Issue も `gwt-register-issue`。設計が必要なら先に `gwt-discussion`）。\
-不要なら「対応不要」と明示してください。intake は GitHub Issue を生成する役割です — \
-curate したのに未登録のまま停止しないでください。";
-
-pub(super) const INTAKE_ONBOARDING: &str = "# Intake (Curate) session\n\n\
-This is a branchless, ephemeral **intake** session: you curate and register \
-work, you do not implement it. Produce GitHub Issues, not code.\n\n\
-- Search first, then register: `gwt-search` → `gwt-register-issue` (plain Issue \
-or `gwt-spec` design-required Issue). Use `gwt-discussion` first when design must be shaped, then `gwt-plan-spec`.\n\
-- Coordinate through the Board; you own no Work state (no `workspace.update`).\n\
-- Leave implementation, verification, and PRs to Execute-lane sessions (opened \
-from a Workspace or the Issue Monitor).\n";
-
-pub(super) const INTAKE_ONBOARDING_JA: &str = "# Intake (Curate) セッション\n\n\
-これは branchless で使い捨ての **intake** セッションです。作業を curate・登録し、\
-実装はしません。コードではなく GitHub Issue を生成します。\n\n\
-- まず検索、次に登録: `gwt-search` → `gwt-register-issue`（plain Issue または `gwt-spec` design-required Issue）。\
-設計を詰める必要があれば先に `gwt-discussion`、その後 `gwt-plan-spec`。\n\
-- 協調は Board 経由。Work state は持ちません（`workspace.update` 不要）。\n\
-- 実装・検証・PR は Execute レーンのセッション（Workspace か Issue Monitor 起動）に任せます。\n";
 
 pub(super) fn stop_reminder(lang: ReminderLanguage, short: bool) -> &'static str {
     match (lang, short) {

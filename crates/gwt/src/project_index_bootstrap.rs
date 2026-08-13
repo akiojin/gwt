@@ -19,6 +19,10 @@ pub enum ProjectIndexBootstrapRequest {
     /// the cooldown window — the cached status was replayed instead of
     /// re-running the bootstrap + status sweep (reconnect-storm guard).
     SkippedFresh,
+    /// SPEC-3170 FR-073: automatic bootstrap is disabled by the emergency
+    /// environment opt-out. Explicit search/refresh/rebuild paths are
+    /// unaffected.
+    SkippedDisabled,
 }
 
 const FULL_STATUS_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -129,9 +133,11 @@ impl ProjectIndexBootstrapService {
         proxy: AppEventProxy,
         project_root: PathBuf,
     ) -> ProjectIndexBootstrapRequest {
-        self.spawn_with(
+        let disabled = gwt::index_worker::automatic_background_index_disabled();
+        self.spawn_automatic_with(
             proxy,
             project_root,
+            disabled,
             gwt::index_worker::bootstrap_project_index_for_path,
             current_worktree_status_probe,
         )
@@ -366,7 +372,8 @@ impl ProjectIndexBootstrapService {
                             return;
                         }
                         ProjectIndexBootstrapRequest::SpawnFailed
-                        | ProjectIndexBootstrapRequest::SkippedFresh => return,
+                        | ProjectIndexBootstrapRequest::SkippedFresh
+                        | ProjectIndexBootstrapRequest::SkippedDisabled => return,
                         ProjectIndexBootstrapRequest::AlreadyRunning => {}
                     }
                 }
@@ -636,6 +643,29 @@ impl ProjectIndexBootstrapService {
                 ProjectIndexBootstrapRequest::SpawnFailed
             }
         }
+    }
+
+    fn spawn_automatic_with<B, S>(
+        &self,
+        proxy: AppEventProxy,
+        project_root: PathBuf,
+        disabled: bool,
+        bootstrap: B,
+        status_probe: S,
+    ) -> ProjectIndexBootstrapRequest
+    where
+        B: FnOnce(&Path) -> Result<(), String> + Send + 'static,
+        S: FnOnce(&Path) -> gwt::ProjectIndexStatusView + Send + 'static,
+    {
+        if disabled {
+            tracing::info!(
+                target: "gwt::index",
+                worktree = %project_root.display(),
+                "automatic project index bootstrap disabled by environment"
+            );
+            return ProjectIndexBootstrapRequest::SkippedDisabled;
+        }
+        self.spawn_with(proxy, project_root, bootstrap, status_probe)
     }
 
     /// Spawn a background task that performs a single per-cell rebuild for
@@ -988,6 +1018,39 @@ mod tests {
     use crate::{app_runtime::AppEventProxy, UserEvent};
 
     use super::IndexRebuildScope;
+
+    #[test]
+    fn disabled_automatic_bootstrap_starts_no_background_work() {
+        let service = super::ProjectIndexBootstrapService::new_for_test();
+        let temp = tempdir().expect("tempdir");
+        let (proxy, events) = AppEventProxy::stub();
+        let bootstrap_calls = Arc::new(AtomicUsize::new(0));
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let bootstrap_calls_for_request = bootstrap_calls.clone();
+        let status_calls_for_request = status_calls.clone();
+
+        let request = service.spawn_automatic_with(
+            proxy,
+            temp.path().to_path_buf(),
+            true,
+            move |_project_root: &Path| {
+                bootstrap_calls_for_request.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_project_root| {
+                status_calls_for_request.fetch_add(1, Ordering::SeqCst);
+                gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready")
+            },
+        );
+
+        assert_eq!(
+            request,
+            super::ProjectIndexBootstrapRequest::SkippedDisabled
+        );
+        assert_eq!(bootstrap_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(status_calls.load(Ordering::SeqCst), 0);
+        assert!(events.lock().expect("events").is_empty());
+    }
 
     fn wait_for_project_status(
         events: &Arc<Mutex<Vec<UserEvent>>>,
