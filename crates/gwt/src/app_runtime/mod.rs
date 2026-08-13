@@ -179,7 +179,7 @@ use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
-    maybe_register_codex_managed_hook_trust_for_launch,
+    maybe_register_codex_managed_hook_trust_for_launch, ManualLaunchGenerationPreflight,
 };
 pub(crate) use launch::{continue_work_readiness_decision, ReadinessDeadlineDecision};
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
@@ -555,6 +555,19 @@ pub struct LaunchWizardSession {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PendingManualLaunchGenerationConflict {
+    pub(crate) wizard_id: String,
+    pub(crate) client_id: Option<String>,
+    pub(crate) config: gwt_agent::LaunchConfig,
+    pub(crate) bounds: WindowGeometry,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) holder_session_id: String,
+    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+    pub(crate) window_id: Option<String>,
+    pub(crate) view: gwt::LaunchWizardGenerationConflictView,
+}
+
+#[derive(Debug, Clone)]
 pub struct IssueMonitorProfileSaveContext {
     pub(crate) client_id: ClientId,
     pub(crate) issue_number: Option<u64>,
@@ -716,6 +729,8 @@ pub struct AppRuntime {
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
+    pub(crate) pending_manual_launch_generation_conflict:
+        Option<PendingManualLaunchGenerationConflict>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
     /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
@@ -1850,6 +1865,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_manual_launch_generation_conflict: None,
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),

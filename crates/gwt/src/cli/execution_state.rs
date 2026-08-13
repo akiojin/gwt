@@ -681,6 +681,14 @@ pub enum SuccessorPredecessorStatus {
 }
 
 pub const FRESH_LINKED_OWNER_LAUNCH_SOURCE: &str = "fresh-linked-owner-launch";
+pub const MANUAL_LINKED_OWNER_LAUNCH_SOURCE: &str = "manual-linked-owner-launch";
+
+fn is_linked_owner_launch_successor(attempt: &ContinuationAttempt) -> bool {
+    attempt.request.work_id.is_none()
+        && ((attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
+            && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE)
+            || attempt.request.source == MANUAL_LINKED_OWNER_LAUNCH_SOURCE)
+}
 
 fn is_completed_successor_status(status: &SuccessorPredecessorStatus) -> bool {
     *status == SuccessorPredecessorStatus::Completed
@@ -1397,15 +1405,19 @@ fn validate_generation_ledger(
     for attempt in &ledger.continuation_attempts {
         if validate_successor_request(&attempt.request).is_err()
             || (attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
-                && (attempt.request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE
-                    || attempt.request.work_id.is_some()))
+                && !is_linked_owner_launch_successor(attempt))
             || (attempt.predecessor_status == SuccessorPredecessorStatus::Completed
                 && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE)
             || (attempt.predecessor_status == SuccessorPredecessorStatus::Active
                 && !matches!(
                     attempt.request.source.as_str(),
-                    "execution-continue" | "continue-work:resume" | "continue-work:handoff"
+                    "execution-continue"
+                        | "continue-work:resume"
+                        | "continue-work:handoff"
+                        | MANUAL_LINKED_OWNER_LAUNCH_SOURCE
                 ))
+            || (attempt.request.source == MANUAL_LINKED_OWNER_LAUNCH_SOURCE
+                && attempt.request.work_id.is_some())
             || attempt.worktree_binding_hash.trim().is_empty()
             || attempt.candidate_generation_id.trim().is_empty()
             || attempt
@@ -2715,6 +2727,9 @@ fn current_execution_binding_matches_context(
     let current = ledger.current_generation().ok_or_else(|| {
         invalid_generation_data("execution generation ledger current id is missing")
     })?;
+    if current_generation_has_prepared_manual_successor(&ledger, current) {
+        return Ok(false);
+    }
     if !authority.allows(ledger.effective_status_for(current))
         || current.identity.worktree_binding_hash != context.worktree_binding_hash
     {
@@ -2735,6 +2750,56 @@ fn current_execution_binding_matches_context(
             expected_session_id,
             expected_identity,
         ))
+}
+
+fn current_generation_has_prepared_manual_successor(
+    ledger: &ExecutionGenerationLedger,
+    current: &ExecutionGeneration,
+) -> bool {
+    let current_head = effective_generation_head_hash(ledger, current);
+    let mut seen_operations = std::collections::HashSet::new();
+    ledger.continuation_attempts.iter().rev().any(|attempt| {
+        seen_operations.insert(attempt.request.operation_id.as_str())
+            && attempt.status == ContinuationAttemptStatus::Prepared
+            && attempt.request.source == MANUAL_LINKED_OWNER_LAUNCH_SOURCE
+            && attempt.predecessor == current.identity
+            && attempt.predecessor_generation_content_hash == current_head
+    })
+}
+
+fn current_generation_has_prepared_takeover(
+    ledger: &ExecutionGenerationLedger,
+    current: &ExecutionGeneration,
+) -> bool {
+    let current_head = effective_generation_head_hash(ledger, current);
+    let mut seen_operations = std::collections::HashSet::new();
+    ledger.takeover_attempts.iter().rev().any(|attempt| {
+        seen_operations.insert(attempt.request.operation_id.as_str())
+            && attempt.status == GenerationTakeoverAttemptStatus::Prepared
+            && attempt.generation_id == current.identity.generation_id
+            && attempt.predecessor_head_hash == current_head
+    })
+}
+
+/// Return whether a Prepared manual-launch successor currently fences the
+/// predecessor's producing authority. The current pointer stays unchanged
+/// until activation, but predecessor mutations and exact relaunches must stop
+/// at this append-only fence so a holder cannot revive into a second writer.
+pub fn manual_successor_fences_current_execution(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<bool> {
+    with_generation_owner_lease(worktree, owner, |context| {
+        let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+            return Ok(false);
+        };
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        Ok(current_generation_has_prepared_manual_successor(
+            &ledger, current,
+        ))
+    })
 }
 
 /// Execute one producing operation while its owner generation and durable
@@ -4291,6 +4356,14 @@ pub fn record_rebound_continuation_validation(
                 "owner generation ledger is not initialized",
             )
         })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        if current_generation_has_prepared_manual_successor(&ledger, current) {
+            return Err(generation_conflict(
+                "a Prepared manual launch successor already fences rebound continuation validation",
+            ));
+        }
         if let Some(existing) = ledger
             .continuation_validations
             .iter()
@@ -4319,9 +4392,6 @@ pub fn record_rebound_continuation_validation(
                 "continuation operation id is already bound to another operation",
             ));
         }
-        let current = ledger.current_generation().ok_or_else(|| {
-            invalid_generation_data("execution generation ledger current id is missing")
-        })?;
         let projection = serde_json::from_str::<ExecutionControlRecord>(
             ledger.effective_projection_for(current),
         )
@@ -4445,10 +4515,10 @@ pub fn continuation_attempt_execution_binding_matches(
     Ok(execution_binding_for_generation(&ledger, &candidate) == *expected_identity)
 }
 
-/// Recover the one live Prepared fresh-launch attempt for a candidate
-/// Session. This lets the Host rebuild its process-local readiness receipt
-/// from the integrity-valid owner ledger without persisting a nonce or
-/// trusting child-process input as authority.
+/// Recover the one live Prepared linked-owner launch attempt for a candidate
+/// Session. This includes both a legacy Blocked fresh launch and a manually
+/// fenced terminal-holder successor, letting the Host rebuild readiness from
+/// the integrity-valid owner ledger without trusting child-process authority.
 pub fn prepared_fresh_linked_owner_launch_for_session(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -4474,9 +4544,7 @@ pub fn prepared_fresh_linked_owner_launch_for_session(
         .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
         .filter(|attempt| {
             attempt.status == ContinuationAttemptStatus::Prepared
-                && attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
-                && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE
-                && attempt.request.work_id.is_none()
+                && is_linked_owner_launch_successor(attempt)
                 && attempt.request.initial_session_id == session_id
         });
     let candidate = candidates.next().cloned();
@@ -4488,8 +4556,8 @@ pub fn prepared_fresh_linked_owner_launch_for_session(
     Ok(candidate)
 }
 
-/// Recover the one latest fresh linked-owner launch attempt for a candidate
-/// Session, including terminal Aborted and Activated attempts.
+/// Recover the one latest linked-owner launch attempt for a candidate Session,
+/// including terminal Aborted and Activated attempts.
 ///
 /// Unlike [`prepared_fresh_linked_owner_launch_for_session`], this is the
 /// process-restart reconciliation seam. The persisted Session id is only a
@@ -4520,9 +4588,7 @@ pub fn fresh_linked_owner_launch_for_session(
         .rev()
         .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
         .filter(|attempt| {
-            attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
-                && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE
-                && attempt.request.work_id.is_none()
+            is_linked_owner_launch_successor(attempt)
                 && attempt.request.initial_session_id == session_id
         });
     let candidate = candidates.next().cloned();
@@ -4569,6 +4635,11 @@ pub fn prepare_generation_takeover(
                 invalid_generation_data("execution generation ledger current id is missing")
             })?
             .clone();
+        if current_generation_has_prepared_manual_successor(&ledger, &current) {
+            return Err(generation_conflict(
+                "a Prepared manual launch successor already fences this execution takeover",
+            ));
+        }
         let predecessor_head_hash = effective_generation_head_hash(&ledger, &current);
         // Validate the exact Active owner and deterministic post-takeover
         // projection before persisting a Prepared audit entry.
@@ -5095,6 +5166,85 @@ pub fn prepare_fresh_linked_owner_launch_successor(
     )
 }
 
+/// Prepare one successor for a user-initiated linked-owner launch after the
+/// exact observed holder has been proven terminal while the owner write lease
+/// is held. The current generation remains authoritative until the candidate
+/// Session authenticates and activates through the ordinary successor CAS.
+pub fn prepare_manual_linked_owner_launch_successor<F>(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+    expected_session_id: &str,
+    expected_binding: &gwt_agent::ExecutionBindingIdentity,
+    still_terminal_guard: F,
+) -> io::Result<ContinuationAttempt>
+where
+    F: FnOnce() -> io::Result<bool>,
+{
+    if request.source != MANUAL_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
+        return Err(invalid_generation_data(
+            "manual linked-owner launch successor must use the canonical source without a Continue Work identity",
+        ));
+    }
+    validate_successor_request(request)?;
+    with_generation_owner_lease(worktree, owner, |context| {
+        let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let predecessor = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        let current_binding = execution_binding_for_generation(&ledger, &predecessor);
+        if predecessor.identity.initial_session_id != expected_session_id
+            || current_binding != *expected_binding
+        {
+            return Err(generation_conflict(
+                "manual launch predecessor changed before terminal recovery",
+            ));
+        }
+
+        let predecessor_head = effective_generation_head_hash(&ledger, &predecessor);
+        let mut latest_operation_ids = std::collections::HashSet::new();
+        if ledger.continuation_attempts.iter().rev().any(|attempt| {
+            latest_operation_ids.insert(attempt.request.operation_id.as_str())
+                && attempt.request.operation_id != request.operation_id
+                && attempt.status == ContinuationAttemptStatus::Prepared
+                && attempt.predecessor == predecessor.identity
+                && attempt.predecessor_generation_content_hash == predecessor_head
+        }) {
+            return Err(generation_conflict(
+                "another Prepared successor already owns this generation transition",
+            ));
+        }
+        if current_generation_has_prepared_takeover(&ledger, &predecessor) {
+            return Err(generation_conflict(
+                "a Prepared same-generation takeover already owns this generation transition",
+            ));
+        }
+
+        let predecessor_status = match ledger.effective_status_for(&predecessor) {
+            ExecutionControlStatus::Active => SuccessorPredecessorStatus::Active,
+            ExecutionControlStatus::Completed => SuccessorPredecessorStatus::Completed,
+            ExecutionControlStatus::Blocked => SuccessorPredecessorStatus::Blocked,
+        };
+        if predecessor_status == SuccessorPredecessorStatus::Active && !still_terminal_guard()? {
+            return Err(generation_conflict(
+                "manual launch holder is no longer terminal",
+            ));
+        }
+        let attempt = plan_successor_for_status(context, &mut ledger, request, predecessor_status)?;
+        stamp_generation_ledger(&mut ledger);
+        write_owner_ledger(context, &ledger)?;
+        Ok(attempt)
+    })
+}
+
 fn successor_predecessor_execution_status(
     status: SuccessorPredecessorStatus,
 ) -> ExecutionControlStatus {
@@ -5152,6 +5302,11 @@ fn plan_successor_for_status(
             invalid_generation_data("execution generation ledger current id is missing")
         })?
         .clone();
+    if current_generation_has_prepared_manual_successor(ledger, &predecessor) {
+        return Err(generation_conflict(
+            "a Prepared manual launch successor already owns this generation transition",
+        ));
+    }
     let expected_status = successor_predecessor_execution_status(predecessor_status);
     if ledger.effective_status_for(&predecessor) != expected_status {
         return Err(generation_conflict(match predecessor_status {
@@ -6278,6 +6433,11 @@ where
                 invalid_generation_data("execution generation ledger current id is missing")
             })?
             .clone();
+        if current_generation_has_prepared_manual_successor(&ledger, &current) {
+            return Err(generation_conflict(
+                "a Prepared manual launch successor already fences this execution lifecycle",
+            ));
+        }
         if current.identity.worktree_binding_hash != context.worktree_binding_hash {
             return Err(generation_conflict(
                 "current execution generation is bound to a different worktree",
@@ -6414,6 +6574,11 @@ fn persist_generation_takeover_if_owned_with_session(
                 invalid_generation_data("execution generation ledger current id is missing")
             })?
             .clone();
+        if current_generation_has_prepared_manual_successor(&ledger, &current) {
+            return Err(generation_conflict(
+                "a Prepared manual launch successor already fences this ownership transfer",
+            ));
+        }
         let prior_projection = serde_json::from_str::<ExecutionControlRecord>(
             ledger.effective_projection_for(&current),
         )
@@ -10414,6 +10579,625 @@ mod tests {
             "session-original",
             "prepare must not publish the successor before activation"
         );
+    }
+
+    fn initialize_manual_launch_predecessor(
+        worktree: &Path,
+        owner: ExecutionOwnerKey,
+        session_id: &str,
+        status: ExecutionControlStatus,
+    ) -> gwt_agent::ExecutionBindingIdentity {
+        let mut predecessor = active_record(session_id);
+        predecessor.owner_number = owner.number;
+        predecessor.status = status;
+        match status {
+            ExecutionControlStatus::Active => {}
+            ExecutionControlStatus::Completed => predecessor.settled_at = Some(Utc::now()),
+            ExecutionControlStatus::Blocked => {
+                predecessor.blocked_reason = Some("terminal holder".to_string());
+                predecessor.settled_at = Some(Utc::now());
+            }
+        }
+        save(worktree, &predecessor).unwrap();
+        ensure_generation_ledger(
+            worktree,
+            owner,
+            if status == ExecutionControlStatus::Active {
+                LegacyActiveDisposition::Live
+            } else {
+                LegacyActiveDisposition::Unknown
+            },
+        )
+        .unwrap();
+        current_execution_binding(worktree, owner)
+            .unwrap()
+            .expect("manual launch predecessor binding")
+    }
+
+    fn manual_launch_successor_request(operation_id: &str) -> SuccessorRequest {
+        successor_request(
+            operation_id,
+            "gwt-host-launch",
+            MANUAL_LINKED_OWNER_LAUNCH_SOURCE,
+        )
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_prepares_exact_terminal_active_predecessor_without_advancing_it()
+    {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_binding = initialize_manual_launch_predecessor(
+            dir.path(),
+            owner,
+            "session-terminal-active",
+            ExecutionControlStatus::Active,
+        );
+        let before = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        let request = manual_launch_successor_request("manual-terminal-active");
+        let owner_lease_acquired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let lease_hook_flag = owner_lease_acquired.clone();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            lease_hook_flag.set(true);
+        });
+        let guard_flag = owner_lease_acquired.clone();
+
+        let prepared = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &request,
+            "session-terminal-active",
+            &predecessor_binding,
+            || {
+                assert!(
+                    guard_flag.get(),
+                    "terminal liveness must be rechecked while the owner lease is held",
+                );
+                Ok(true)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
+        assert_eq!(
+            prepared.predecessor_status,
+            SuccessorPredecessorStatus::Active
+        );
+        assert_eq!(prepared.request.source, MANUAL_LINKED_OWNER_LAUNCH_SOURCE);
+        let after = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(after.generations, before.generations);
+        assert_eq!(after.current_generation_id, before.current_generation_id);
+        assert_eq!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(predecessor_binding.clone()),
+            "Prepared must not publish the manual-launch successor before activation",
+        );
+        assert!(manual_successor_fences_current_execution(dir.path(), owner).unwrap());
+        assert!(
+            !current_active_execution_binding_matches(
+                dir.path(),
+                owner,
+                "session-terminal-active",
+                &predecessor_binding,
+            )
+            .unwrap(),
+            "Prepared manual recovery must fence predecessor mutations before activation",
+        );
+        let competing = successor_request(
+            "continuation-after-manual",
+            "gwt-host-continuation",
+            "execution-continue",
+        );
+        assert_eq!(
+            prepare_active_continuation_successor(dir.path(), owner, &competing)
+                .expect_err("manual Prepared must exclude later continuation successors")
+                .kind(),
+            ErrorKind::AlreadyExists,
+        );
+        let rebound_binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-terminal-active".to_string(),
+            repo_hash: "repo-hash".to_string(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: predecessor_binding,
+            capability_generation: 1,
+        };
+        assert_eq!(
+            record_rebound_continuation_validation(
+                dir.path(),
+                owner,
+                "rebound-after-manual",
+                "session-terminal-active",
+                &rebound_binding,
+            )
+            .expect_err("manual Prepared must exclude rebound validation")
+            .kind(),
+            ErrorKind::AlreadyExists,
+        );
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_revival_guard_refuses_without_mutating_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_binding = initialize_manual_launch_predecessor(
+            dir.path(),
+            owner,
+            "session-revived",
+            ExecutionControlStatus::Active,
+        );
+        let request = manual_launch_successor_request("manual-revived");
+        let authority_before = generation_authority_bytes(dir.path(), owner);
+
+        let error = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &request,
+            "session-revived",
+            &predecessor_binding,
+            || Ok(false),
+        )
+        .expect_err("a holder that revived under the owner lease must win");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            authority_before,
+            "a failed terminal recheck must leave zero durable mutation",
+        );
+
+        let guard_error = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &manual_launch_successor_request("manual-terminal-guard-error"),
+            "session-revived",
+            &predecessor_binding,
+            || Err(io::Error::other("terminal liveness could not be rechecked")),
+        )
+        .expect_err("an inconclusive terminal recheck must fail closed");
+        assert!(
+            guard_error
+                .to_string()
+                .contains("terminal liveness could not be rechecked"),
+            "{guard_error}",
+        );
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            authority_before,
+            "a terminal guard error must leave zero durable mutation",
+        );
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_fences_lifecycle_until_the_attempt_is_aborted() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let active_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(active_dir.path());
+        let owner = generation_owner();
+        let active_binding = initialize_manual_launch_predecessor(
+            active_dir.path(),
+            owner,
+            "session-lifecycle-active",
+            ExecutionControlStatus::Active,
+        );
+        let active_request = manual_launch_successor_request("manual-lifecycle-active");
+        prepare_manual_linked_owner_launch_successor(
+            active_dir.path(),
+            owner,
+            &active_request,
+            "session-lifecycle-active",
+            &active_binding,
+            || Ok(true),
+        )
+        .unwrap();
+        let fenced_active = generation_authority_bytes(active_dir.path(), owner);
+
+        let settle_error = settle(
+            active_dir.path(),
+            "session-lifecycle-active",
+            ExecutionSettlement::Completed,
+        )
+        .expect_err("a Prepared manual successor must fence predecessor settlement");
+        assert_eq!(settle_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(active_dir.path(), owner),
+            fenced_active,
+            "a fenced lifecycle writer must leave generation authority unchanged",
+        );
+        abort_successor(
+            active_dir.path(),
+            owner,
+            &active_request,
+            "candidate launch was cancelled",
+        )
+        .unwrap();
+        assert!(matches!(
+            settle(
+                active_dir.path(),
+                "session-lifecycle-active",
+                ExecutionSettlement::Completed,
+            )
+            .unwrap(),
+            SettleResult::Settled(_)
+        ));
+
+        let blocked_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(blocked_dir.path());
+        let blocked_owner = ExecutionOwnerKey {
+            kind: owner.kind,
+            number: owner.number + 1,
+        };
+        let blocked_binding = initialize_manual_launch_predecessor(
+            blocked_dir.path(),
+            blocked_owner,
+            "session-lifecycle-blocked",
+            ExecutionControlStatus::Blocked,
+        );
+        let blocked_request = manual_launch_successor_request("manual-lifecycle-blocked");
+        prepare_manual_linked_owner_launch_successor(
+            blocked_dir.path(),
+            blocked_owner,
+            &blocked_request,
+            "session-lifecycle-blocked",
+            &blocked_binding,
+            || Ok(false),
+        )
+        .unwrap();
+        let fenced_blocked = generation_authority_bytes(blocked_dir.path(), blocked_owner);
+        let mut recovery = load(blocked_dir.path()).unwrap().unwrap();
+        recovery.status = ExecutionControlStatus::Active;
+        recovery.blocked_reason = None;
+        recovery.settled_at = None;
+        recovery
+            .recoveries
+            .push(test_recovery("session-lifecycle-blocked", 1));
+
+        let recovery_error = persist_generation_lifecycle_transition_if_owned(
+            blocked_dir.path(),
+            &recovery,
+            ExecutionControlStatus::Blocked,
+            "test blocked recovery",
+        )
+        .expect_err("a Prepared manual successor must fence predecessor recovery");
+        assert_eq!(recovery_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(blocked_dir.path(), blocked_owner),
+            fenced_blocked,
+            "a fenced recovery writer must leave generation authority unchanged",
+        );
+        abort_successor(
+            blocked_dir.path(),
+            blocked_owner,
+            &blocked_request,
+            "candidate launch was cancelled",
+        )
+        .unwrap();
+        assert!(persist_generation_lifecycle_transition_if_owned(
+            blocked_dir.path(),
+            &recovery,
+            ExecutionControlStatus::Blocked,
+            "test blocked recovery",
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_and_same_generation_takeover_are_mutually_exclusive() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let manual_first = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(manual_first.path());
+        let owner = generation_owner();
+        let binding = initialize_manual_launch_predecessor(
+            manual_first.path(),
+            owner,
+            "session-manual-first",
+            ExecutionControlStatus::Active,
+        );
+        prepare_manual_linked_owner_launch_successor(
+            manual_first.path(),
+            owner,
+            &manual_launch_successor_request("manual-before-takeover"),
+            "session-manual-first",
+            &binding,
+            || Ok(true),
+        )
+        .unwrap();
+        let mut takeover = takeover_request("takeover-after-manual");
+        takeover.from_session_id = "session-manual-first".to_string();
+        assert_eq!(
+            prepare_generation_takeover(manual_first.path(), owner, &takeover)
+                .expect_err("manual Prepared must fence later same-generation takeover")
+                .kind(),
+            ErrorKind::AlreadyExists,
+        );
+
+        let takeover_first = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(takeover_first.path());
+        let takeover_owner = ExecutionOwnerKey {
+            kind: owner.kind,
+            number: owner.number + 2,
+        };
+        let takeover_binding = initialize_manual_launch_predecessor(
+            takeover_first.path(),
+            takeover_owner,
+            "session-takeover-first",
+            ExecutionControlStatus::Active,
+        );
+        let mut prepared_takeover = takeover_request("takeover-before-manual");
+        prepared_takeover.from_session_id = "session-takeover-first".to_string();
+        prepare_generation_takeover(takeover_first.path(), takeover_owner, &prepared_takeover)
+            .unwrap();
+        assert_eq!(
+            prepare_manual_linked_owner_launch_successor(
+                takeover_first.path(),
+                takeover_owner,
+                &manual_launch_successor_request("manual-after-takeover"),
+                "session-takeover-first",
+                &takeover_binding,
+                || Ok(true),
+            )
+            .expect_err("same-generation Prepared takeover must fence later manual recovery")
+            .kind(),
+            ErrorKind::AlreadyExists,
+        );
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_rejects_foreign_session_and_stale_binding_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_binding = initialize_manual_launch_predecessor(
+            dir.path(),
+            owner,
+            "session-exact",
+            ExecutionControlStatus::Active,
+        );
+        let authority_before = generation_authority_bytes(dir.path(), owner);
+
+        let foreign_error = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &manual_launch_successor_request("manual-foreign-session"),
+            "session-foreign",
+            &predecessor_binding,
+            || Ok(true),
+        )
+        .expect_err("a foreign holder Session must not be fenced");
+        assert_eq!(foreign_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            authority_before
+        );
+
+        let mut stale_binding = predecessor_binding;
+        stale_binding.ledger_head_hash.push_str("-stale");
+        let stale_error = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &manual_launch_successor_request("manual-stale-binding"),
+            "session-exact",
+            &stale_binding,
+            || Ok(true),
+        )
+        .expect_err("a stale predecessor binding must not be fenced");
+        assert_eq!(stale_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            authority_before,
+            "failed exact fences must leave zero durable mutation",
+        );
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_ignores_aborted_attempt_but_rejects_live_prepared_attempt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_binding = initialize_manual_launch_predecessor(
+            dir.path(),
+            owner,
+            "session-attempts",
+            ExecutionControlStatus::Active,
+        );
+        let first = manual_launch_successor_request("manual-aborted");
+        prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &first,
+            "session-attempts",
+            &predecessor_binding,
+            || Ok(true),
+        )
+        .unwrap();
+        abort_successor(dir.path(), owner, &first, "candidate did not become ready").unwrap();
+
+        let second = manual_launch_successor_request("manual-after-abort");
+        let prepared = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &second,
+            "session-attempts",
+            &predecessor_binding,
+            || Ok(true),
+        )
+        .expect("a terminal Aborted attempt must not block a later manual launch");
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
+        let authority_with_live_prepare = generation_authority_bytes(dir.path(), owner);
+
+        let error = prepare_manual_linked_owner_launch_successor(
+            dir.path(),
+            owner,
+            &manual_launch_successor_request("manual-competing-live-prepare"),
+            "session-attempts",
+            &predecessor_binding,
+            || Ok(true),
+        )
+        .expect_err("one live Prepared manual successor must retain exclusivity");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            authority_with_live_prepare,
+        );
+    }
+
+    #[test]
+    fn concurrent_manual_linked_owner_launch_has_exactly_one_prepared_winner() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let predecessor_binding = initialize_manual_launch_predecessor(
+            dir.path(),
+            owner,
+            "session-concurrent-manual",
+            ExecutionControlStatus::Active,
+        );
+        let worktree = dir.path().to_path_buf();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut joins = Vec::new();
+        for index in 0..2 {
+            let worktree = worktree.clone();
+            let start = start.clone();
+            let binding = predecessor_binding.clone();
+            joins.push(std::thread::spawn(move || {
+                let request =
+                    manual_launch_successor_request(&format!("manual-concurrent-{index}"));
+                start.wait();
+                prepare_manual_linked_owner_launch_successor(
+                    &worktree,
+                    owner,
+                    &request,
+                    "session-concurrent-manual",
+                    &binding,
+                    || Ok(true),
+                )
+            }));
+        }
+
+        let results = joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == ErrorKind::AlreadyExists))
+                .count(),
+            1,
+        );
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(
+            ledger
+                .continuation_attempts
+                .iter()
+                .filter(|attempt| attempt.status == ContinuationAttemptStatus::Prepared)
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn manual_linked_owner_launch_accepts_exact_completed_and_blocked_predecessors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        for (index, status, expected) in [
+            (
+                0,
+                ExecutionControlStatus::Completed,
+                SuccessorPredecessorStatus::Completed,
+            ),
+            (
+                1,
+                ExecutionControlStatus::Blocked,
+                SuccessorPredecessorStatus::Blocked,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                number: generation_owner().number + index,
+                ..generation_owner()
+            };
+            let session_id = format!("session-manual-{status:?}");
+            let predecessor_binding =
+                initialize_manual_launch_predecessor(dir.path(), owner, &session_id, status);
+            let before = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+            let prepared = prepare_manual_linked_owner_launch_successor(
+                dir.path(),
+                owner,
+                &manual_launch_successor_request(&format!("manual-status-{index}")),
+                &session_id,
+                &predecessor_binding,
+                || Ok(false),
+            )
+            .expect("a terminal ledger status must not depend on stale Session liveness");
+
+            assert_eq!(prepared.predecessor_status, expected);
+            let after = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+            assert_eq!(after.generations, before.generations);
+            assert_eq!(after.current_generation_id, before.current_generation_id);
+        }
     }
 
     #[test]

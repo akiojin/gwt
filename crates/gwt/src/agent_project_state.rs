@@ -705,6 +705,14 @@ pub fn continue_authenticated_execution(
         exact_unbound,
         current_binding,
     } = authority;
+    if crate::cli::execution_state::manual_successor_fences_current_execution(&worktree, owner)
+        .map_err(|_| execution_binding_error("execution_manual_successor_fence_unreadable"))?
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::TransactionConflict,
+            "a Prepared manual launch successor already fences this execution",
+        ));
+    }
 
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
         &worktree,

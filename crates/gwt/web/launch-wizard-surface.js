@@ -933,6 +933,54 @@ export function createLaunchWizardSurface({
           wizardError.textContent = "";
         }
 
+        const generationConflict = launchWizard.generation_conflict;
+        if (generationConflict) {
+          const conflictPending = Boolean(launchWizardPendingAction);
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = true;
+          wizardSubmitButton.hidden = true;
+          wizardSubmitButton.disabled = true;
+          wizardCancelButton.disabled = conflictPending;
+
+          const conflictPanel = createNode("div", "launch-panel");
+          conflictPanel.appendChild(
+            createNode("div", "launch-note", generationConflict.holder_label),
+          );
+          conflictPanel.appendChild(
+            createNode("div", "launch-note", generationConflict.detail),
+          );
+          const conflictActions = createNode("div", "launch-form-grid");
+          const appendConflictAction = (label, kind, enabled) => {
+            const button = createNode("button", "wizard-button", label);
+            button.type = "button";
+            button.disabled = conflictPending || !enabled;
+            button.addEventListener("click", () => {
+              if (launchWizardPendingAction || button.disabled) return;
+              setLaunchWizardPendingAction({ kind });
+              sendWizardAction({ kind });
+            });
+            conflictActions.appendChild(button);
+          };
+          appendConflictAction(
+            "Move to existing pane",
+            "focus_generation_holder",
+            generationConflict.can_focus,
+          );
+          appendConflictAction(
+            "Stop and start successor",
+            "stop_and_start_generation_successor",
+            generationConflict.can_stop_and_start,
+          );
+          conflictPanel.appendChild(conflictActions);
+          wizardBody.appendChild(conflictPanel);
+          if (!conflictPending && typeof wizardCancelButton.focus === "function") {
+            queueMicrotask(() => wizardCancelButton.focus({ preventScroll: true }));
+          }
+          return;
+        }
+
         renderWizardSummary();
         // SPEC-2014 FR-126/FR-127 — the backend now drives four mutually
         // exclusive wizard phases through dedicated flags:

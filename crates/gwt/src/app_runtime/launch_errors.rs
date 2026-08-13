@@ -65,6 +65,10 @@ impl AppRuntime {
             | gwt::LaunchWizardAction::SelectLiveSession { .. }
             | gwt::LaunchWizardAction::UseStartMethod { .. } => "launch_path_select",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::FocusGenerationHolder => "focus_generation_holder",
+            gwt::LaunchWizardAction::StopAndStartGenerationSuccessor => {
+                "stop_and_start_generation_successor"
+            }
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
             gwt::LaunchWizardAction::Select { .. } => "wizard_select",
@@ -77,6 +81,10 @@ impl AppRuntime {
             gwt::LaunchWizardAction::Select { .. } => "select",
             gwt::LaunchWizardAction::Back => "back",
             gwt::LaunchWizardAction::Cancel => "cancel",
+            gwt::LaunchWizardAction::FocusGenerationHolder => "focus_generation_holder",
+            gwt::LaunchWizardAction::StopAndStartGenerationSuccessor => {
+                "stop_and_start_generation_successor"
+            }
             gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
             gwt::LaunchWizardAction::UseStartMethod { .. } => "use_start_method",

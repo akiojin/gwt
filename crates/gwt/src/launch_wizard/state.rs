@@ -470,6 +470,12 @@ impl LaunchWizardState {
             LaunchWizardAction::Cancel => {
                 self.completion = Some(LaunchWizardCompletion::Cancelled);
             }
+            LaunchWizardAction::FocusGenerationHolder
+            | LaunchWizardAction::StopAndStartGenerationSuccessor => {
+                // These actions consume server-held generation authority in
+                // AppRuntime. The public wizard state deliberately has no
+                // generation/session/window identifiers to apply here.
+            }
             LaunchWizardAction::Submit => {
                 self.submit_panel();
             }

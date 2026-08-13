@@ -10,7 +10,10 @@ use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
-    session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
+    session::{
+        ExecutionBindingIdentity, SessionExecutionBinding, ToolRuntimeProvenance,
+        GWT_SESSION_RUNTIME_PATH_ENV,
+    },
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
@@ -518,6 +521,12 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
 /// Execution lifecycle intent is independent from provider conversation
 /// continuity. In particular, `SessionMode::Resume` can resume the same
 /// conversation while a coordinator starts a new producing generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualExecutionSuccessorIntent {
+    pub holder_session_id: String,
+    pub predecessor_binding: ExecutionBindingIdentity,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ExecutionLaunchIntent {
     /// Launch without a pre-authorized producing binding. The launch path
@@ -529,6 +538,10 @@ pub enum ExecutionLaunchIntent {
     /// Launch a producing continuation already authorized by the execution
     /// coordinator. The binding is installed atomically at Session bootstrap.
     PreparedContinuation(SessionExecutionBinding),
+    /// User-approved recovery of an exact terminal linked-owner holder. The
+    /// Host rechecks this opaque fence under the owner lease before preparing
+    /// a successor; it is never accepted from a browser payload.
+    ManualSuccessor(ManualExecutionSuccessorIntent),
 }
 
 /// Reuse a fresh Bun-created package executable for a host launch.

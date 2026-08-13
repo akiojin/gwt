@@ -100,20 +100,20 @@ use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
-    resolve_shell_launch_worktree, save_shell_work_projection, session_exact_resume_materializable,
-    synthetic_branch_entry, workspace_projection_for_current_resume,
-    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
-    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
-    workspace_resume_context_from_projection, workspace_resume_owner_issue_number,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DispatchTarget,
-    IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext, LaunchFeedbackContext,
-    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus,
-    WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    resolve_launch_worktree, resolve_shell_launch_worktree, save_shell_work_projection,
+    session_exact_resume_materializable, synthetic_branch_entry,
+    workspace_projection_for_current_resume, workspace_resume_branch_exists,
+    workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
+    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
+    workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
+    BackendEvent, DispatchTarget, IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
 impl AppRuntime {
-    fn launch_wizard_view_for_session(session: &LaunchWizardSession) -> LaunchWizardView {
+    fn launch_wizard_view_for_session(&self, session: &LaunchWizardSession) -> LaunchWizardView {
         let mut view = session.wizard.view();
         if session.issue_monitor_profile_save.is_some() {
             view.title = "Configure Issue Monitor".to_string();
@@ -123,6 +123,11 @@ impl AppRuntime {
                 view.primary_action_label = "Save settings".to_string();
             }
         }
+        view.generation_conflict = self
+            .pending_manual_launch_generation_conflict
+            .as_ref()
+            .filter(|pending| pending.wizard_id == session.wizard_id)
+            .map(|pending| pending.view.clone());
         view
     }
 
@@ -131,7 +136,7 @@ impl AppRuntime {
             wizard: self
                 .launch_wizard
                 .as_ref()
-                .map(|wizard| Box::new(Self::launch_wizard_view_for_session(wizard))),
+                .map(|wizard| Box::new(self.launch_wizard_view_for_session(wizard))),
         })
     }
 
@@ -146,6 +151,7 @@ impl AppRuntime {
 
     #[cfg(test)]
     pub(crate) fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
+        self.pending_manual_launch_generation_conflict = None;
         self.launch_wizard.take()
     }
 
@@ -2540,6 +2546,218 @@ impl AppRuntime {
         self.handle_launch_wizard_action_for_client(None, action, bounds)
     }
 
+    fn spawn_launch_wizard_agent(
+        &mut self,
+        session: &LaunchWizardSession,
+        client_id: Option<String>,
+        config: gwt_agent::LaunchConfig,
+        bounds: WindowGeometry,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        let issue_monitor_project_root = session
+            .issue_monitor_launch_issue_number
+            .and_then(|_| self.tab(&session.tab_id))
+            .map(|tab| tab.project_root.clone());
+        let workspace_resume_context = session.workspace_resume_context.clone();
+        let launch_feedback_context = client_id.map(|client_id| LaunchFeedbackContext {
+            client_id,
+            title: if session.wizard.wizard_mode == gwt::LaunchWizardMode::StartWork {
+                "Start Work".to_string()
+            } else {
+                "Launch Agent".to_string()
+            },
+            issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root,
+        });
+        if let Some(target) = session.agent_kanban_target.clone() {
+            self.spawn_agent_window_in_agent_kanban(
+                &session.tab_id,
+                config,
+                bounds,
+                workspace_resume_context,
+                launch_feedback_context,
+                target,
+            )
+        } else if let Some(launch_feedback_context) = launch_feedback_context {
+            self.spawn_agent_window_with_feedback(
+                &session.tab_id,
+                config,
+                bounds,
+                workspace_resume_context,
+                launch_feedback_context,
+            )
+        } else {
+            self.spawn_agent_window(&session.tab_id, config, bounds, workspace_resume_context)
+        }
+    }
+
+    fn manual_launch_holder_label(&self, session_id: &str) -> String {
+        gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+            .ok()
+            .map(|session| {
+                if session.display_name.trim().is_empty() {
+                    session.agent_id.command().to_string()
+                } else {
+                    session.display_name
+                }
+            })
+            .unwrap_or_else(|| "Existing agent".to_string())
+    }
+
+    fn set_manual_launch_generation_conflict(
+        &mut self,
+        session: &mut LaunchWizardSession,
+        client_id: Option<String>,
+        config: gwt_agent::LaunchConfig,
+        bounds: WindowGeometry,
+        owner: gwt::cli::execution_state::ExecutionOwnerKey,
+        observed: super::launch::ManualLaunchGenerationPreflight,
+    ) {
+        let (holder_session_id, predecessor_binding, window_id) = match observed {
+            super::launch::ManualLaunchGenerationPreflight::LiveLocal {
+                holder_session_id,
+                predecessor_binding,
+                window_id,
+            } => (holder_session_id, predecessor_binding, Some(window_id)),
+            super::launch::ManualLaunchGenerationPreflight::Unknown {
+                holder_session_id,
+                predecessor_binding,
+            } => (holder_session_id, predecessor_binding, None),
+            _ => return,
+        };
+        let local = window_id.is_some();
+        let detail = if local {
+            "This work already has a live execution holder. Move to it, or stop it before starting a successor."
+        } else {
+            "Holder liveness cannot be proven from this app instance. Recovery is disabled until the holder becomes terminal or locally reachable."
+        };
+        let holder_label = self.manual_launch_holder_label(&holder_session_id);
+        self.pending_manual_launch_generation_conflict =
+            Some(super::PendingManualLaunchGenerationConflict {
+                wizard_id: session.wizard_id.clone(),
+                client_id,
+                config,
+                bounds,
+                owner,
+                holder_session_id,
+                predecessor_binding,
+                window_id,
+                view: gwt::LaunchWizardGenerationConflictView {
+                    holder_label,
+                    detail: detail.to_string(),
+                    can_focus: local,
+                    can_stop_and_start: local,
+                },
+            });
+        session.wizard.clear_launch_materialization_pending();
+        session.wizard.error = None;
+    }
+
+    fn handle_manual_launch_generation_conflict_action(
+        &mut self,
+        mut session: LaunchWizardSession,
+        action: gwt::LaunchWizardAction,
+    ) -> Vec<OutboundEvent> {
+        let Some(mut pending) = self.pending_manual_launch_generation_conflict.take() else {
+            session.wizard.error = Some("Launch generation conflict expired".to_string());
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        };
+        if pending.wizard_id != session.wizard_id {
+            self.pending_manual_launch_generation_conflict = Some(pending);
+            session.wizard.error = Some("Launch generation conflict expired".to_string());
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        }
+        let Some(worktree) = pending.config.working_dir.clone() else {
+            session.wizard.error = Some("Resolved launch worktree is missing".to_string());
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        };
+        let observed = self.manual_launch_generation_preflight(&worktree, pending.owner);
+        let exact_window = match observed {
+            super::launch::ManualLaunchGenerationPreflight::LiveLocal {
+                holder_session_id,
+                predecessor_binding,
+                window_id,
+            } if holder_session_id == pending.holder_session_id
+                && predecessor_binding == pending.predecessor_binding
+                && pending.window_id.as_deref() == Some(window_id.as_str()) =>
+            {
+                Some(window_id)
+            }
+            _ => None,
+        };
+        let Some(window_id) = exact_window else {
+            pending.view.can_focus = false;
+            pending.view.can_stop_and_start = false;
+            pending.view.detail =
+                "The observed holder changed. Recovery is disabled; reopen Launch Agent to refresh authority."
+                    .to_string();
+            self.pending_manual_launch_generation_conflict = Some(pending);
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        };
+
+        match action {
+            gwt::LaunchWizardAction::FocusGenerationHolder => {
+                let mut events = self.focus_existing_live_work_agent_events(&window_id, None);
+                events.push(self.launch_wizard_state_broadcast(None));
+                events
+            }
+            gwt::LaunchWizardAction::StopAndStartGenerationSuccessor => {
+                let mut events = self.stop_window_events(&window_id);
+                let terminal = self.manual_launch_generation_preflight(&worktree, pending.owner);
+                if !matches!(
+                    terminal,
+                    super::launch::ManualLaunchGenerationPreflight::Terminal {
+                        holder_session_id,
+                        predecessor_binding,
+                        ..
+                    } if holder_session_id == pending.holder_session_id
+                        && predecessor_binding == pending.predecessor_binding
+                ) {
+                    session.wizard.error = Some(
+                        "The stopped holder could not be proven terminal; no successor was started"
+                            .to_string(),
+                    );
+                    self.launch_wizard = Some(session);
+                    events.push(self.launch_wizard_state_outbound());
+                    return events;
+                }
+                pending.config.execution_intent = gwt_agent::ExecutionLaunchIntent::ManualSuccessor(
+                    gwt_agent::ManualExecutionSuccessorIntent {
+                        holder_session_id: pending.holder_session_id,
+                        predecessor_binding: pending.predecessor_binding,
+                    },
+                );
+                match self.spawn_launch_wizard_agent(
+                    &session,
+                    pending.client_id,
+                    pending.config,
+                    pending.bounds,
+                ) {
+                    Ok(spawn_events) => {
+                        events.push(self.launch_wizard_state_broadcast(None));
+                        events.extend(spawn_events);
+                        events
+                    }
+                    Err(error) => {
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        events.push(self.launch_wizard_state_outbound());
+                        events
+                    }
+                }
+            }
+            _ => {
+                self.pending_manual_launch_generation_conflict = Some(pending);
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
+            }
+        }
+    }
+
     pub(crate) fn handle_launch_wizard_action_for_client(
         &mut self,
         client_id: Option<&str>,
@@ -2549,6 +2767,29 @@ impl AppRuntime {
         let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
         };
+        if self
+            .pending_manual_launch_generation_conflict
+            .as_ref()
+            .is_some_and(|pending| pending.wizard_id != session.wizard_id)
+        {
+            self.pending_manual_launch_generation_conflict = None;
+        }
+        if matches!(
+            action,
+            gwt::LaunchWizardAction::FocusGenerationHolder
+                | gwt::LaunchWizardAction::StopAndStartGenerationSuccessor
+        ) {
+            return self.handle_manual_launch_generation_conflict_action(session, action);
+        }
+        if self.pending_manual_launch_generation_conflict.is_some()
+            && !matches!(action, gwt::LaunchWizardAction::Cancel)
+        {
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        }
+        if matches!(action, gwt::LaunchWizardAction::Cancel) {
+            self.pending_manual_launch_generation_conflict = None;
+        }
         let action_stage = Self::launch_wizard_action_error_stage(&action);
         let action_label = Self::launch_wizard_action_label(&action);
         let requested_agent_id = match &action {
@@ -2710,6 +2951,87 @@ impl AppRuntime {
         config: LaunchWizardLaunchRequest,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        let manual_interactive = self
+            .launch_wizard
+            .as_ref()
+            .filter(|session| session.wizard_id == wizard_id)
+            .is_some_and(|session| session.issue_monitor_launch_issue_number.is_none());
+        let requires_manual_worktree_resolution = manual_interactive
+            && matches!(
+                &config,
+                LaunchWizardLaunchRequest::Agent(config)
+                    if matches!(config.execution_intent, gwt_agent::ExecutionLaunchIntent::Automatic)
+                        && config.session_mode == gwt_agent::SessionMode::Normal
+                        && !config.is_ephemeral
+                        && !config.suppress_execution_control
+                        && config.linked_issue_number.is_some()
+                        && config.working_dir.is_none()
+            );
+        if requires_manual_worktree_resolution {
+            let Some(project_root) = self
+                .launch_wizard
+                .as_ref()
+                .filter(|session| session.wizard_id == wizard_id)
+                .and_then(|session| self.tab(&session.tab_id))
+                .map(|tab| tab.project_root.clone())
+            else {
+                return Vec::new();
+            };
+            let LaunchWizardLaunchRequest::Agent(mut config) = config else {
+                unreachable!("manual worktree resolution is Agent-only")
+            };
+            let proxy = self.proxy.clone();
+            thread::spawn(move || {
+                let result = resolve_launch_worktree(&project_root, &mut config).map(|()| *config);
+                proxy.send(UserEvent::LaunchWizardLaunchWorktreeResolved {
+                    wizard_id,
+                    client_id,
+                    config: Box::new(result),
+                    bounds,
+                });
+            });
+            return vec![self.launch_wizard_state_outbound()];
+        }
+        self.handle_resolved_launch_wizard_materialization(wizard_id, client_id, config, bounds)
+    }
+
+    pub(crate) fn handle_launch_wizard_launch_worktree_resolved(
+        &mut self,
+        wizard_id: String,
+        client_id: Option<String>,
+        config: Result<gwt_agent::LaunchConfig, String>,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        match config {
+            Ok(config) => self.handle_resolved_launch_wizard_materialization(
+                wizard_id,
+                client_id,
+                LaunchWizardLaunchRequest::Agent(Box::new(config)),
+                bounds,
+            ),
+            Err(error) => {
+                let Some(mut session) = self.launch_wizard.take() else {
+                    return Vec::new();
+                };
+                if session.wizard_id != wizard_id {
+                    self.launch_wizard = Some(session);
+                    return Vec::new();
+                }
+                session.wizard.clear_launch_materialization_pending();
+                session.wizard.error = Some(error);
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
+            }
+        }
+    }
+
+    fn handle_resolved_launch_wizard_materialization(
+        &mut self,
+        wizard_id: String,
+        client_id: Option<String>,
+        config: LaunchWizardLaunchRequest,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
         let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
         };
@@ -2717,54 +3039,110 @@ impl AppRuntime {
             self.launch_wizard = Some(session);
             return Vec::new();
         }
-        let issue_monitor_project_root = session
-            .issue_monitor_launch_issue_number
-            .and_then(|_| self.tab(&session.tab_id))
-            .map(|tab| tab.project_root.clone());
-
         match config {
             LaunchWizardLaunchRequest::Agent(config) => {
+                let mut config = *config;
                 let requested_agent_id = config.agent_id.command().to_string();
-                let workspace_resume_context = session.workspace_resume_context.clone();
-                let launch_feedback_context = client_id.map(|client_id| LaunchFeedbackContext {
-                    client_id,
-                    title: if session.wizard.wizard_mode == gwt::LaunchWizardMode::StartWork {
-                        "Start Work".to_string()
-                    } else {
-                        "Launch Agent".to_string()
-                    },
-                    issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
-                    issue_monitor_delivery_id: None,
-                    issue_monitor_project_root: issue_monitor_project_root.clone(),
-                });
-                let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
-                    self.spawn_agent_window_in_agent_kanban(
-                        &session.tab_id,
-                        *config,
-                        bounds,
-                        workspace_resume_context,
-                        launch_feedback_context,
-                        target,
+                let mut terminalization_events = Vec::new();
+                if session.issue_monitor_launch_issue_number.is_none()
+                    && matches!(
+                        &config.execution_intent,
+                        gwt_agent::ExecutionLaunchIntent::Automatic
                     )
-                } else if let Some(launch_feedback_context) = launch_feedback_context {
-                    self.spawn_agent_window_with_feedback(
-                        &session.tab_id,
-                        *config,
-                        bounds,
-                        workspace_resume_context,
-                        launch_feedback_context,
-                    )
-                } else {
-                    self.spawn_agent_window(
-                        &session.tab_id,
-                        *config,
-                        bounds,
-                        workspace_resume_context,
-                    )
-                };
+                    && config.session_mode == gwt_agent::SessionMode::Normal
+                    && !config.is_ephemeral
+                    && !config.suppress_execution_control
+                {
+                    if let (Some(worktree), Some(owner_number)) =
+                        (config.working_dir.as_deref(), config.linked_issue_number)
+                    {
+                        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+                            kind: gwt::cli::execution_state::detect_owner_kind(
+                                worktree,
+                                owner_number,
+                            ),
+                            number: owner_number,
+                        };
+                        match self.manual_launch_generation_preflight(worktree, owner) {
+                            super::launch::ManualLaunchGenerationPreflight::NoGeneration => {}
+                            super::launch::ManualLaunchGenerationPreflight::Terminal {
+                                holder_session_id,
+                                predecessor_binding,
+                                detail,
+                                local_window_id,
+                            } => {
+                                tracing::info!(
+                                    holder_session_id = %holder_session_id,
+                                    detail,
+                                    "manual Launch Agent is preparing a terminal-holder successor"
+                                );
+                                if let Some(window_id) = local_window_id {
+                                    terminalization_events.extend(self.stop_window_events(&window_id));
+                                    if !matches!(
+                                        self.manual_launch_generation_preflight(worktree, owner),
+                                        super::launch::ManualLaunchGenerationPreflight::Terminal {
+                                            holder_session_id: ref current_holder,
+                                            predecessor_binding: ref current_binding,
+                                            ..
+                                        } if current_holder == &holder_session_id
+                                            && current_binding == &predecessor_binding
+                                    ) {
+                                        session.wizard.clear_launch_materialization_pending();
+                                        session.wizard.error = Some(
+                                            "The terminal holder changed before recovery; no successor was started"
+                                                .to_string(),
+                                        );
+                                        self.launch_wizard = Some(session);
+                                        terminalization_events.push(self.launch_wizard_state_outbound());
+                                        return terminalization_events;
+                                    }
+                                }
+                                config.execution_intent =
+                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor(
+                                        gwt_agent::ManualExecutionSuccessorIntent {
+                                            holder_session_id,
+                                            predecessor_binding,
+                                        },
+                                    );
+                            }
+                            observed
+                            @ super::launch::ManualLaunchGenerationPreflight::LiveLocal {
+                                ..
+                            } => {
+                                self.set_manual_launch_generation_conflict(
+                                    &mut session,
+                                    client_id,
+                                    config,
+                                    bounds,
+                                    owner,
+                                    observed,
+                                );
+                                self.launch_wizard = Some(session);
+                                return vec![self.launch_wizard_state_outbound()];
+                            }
+                            observed
+                            @ super::launch::ManualLaunchGenerationPreflight::Unknown { .. } => {
+                                self.set_manual_launch_generation_conflict(
+                                    &mut session,
+                                    client_id,
+                                    config,
+                                    bounds,
+                                    owner,
+                                    observed,
+                                );
+                                self.launch_wizard = Some(session);
+                                return vec![self.launch_wizard_state_outbound()];
+                            }
+                        }
+                    }
+                }
+                let spawn_result =
+                    self.spawn_launch_wizard_agent(&session, client_id, config, bounds);
                 match spawn_result {
-                    Ok(mut events) => {
-                        events.insert(0, self.launch_wizard_state_broadcast(None));
+                    Ok(spawn_events) => {
+                        let mut events = terminalization_events;
+                        events.push(self.launch_wizard_state_broadcast(None));
+                        events.extend(spawn_events);
                         events
                     }
                     Err(error) => {
@@ -2778,7 +3156,8 @@ impl AppRuntime {
                         session.wizard.clear_launch_materialization_pending();
                         session.wizard.error = Some(error);
                         self.launch_wizard = Some(session);
-                        vec![self.launch_wizard_state_outbound()]
+                        terminalization_events.push(self.launch_wizard_state_outbound());
+                        terminalization_events
                     }
                 }
             }

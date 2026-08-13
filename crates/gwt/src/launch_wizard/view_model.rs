@@ -138,6 +138,7 @@ impl LaunchWizardState {
             launch_summary: self.launch_summary_view(),
             phase: self.current_phase(),
             error: self.error.clone(),
+            generation_conflict: None,
         }
     }
 

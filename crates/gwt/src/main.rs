@@ -1171,6 +1171,12 @@ enum UserEvent {
         config: Box<gwt::LaunchWizardLaunchRequest>,
         bounds: WindowGeometry,
     },
+    LaunchWizardLaunchWorktreeResolved {
+        wizard_id: String,
+        client_id: Option<ClientId>,
+        config: Box<Result<gwt_agent::LaunchConfig, String>>,
+        bounds: WindowGeometry,
+    },
     ProjectIndexStatus {
         project_root: String,
         status: gwt::ProjectIndexStatusView,
@@ -2661,6 +2667,7 @@ mod tests {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_manual_launch_generation_conflict: None,
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
@@ -8371,6 +8378,17 @@ fn main() -> std::io::Result<()> {
                 bounds,
             }) => {
                 let events = app.handle_launch_wizard_launch_materialization_requested(
+                    wizard_id, client_id, *config, bounds,
+                );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchWizardLaunchWorktreeResolved {
+                wizard_id,
+                client_id,
+                config,
+                bounds,
+            }) => {
+                let events = app.handle_launch_wizard_launch_worktree_resolved(
                     wizard_id, client_id, *config, bounds,
                 );
                 clients.dispatch(events);

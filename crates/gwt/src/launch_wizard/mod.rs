@@ -286,6 +286,14 @@ pub struct LaunchWizardProgressStepView {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardGenerationConflictView {
+    pub holder_label: String,
+    pub detail: String,
+    pub can_focus: bool,
+    pub can_stop_and_start: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
     pub mode: LaunchWizardMode,
@@ -383,6 +391,7 @@ pub struct LaunchWizardView {
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
     pub error: Option<String>,
+    pub generation_conflict: Option<LaunchWizardGenerationConflictView>,
 }
 
 #[derive(Debug, Clone)]
@@ -747,6 +756,8 @@ pub enum LaunchWizardAction {
     },
     Back,
     Cancel,
+    FocusGenerationHolder,
+    StopAndStartGenerationSuccessor,
     SubmitText {
         value: String,
     },
