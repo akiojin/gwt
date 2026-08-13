@@ -140,6 +140,7 @@ pub fn issue_monitor_daemon_payloads(
                     "branch_name": request.branch_name,
                     "linked_issue_kind": request.linked_issue_kind,
                     "delivery_id": delivery_id,
+                    "launch_session_strategy": request.launch_session_strategy,
                 }),
             });
             if request.delivery_id.is_none() {
