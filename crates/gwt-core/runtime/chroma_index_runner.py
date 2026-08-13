@@ -3694,13 +3694,14 @@ def _read_work_event_shard(path: Path) -> Optional[str]:
 
 
 def _work_event_shard_store_exists(shard_dir: Path) -> bool:
-    for managed_parent in (shard_dir.parent, shard_dir.parent.parent):
+    # Missing managed parents are the ordinary first-run/no-source case. Walk
+    # root-first so a symlinked `.gwt` is still rejected even when its target
+    # does not happen to contain `work/` yet.
+    for managed_parent in (shard_dir.parent.parent, shard_dir.parent):
         try:
             managed_parent_mode = managed_parent.lstat().st_mode
-        except FileNotFoundError as error:
-            raise ValueError(
-                f"Work event shard store parent is missing: {managed_parent}"
-            ) from error
+        except FileNotFoundError:
+            return False
         except OSError as error:
             raise ValueError(
                 f"failed to inspect Work event shard store parent: {managed_parent}"
@@ -3723,6 +3724,70 @@ def _work_event_shard_store_exists(shard_dir: Path) -> bool:
             f"Work event shard store must be a real directory: {shard_dir}"
         )
     return True
+
+
+def _enumerate_work_event_shards(shard_dir: Path) -> List[Path]:
+    """Return compatible flat and canonical two-hex-bucket shard paths.
+
+    W-33 flat shards remain immutable read inputs. New W-33b shards live at
+    ``<digest[:2]>/<digest>.jsonl``. Any other entry makes discovery
+    incomplete and therefore fails closed before index publication.
+    """
+    try:
+        entries = sorted(shard_dir.iterdir())
+    except OSError as error:
+        raise ValueError(
+            f"failed to enumerate Work event shards: {shard_dir}"
+        ) from error
+
+    shards: List[Path] = []
+    for entry in entries:
+        if _is_work_event_writer_temp_residue(entry):
+            continue
+        try:
+            mode = entry.lstat().st_mode
+        except OSError as error:
+            raise ValueError(f"failed to inspect Work event shard: {entry}") from error
+
+        if stat.S_ISREG(mode):
+            if re.fullmatch(r"[0-9a-f]{64}\.jsonl", entry.name) is None:
+                raise ValueError(
+                    f"invalid Work event shard filename or file type: {entry}"
+                )
+            shards.append(entry)
+            continue
+
+        if not stat.S_ISDIR(mode) or re.fullmatch(r"[0-9a-f]{2}", entry.name) is None:
+            raise ValueError(
+                f"invalid Work event shard bucket name or file type: {entry}"
+            )
+
+        try:
+            bucket_entries = sorted(entry.iterdir())
+        except OSError as error:
+            raise ValueError(
+                f"failed to enumerate Work event shard bucket: {entry}"
+            ) from error
+        for shard in bucket_entries:
+            if _is_work_event_writer_temp_residue(shard):
+                continue
+            try:
+                shard_mode = shard.lstat().st_mode
+            except OSError as error:
+                raise ValueError(
+                    f"failed to inspect Work event shard: {shard}"
+                ) from error
+            match = re.fullmatch(r"([0-9a-f]{64})\.jsonl", shard.name)
+            if (
+                not stat.S_ISREG(shard_mode)
+                or match is None
+                or match.group(1)[:2] != entry.name
+            ):
+                raise ValueError(
+                    f"invalid Work event shard bucket, filename, or file type: {shard}"
+                )
+            shards.append(shard)
+    return shards
 
 
 def _fold_work_events_into_items(
@@ -3893,17 +3958,10 @@ def _load_work_documents(
         )
         shard_dir = repo_work_dir / "events"
         if _work_event_shard_store_exists(shard_dir):
-            try:
-                shard_paths = sorted(shard_dir.iterdir())
-            except OSError as error:
-                raise ValueError(
-                    f"failed to enumerate Work event shards: {shard_dir}"
-                ) from error
-            for shard in shard_paths:
-                if _is_work_event_writer_temp_residue(shard):
-                    continue
+            for shard in _enumerate_work_event_shards(shard_dir):
+                path_label = shard.relative_to(Path(project_root)).as_posix()
                 event_sources.append(
-                    (shard, f".gwt/work/events/{shard.name}", True)
+                    (shard, path_label, True)
                 )
 
     event_contents: List[str] = []

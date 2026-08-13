@@ -245,7 +245,12 @@ mod tests {
 
         for relative in [
             format!(".gwt/work/events/{}.jsonl", "a".repeat(64)),
+            format!(".gwt/work/events/aa/{}.jsonl", "a".repeat(64)),
             format!(".gwt/work/events/.{}.jsonl.create-123-test", "b".repeat(64)),
+            format!(
+                ".gwt/work/events/bb/.{}.jsonl.create-123-test",
+                "b".repeat(64)
+            ),
         ] {
             let path = root.join(relative);
             assert!(is_ignored(&policy, &gi, root, &path), "{}", path.display());

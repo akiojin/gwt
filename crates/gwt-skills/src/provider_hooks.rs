@@ -652,6 +652,7 @@ fn github_slug_from_remote_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod runtime_resolution_tests {
     use super::*;
+    #[cfg(unix)]
     use std::process::Stdio;
 
     const FALLBACK: &str = "/Applications/GWT.app/Contents/MacOS/gwtd";

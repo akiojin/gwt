@@ -434,8 +434,10 @@ pub fn gwt_repo_local_work_event_shard_path(repo_root: &Path, event_id: &str) ->
 pub fn gwt_work_event_shard_path(events_dir: &Path, event_id: &str) -> PathBuf {
     use sha2::{Digest, Sha256};
 
-    let digest = Sha256::digest(event_id.as_bytes());
-    events_dir.join(format!("{digest:x}.jsonl"))
+    let digest = format!("{:x}", Sha256::digest(event_id.as_bytes()));
+    events_dir
+        .join(&digest[..2])
+        .join(format!("{digest}.jsonl"))
 }
 
 /// Return the repo-local project memory path
@@ -1109,12 +1111,13 @@ mod tests {
                     .join(".gwt")
                     .join("work")
                     .join("events")
+                    .join("76")
                     .join("768f7de390c732dd9558b3ccfa251ee9b5f5e6e51ed898a005accdabc48a1caf.jsonl")
             )
         );
         assert_eq!(
             shard.parent(),
-            Some(gwt_repo_local_work_events_dir(&repo).as_path())
+            Some(gwt_repo_local_work_events_dir(&repo).join("76").as_path())
         );
     }
 

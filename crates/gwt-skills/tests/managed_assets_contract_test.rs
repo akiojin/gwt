@@ -101,7 +101,7 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
 }
 
 #[test]
-fn repo_keeps_managed_claude_and_codex_skill_assets_in_parity() {
+fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let claude_root = workspace_root.join(".claude/skills");
     let codex_root = workspace_root.join(".codex/skills");
@@ -562,7 +562,10 @@ fn collect_gwt_skill_files(skills_root: &Path) -> BTreeSet<PathBuf> {
         let file_type = entry.file_type().expect("read skill root entry type");
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if file_type.is_dir() && name.starts_with("gwt-") {
+        // gwt-coordination is generated from coordination_guidance.rs at
+        // materialization time and has its own dual-target contract below.
+        // This parity check owns only source-controlled bundle assets.
+        if file_type.is_dir() && name.starts_with("gwt-") && name != "gwt-coordination" {
             collect_files_relative_to(skills_root, &entry.path(), &mut files);
         }
     }
@@ -623,7 +626,7 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
         assert!(
-            content.contains(".gwt/work/events/*.jsonl")
+            content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
                 && content.contains("immutable event shard"),
             "generated guidance must deliver new Work events as immutable shards"
         );
@@ -632,8 +635,18 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             "generated guidance must freeze the legacy events.jsonl monolith"
         );
         assert!(
-            content.contains(".gwt/work/events/.*.jsonl.create-*"),
+            content.contains(".gwt/work/events/<digest-prefix>/.*.jsonl.create-*"),
             "generated guidance must identify writer temp residue as non-delivery state"
+        );
+        assert!(
+            content.contains("git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl"),
+            "generated guidance must explain exact force-add recovery beneath broad ignores"
+        );
+        assert!(
+            content
+                .contains("git ls-files --others --ignored --exclude-standard -- .gwt/work/events")
+                && content.contains("<2hex>/<64hex>.jsonl"),
+            "generated guidance must safely discover every ignored canonical shard"
         );
     }
 }
@@ -680,11 +693,15 @@ fn git_exclude_tracks_only_canonical_work_history_and_ignores_writer_temp() {
     let events = work.join("events");
     fs::create_dir_all(&events).expect("create events dir");
     fs::write(work.join("events.jsonl"), "legacy\n").expect("write legacy store");
-    fs::write(events.join(format!("{}.jsonl", "a".repeat(64))), "shard\n")
-        .expect("write canonical shard");
+    let bucket = events.join("aa");
+    fs::create_dir_all(&bucket).expect("create canonical bucket");
+    fs::write(bucket.join(format!("{}.jsonl", "a".repeat(64))), "shard\n")
+        .expect("write canonical bucketed shard");
+    fs::write(events.join(format!("{}.jsonl", "b".repeat(64))), "flat\n")
+        .expect("write flat compatibility shard");
     fs::write(events.join("not-a-hash.jsonl"), "invalid\n").expect("write noncanonical shard");
     fs::write(
-        events.join(format!(".{}.jsonl.create-123-test", "b".repeat(64))),
+        bucket.join(format!(".{}.jsonl.create-123-test", "c".repeat(64))),
         "temp\n",
     )
     .expect("write writer temp");
@@ -700,15 +717,22 @@ fn git_exclude_tracks_only_canonical_work_history_and_ignores_writer_temp() {
 
     assert!(status.contains("?? .gwt/work/events.jsonl\n"), "{status}");
     assert!(
-        status.contains(&format!("?? .gwt/work/events/{}.jsonl\n", "a".repeat(64))),
+        status.contains(&format!(
+            "?? .gwt/work/events/aa/{}.jsonl\n",
+            "a".repeat(64)
+        )),
         "{status}"
     );
     assert!(
         status.contains(&format!(
-            "!! .gwt/work/events/.{}.jsonl.create-123-test\n",
-            "b".repeat(64)
+            "!! .gwt/work/events/aa/.{}.jsonl.create-123-test\n",
+            "c".repeat(64)
         )),
         "{status}"
+    );
+    assert!(
+        status.contains(&format!("!! .gwt/work/events/{}.jsonl\n", "b".repeat(64))),
+        "flat compatibility is read-only and must stay ignored for new writes: {status}"
     );
     assert!(
         status.contains("!! .gwt/work/events/not-a-hash.jsonl\n"),
@@ -728,6 +752,10 @@ fn repository_attributes_leave_immutable_shards_on_default_merge() {
         "attributes must document that the legacy union file is frozen"
     );
     assert!(
+        attributes.contains("bucketed") && attributes.contains("flat compatibility"),
+        "attributes must document that bucketed and compatible flat shards use the default driver"
+    );
+    assert!(
         attributes
             .lines()
             .any(|line| line == "**/.gwt/work/events.jsonl merge=union"),
@@ -738,5 +766,35 @@ fn repository_attributes_leave_immutable_shards_on_default_merge() {
             .lines()
             .any(|line| { line.contains(".gwt/work/events/") && line.contains("merge=") }),
         "immutable shards must use Git's default merge behavior"
+    );
+}
+
+#[test]
+fn repository_gitignore_tracks_only_bucketed_new_event_shards() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ignore =
+        fs::read_to_string(workspace_root.join(".gitignore")).expect("read repository .gitignore");
+
+    assert!(
+        ignore
+            .lines()
+            .any(|line| line == "!.gwt/work/events/[0-9a-f][0-9a-f]/"),
+        "canonical two-hex bucket directories must be re-included"
+    );
+    assert!(
+        ignore.lines().any(|line| {
+            line.starts_with("!.gwt/work/events/[0-9a-f][0-9a-f]/")
+                && line.ends_with(".jsonl")
+                && line.matches("[0-9a-f]").count() == 66
+        }),
+        "canonical bucketed full-digest shard files must be re-included"
+    );
+    assert!(
+        !ignore.lines().any(|line| {
+            line.starts_with("!.gwt/work/events/")
+                && !line.starts_with("!.gwt/work/events/[0-9a-f][0-9a-f]/")
+                && line.ends_with(".jsonl")
+        }),
+        "W-33 flat shards are read compatibility only and must not be re-included for new writes"
     );
 }

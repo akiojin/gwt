@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,10 +88,22 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             json.dumps(projection), encoding="utf-8"
         )
 
-    def _write_shard(self, repo: Path, event: dict) -> Path:
+    def _write_shard(
+        self,
+        repo: Path,
+        event: dict,
+        *,
+        flat: bool = False,
+        bucket: str | None = None,
+    ) -> Path:
         event_id = event["id"]
         digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
-        shard = repo / ".gwt" / "work" / "events" / f"{digest}.jsonl"
+        store = repo / ".gwt" / "work" / "events"
+        shard = (
+            store / f"{digest}.jsonl"
+            if flat
+            else store / (bucket or digest[:2]) / f"{digest}.jsonl"
+        )
         shard.parent.mkdir(parents=True, exist_ok=True)
         shard.write_text(json.dumps(event) + "\n", encoding="utf-8")
         return shard
@@ -161,7 +174,7 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             self.assertEqual(work["status_category"], "done")
             self.assertTrue(manifest)
 
-    def test_fallback_dual_reads_repo_legacy_and_shards_exactly_once(self):
+    def test_fallback_dual_reads_legacy_flat_and_bucketed_shards_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             repo = Path(tmp) / "repo"
@@ -186,7 +199,7 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             legacy = repo / ".gwt" / "work" / "events.jsonl"
             legacy.parent.mkdir(parents=True, exist_ok=True)
             legacy.write_text(json.dumps(legacy_event) + "\n", encoding="utf-8")
-            self._write_shard(repo, legacy_event)
+            self._write_shard(repo, legacy_event, flat=True)
             self._write_shard(repo, shard_event)
 
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
@@ -215,6 +228,8 @@ class LoadWorkDocumentsTests(unittest.TestCase):
                         + hashlib.sha256(b"ev-repo-legacy").hexdigest()
                         + ".jsonl",
                         ".gwt/work/events/"
+                        + hashlib.sha256(b"ev-repo-shard").hexdigest()[:2]
+                        + "/"
                         + hashlib.sha256(b"ev-repo-shard").hexdigest()
                         + ".jsonl",
                     ]
@@ -354,14 +369,16 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             repo = Path(tmp) / "repo"
             self._state_dir(home)
             invalid_id = "ev-python-id-only"
-            self._write_shard(repo, {"id": invalid_id})
+            invalid_shard = self._write_shard(repo, {"id": invalid_id})
             existing = Path(tmp) / "index-root" / "existing-generation"
             existing.parent.mkdir(parents=True, exist_ok=True)
             existing.write_bytes(b"existing-index-bytes")
 
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
                 with mock.patch.object(runner, "_full_build_store") as build_store:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(
+                        ValueError, re.escape(str(invalid_shard))
+                    ):
                         runner.action_index_works_v2(
                             project_root=str(repo),
                             repo_hash=self.REPO_HASH,
@@ -396,9 +413,12 @@ class LoadWorkDocumentsTests(unittest.TestCase):
                 )
             self.assertEqual([work["id"] for work in works], ["work-python-temp"])
 
-            (shard.parent / "notes.txt").write_text("not a shard", encoding="utf-8")
+            invalid_entry = shard.parent / "notes.txt"
+            invalid_entry.write_text("not a shard", encoding="utf-8")
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(
+                    ValueError, re.escape(str(invalid_entry))
+                ):
                     runner._load_work_documents(self.REPO_HASH, project_root=str(repo))
 
     def test_shard_requires_exact_hash_strict_json_and_regular_file(self):
@@ -415,38 +435,79 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             shard_dir = repo / ".gwt" / "work" / "events"
             shard_dir.mkdir(parents=True, exist_ok=True)
 
-            mismatched = shard_dir / ("0" * 64 + ".jsonl")
+            mismatched = shard_dir / "00" / ("0" * 64 + ".jsonl")
+            mismatched.parent.mkdir(parents=True)
             mismatched.write_text(json.dumps(event) + "\n", encoding="utf-8")
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, re.escape(str(mismatched))):
                     runner._load_work_documents(self.REPO_HASH, project_root=str(repo))
             mismatched.unlink()
 
             event["execution_container"] = {"pr_number": 1 << 64}
             overflow = self._write_shard(repo, event)
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, re.escape(str(overflow))):
                     runner._load_work_documents(self.REPO_HASH, project_root=str(repo))
             overflow.unlink()
             del event["execution_container"]
 
             digest = hashlib.sha256(event["id"].encode("utf-8")).hexdigest()
-            strict_json = shard_dir / f"{digest}.jsonl"
+            strict_json = shard_dir / digest[:2] / f"{digest}.jsonl"
             strict_json.write_text(
                 json.dumps(event)[:-1] + ',"future_value":NaN}\n',
                 encoding="utf-8",
             )
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, re.escape(str(strict_json))):
                     runner._load_work_documents(self.REPO_HASH, project_root=str(repo))
             strict_json.unlink()
 
+
+    @unittest.skipIf(os.name == "nt", "file symlink fixture requires Unix semantics")
+    def test_fallback_rejects_symlinked_event_shard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            repo = Path(tmp) / "repo"
+            self._state_dir(home)
+            event = {
+                "id": "ev-python-symlink-shard",
+                "work_item_id": "work-python-symlink-shard",
+                "kind": "start",
+                "updated_at": "2026-08-12T05:10:00Z",
+            }
+            digest = hashlib.sha256(event["id"].encode("utf-8")).hexdigest()
+            shard = repo / ".gwt" / "work" / "events" / digest[:2] / f"{digest}.jsonl"
+            shard.parent.mkdir(parents=True)
             target = Path(tmp) / "external-event.jsonl"
             target.write_text(json.dumps(event) + "\n", encoding="utf-8")
-            strict_json.symlink_to(target)
+            shard.symlink_to(target)
+
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with self.assertRaises(ValueError):
-                    runner._load_work_documents(self.REPO_HASH, project_root=str(repo))
+                with self.assertRaisesRegex(ValueError, re.escape(str(shard))):
+                    runner._load_work_documents(
+                        self.REPO_HASH, project_root=str(repo)
+                    )
+
+    def test_fallback_rejects_wrong_bucket_with_the_exact_diagnostic_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            repo = Path(tmp) / "repo"
+            self._state_dir(home)
+            event = {
+                "id": "ev-python-wrong-bucket",
+                "work_item_id": "work-python-wrong-bucket",
+                "kind": "start",
+                "updated_at": "2026-08-12T05:15:00Z",
+            }
+            digest = hashlib.sha256(event["id"].encode("utf-8")).hexdigest()
+            wrong_bucket = "00" if digest[:2] != "00" else "ff"
+            shard = self._write_shard(repo, event, bucket=wrong_bucket)
+
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                with self.assertRaisesRegex(ValueError, re.escape(str(shard))):
+                    runner._load_work_documents(
+                        self.REPO_HASH, project_root=str(repo)
+                    )
 
     @unittest.skipIf(os.name == "nt", "directory symlink fixture requires Unix semantics")
     def test_fallback_rejects_symlinked_event_store_root(self):
@@ -471,7 +532,36 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             store.symlink_to(external, target_is_directory=True)
 
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, re.escape(str(store))):
+                    runner._load_work_documents(
+                        self.REPO_HASH, project_root=str(repo)
+                    )
+
+    @unittest.skipIf(os.name == "nt", "directory symlink fixture requires Unix semantics")
+    def test_fallback_rejects_symlinked_event_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            repo = Path(tmp) / "repo"
+            self._state_dir(home)
+            event = {
+                "id": "ev-python-symlink-bucket",
+                "work_item_id": "work-python-symlink-bucket",
+                "kind": "start",
+                "updated_at": "2026-08-12T05:35:00Z",
+            }
+            digest = hashlib.sha256(event["id"].encode("utf-8")).hexdigest()
+            external = Path(tmp) / "external-bucket"
+            external.mkdir(parents=True)
+            (external / f"{digest}.jsonl").write_text(
+                json.dumps(event) + "\n", encoding="utf-8"
+            )
+            store = repo / ".gwt" / "work" / "events"
+            store.mkdir(parents=True)
+            bucket = store / digest[:2]
+            bucket.symlink_to(external, target_is_directory=True)
+
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                with self.assertRaisesRegex(ValueError, re.escape(str(bucket))):
                     runner._load_work_documents(
                         self.REPO_HASH, project_root=str(repo)
                     )
@@ -496,7 +586,7 @@ class LoadWorkDocumentsTests(unittest.TestCase):
 
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
                 with mock.patch.object(runner, "_full_build_store") as build_store:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, re.escape(str(link))):
                         runner.action_index_works_v2(
                             project_root=str(repo),
                             repo_hash=self.REPO_HASH,
@@ -518,7 +608,7 @@ class LoadWorkDocumentsTests(unittest.TestCase):
             ".gwt/work"
         )
 
-    def _assert_missing_managed_event_parent_fails_before_index_mutation(
+    def _assert_missing_managed_event_parent_is_an_empty_source(
         self, managed_parent: str
     ):
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,31 +620,19 @@ class LoadWorkDocumentsTests(unittest.TestCase):
                 (repo / ".gwt").mkdir()
             elif managed_parent != ".gwt":
                 self.fail(f"unsupported managed parent fixture: {managed_parent}")
-            existing = Path(tmp) / "index-root" / "existing-generation"
-            existing.parent.mkdir(parents=True)
-            existing.write_bytes(b"existing-index-bytes")
-
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                with mock.patch.object(runner, "_full_build_store") as build_store:
-                    with self.assertRaises(ValueError):
-                        runner.action_index_works_v2(
-                            project_root=str(repo),
-                            repo_hash=self.REPO_HASH,
-                            worktree_hash=None,
-                            mode="full",
-                            db_root=existing.parent,
-                        )
+                works, manifest = runner._load_work_documents(
+                    self.REPO_HASH, project_root=str(repo)
+                )
 
-            build_store.assert_not_called()
-            self.assertEqual(existing.read_bytes(), b"existing-index-bytes")
+            self.assertEqual(works, [])
+            self.assertEqual(manifest, [])
 
-    def test_fallback_rejects_missing_gwt_parent_before_index_mutation(self):
-        self._assert_missing_managed_event_parent_fails_before_index_mutation(".gwt")
+    def test_fallback_accepts_missing_gwt_parent_as_an_empty_source(self):
+        self._assert_missing_managed_event_parent_is_an_empty_source(".gwt")
 
-    def test_fallback_rejects_missing_work_parent_before_index_mutation(self):
-        self._assert_missing_managed_event_parent_fails_before_index_mutation(
-            ".gwt/work"
-        )
+    def test_fallback_accepts_missing_work_parent_as_an_empty_source(self):
+        self._assert_missing_managed_event_parent_is_an_empty_source(".gwt/work")
 
 
 class BuildWorkRecordsTests(unittest.TestCase):

@@ -3914,10 +3914,39 @@ pub(crate) mod tests {
                         .file_name()
                         .into_string()
                         .expect("UTF-8 tracked Work event shard name");
-                    shards.insert(
-                        name,
-                        std::fs::read(entry.path()).expect("read tracked Work event shard"),
-                    );
+                    let file_type = entry
+                        .file_type()
+                        .expect("read tracked Work event shard entry type");
+                    if file_type.is_file() {
+                        shards.insert(
+                            name,
+                            std::fs::read(entry.path()).expect("read tracked Work event shard"),
+                        );
+                    } else if file_type.is_dir() {
+                        for bucket_entry in
+                            std::fs::read_dir(entry.path()).expect("read Work event shard bucket")
+                        {
+                            let bucket_entry =
+                                bucket_entry.expect("read bucketed Work event shard entry");
+                            let bucket_name = bucket_entry
+                                .file_name()
+                                .into_string()
+                                .expect("UTF-8 bucketed Work event shard name");
+                            assert!(
+                                bucket_entry
+                                    .file_type()
+                                    .expect("read bucketed Work event shard entry type")
+                                    .is_file(),
+                                "tracked Work event bucket entries must be files: {}",
+                                bucket_entry.path().display()
+                            );
+                            shards.insert(
+                                format!("{name}/{bucket_name}"),
+                                std::fs::read(bucket_entry.path())
+                                    .expect("read bucketed Work event shard"),
+                            );
+                        }
+                    }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

@@ -122,9 +122,10 @@ blocker/recovery coordination on the Board or in a Draft PR comment instead.
 Set `params.status:"done"` on that explicit final update; its successful event
 append opens the machine-local delivery obligation used by Stop and final gates.
 
-Include new immutable event shards under `.gwt/work/events/*.jsonl` in the
+Include new immutable event shards under
+`.gwt/work/events/<digest-prefix>/*.jsonl` in the
 related source commit. Writer temp files matching
-`.gwt/work/events/.*.jsonl.create-*` remain untracked and must never be
+`.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` remain untracked and must never be
 committed. If no source change remains and the event shard is the only
 bookkeeping change, use a scoped Conventional Commit whose subject starts with
 the exact `chore(work):` prefix. gwt never commits or pushes this event
@@ -163,14 +164,22 @@ There is no standalone `gwt-search` executable.
 
 The tracked `.gwt/work/` directory is the persistent Work core
 (SPEC-2359 W-33). When you commit your work, include the new tracked
-immutable event shard under `.gwt/work/events/*.jsonl` in the
+immutable event shard under `.gwt/work/events/<digest-prefix>/*.jsonl` in the
 regular commit so they reach the base branch through the PR:
 
-- Each `.gwt/work/events/*.jsonl` file is an immutable event shard. Never hand-edit, append to, delete, truncate, overwrite, or revert a shard
-- `.gwt/work/events/.*.jsonl.create-*` is untracked writer temp residue,
+- Each `.gwt/work/events/<digest-prefix>/*.jsonl` file is an immutable event shard. Never hand-edit, append to, delete, truncate, overwrite, or revert a shard
+- `.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` is untracked writer temp residue,
   not Work history and not a delivery target
+- Existing flat `.gwt/work/events/*.jsonl` shards are frozen read-only
+  compatibility history and are never a new-write target
 - `.gwt/work/events.jsonl` is frozen read-only compatibility history. Its
   existing `merge=union` behavior is retained only for legacy lines. Never hand-edit, append to, delete, truncate, overwrite, or revert this file
+- If the target repository broadly ignores `.gwt/`, stage every exact new
+  shard individually. Discover ignored candidates with
+  `git ls-files --others --ignored --exclude-standard -- .gwt/work/events`,
+  select only canonical `<2hex>/<64hex>.jsonl` paths, and repeat
+  `git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl`. Never
+  force-add the event directory or another managed subtree
 - Do not commit a shard separately from the work it describes; ride the
   normal work commit
 
@@ -302,8 +311,8 @@ explicit final update では `params.status:"done"` を設定します。event a
 が成功すると、Stop と final gate が使用する machine-local delivery obligation
 が開きます。
 
-新しい immutable event shard `.gwt/work/events/*.jsonl` は関連 source commit に
-含めます。`.gwt/work/events/.*.jsonl.create-*` に一致する writer temp は未追跡の
+新しい immutable event shard `.gwt/work/events/<digest-prefix>/*.jsonl` は関連 source commit に
+含めます。`.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` に一致する writer temp は未追跡の
 ままとし、commit してはいけません。source change が残らず event shard だけが
 bookkeeping change の場合は、subject が exact `chore(work):` prefix で始まる
 scoped Conventional Commit を使用します。gwt は event を自動 commit / push
@@ -339,16 +348,23 @@ binary の `search` JSON operation で実行します:
 
 追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
 （SPEC-2359 W-33）。作業を commit する際は、新しい追跡対象の
-immutable event shard `.gwt/work/events/*.jsonl` を通常の commit に含め、PR 経由で
+immutable event shard `.gwt/work/events/<digest-prefix>/*.jsonl` を通常の commit に含め、PR 経由で
 base branch に届けます:
 
-- `.gwt/work/events/*.jsonl` の各ファイルは immutable event shard です。
+- `.gwt/work/events/<digest-prefix>/*.jsonl` の各ファイルは immutable event shard です。
   shard の手編集・追記・削除・切詰め・上書き・revert を禁止します
-- `.gwt/work/events/.*.jsonl.create-*` は未追跡の writer temp residue であり、
+- `.gwt/work/events/<digest-prefix>/.*.jsonl.create-*` は未追跡の writer temp residue であり、
   Work history でも delivery 対象でもありません
+- 既存の flat `.gwt/work/events/*.jsonl` shard は frozen な read-only
+  compatibility history であり、新規書込先にはしません
 - `.gwt/work/events.jsonl` は frozen な read-only compatibility history です。
   既存の `merge=union` は legacy 行の互換性のためだけに維持します。この
   ファイルの手編集・追記・削除・切詰め・上書き・revert を禁止します
+- target repository が `.gwt/` を広く ignore している場合は、すべての exact な新規
+  shard を1つずつ stage します。`git ls-files --others --ignored --exclude-standard -- .gwt/work/events`
+  で候補を列挙し、canonical な `<2hex>/<64hex>.jsonl` path だけを選び、
+  `git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl` を各 path で繰り返します。
+  events directory や他の managed subtree 全体を force-add してはいけません
 - shard は作業内容と切り離して単独 commit にせず、通常の作業 commit に乗せます
 
 プロジェクト memory と discussion notes はマシンローカルの scratch です
@@ -496,7 +512,9 @@ mod tests {
         for phrase in [
             "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion",
             "`chore(work):`",
-            ".gwt/work/events/*.jsonl",
+            ".gwt/work/events/<digest-prefix>/*.jsonl",
+            "git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl",
+            "git ls-files --others --ignored --exclude-standard -- .gwt/work/events",
         ] {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
@@ -511,9 +529,11 @@ mod tests {
     fn guidance_commits_immutable_shards_and_freezes_the_legacy_monolith() {
         for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
             for phrase in [
+                ".gwt/work/events/<digest-prefix>/*.jsonl",
+                ".gwt/work/events/<digest-prefix>/.*.jsonl.create-*",
                 ".gwt/work/events/*.jsonl",
-                ".gwt/work/events/.*.jsonl.create-*",
                 ".gwt/work/events.jsonl",
+                "git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl",
             ] {
                 assert!(body.contains(phrase), "guidance is missing {phrase:?}");
             }

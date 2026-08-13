@@ -26,8 +26,9 @@ docker-compose.yaml text eol=lf
 *.ico binary
 *.pdf binary
 
-# W-33 (SPEC-2359): immutable `.gwt/work/events/*.jsonl` shards intentionally
-# use Git's default merge behavior. The union rule below is retained only for
-# the frozen read-only compatibility history in the legacy monolith.
+# W-33b (SPEC-2359): immutable bucketed shards and flat compatibility shards
+# from W-33 below `.gwt/work/events/` intentionally use Git's default merge
+# behavior. The union rule below is retained only for the
+# frozen read-only compatibility history in the legacy monolith.
 **/.gwt/work/events.jsonl merge=union
 **/.gwt/work/board-remote-roots.jsonl merge=union

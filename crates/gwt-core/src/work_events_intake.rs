@@ -875,9 +875,10 @@ fn execution_container_same(
 }
 
 /// Fingerprint cache mapping a source key (worktree path / ref name) to the
-/// last-ingested content fingerprint (git blob oid or content sha256). A pure
-/// optimization: deleting the file only costs re-reading sources, never
-/// correctness (dedup is event-id based).
+/// last-ingested source fingerprint. Callers may use a git blob oid, content
+/// sha256, or immutable-file metadata bound to source/container identity.
+/// Deleting the cache only costs re-reading sources; event-id dedup preserves
+/// correctness.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkEventsIntakeState {
     #[serde(default)]

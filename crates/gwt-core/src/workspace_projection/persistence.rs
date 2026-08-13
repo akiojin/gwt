@@ -14,6 +14,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -2435,6 +2436,12 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         }
         TrackedWorkEventPolicy::SkipTracked => None,
     };
+    if let Some(events_dir) = events_path.as_deref() {
+        // The Session-bound pre-persist hook may reserve a terminal delivery
+        // identity outside this transaction. Reject an unsafe managed store
+        // before that reservation or any recovery marker can be published.
+        validate_workspace_work_event_store_path(events_dir)?;
+    }
 
     // This strict entry point never synthesizes or migrates authority state.
     // Target resolution already proved each surface; disappearance between
@@ -5675,7 +5682,9 @@ pub fn retroactive_auto_done_scan_paths(
 /// Version 1 corresponds to the terminal-Done apply_event fix; prior
 /// projections may show stale non-Done status_category for items whose
 /// latest event regressed Done.
-pub const WORK_ITEMS_REBUILD_VERSION: u32 = 1;
+/// Version 2 adds the immutable shard sources. A v1 marker only proves that
+/// the legacy monolith was replayed and must not suppress shard recovery.
+pub const WORK_ITEMS_REBUILD_VERSION: u32 = 2;
 
 /// SPEC-2359 US-37: Outcome of the work_items.json rebuild migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5793,6 +5802,12 @@ pub fn rebuild_work_items_from_events_for_repo(
         records.extend(read_workspace_work_event_shard_records_from_dir(
             &events_dir,
         )?);
+    }
+    if records.is_empty() {
+        // An existing but empty store is still an empty input. In particular,
+        // never replace an already useful projection or advance its migration
+        // marker merely because `.gwt/work/events/` was materialized.
+        return Ok(WorkItemsRebuildOutcome::Missing);
     }
 
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
@@ -6285,7 +6300,7 @@ fn read_workspace_work_event_shard_records_from_dir(
         .collect::<std::io::Result<Vec<_>>>()?;
     paths.sort();
 
-    let mut records = Vec::with_capacity(paths.len());
+    let mut records = Vec::new();
     for path in paths {
         if is_workspace_work_event_writer_temp_residue(&path) {
             if fs::symlink_metadata(&path)?.file_type().is_file() {
@@ -6296,63 +6311,138 @@ fn read_workspace_work_event_shard_records_from_dir(
                 path.display()
             )));
         }
-        let name = path
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_file() {
+            // W-33 shipped flat immutable shards. They remain a read-only
+            // compatibility source, but no writer creates another one.
+            records.push(read_workspace_work_event_shard_record(&path, None)?);
+            continue;
+        }
+        if !metadata.file_type().is_dir() {
+            return Err(GwtError::Other(format!(
+                "workspace Work event shard entry has an invalid file type: {}",
+                path.display()
+            )));
+        }
+
+        let bucket = path
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
                 GwtError::Other(format!(
-                    "workspace Work event shard has an invalid filename: {}",
+                    "workspace Work event shard bucket has an invalid name: {}",
                     path.display()
                 ))
             })?;
-        let Some(hash) = name.strip_suffix(".jsonl") else {
+        if !is_lowercase_hex_bucket(bucket) {
             return Err(GwtError::Other(format!(
-                "workspace Work event shard has an invalid filename: {}",
-                path.display()
-            )));
-        };
-        if !is_lowercase_sha256_hex(hash) || !fs::symlink_metadata(&path)?.file_type().is_file() {
-            return Err(GwtError::Other(format!(
-                "workspace Work event shard has an invalid filename or file type: {}",
+                "workspace Work event shard bucket has an invalid name: {}",
                 path.display()
             )));
         }
-        let content = fs::read(&path)?;
-        if content.last() != Some(&b'\n')
-            || content.iter().filter(|byte| **byte == b'\n').count() != 1
-        {
-            return Err(GwtError::Other(format!(
-                "workspace Work event shard must contain exactly one newline-terminated event: {}",
-                path.display()
-            )));
+
+        let mut bucket_paths = fs::read_dir(&path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        bucket_paths.sort();
+        for shard_path in bucket_paths {
+            if is_workspace_work_event_writer_temp_residue(&shard_path) {
+                if fs::symlink_metadata(&shard_path)?.file_type().is_file() {
+                    continue;
+                }
+                return Err(GwtError::Other(format!(
+                    "workspace Work event shard temp residue has an invalid file type: {}",
+                    shard_path.display()
+                )));
+            }
+            if !fs::symlink_metadata(&shard_path)?.file_type().is_file() {
+                return Err(GwtError::Other(format!(
+                    "workspace Work event shard has an invalid file type: {}",
+                    shard_path.display()
+                )));
+            }
+            records.push(read_workspace_work_event_shard_record(
+                &shard_path,
+                Some(bucket),
+            )?);
         }
-        let payload = &content[..content.len() - 1];
-        let record = decode_workspace_work_event_record(payload)?;
-        let value: serde_json::Value = serde_json::from_slice(payload).map_err(|error| {
+    }
+    Ok(records)
+}
+
+fn read_workspace_work_event_shard_record(
+    path: &Path,
+    expected_bucket: Option<&str>,
+) -> Result<WorkEventLogRecord> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
             GwtError::Other(format!(
-                "workspace Work event shard json {}: {error}",
+                "workspace Work event shard has an invalid filename: {}",
                 path.display()
             ))
         })?;
-        let event_id = value
-            .as_object()
-            .and_then(|object| object.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                GwtError::Other(format!(
-                    "workspace Work event shard payload has no string id: {}",
-                    path.display()
-                ))
-            })?;
-        if path != gwt_work_event_shard_path(events_dir, event_id) {
-            return Err(GwtError::Other(format!(
-                "workspace Work event shard filename does not match payload id: {}",
-                path.display()
-            )));
-        }
-        records.push(record);
+    let Some(hash) = name.strip_suffix(".jsonl") else {
+        return Err(GwtError::Other(format!(
+            "workspace Work event shard has an invalid filename: {}",
+            path.display()
+        )));
+    };
+    if !is_lowercase_sha256_hex(hash) {
+        return Err(GwtError::Other(format!(
+            "workspace Work event shard has an invalid filename: {}",
+            path.display()
+        )));
     }
-    Ok(records)
+    if expected_bucket.is_some_and(|bucket| bucket != &hash[..2]) {
+        return Err(GwtError::Other(format!(
+            "workspace Work event shard bucket does not match its filename: {}",
+            path.display()
+        )));
+    }
+
+    let content = fs::read(path)?;
+    if content.last() != Some(&b'\n') || content.iter().filter(|byte| **byte == b'\n').count() != 1
+    {
+        return Err(GwtError::Other(format!(
+            "workspace Work event shard must contain exactly one newline-terminated event: {}",
+            path.display()
+        )));
+    }
+    let payload = &content[..content.len() - 1];
+    let record = decode_workspace_work_event_record(payload)?;
+    let value: serde_json::Value = serde_json::from_slice(payload).map_err(|error| {
+        GwtError::Other(format!(
+            "workspace Work event shard json {}: {error}",
+            path.display()
+        ))
+    })?;
+    let event_id = value
+        .as_object()
+        .and_then(|object| object.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            GwtError::Other(format!(
+                "workspace Work event shard payload has no string id: {}",
+                path.display()
+            ))
+        })?;
+    let expected_hash = format!("{:x}", Sha256::digest(event_id.as_bytes()));
+    if hash != expected_hash {
+        return Err(GwtError::Other(format!(
+            "workspace Work event shard filename does not match payload id: {}",
+            path.display()
+        )));
+    }
+    Ok(record)
+}
+
+fn is_lowercase_hex_bucket(value: &str) -> bool {
+    value.len() == 2
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn is_lowercase_sha256_hex(value: &str) -> bool {
@@ -6511,6 +6601,32 @@ fn validate_workspace_work_event_store_path(events_dir: &Path) -> Result<bool> {
     Ok(store_exists)
 }
 
+fn validate_workspace_work_event_bucket_path(events_dir: &Path, bucket_dir: &Path) -> Result<bool> {
+    let bucket = bucket_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| is_lowercase_hex_bucket(name));
+    if bucket.is_none() || bucket_dir.parent() != Some(events_dir) {
+        return Err(GwtError::Other(format!(
+            "workspace Work event shard bucket path is not canonical: {}",
+            bucket_dir.display()
+        )));
+    }
+    match fs::symlink_metadata(bucket_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "workspace Work event shard bucket is not a real directory: {}",
+                bucket_dir.display()
+            ),
+        )
+        .into()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEvent]) -> Result<()> {
     validate_workspace_work_event_store_path(events_dir)?;
     let mut prepared = Vec::with_capacity(events.len());
@@ -6534,6 +6650,10 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
     // Refuse a known divergent identity before publishing any member of this
     // transaction batch. A concurrent create is checked again below.
     for (event, shard_path, canonical) in &prepared {
+        let bucket_dir = shard_path.parent().ok_or_else(|| {
+            GwtError::Other("Work event shard path has no bucket directory".to_string())
+        })?;
+        validate_workspace_work_event_bucket_path(events_dir, bucket_dir)?;
         match fs::symlink_metadata(shard_path) {
             Ok(metadata) if !metadata.file_type().is_file() => {
                 return Err(GwtError::Other(format!(
@@ -6555,7 +6675,7 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
         }
     }
     for (event, shard_path, canonical) in prepared {
-        write_workspace_work_event_shard_bytes(event, &shard_path, &canonical)?;
+        write_workspace_work_event_shard_bytes(event, events_dir, &shard_path, &canonical)?;
     }
     Ok(())
 }
@@ -6563,13 +6683,17 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
 /// Publish one fully-written canonical event at its immutable shard path.
 fn write_workspace_work_event_shard_bytes(
     event: &WorkEvent,
+    events_dir: &Path,
     shard_path: &Path,
     canonical: &[u8],
 ) -> Result<()> {
     let parent = shard_path.parent().ok_or_else(|| {
         GwtError::Other("Work event shard path has no parent directory".to_string())
     })?;
-    create_dir_all_durable(parent)?;
+    if !validate_workspace_work_event_bucket_path(events_dir, parent)? {
+        create_dir_all_durable(parent)?;
+        validate_workspace_work_event_bucket_path(events_dir, parent)?;
+    }
 
     let file_name = shard_path
         .file_name()

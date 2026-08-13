@@ -1059,7 +1059,7 @@ fn pending_work_event_shard_is_persisted(
     work_id: &str,
     session_id: &str,
 ) -> io::Result<bool> {
-    if !pending_work_event_store_ancestors_are_directories(worktree)? {
+    if !pending_work_event_store_ancestors_are_directories(worktree, event_id)? {
         return Ok(false);
     }
     let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
@@ -1105,16 +1105,32 @@ fn pending_work_event_shard_is_persisted(
     Ok(true)
 }
 
-fn pending_work_event_store_ancestors_are_directories(worktree: &Path) -> io::Result<bool> {
+fn pending_work_event_store_ancestors_are_directories(
+    worktree: &Path,
+    event_id: &str,
+) -> io::Result<bool> {
     let root = gwt_core::paths::resolve_current_worktree_root(worktree);
-    for relative in [".gwt", ".gwt/work", WORK_EVENT_STORE_RELATIVE] {
-        match fs::symlink_metadata(root.join(relative)) {
+    let exact = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let bucket = exact.parent().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard has no canonical digest bucket",
+        )
+    })?;
+    for path in [
+        root.join(".gwt"),
+        root.join(".gwt/work"),
+        root.join(WORK_EVENT_STORE_RELATIVE),
+        bucket.to_path_buf(),
+    ] {
+        match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_dir() => {}
             Ok(_) => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
                     format!(
-                        "prepared Work event store ancestor `{relative}` must be a real directory"
+                        "prepared Work event store ancestor `{}` must be a real directory",
+                        path.display()
                     ),
                 ));
             }
@@ -1137,17 +1153,54 @@ fn pending_work_event_shard_matches_head(worktree: &Path, event_id: &str) -> io:
 }
 
 fn pending_work_event_shard_relative_path(worktree: &Path, event_id: &str) -> io::Result<String> {
+    let root = gwt_core::paths::resolve_current_worktree_root(worktree);
     let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            io::Error::new(
+    let relative = path.strip_prefix(&root).map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard escapes the current worktree",
+        )
+    })?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    "prepared Work event shard path is not valid UTF-8",
+                )
+            }),
+            _ => Err(io::Error::new(
                 ErrorKind::InvalidData,
-                "prepared Work event shard path is not valid UTF-8",
-            )
-        })?;
-    Ok(format!("{WORK_EVENT_STORE_RELATIVE}/{file_name}"))
+                "prepared Work event shard path is not canonical",
+            )),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let [gwt, work, events, bucket, file_name] = components.as_slice() else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard path has an unexpected shape",
+        ));
+    };
+    let Some(digest) = file_name.strip_suffix(".jsonl") else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard filename is not canonical",
+        ));
+    };
+    if (*gwt, *work, *events) != (".gwt", "work", "events")
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || bucket.len() != 2
+        || !bucket.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || *bucket != &digest[..2]
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard path is not canonical",
+        ));
+    }
+    Ok(components.join("/"))
 }
 
 fn pending_legacy_work_event_is_persisted(
@@ -1530,7 +1583,7 @@ pub(crate) fn work_event_settlement_blocker_description(
                 .to_string(),
     };
     format!(
-        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry."
+        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory."
     )
 }
 
@@ -1572,9 +1625,69 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
             states.push(WorkEventPathState::Unstaged);
         }
     }
+    let ignored = gwt_core::process::hidden_command("git")
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            WORK_EVENT_STORE_RELATIVE,
+        ])
+        .current_dir(worktree)
+        .output()
+        .map_err(|_| ())?;
+    if !ignored.status.success() {
+        return Err(());
+    }
+    if ignored
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .any(is_canonical_bucketed_work_event_shard)
+    {
+        states.push(WorkEventPathState::Untracked);
+    }
     states.sort_unstable();
     states.dedup();
     Ok(states)
+}
+
+fn is_canonical_bucketed_work_event_shard(path: &[u8]) -> bool {
+    let mut components = path.split(|byte| *byte == b'/');
+    let Some(gwt) = components.next() else {
+        return false;
+    };
+    let Some(work) = components.next() else {
+        return false;
+    };
+    let Some(events) = components.next() else {
+        return false;
+    };
+    let Some(bucket) = components.next() else {
+        return false;
+    };
+    let Some(file_name) = components.next() else {
+        return false;
+    };
+    if components.next().is_some()
+        || (gwt, work, events) != (b".gwt", b"work", b"events")
+        || bucket.len() != 2
+        || !bucket
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
+    {
+        return false;
+    }
+    let Some(digest) = file_name.strip_suffix(b".jsonl") else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
+        && bucket == &digest[..2]
 }
 
 fn event_commit_has_non_bookkeeping_change(
@@ -5496,6 +5609,115 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn pending_work_event_shard_relative_path_keeps_the_canonical_bucket() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let event_id = "event-with-a-bucketed-settlement-path";
+        let digest = format!("{:x}", Sha256::digest(event_id.as_bytes()));
+
+        let relative = pending_work_event_shard_relative_path(&fixture.repo, event_id)
+            .expect("derive canonical relative path");
+
+        assert_eq!(
+            relative,
+            format!(".gwt/work/events/{}/{}.jsonl", &digest[..2], digest)
+        );
+        assert!(
+            !relative.contains('\\'),
+            "Git path must use slash separators"
+        );
+    }
+
+    #[test]
+    fn pending_work_event_settlement_requires_every_exact_ignored_shard() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::write(fixture.repo.join(".gitignore"), ".gwt/\n").expect("ignore managed root");
+        fixture.git_ok(&["add", ".gitignore"]);
+        fixture.commit("chore: ignore managed project state");
+        fixture.push();
+
+        let updated_at = Utc::now();
+        let session_id = "session-ignored-shard";
+        let mut prior_event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-ignored-shard",
+            updated_at,
+        );
+        prior_event.agent_session_id = Some(session_id.to_string());
+        fixture.append_typed_event_shard(&prior_event);
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-ignored-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-ignored-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(session_id.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(&fixture.repo, session_id, &event, &journal)
+            .expect("prepare ignored-shard settlement receipt");
+        fixture.append_typed_event_shard(&event);
+
+        let ordinary_add = fixture.git_output(&["add", "--", WORK_EVENT_SHARDS_PATH]);
+        assert!(
+            !ordinary_add.status.success(),
+            "ordinary add must not override a target repository's broad ignore"
+        );
+        let relative = pending_work_event_shard_relative_path(&fixture.repo, &event.id)
+            .expect("exact ignored shard path");
+        let tracked = fixture.git_output(&["ls-files", "--error-unmatch", "--", &relative]);
+        assert!(
+            !tracked.status.success(),
+            "ordinary add must not stage ignored shard"
+        );
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_some(),
+            "an ignored, undelivered shard must keep terminal settlement blocked"
+        );
+
+        fixture.git_ok(&["add", "-f", "--", &relative]);
+        fixture.commit("chore(work): deliver exact ignored Work event shard");
+        fixture.push();
+
+        let incomplete = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("refresh force-added exact shard");
+        assert_eq!(
+            incomplete.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+                states: vec![WorkEventPathState::Untracked],
+            }),
+            "an earlier ignored immutable event must keep delivery open"
+        );
+
+        let prior_relative = pending_work_event_shard_relative_path(&fixture.repo, &prior_event.id)
+            .expect("prior exact ignored shard path");
+        fixture.git_ok(&["add", "-f", "--", &prior_relative]);
+        fixture.commit("chore(work): deliver prior ignored Work event shard");
+        fixture.push();
+
+        let settled = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("refresh after every exact ignored shard is delivered");
+        assert!(settled.status.is_settled(), "{settled:?}");
+    }
+
+    #[test]
     fn pending_work_event_settlement_applies_provenance_to_the_exact_shard_commit() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -5873,10 +6095,7 @@ pub(crate) mod tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
 
-        for (index, ancestor) in [".gwt", ".gwt/work", WORK_EVENT_STORE_RELATIVE]
-            .into_iter()
-            .enumerate()
-        {
+        for index in 0..4 {
             let fixture = WorkEventGitFixture::tracked_shards();
             let session_id = format!("session-symlinked-store-{index}");
             let updated_at = Utc::now();
@@ -5913,7 +6132,21 @@ pub(crate) mod tests {
             let exact_path =
                 gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &event.id);
             let resolved_repo = gwt_core::paths::resolve_current_worktree_root(&fixture.repo);
-            let ancestor_path = resolved_repo.join(ancestor);
+            let (ancestor, ancestor_path) = match index {
+                0 => (".gwt", resolved_repo.join(".gwt")),
+                1 => (".gwt/work", resolved_repo.join(".gwt/work")),
+                2 => (
+                    WORK_EVENT_STORE_RELATIVE,
+                    resolved_repo.join(WORK_EVENT_STORE_RELATIVE),
+                ),
+                _ => (
+                    "canonical digest bucket",
+                    exact_path
+                        .parent()
+                        .expect("exact shard bucket")
+                        .to_path_buf(),
+                ),
+            };
             let descendant = exact_path
                 .strip_prefix(&ancestor_path)
                 .expect("exact shard descends from canonical ancestor");

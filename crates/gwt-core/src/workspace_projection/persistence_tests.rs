@@ -9793,30 +9793,90 @@ fn start_event(work_item_id: &str, at: DateTime<Utc>) -> WorkEvent {
 
 fn read_work_event_shards(events_dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     let mut shards = std::collections::BTreeMap::new();
-    let entries = match fs::read_dir(events_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return shards,
-        Err(error) => panic!("read {}: {error}", events_dir.display()),
-    };
-    for entry in entries {
-        let entry = entry.expect("read shard entry");
-        let file_name = entry.file_name();
-        let is_canonical_shard = file_name.to_str().is_some_and(|name| {
-            let bytes = name.as_bytes();
-            bytes.len() == 64 + ".jsonl".len()
-                && bytes[..64]
-                    .iter()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-                && &bytes[64..] == b".jsonl"
-        });
-        if is_canonical_shard && entry.file_type().expect("shard file type").is_file() {
-            shards.insert(
-                file_name.to_string_lossy().into_owned(),
-                fs::read(entry.path()).expect("read shard bytes"),
-            );
+    let mut pending = vec![events_dir.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("read {}: {error}", directory.display()),
+        };
+        for entry in entries {
+            let entry = entry.expect("read shard entry");
+            let file_type = entry.file_type().expect("shard file type");
+            if file_type.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            let file_name = entry.file_name();
+            let is_canonical_shard = file_name.to_str().is_some_and(|name| {
+                let bytes = name.as_bytes();
+                bytes.len() == 64 + ".jsonl".len()
+                    && bytes[..64]
+                        .iter()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                    && &bytes[64..] == b".jsonl"
+            });
+            if is_canonical_shard && file_type.is_file() {
+                shards.insert(
+                    file_name.to_string_lossy().into_owned(),
+                    fs::read(entry.path()).expect("read shard bytes"),
+                );
+            }
         }
     }
     shards
+}
+
+#[test]
+fn session_bound_update_validates_event_store_before_pre_persist_and_transaction_marker() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let before = fixture.state_bytes();
+    let events_dir = gwt_repo_local_work_events_dir(&fixture.target.work_event_root);
+    std::fs::write(&events_dir, b"not a directory").expect("invalid event store");
+    let pre_persist_called = std::sync::atomic::AtomicBool::new(false);
+
+    let result = update_workspace_projection_with_journal_for_resolved_work_target(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("must fail before reservation".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+        |_, _| {
+            pre_persist_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    );
+
+    assert!(result.is_err(), "invalid store must fail closed");
+    assert!(
+        !pre_persist_called.load(std::sync::atomic::Ordering::SeqCst),
+        "write-ahead reservation must not run for an invalid tracked store"
+    );
+    assert_eq!(fixture.state_bytes(), before);
+    for marker in [
+        pending_workspace_state_transaction_path(&fixture.current_path),
+        pending_workspace_state_transaction_path_for_work_items(&fixture.work_items_path),
+    ] {
+        assert!(
+            !marker.exists(),
+            "invalid event store must be rejected before marker {}",
+            marker.display()
+        );
+    }
 }
 
 #[test]
@@ -9841,6 +9901,22 @@ fn production_work_event_writer_creates_one_immutable_shard() {
     record_workspace_work_event(&repo, event.clone()).expect("record shard");
 
     let shard = gwt_repo_local_work_event_shard_path(&repo, &event.id);
+    let digest = shard
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .expect("digest filename");
+    assert_eq!(
+        shard
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str()),
+        Some(&digest[..2]),
+        "new writes must use the deterministic first-byte bucket"
+    );
+    assert_eq!(
+        shard.parent().and_then(Path::parent),
+        Some(gwt_repo_local_work_events_dir(&repo).as_path())
+    );
     let expected = serde_json::to_string(&event).expect("canonical event") + "\n";
     assert_eq!(
         std::fs::read(&shard).expect("read shard"),
@@ -9850,6 +9926,13 @@ fn production_work_event_writer_creates_one_immutable_shard() {
     assert_eq!(
         std::fs::read_dir(gwt_repo_local_work_events_dir(&repo))
             .expect("read shard store")
+            .count(),
+        1,
+        "one event owns one deterministic bucket"
+    );
+    assert_eq!(
+        std::fs::read_dir(shard.parent().expect("bucket"))
+            .expect("read bucket")
             .count(),
         1,
         "one event owns one newline-terminated shard"
@@ -9862,6 +9945,112 @@ fn production_work_event_writer_creates_one_immutable_shard() {
         std::fs::read(&legacy).expect("read legacy again"),
         legacy_bytes
     );
+}
+
+#[test]
+fn manual_rebuild_reads_legacy_flat_and_canonical_bucketed_shards() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+    let events_dir = gwt_repo_local_work_events_dir(&repo);
+    std::fs::create_dir_all(&events_dir).expect("event store");
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 13, 2, 0, 0).unwrap();
+    let mut flat = start_event("work-flat-compatible", now);
+    flat.id = "event-flat-compatible".to_string();
+    let canonical_flat_name = gwt_work_event_shard_path(&events_dir, &flat.id)
+        .file_name()
+        .expect("flat shard name")
+        .to_owned();
+    let flat_path = events_dir.join(canonical_flat_name);
+    let mut flat_bytes = serde_json::to_vec(&flat).expect("serialize flat event");
+    flat_bytes.push(b'\n');
+    std::fs::write(&flat_path, flat_bytes).expect("seed W-33 flat shard");
+
+    let mut bucketed = start_event(
+        "work-bucketed-compatible",
+        now + chrono::Duration::seconds(1),
+    );
+    bucketed.id = "event-bucketed-compatible".to_string();
+    write_workspace_work_event_shards_to_dir(&events_dir, std::slice::from_ref(&bucketed))
+        .expect("write canonical bucketed shard");
+    let bucketed_path = gwt_work_event_shard_path(&events_dir, &bucketed.id);
+    assert_eq!(
+        bucketed_path.parent().and_then(Path::parent),
+        Some(events_dir.as_path()),
+        "canonical writer must not create another flat shard"
+    );
+
+    assert_eq!(
+        rebuild_work_items_from_events_for_repo(&repo).expect("dual-layout rebuild"),
+        WorkItemsRebuildOutcome::Applied
+    );
+    let projection =
+        load_workspace_work_items_from_path(&gwt_workspace_work_items_path_for_repo_path(&repo))
+            .expect("load WorkItems")
+            .expect("rebuilt WorkItems");
+    for work_id in ["work-flat-compatible", "work-bucketed-compatible"] {
+        assert!(
+            projection.work_items.iter().any(|item| item.id == work_id),
+            "missing compatible source {work_id}"
+        );
+    }
+}
+
+#[test]
+fn manual_rebuild_rejects_valid_shard_in_the_wrong_bucket_without_mutation() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 13, 2, 10, 0).unwrap();
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let mut preserved = WorkItemsProjection::empty(now);
+    preserved.apply_event(start_event("work-preserved-wrong-bucket", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &preserved)
+        .expect("seed projection");
+    let projection_before = std::fs::read(&work_items_path).expect("projection bytes");
+    let marker = work_items_path
+        .parent()
+        .expect("project state")
+        .join("work_items.migration.json");
+    let marker_before = b"{\"version\":0,\"preserve\":true}\n";
+    std::fs::write(&marker, marker_before).expect("seed marker");
+
+    let mut misplaced = start_event("work-wrong-bucket", now);
+    misplaced.id = "event-wrong-bucket".to_string();
+    let events_dir = gwt_repo_local_work_events_dir(&repo);
+    let canonical = gwt_work_event_shard_path(&events_dir, &misplaced.id);
+    let canonical_bucket = canonical
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .expect("canonical bucket");
+    let wrong_bucket = if canonical_bucket == "00" { "ff" } else { "00" };
+    let misplaced_path = events_dir
+        .join(wrong_bucket)
+        .join(canonical.file_name().expect("shard filename"));
+    std::fs::create_dir_all(misplaced_path.parent().expect("wrong bucket"))
+        .expect("create wrong bucket");
+    let mut bytes = serde_json::to_vec(&misplaced).expect("serialize misplaced event");
+    bytes.push(b'\n');
+    std::fs::write(&misplaced_path, bytes).expect("write misplaced shard");
+
+    let error = rebuild_work_items_from_events_for_repo(&repo)
+        .expect_err("wrong-bucket shard must fail closed");
+    assert!(error.to_string().contains("bucket"), "{error}");
+    assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+    assert_eq!(std::fs::read(&marker).unwrap(), marker_before);
 }
 
 #[test]
@@ -10339,6 +10528,115 @@ fn rebuild_work_items_uses_repo_local_events_after_migration() {
 }
 
 #[test]
+fn manual_rebuild_replays_shards_after_the_legacy_v1_marker() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 13, 3, 0, 0).unwrap();
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let mut legacy_projection = WorkItemsProjection::empty(now);
+    legacy_projection.apply_event(start_event("work-before-shards", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &legacy_projection)
+        .expect("seed legacy projection");
+    let marker = work_items_path
+        .parent()
+        .expect("project state")
+        .join("work_items.migration.json");
+    std::fs::write(&marker, b"{\"version\":1}\n").expect("seed legacy v1 marker");
+
+    let mut shard_event = start_event(
+        "work-recovered-from-shard",
+        now + chrono::Duration::seconds(1),
+    );
+    shard_event.id = "event-after-legacy-rebuild-marker".to_string();
+    write_workspace_work_event_shards_to_dir(
+        &gwt_repo_local_work_events_dir(&repo),
+        std::slice::from_ref(&shard_event),
+    )
+    .expect("seed shard added after v1 rebuild");
+
+    assert_eq!(
+        rebuild_work_items_from_events_for_repo(&repo).expect("rebuild shard generation"),
+        WorkItemsRebuildOutcome::Applied,
+        "the legacy-only v1 marker must not suppress shard recovery"
+    );
+    let projection = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems exist");
+    assert!(projection
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-recovered-from-shard"));
+}
+
+#[test]
+fn manual_rebuild_empty_shard_store_preserves_projection_and_marker_as_missing() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 13, 3, 10, 0).unwrap();
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let mut preserved = WorkItemsProjection::empty(now);
+    preserved.apply_event(start_event("work-preserved-empty-store", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &preserved)
+        .expect("seed projection");
+    let projection_before = std::fs::read(&work_items_path).expect("projection bytes");
+    let marker = work_items_path
+        .parent()
+        .expect("project state")
+        .join("work_items.migration.json");
+    let marker_before = b"{\"version\":0,\"preserve\":true}\n";
+    std::fs::write(&marker, marker_before).expect("seed stale marker");
+    std::fs::create_dir_all(gwt_repo_local_work_events_dir(&repo)).expect("empty shard store");
+
+    assert_eq!(
+        rebuild_work_items_from_events_for_repo(&repo).expect("empty source"),
+        WorkItemsRebuildOutcome::Missing
+    );
+    assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+    assert_eq!(std::fs::read(&marker).unwrap(), marker_before);
+}
+
+#[test]
+fn manual_rebuild_missing_event_store_preserves_existing_projection() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 13, 3, 20, 0).unwrap();
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let mut preserved = WorkItemsProjection::empty(now);
+    preserved.apply_event(start_event("work-preserved-missing-store", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &preserved)
+        .expect("seed projection");
+    let projection_before = std::fs::read(&work_items_path).expect("projection bytes");
+
+    assert_eq!(
+        rebuild_work_items_from_events_for_repo(&repo).expect("missing source"),
+        WorkItemsRebuildOutcome::Missing
+    );
+    assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+    assert!(!gwt_repo_local_work_events_dir(&repo).exists());
+}
+
+#[test]
 fn manual_rebuild_dual_reads_legacy_and_shards_in_global_order_exactly_once() {
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -10374,6 +10672,7 @@ fn manual_rebuild_dual_reads_legacy_and_shards_in_global_order_exactly_once() {
         "{{\"id\":\"{opaque_id}\",\"work_item_id\":\"work-manual-future\",\"kind\":\"future_kind\",\"updated_at\":\"2026-08-12T03:00:00Z\",\"future_field\":{{\"preserve\":true}}}}\n"
     )
     .into_bytes();
+    std::fs::create_dir_all(opaque_shard.parent().expect("opaque bucket")).expect("opaque bucket");
     std::fs::write(&opaque_shard, &opaque_bytes).expect("opaque future shard");
 
     let outcome = rebuild_work_items_from_events_for_repo(&repo).expect("manual dual rebuild");
@@ -10484,6 +10783,8 @@ fn assert_cold_manual_rebuild_invalid_shard_is_zero_mutation(kind: ColdInvalidSh
         ColdInvalidShard::Malformed => {
             let event_id = "evt-cold-malformed";
             let shard = gwt_work_event_shard_path(&events_dir, event_id);
+            std::fs::create_dir_all(shard.parent().expect("malformed bucket"))
+                .expect("malformed bucket");
             std::fs::write(&shard, format!("{{\"id\":\"{event_id}\"}}\n"))
                 .expect("malformed shard");
             let bytes = std::fs::read(&shard).expect("malformed bytes");
@@ -10493,6 +10794,8 @@ fn assert_cold_manual_rebuild_invalid_shard_is_zero_mutation(kind: ColdInvalidSh
             let mut event = start_event("work-hash-mismatch", now);
             event.id = "evt-cold-hash-body".to_string();
             let shard = gwt_work_event_shard_path(&events_dir, "evt-cold-hash-path");
+            std::fs::create_dir_all(shard.parent().expect("mismatch bucket"))
+                .expect("mismatch bucket");
             let mut bytes = serde_json::to_vec(&event).expect("serialize mismatched event");
             bytes.push(b'\n');
             std::fs::write(&shard, &bytes).expect("hash-mismatched shard");
@@ -10507,6 +10810,8 @@ fn assert_cold_manual_rebuild_invalid_shard_is_zero_mutation(kind: ColdInvalidSh
             let external = workspace.path().join("external-shard.jsonl");
             std::fs::write(&external, &bytes).expect("external shard target");
             let shard = gwt_work_event_shard_path(&events_dir, &event.id);
+            std::fs::create_dir_all(shard.parent().expect("symlink bucket"))
+                .expect("symlink bucket");
             std::os::unix::fs::symlink(&external, &shard).expect("symlink shard");
             (shard, bytes)
         }
@@ -10643,6 +10948,8 @@ fn manual_rebuild_rejects_symlinked_event_store_without_mutating_projection_or_m
     let outside_path = gwt_work_event_shard_path(&external, &outside.id);
     let mut outside_bytes = serde_json::to_vec(&outside).expect("serialize outside event");
     outside_bytes.push(b'\n');
+    std::fs::create_dir_all(outside_path.parent().expect("outside bucket"))
+        .expect("outside bucket");
     std::fs::write(&outside_path, outside_bytes).expect("outside shard");
     let events_dir = gwt_repo_local_work_events_dir(&repo);
     std::fs::create_dir_all(events_dir.parent().unwrap()).expect("work dir");
@@ -10690,6 +10997,7 @@ fn manual_rebuild_rejects_symlinked_event_shard_without_mutating_projection_or_m
     let events_dir = gwt_repo_local_work_events_dir(&repo);
     std::fs::create_dir_all(&events_dir).expect("event store");
     let shard = gwt_work_event_shard_path(&events_dir, &outside.id);
+    std::fs::create_dir_all(shard.parent().expect("symlink bucket")).expect("symlink bucket");
     std::os::unix::fs::symlink(&external, &shard).expect("symlink shard");
 
     rebuild_work_items_from_events_for_repo(&repo)
@@ -10753,6 +11061,7 @@ fn immutable_event_writer_rejects_existing_shard_symlink_without_mutating_target
     let external = temp.path().join("external-existing-shard.jsonl");
     std::fs::write(&external, &canonical).expect("external target");
     let shard = gwt_work_event_shard_path(&events_dir, &event.id);
+    std::fs::create_dir_all(shard.parent().expect("shard bucket")).expect("shard bucket");
     std::os::unix::fs::symlink(&external, &shard).expect("existing shard symlink");
     let target_before = std::fs::read(&external).expect("target before");
 

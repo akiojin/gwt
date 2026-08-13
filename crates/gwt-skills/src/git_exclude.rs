@@ -9,11 +9,22 @@ use gwt_core::process::hidden_command;
 
 use crate::distribute::ManagedAssetTarget;
 
+const WORK_EVENT_BUCKET_GLOB: &str = "!.gwt/work/events/[0-9a-f][0-9a-f]/";
+const WORK_EVENT_BUCKET_CONTENTS_GLOB: &str = ".gwt/work/events/[0-9a-f][0-9a-f]/*";
+
+fn canonical_bucketed_work_event_shard_glob() -> String {
+    format!(
+        "!.gwt/work/events/[0-9a-f][0-9a-f]/{}.jsonl",
+        "[0-9a-f]".repeat(64)
+    )
+}
+
 const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";
 const LEGACY_BEGIN_MARKER: &str = "# BEGIN gwt managed local assets";
 const LEGACY_END_MARKER: &str = "# END gwt managed local assets";
-const CANONICAL_WORK_EVENT_SHARD_GLOB: &str =
+#[cfg(test)]
+const FLAT_WORK_EVENT_SHARD_GLOB: &str =
     "!.gwt/work/events/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].jsonl";
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.
@@ -103,10 +114,7 @@ fn replace_managed_block_for_targets(
     replace_managed_block_with_patterns(content, &patterns)
 }
 
-fn replace_managed_block_with_patterns(
-    content: &str,
-    patterns: &[&'static str],
-) -> io::Result<String> {
+fn replace_managed_block_with_patterns(content: &str, patterns: &[String]) -> io::Result<String> {
     let mut result = String::new();
     let mut in_managed_block = false;
     let mut in_legacy_managed_block = false;
@@ -189,7 +197,7 @@ fn replace_managed_block_with_patterns(
     Ok(final_content)
 }
 
-fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static str> {
+fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<String> {
     let mut patterns = Vec::new();
     if targets.is_empty() {
         return patterns;
@@ -198,7 +206,9 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
     // discussion.md, agent homes). Exclude its contents broadly, then carve out
     // only the tracked Work persistent core: the frozen legacy event history,
     // immutable per-event shards, and the board remote-root registry
-    // (SPEC-2359 W-33). Writer temp residue stays ignored. memory.md /
+    // (SPEC-2359 W-33b). Only canonical bucketed shards are carved out for new
+    // writes; flat W-33 shards remain ignored read compatibility. Writer temp
+    // residue stays ignored. memory.md /
     // discussions.md moved to the
     // machine-local home work-notes dir (SPEC-3214); a legacy repo-local copy
     // remains a read fallback. `.gwt/*` excludes the children without
@@ -211,8 +221,14 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
     push_unique(&mut patterns, "!.gwt/work/events.jsonl");
     push_unique(&mut patterns, "!.gwt/work/events/");
     push_unique(&mut patterns, ".gwt/work/events/*");
-    push_unique(&mut patterns, CANONICAL_WORK_EVENT_SHARD_GLOB);
+    push_unique(&mut patterns, WORK_EVENT_BUCKET_GLOB);
+    push_unique(&mut patterns, WORK_EVENT_BUCKET_CONTENTS_GLOB);
+    push_unique(&mut patterns, &canonical_bucketed_work_event_shard_glob());
     push_unique(&mut patterns, ".gwt/work/events/.*.jsonl.create-*");
+    push_unique(
+        &mut patterns,
+        ".gwt/work/events/[0-9a-f][0-9a-f]/.*.jsonl.create-*",
+    );
     push_unique(&mut patterns, "!.gwt/work/board-remote-roots.jsonl");
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         push_unique(&mut patterns, ".claude/skills/gwt-*");
@@ -228,9 +244,9 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
     patterns
 }
 
-fn push_unique(patterns: &mut Vec<&'static str>, pattern: &'static str) {
-    if !patterns.contains(&pattern) {
-        patterns.push(pattern);
+fn push_unique(patterns: &mut Vec<String>, pattern: &str) {
+    if !patterns.iter().any(|candidate| candidate == pattern) {
+        patterns.push(pattern.to_string());
     }
 }
 
@@ -299,12 +315,16 @@ mod tests {
             "`.gwt/*` must precede `!.gwt/work/` so the carve-out re-includes: {result}"
         );
 
+        let canonical_shard_glob = canonical_bucketed_work_event_shard_glob();
         for pattern in [
             ".gwt/work/*",
             "!.gwt/work/events.jsonl",
             "!.gwt/work/events/",
-            CANONICAL_WORK_EVENT_SHARD_GLOB,
+            WORK_EVENT_BUCKET_GLOB,
+            WORK_EVENT_BUCKET_CONTENTS_GLOB,
+            canonical_shard_glob.as_str(),
             ".gwt/work/events/.*.jsonl.create-*",
+            ".gwt/work/events/[0-9a-f][0-9a-f]/.*.jsonl.create-*",
             "!.gwt/work/board-remote-roots.jsonl",
         ] {
             assert!(
@@ -315,18 +335,24 @@ mod tests {
 
         let work_exclude_idx = result.find("\n.gwt/work/*\n").unwrap();
         let shard_dir_idx = result.find("\n!.gwt/work/events/\n").unwrap();
-        let shard_idx = result
-            .find(&format!("\n{CANONICAL_WORK_EVENT_SHARD_GLOB}\n"))
+        let bucket_dir_idx = result
+            .find(&format!("\n{WORK_EVENT_BUCKET_GLOB}\n"))
             .unwrap();
+        let shard_idx = result.find(&format!("\n{canonical_shard_glob}\n")).unwrap();
         let writer_temp_idx = result
-            .find("\n.gwt/work/events/.*.jsonl.create-*\n")
+            .find("\n.gwt/work/events/[0-9a-f][0-9a-f]/.*.jsonl.create-*\n")
             .unwrap();
         assert!(
             carveout_idx < work_exclude_idx
                 && work_exclude_idx < shard_dir_idx
-                && shard_dir_idx < shard_idx
+                && shard_dir_idx < bucket_dir_idx
+                && bucket_dir_idx < shard_idx
                 && shard_idx < writer_temp_idx,
             "Work exclusions must track immutable shards while the later writer-temp pattern stays ignored: {result}"
+        );
+        assert!(
+            !result.lines().any(|line| line == FLAT_WORK_EVENT_SHARD_GLOB),
+            "flat W-33 shards must remain read-only compatibility, not a new-write carve-out: {result}"
         );
     }
 
