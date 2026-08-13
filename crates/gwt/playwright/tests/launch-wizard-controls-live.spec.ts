@@ -83,6 +83,8 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     }
 
     await selectWizardAgent(page, "grok");
+    await expect(agentSummaryValue(page)).toHaveText("Grok Build");
+    await page.evaluate(() => new Promise(requestAnimationFrame));
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });
@@ -155,6 +157,15 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
 function targetSummaryValue(page: Page) {
   return page
     .locator(".wizard-summary-item", { hasText: "Target" })
+    .locator(".wizard-summary-value");
+}
+
+function agentSummaryValue(page: Page) {
+  return page
+    .locator(".wizard-summary-item")
+    .filter({
+      has: page.locator(".wizard-summary-label", { hasText: /^Agent$/ }),
+    })
     .locator(".wizard-summary-value");
 }
 
