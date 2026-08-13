@@ -58,10 +58,17 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Grok Build is exposed as a selectable built-in agent", async ({
     page,
   }) => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
     await sendLiveGwtEvent(page, { kind: "open_intake_session" });
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await wizard.getByRole("button", { name: "Configure and start" }).click();
+    await wizard.getByRole("button", { name: "Configure intake" }).click();
 
     const agentField = wizard.getByLabel("Agent", { exact: true });
     const tag = await agentField.evaluate((node) => node.tagName.toLowerCase());
@@ -76,6 +83,8 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     }
 
     await selectWizardAgent(page, "grok");
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
   });
 
   test("Reasoning renders as a slider with a separate Auto toggle", async ({
