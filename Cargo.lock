@@ -1443,6 +1443,7 @@ name = "gwt-github"
 version = "9.69.1"
 dependencies = [
  "chrono",
+ "fs2",
  "gwt-core",
  "hex",
  "regex",
@@ -1452,6 +1453,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.19",
+ "uuid",
 ]
 
 [[package]]

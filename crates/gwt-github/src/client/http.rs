@@ -1455,6 +1455,14 @@ query($owner:String!,$repo:String!,$number:Int!){
 }
 "#;
 
+const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner, name:$repo){
+    issue(number:$number){ updatedAt }
+  }
+}
+"#;
+
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
   repository(owner:$owner, name:$repo){
@@ -1509,6 +1517,32 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError> {
+        if let Some(previous) = since {
+            let value = self.graphql(
+                FETCH_ISSUE_UPDATED_AT_QUERY,
+                json!({
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "number": number.0,
+                }),
+            )?;
+            let issue = value
+                .get("data")
+                .and_then(|data| data.get("repository"))
+                .and_then(|repository| repository.get("issue"))
+                .ok_or(ApiError::NotFound(number))?;
+            if issue.is_null() {
+                return Err(ApiError::NotFound(number));
+            }
+            let updated_at = issue
+                .get("updatedAt")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::Unexpected("issue.updatedAt missing".to_string()))?;
+            if *previous == UpdatedAt::new(updated_at) {
+                return Ok(FetchResult::NotModified);
+            }
+        }
+
         let value = self.graphql(
             FETCH_ISSUE_QUERY,
             json!({
@@ -1526,11 +1560,6 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             return Err(ApiError::NotFound(number));
         }
         let snapshot = parse_graphql_issue(issue)?;
-        if let Some(prev) = since {
-            if *prev == snapshot.updated_at {
-                return Ok(FetchResult::NotModified);
-            }
-        }
         Ok(FetchResult::Updated(snapshot))
     }
 

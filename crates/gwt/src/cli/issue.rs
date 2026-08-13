@@ -1,8 +1,13 @@
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use gwt_github::{
-    cache::write_atomic, client::ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot,
-    IssueState, SpecOpsError,
+    cache::{write_atomic, CacheGeneration, ValidatedCacheEntry},
+    client::ApiError,
+    Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError,
 };
 
 use crate::cli::{CliEnv, CliParseError, IssueCommand, LinkedPrSummary};
@@ -337,13 +342,24 @@ pub(super) fn load_or_refresh_issue<E: CliEnv>(
     number: IssueNumber,
     refresh: bool,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let cache = Cache::new(env.cache_root());
-    if !refresh {
-        if let Some(entry) = cache.load_entry(number) {
-            return Ok(entry);
+    load_or_refresh_issue_with_index_rebuild(env, number, refresh, |repo_path| {
+        if crate::index_worker::detect_repo_hash(repo_path).is_none() {
+            return Ok(());
         }
-    }
-    refresh_issue_cache(env, number)
+        crate::index_worker::default_rebuild_runner(
+            repo_path,
+            crate::index_worker::IndexRebuildScope::Issues,
+            None,
+        )
+    })
+}
+
+fn cache_resource_is_fresh(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age < crate::issue_cache::ISSUE_CACHE_TTL)
 }
 
 pub(super) fn refresh_issue_cache<E: CliEnv>(
@@ -365,6 +381,90 @@ pub(super) fn refresh_issue_cache<E: CliEnv>(
 pub(super) fn refresh_issue_cache_with_index_rebuild<E, F>(
     env: &mut E,
     number: IssueNumber,
+    rebuild_issue_index: F,
+) -> Result<gwt_github::CacheEntry, SpecOpsError>
+where
+    E: CliEnv,
+    F: FnMut(&std::path::Path) -> Result<(), String>,
+{
+    let generation = Cache::new(env.cache_root()).current_generation(number)?;
+    refresh_issue_cache_with_index_rebuild_since(
+        env,
+        number,
+        None,
+        generation.as_ref(),
+        None,
+        false,
+        rebuild_issue_index,
+    )
+}
+
+fn load_or_refresh_issue_with_index_rebuild<E, F>(
+    env: &mut E,
+    number: IssueNumber,
+    refresh: bool,
+    rebuild_issue_index: F,
+) -> Result<gwt_github::CacheEntry, SpecOpsError>
+where
+    E: CliEnv,
+    F: FnMut(&std::path::Path) -> Result<(), String>,
+{
+    if refresh {
+        let generation = Cache::new(env.cache_root()).current_generation(number)?;
+        return refresh_issue_cache_with_index_rebuild_since(
+            env,
+            number,
+            None,
+            generation.as_ref(),
+            None,
+            false,
+            rebuild_issue_index,
+        );
+    }
+
+    match Cache::new(env.cache_root())
+        .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
+    {
+        ValidatedCacheEntry::Fresh(entry) => Ok(entry.entry),
+        ValidatedCacheEntry::Stale(entry) => refresh_issue_cache_with_index_rebuild_since(
+            env,
+            number,
+            Some(&entry.entry.snapshot.updated_at),
+            entry.generation.as_ref(),
+            Some(&entry.entry.snapshot),
+            false,
+            rebuild_issue_index,
+        ),
+        ValidatedCacheEntry::Unvalidated(entry) => refresh_issue_cache_with_index_rebuild_since(
+            env,
+            number,
+            None,
+            entry.generation.as_ref(),
+            None,
+            true,
+            rebuild_issue_index,
+        ),
+        ValidatedCacheEntry::Missing { generation } => {
+            refresh_issue_cache_with_index_rebuild_since(
+                env,
+                number,
+                None,
+                generation.as_ref(),
+                None,
+                true,
+                rebuild_issue_index,
+            )
+        }
+    }
+}
+
+fn refresh_issue_cache_with_index_rebuild_since<E, F>(
+    env: &mut E,
+    number: IssueNumber,
+    since: Option<&gwt_github::UpdatedAt>,
+    expected_generation: Option<&CacheGeneration>,
+    not_modified_snapshot: Option<&IssueSnapshot>,
+    force_rebuild: bool,
     mut rebuild_issue_index: F,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError>
 where
@@ -374,26 +474,61 @@ where
     let cache_root = env.cache_root();
     let before = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
-    let snapshot = match env.client().fetch(number, None)? {
+    let snapshot = match env.client().fetch(number, since)? {
         gwt_github::FetchResult::Updated(snapshot) => snapshot,
         gwt_github::FetchResult::NotModified => {
-            return Cache::new(cache_root)
-                .load_entry(number)
-                .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)));
+            let cache = Cache::new(cache_root);
+            let expected = not_modified_snapshot.ok_or_else(|| {
+                SpecOpsError::from(ApiError::Network(format!(
+                    "issue #{} returned NotModified without a validated cache snapshot",
+                    number.0
+                )))
+            })?;
+            if !cache.renew_validation_receipt_if_generation(expected, expected_generation)? {
+                return Err(SpecOpsError::from(ApiError::Network(format!(
+                    "issue #{} cache changed during validation",
+                    number.0
+                ))));
+            }
+            return load_fresh_validated_entry(&cache, number);
         }
     };
     let cache = Cache::new(cache_root.clone());
-    cache.write_snapshot(&snapshot)?;
+    let Some(committed_generation) =
+        cache.write_snapshot_if_generation(&snapshot, expected_generation)?
+    else {
+        return Err(SpecOpsError::from(ApiError::Network(format!(
+            "issue #{} cache changed while fetching remote snapshot",
+            number.0
+        ))));
+    };
     let after = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
-    if crate::issue_cache::issue_cache_source_changed(&before, &after) {
+    if force_rebuild || crate::issue_cache::issue_cache_source_changed(&before, &after) {
         rebuild_issue_index(env.repo_path()).map_err(|err| {
             SpecOpsError::from(ApiError::Network(format!("rebuild issue index: {err}")))
         })?;
     }
-    cache
-        .load_entry(number)
-        .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))
+    if !cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))? {
+        return Err(SpecOpsError::from(ApiError::Network(format!(
+            "issue #{} cache changed before validation receipt publication",
+            number.0
+        ))));
+    }
+    load_fresh_validated_entry(&cache, number)
+}
+
+fn load_fresh_validated_entry(
+    cache: &Cache,
+    number: IssueNumber,
+) -> Result<gwt_github::CacheEntry, SpecOpsError> {
+    match cache.load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)? {
+        ValidatedCacheEntry::Fresh(entry) => Ok(entry.entry),
+        _ => Err(SpecOpsError::from(ApiError::Network(format!(
+            "issue #{} cache validation receipt is unstable",
+            number.0
+        )))),
+    }
 }
 
 pub(super) fn load_or_refresh_linked_prs<E: CliEnv>(
@@ -403,8 +538,10 @@ pub(super) fn load_or_refresh_linked_prs<E: CliEnv>(
 ) -> Result<Vec<LinkedPrSummary>, SpecOpsError> {
     let cache_root = env.cache_root();
     if !refresh {
-        if let Some(cached) = read_linked_prs_cache(&cache_root, number)? {
-            return Ok(cached);
+        if let Ok(Some(cached)) = read_linked_prs_cache(&cache_root, number) {
+            if cache_resource_is_fresh(&linked_prs_cache_path(&cache_root, number)) {
+                return Ok(cached);
+            }
         }
     }
     let linked_prs = env.fetch_linked_prs(number).map_err(io_as_api_error)?;
@@ -648,13 +785,58 @@ pub(crate) fn body_closes_issue(body: &str, issue_number: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use gwt_github::client::{IssueSnapshot, IssueState, UpdatedAt};
+    use std::{
+        fs::File,
+        path::Path,
+        time::{Duration, SystemTime},
+    };
+
+    use gwt_github::client::{CommentId, CommentSnapshot, IssueSnapshot, IssueState, UpdatedAt};
     use tempfile::TempDir;
 
     use super::*;
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    fn set_modified(path: &Path, modified: SystemTime) {
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("open cache receipt")
+            .set_modified(modified)
+            .expect("set cache receipt mtime");
+    }
+
+    fn stale_time() -> SystemTime {
+        SystemTime::now() - crate::issue_cache::ISSUE_CACHE_TTL - Duration::from_secs(1)
+    }
+
+    fn write_issue_validation_receipt(
+        cache_root: &Path,
+        snapshot: &IssueSnapshot,
+        validated_at: &str,
+    ) -> String {
+        let cache = Cache::new(cache_root.to_path_buf());
+        assert!(cache
+            .renew_validation_receipt_if_current(snapshot)
+            .expect("publish validation receipt"));
+        let path = cache.validation_receipt_path(snapshot.number);
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read validation receipt"))
+                .expect("parse validation receipt");
+        let generation = receipt["generation"]
+            .as_str()
+            .expect("validation generation")
+            .to_string();
+        receipt["validated_at"] = serde_json::Value::String(validated_at.to_string());
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&receipt).expect("serialize validation receipt"),
+        )
+        .expect("write validation receipt");
+        generation
     }
 
     #[test]
@@ -790,6 +972,7 @@ mod tests {
         gwt_github::Cache::new(tmp.path().to_path_buf())
             .write_snapshot(&snapshot)
             .expect("write cache");
+        write_issue_validation_receipt(tmp.path(), &snapshot, &chrono::Utc::now().to_rfc3339());
 
         let mut out = String::new();
         let code = run(
@@ -857,6 +1040,317 @@ mod tests {
     }
 
     #[test]
+    fn stale_issue_cache_revalidates_and_surfaces_remote_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut cached = sample_issue_snapshot();
+        cached.state = IssueState::Open;
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+        write_issue_validation_receipt(temp.path(), &cached, "2020-01-01T00:00:00Z");
+
+        let mut remote = cached.clone();
+        remote.state = IssueState::Closed;
+        remote.updated_at = UpdatedAt::new("2026-08-13T01:00:00Z");
+        env.client.seed(remote);
+
+        let loaded = load_or_refresh_issue(&mut env, cached.number, false)
+            .expect("stale issue should revalidate");
+
+        assert_eq!(loaded.snapshot.state, IssueState::Closed);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn stale_unchanged_issue_renews_receipt_without_a_second_fetch() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut snapshot = sample_issue_snapshot();
+        snapshot.body = "cached body must survive NotModified".to_string();
+        Cache::new(env.cache_root())
+            .write_snapshot(&snapshot)
+            .expect("write cached issue");
+        write_issue_validation_receipt(temp.path(), &snapshot, "2020-01-01T00:00:00Z");
+        let mut remote = snapshot.clone();
+        remote.body = "remote body must not transfer on NotModified".to_string();
+        env.client.seed(remote);
+
+        let first = load_or_refresh_issue(&mut env, snapshot.number, false)
+            .expect("stale issue should revalidate");
+        let second = load_or_refresh_issue(&mut env, snapshot.number, false)
+            .expect("renewed receipt should be fresh");
+
+        assert_eq!(first.snapshot.body, snapshot.body);
+        assert_eq!(second.snapshot.body, snapshot.body);
+        assert_eq!(
+            Cache::new(env.cache_root())
+                .load_entry(snapshot.number)
+                .expect("cached issue after NotModified")
+                .snapshot
+                .body,
+            snapshot.body
+        );
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn stale_validation_sidecar_conditionally_revalidates_and_renews_generation() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut cached = sample_issue_snapshot();
+        cached.body = "cached complete body".to_string();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+        let stale_generation =
+            write_issue_validation_receipt(temp.path(), &cached, "2020-01-01T00:00:00Z");
+
+        let mut remote = cached.clone();
+        remote.body = "remote body must not replace NotModified cache".to_string();
+        env.client.seed(remote);
+
+        let loaded = load_or_refresh_issue(&mut env, cached.number, false)
+            .expect("stale validation should conditionally revalidate");
+
+        assert_eq!(loaded.snapshot.body, cached.body);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                temp.path()
+                    .join(cached.number.0.to_string())
+                    .join("issue-validation.json"),
+            )
+            .expect("renewed validation receipt"),
+        )
+        .expect("parse renewed receipt");
+        assert_ne!(receipt["generation"], stale_generation);
+    }
+
+    #[test]
+    fn stale_issue_comments_refresh_remote_changes() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+        write_issue_validation_receipt(temp.path(), &cached, "2020-01-01T00:00:00Z");
+
+        let mut remote = cached.clone();
+        remote.updated_at = UpdatedAt::new("2026-08-13T02:00:00Z");
+        remote.comments = vec![CommentSnapshot {
+            id: CommentId(9001),
+            body: "fresh remote comment".to_string(),
+            updated_at: remote.updated_at.clone(),
+        }];
+        env.client.seed(remote);
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Comments {
+                number: cached.number.0,
+                refresh: false,
+            },
+            &mut out,
+        )
+        .expect("stale comments should revalidate");
+
+        assert!(out.contains("fresh remote comment"));
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn cache_without_validation_sidecar_full_fetches_partial_comments() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut partial = sample_issue_snapshot();
+        partial.comments.clear();
+        Cache::new(env.cache_root())
+            .write_snapshot(&partial)
+            .expect("write bulk-like partial cache");
+
+        let mut remote = partial.clone();
+        remote.comments = vec![CommentSnapshot {
+            id: CommentId(9002),
+            body: "comment omitted by bulk list snapshot".to_string(),
+            updated_at: remote.updated_at.clone(),
+        }];
+        env.client.seed(remote);
+
+        let loaded = load_or_refresh_issue(&mut env, partial.number, false)
+            .expect("unvalidated partial cache should full fetch");
+
+        assert_eq!(loaded.snapshot.comments.len(), 1);
+        assert_eq!(
+            loaded.snapshot.comments[0].body,
+            "comment omitted by bulk list snapshot"
+        );
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn stale_linked_pr_cache_refreshes_independently() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let number = IssueNumber(42);
+        write_linked_prs_cache(
+            temp.path(),
+            number,
+            &[LinkedPrSummary {
+                number: 100,
+                title: "cached PR".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://example.test/100".to_string(),
+                will_close_target: false,
+            }],
+        )
+        .expect("write linked PR cache");
+        set_modified(&linked_prs_cache_path(temp.path(), number), stale_time());
+        env.seed_linked_prs(
+            number.0,
+            vec![LinkedPrSummary {
+                number: 101,
+                title: "fresh PR".to_string(),
+                state: "MERGED".to_string(),
+                url: "https://example.test/101".to_string(),
+                will_close_target: true,
+            }],
+        );
+
+        let linked = load_or_refresh_linked_prs(&mut env, number, false)
+            .expect("stale linked PRs should refresh");
+
+        assert_eq!(linked[0].number, 101);
+        assert_eq!(env.linked_pr_calls(), vec![42]);
+    }
+
+    #[test]
+    fn stale_linked_pr_revalidation_error_does_not_return_cached_data() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let number = IssueNumber(42);
+        write_linked_prs_cache(
+            temp.path(),
+            number,
+            &[LinkedPrSummary {
+                number: 100,
+                title: "stale cached PR".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://example.test/100".to_string(),
+                will_close_target: false,
+            }],
+        )
+        .expect("write linked PR cache");
+        let receipt = linked_prs_cache_path(temp.path(), number);
+        let stale = stale_time();
+        set_modified(&receipt, stale);
+        env.seed_linked_pr_error(number.0, "linked PR refresh failed");
+
+        let error = load_or_refresh_linked_prs(&mut env, number, false)
+            .expect_err("failed linked PR refresh must fail closed");
+
+        assert!(error.to_string().contains("linked PR refresh failed"));
+        assert_eq!(env.linked_pr_calls(), vec![42]);
+        assert!(!cache_resource_is_fresh(&receipt));
+    }
+
+    #[test]
+    fn corrupt_linked_pr_cache_is_replaced_from_remote() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let number = IssueNumber(42);
+        let receipt = linked_prs_cache_path(temp.path(), number);
+        fs::create_dir_all(receipt.parent().expect("cache directory"))
+            .expect("create cache directory");
+        fs::write(&receipt, "{not-json").expect("write corrupt linked PR cache");
+        env.seed_linked_prs(
+            number.0,
+            vec![LinkedPrSummary {
+                number: 101,
+                title: "recovered PR".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://example.test/101".to_string(),
+                will_close_target: true,
+            }],
+        );
+
+        let linked = load_or_refresh_linked_prs(&mut env, number, false)
+            .expect("corrupt linked PR cache should refresh");
+
+        assert_eq!(linked[0].number, 101);
+        assert_eq!(env.linked_pr_calls(), vec![42]);
+        assert_eq!(
+            read_linked_prs_cache(temp.path(), number)
+                .expect("repaired linked PR cache")
+                .expect("linked PR cache should exist")[0]
+                .number,
+            101
+        );
+    }
+
+    #[test]
+    fn future_dated_issue_receipt_is_revalidated() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+        write_issue_validation_receipt(temp.path(), &cached, "2999-01-01T00:00:00Z");
+
+        let mut remote = cached.clone();
+        remote.title = "future receipt was revalidated".to_string();
+        remote.updated_at = UpdatedAt::new("2026-08-13T03:00:00Z");
+        env.client.seed(remote);
+
+        let loaded = load_or_refresh_issue(&mut env, cached.number, false)
+            .expect("future receipt should revalidate");
+
+        assert_eq!(loaded.snapshot.title, "future receipt was revalidated");
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn stale_issue_revalidation_error_does_not_return_cached_data() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+        write_issue_validation_receipt(temp.path(), &cached, "2020-01-01T00:00:00Z");
+
+        let error = load_or_refresh_issue(&mut env, cached.number, false)
+            .expect_err("failed revalidation must fail closed");
+
+        assert!(error.to_string().contains("not found"));
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
+    fn explicit_issue_refresh_bypasses_a_fresh_receipt() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write cached issue");
+
+        let mut remote = cached.clone();
+        remote.title = "explicitly refreshed".to_string();
+        remote.updated_at = UpdatedAt::new("2026-08-13T04:00:00Z");
+        env.client.seed(remote);
+
+        let loaded = load_or_refresh_issue(&mut env, cached.number, true)
+            .expect("explicit refresh should fetch");
+
+        assert_eq!(loaded.snapshot.title, "explicitly refreshed");
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+    }
+
+    #[test]
     fn explicit_issue_refresh_rebuilds_issue_index_when_cache_source_changes() {
         let temp = TempDir::new().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
@@ -879,5 +1373,128 @@ mod tests {
 
         assert_eq!(entry.snapshot.state, IssueState::Closed);
         assert_eq!(rebuild_calls, vec![env.repo_path().to_path_buf()]);
+    }
+
+    #[test]
+    fn index_rebuild_failure_keeps_receipt_absent_and_next_read_retries() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut cached = sample_issue_snapshot();
+        cached.title = "old cache".to_string();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write old cache");
+
+        let mut remote = cached.clone();
+        remote.title = "remote snapshot".to_string();
+        remote.updated_at = UpdatedAt::new("2026-08-13T05:00:00Z");
+        env.client.seed(remote.clone());
+
+        let mut rebuild_calls = 0;
+        let first =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, |_| {
+                rebuild_calls += 1;
+                Err("injected rebuild failure".to_string())
+            })
+            .expect_err("first index rebuild should fail");
+        assert!(first.to_string().contains("injected rebuild failure"));
+        assert!(!Cache::new(env.cache_root())
+            .validation_receipt_path(remote.number)
+            .exists());
+
+        let second =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, |_| {
+                rebuild_calls += 1;
+                Ok(())
+            })
+            .expect("unvalidated cache must retry index rebuild");
+        assert_eq!(second.snapshot.title, remote.title);
+
+        let third =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, |_| {
+                rebuild_calls += 1;
+                Ok(())
+            })
+            .expect("validated cache should be a warm hit");
+        assert_eq!(third.snapshot.title, remote.title);
+        assert_eq!(rebuild_calls, 2);
+        assert_eq!(
+            env.client.call_log(),
+            vec!["fetch:#42".to_string(), "fetch:#42".to_string()]
+        );
+    }
+
+    #[test]
+    fn generation_change_during_rebuild_prevents_receipt_publication() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write old cache");
+        let mut remote = cached.clone();
+        remote.title = "remote snapshot".to_string();
+        remote.updated_at = UpdatedAt::new("2026-08-13T06:00:00Z");
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        let mut concurrent = remote.clone();
+        concurrent.title = "concurrent writer wins".to_string();
+
+        let error =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
+                Cache::new(cache_root.clone())
+                    .write_snapshot(&concurrent)
+                    .map_err(|error| error.to_string())
+            })
+            .expect_err("changed generation must reject receipt publication");
+
+        assert!(error
+            .to_string()
+            .contains("changed before validation receipt"));
+        let cache = Cache::new(env.cache_root());
+        assert_eq!(
+            cache
+                .load_entry(remote.number)
+                .expect("concurrent cache")
+                .snapshot
+                .title,
+            "concurrent writer wins"
+        );
+        assert!(!cache.validation_receipt_path(remote.number).exists());
+    }
+
+    #[test]
+    fn identical_snapshot_aba_during_rebuild_rejects_original_generation() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let cached = sample_issue_snapshot();
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .expect("write old cache");
+        let mut remote = cached.clone();
+        remote.title = "same bytes after concurrent commit".to_string();
+        remote.updated_at = UpdatedAt::new("2026-08-13T07:00:00Z");
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        let concurrent = remote.clone();
+
+        let error =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
+                Cache::new(cache_root.clone())
+                    .write_snapshot(&concurrent)
+                    .map_err(|error| error.to_string())
+            })
+            .expect_err("identical bytes with a different UUID must fail generation CAS");
+
+        assert!(error
+            .to_string()
+            .contains("changed before validation receipt"));
+        let cache = Cache::new(env.cache_root());
+        let persisted = cache.load_entry(remote.number).unwrap().snapshot;
+        assert_eq!(persisted.title, remote.title);
+        assert_eq!(persisted.body, remote.body);
+        assert_eq!(persisted.updated_at, remote.updated_at);
+        assert_eq!(persisted.comments[0].body, remote.comments[0].body);
+        assert!(!cache.validation_receipt_path(remote.number).exists());
     }
 }

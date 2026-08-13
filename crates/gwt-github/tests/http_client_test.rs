@@ -95,6 +95,18 @@ fn ok_body(body: &str) -> HttpResponse {
     }
 }
 
+fn graphql_mentions_field(query: &str, field: &str) -> bool {
+    query
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == field)
+}
+
+fn assert_issue_variables(payload: &serde_json::Value, number: u64) {
+    assert_eq!(payload["variables"]["owner"], "octo");
+    assert_eq!(payload["variables"]["repo"], "gwt");
+    assert_eq!(payload["variables"]["number"], number);
+}
+
 fn created(body: &str) -> HttpResponse {
     HttpResponse {
         status: 201,
@@ -159,17 +171,63 @@ fn red_50_fetch_posts_graphql_with_auth() {
 fn red_51_fetch_returns_not_modified_on_match() {
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(
-        r#"{"data":{"repository":{"issue":{
-            "number":1,"title":"t","body":"b","state":"OPEN","updatedAt":"T1",
-            "labels":{"nodes":[]},
-            "comments":{"nodes":[]}
-        }}}}"#,
+        r#"{"data":{"repository":{"issue":{"updatedAt":"T1"}}}}"#,
     ));
     let client = client_with(transport);
     let res = client
         .fetch(IssueNumber(1), Some(&UpdatedAt::new("T1")))
         .unwrap();
     assert!(matches!(res, FetchResult::NotModified));
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().expect("probe body")).unwrap();
+    let query = payload["query"].as_str().expect("probe query");
+    assert!(graphql_mentions_field(query, "updatedAt"));
+    assert!(!graphql_mentions_field(query, "body"));
+    assert!(!graphql_mentions_field(query, "comments"));
+    assert_issue_variables(&payload, 1);
+}
+
+#[test]
+fn conditional_fetch_runs_full_query_only_after_changed_probe() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{"updatedAt":"T2"}}}}"#,
+    ));
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{
+            "number":1,"title":"changed","body":"fresh body","state":"CLOSED","updatedAt":"T2",
+            "labels":{"nodes":[{"name":"bug"}]},
+            "comments":{"nodes":[]}
+        }}}}"#,
+    ));
+    let client = client_with(transport);
+
+    let result = client
+        .fetch(IssueNumber(1), Some(&UpdatedAt::new("T1")))
+        .expect("changed conditional fetch");
+
+    let FetchResult::Updated(snapshot) = result else {
+        panic!("changed probe must return the full snapshot");
+    };
+    assert_eq!(snapshot.title, "changed");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    let probe: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().expect("probe body")).unwrap();
+    let full: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().expect("full body")).unwrap();
+    let probe_query = probe["query"].as_str().expect("probe query");
+    let full_query = full["query"].as_str().expect("full query");
+    assert!(graphql_mentions_field(probe_query, "updatedAt"));
+    assert!(!graphql_mentions_field(probe_query, "body"));
+    assert!(!graphql_mentions_field(probe_query, "comments"));
+    assert!(graphql_mentions_field(full_query, "body"));
+    assert!(graphql_mentions_field(full_query, "comments"));
+    assert_issue_variables(&probe, 1);
+    assert_issue_variables(&full, 1);
 }
 
 // -----------------------------------------------------------------------
