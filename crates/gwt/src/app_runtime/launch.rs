@@ -3557,12 +3557,14 @@ impl AppRuntime {
             agent_kanban_target,
             continuation,
         } = options;
-        // SPEC #3200 FR-052: a durable Issue Monitor delivery must always
-        // materialize its own window so the delivery tuple can be ACKed.
-        // Focusing an existing window would strand the delivery as pending.
-        let durable_issue_monitor_delivery = launch_feedback_context
+        // Issue Monitor owns a stricter native-conversation writer preflight
+        // than the generic branch singleton. Once that preflight authorizes a
+        // Resume or chooses a fresh fallback, a same-branch window must not
+        // replace the requested materialization. Durable deliveries also need
+        // their own window so the exact delivery tuple can be ACKed.
+        let issue_monitor_launch = launch_feedback_context
             .as_ref()
-            .is_some_and(|context| context.issue_monitor_delivery_id.is_some());
+            .is_some_and(|context| context.issue_monitor_issue_number.is_some());
         if continuation.is_some() {
             if let Some(window_id) =
                 self.pending_continue_work
@@ -3581,7 +3583,7 @@ impl AppRuntime {
                     .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
             }
         }
-        if continuation.is_none() && !durable_issue_monitor_delivery {
+        if continuation.is_none() && !issue_monitor_launch {
             if let Some(window_id) = self.live_agent_window_for_work(
                 tab_id,
                 config.branch.as_deref(),
@@ -3609,7 +3611,7 @@ impl AppRuntime {
                     && window_lookup.contains_key(window_id.as_str())
             });
         }
-        if !durable_issue_monitor_delivery {
+        if !issue_monitor_launch {
             if let Some(key) = inflight_key.as_deref() {
                 if let Some((window_id, _)) = self.inflight_launches.get(key) {
                     let window_id = window_id.clone();

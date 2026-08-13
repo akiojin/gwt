@@ -939,11 +939,16 @@ fn issue_monitor_daemon_user_event(
                 .get("delivery_id")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
+            let launch_session_strategy = match payload.get("launch_session_strategy") {
+                Some(value) => serde_json::from_value(value.clone()).ok()?,
+                None => gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+            };
             Some(UserEvent::IssueMonitorLaunchRequest {
                 project_root: project_root.to_path_buf(),
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
+                launch_session_strategy,
             })
         }
         "review_dispatch" => {
@@ -1114,6 +1119,7 @@ enum UserEvent {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -1545,6 +1551,7 @@ mod tests {
                 "issue_number": 42,
                 "linked_issue_kind": "spec",
                 "delivery_id": "launch:effect-42",
+                "launch_session_strategy": "fresh_required",
             }),
             42,
         );
@@ -1559,14 +1566,40 @@ mod tests {
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
+                launch_session_strategy,
             }) => {
                 assert_eq!(actual_project_root, project_root);
                 assert_eq!(issue_number, 42);
                 assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
                 assert_eq!(delivery_id.as_deref(), Some("launch:effect-42"));
+                assert_eq!(
+                    launch_session_strategy,
+                    gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+                );
             }
             other => panic!("unexpected issue monitor launch event: {other:?}"),
         }
+
+        let legacy_launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "launch_request",
+            serde_json::json!({
+                "issue_number": 43,
+                "linked_issue_kind": "issue",
+            }),
+            43,
+        );
+        assert!(matches!(
+            super::daemon_broadcast_user_event(
+                gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+                legacy_launch_payload,
+                project_root,
+                99,
+            ),
+            Some(UserEvent::IssueMonitorLaunchRequest {
+                launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+                ..
+            })
+        ));
 
         let dispatch = gwt::AutonomousReviewDispatch {
             issue_number: 42,
@@ -8275,12 +8308,14 @@ fn main() -> std::io::Result<()> {
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
+                launch_session_strategy,
             }) => {
                 let events = app.auto_launch_issue_monitor_delivery_events_for_project(
                     &project_root,
                     issue_number,
                     linked_issue_kind,
                     delivery_id,
+                    launch_session_strategy,
                 );
                 clients.dispatch(events);
             }
