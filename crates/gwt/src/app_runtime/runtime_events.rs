@@ -272,6 +272,17 @@ impl AppRuntime {
             .active_agent_sessions
             .get(&id)
             .map(|session| session.session_id.clone());
+        // A terminal PTY status ends the input generation even when the Pane
+        // stays on screen for recovery diagnostics. Removing the registry
+        // pointer before invalidation lets an in-flight authorized write
+        // finish, while every worker still waiting to commit observes the
+        // missing/stale generation and fails closed.
+        if matches!(
+            status,
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
+        ) {
+            self.deregister_pty_writer(&id);
+        }
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&id);
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {

@@ -105,6 +105,9 @@ fn handle_user_prompt_submit(
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward(input)
     })?;
+    run_value(event, "pm-delivery-ack", || {
+        pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
+    });
     // SPEC-2359 Phase W-11 (US-58): the workspace-identity step no longer
     // derives a title from the prompt; it only performs the Phase W-10
     // canonical Project State split repair. Fail-open so a repair error does
