@@ -59,7 +59,7 @@ use super::{
     reset_local_issue_monitor_remote_scan_count, save_resumed_workspace_projection,
     save_start_work_workspace_projection, save_workspace_launch_projection,
     set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
+    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AppEventProxy, AppRuntime,
     AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
     ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
     KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
@@ -4239,12 +4239,25 @@ fn wait_for_recorded_event(
     events: &Arc<Mutex<Vec<UserEvent>>>,
     predicate: impl Fn(&[UserEvent]) -> bool,
 ) {
-    for _ in 0..800 {
+    wait_for_recorded_event_with_timeout(label, events, Duration::from_secs(20), predicate);
+}
+
+fn wait_for_recorded_event_with_timeout(
+    label: &str,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    timeout: Duration,
+    predicate: impl Fn(&[UserEvent]) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
         {
             let events = events.lock().expect("event log");
             if predicate(&events) {
                 return;
             }
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -9955,6 +9968,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
                 issue_monitor_issue_number: Some(3456),
                 issue_monitor_delivery_id: Some(delivery_id.clone()),
                 issue_monitor_project_root: Some(repo.clone()),
+                issue_monitor_session_mode: None,
             },
         )
         .expect("start gated launch");
@@ -14581,6 +14595,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
         issue_monitor_issue_number: Some(42),
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: Some(monitor_repo.clone()),
+        issue_monitor_session_mode: None,
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
@@ -14798,6 +14813,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         issue_monitor_issue_number: Some(fixture.owner.number),
         issue_monitor_delivery_id: Some(delivery_id.to_string()),
         issue_monitor_project_root: Some(fixture.repo.clone()),
+        issue_monitor_session_mode: None,
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
@@ -18135,6 +18151,7 @@ No viable candidates found in PATH \
             issue_monitor_issue_number: None,
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         }),
     );
 
@@ -18209,6 +18226,7 @@ No viable candidates found in PATH \
             issue_monitor_issue_number: None,
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         }),
     );
 
@@ -18254,6 +18272,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         }),
     );
 
@@ -18305,6 +18324,7 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         }),
     );
 
@@ -18377,6 +18397,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -18513,6 +18534,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -31609,6 +31631,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
+            issue_monitor_session_mode: None,
         },
     );
 
@@ -31674,6 +31697,7 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
+            issue_monitor_session_mode: None,
         },
     );
 
@@ -31731,6 +31755,7 @@ fn app_runtime_agent_failed_fallback_is_fail_closed_on_corrupt_prefs() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
+            issue_monitor_session_mode: None,
         },
     );
 
@@ -32485,6 +32510,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         42,
         "launch failed",
         Some("launch:effect-42"),
+        gwt_agent::SessionMode::Normal,
         Ok(()),
     );
     assert!(published.is_empty());
@@ -32499,6 +32525,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         42,
         "launch failed",
         Some("launch:effect-42"),
+        gwt_agent::SessionMode::Normal,
         Err(
             gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
                 "daemon not running".to_string(),
@@ -33118,6 +33145,7 @@ fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
             issue_monitor_issue_number: Some(43),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -33199,6 +33227,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
             issue_monitor_issue_number: Some(43),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -33930,6 +33959,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     assert!(first
         .iter()
@@ -33938,6 +33968,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     assert!(!replay
         .iter()
@@ -34027,6 +34058,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
 
     assert!(
@@ -34064,6 +34096,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
 
     assert!(
@@ -34136,11 +34169,13 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     let second = runtime_b.auto_launch_issue_monitor_delivery_events(
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     let non_owner_failure = runtime_b.issue_monitor_launch_failed_delivery_events(
         Some(&repo),
@@ -34222,6 +34257,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     let bound_window_id = gwt::load_issue_monitor_prefs(&prefs_path)
         .expect("load bound delivery")
@@ -34272,6 +34308,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     assert!(!events
         .iter()
@@ -34351,6 +34388,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
         },
     );
 
@@ -34481,6 +34519,1150 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         "Issue Monitor auto launch must pass the generated prompt to the agent: {:?}",
         process.args
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MonitorProviderConversationFixture {
+    Present,
+    Missing,
+    Foreign,
+    Unknown,
+    Corrupt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorNativeHolderFixture {
+    None,
+    ActiveSameConversation,
+    ActiveSameConversationMissingWindow,
+    ActiveSameConversationStopped,
+    ActiveSameConversationError,
+    ActiveOtherConversation,
+    MaterializingSameConversation,
+    StaleMaterializingSameConversation,
+}
+
+struct MonitorRelaunchFixture {
+    runtime: AppRuntime,
+    recorded_events: Arc<Mutex<Vec<UserEvent>>>,
+    sessions_dir: PathBuf,
+    project_root: PathBuf,
+    worktree: PathBuf,
+    repo_hash: String,
+    source_session_id: String,
+    native_conversation_id: String,
+    execution_owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    predecessor_execution_binding: gwt_agent::ExecutionBindingIdentity,
+    holder_window_id: Option<String>,
+    delivery_id: Option<String>,
+}
+
+fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
+    gwt::IssueMonitorLaunchProfile {
+        agent_id: "codex".to_string(),
+        model: Some("gpt-5.5".to_string()),
+        reasoning: Some("high".to_string()),
+        version: Some("latest".to_string()),
+        session_mode: gwt_agent::SessionMode::Normal,
+        skip_permissions: true,
+        codex_fast_mode: false,
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+    }
+}
+
+fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
+    gwt::IssueMonitorLaunchProfile {
+        agent_id: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        reasoning: Some("low".to_string()),
+        version: Some("latest".to_string()),
+        session_mode: gwt_agent::SessionMode::Normal,
+        skip_permissions: true,
+        codex_fast_mode: false,
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+    }
+}
+
+fn monitor_relaunch_fixture(
+    root: &Path,
+    case_name: &str,
+    conversation: MonitorProviderConversationFixture,
+    holder: MonitorNativeHolderFixture,
+    durable_delivery: bool,
+) -> MonitorRelaunchFixture {
+    let case_root = root.join(case_name);
+    fs::create_dir_all(&case_root).expect("create monitor relaunch case root");
+    let repo = case_root.join("repo");
+    init_git_clone_with_origin(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3165,
+            "SPEC: monitor relaunch safety",
+            &["gwt-spec"],
+            "Monitor relaunch fixture",
+            "2026-08-13T00:00:00Z",
+        ))
+        .expect("seed monitored SPEC authority");
+    let worktree = case_root.join("issue-worktree");
+    let target_branch = "work/issue-3165";
+    let status = gwt_core::process::hidden_command("git")
+        .args(["worktree", "add", "-b", target_branch])
+        .arg(&worktree)
+        .arg("develop")
+        .current_dir(&repo)
+        .status()
+        .expect("materialize monitored issue worktree");
+    assert!(status.success(), "git worktree add failed with {status}");
+
+    let sessions_dir = case_root.join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let native_conversation_id = format!("native-monitor-{case_name}");
+    let source_session_id = format!("session-monitor-{case_name}");
+    let now = Utc::now();
+    let mut source = gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
+    source.id = source_session_id.clone();
+    source.agent_session_id = Some(native_conversation_id.clone());
+    source.project_state_root = Some(repo.clone());
+    source.linked_issue_number = Some(3165);
+    source.model = Some("gpt-5.4".to_string());
+    source.reasoning_level = Some("low".to_string());
+    source.tool_version = Some("latest".to_string());
+    source.skip_permissions = true;
+    source.status = gwt_agent::AgentStatus::Stopped;
+    source.created_at = now;
+    source.updated_at = now;
+    source.last_activity_at = now;
+    if matches!(conversation, MonitorProviderConversationFixture::Unknown) {
+        source.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        source.docker_service = Some("app".to_string());
+    }
+    let execution_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        number: 3165,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &worktree,
+        execution_owner.kind,
+        execution_owner.number,
+        &source_session_id,
+        "$gwt-execute #3165",
+        false,
+    )
+    .expect("materialize monitored predecessor execution");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &worktree,
+            &source_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "monitor predecessor failed".to_string(),
+                missing_verification: Some("successor verification pending".to_string()),
+            },
+        )
+        .expect("settle monitored predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &worktree,
+        execution_owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import monitored predecessor generation");
+    let predecessor_execution_binding =
+        gwt::cli::execution_state::current_execution_binding(&worktree, execution_owner)
+            .expect("read monitored predecessor binding")
+            .expect("monitored predecessor binding");
+    let repo_hash = source
+        .repo_hash
+        .clone()
+        .expect("monitored predecessor repository hash");
+    source
+        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: source_session_id.clone(),
+            repo_hash: repo_hash.clone(),
+            owner_kind: execution_owner.kind.as_str().to_string(),
+            owner_number: execution_owner.number,
+            identity: predecessor_execution_binding.clone(),
+            capability_generation: 1,
+        }))
+        .expect("bind monitored predecessor Session");
+    source
+        .save(&sessions_dir)
+        .expect("save resume source Session");
+    let global_sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&global_sessions_dir).expect("create isolated global sessions dir");
+    source
+        .save(&global_sessions_dir)
+        .expect("save globally discoverable predecessor Session");
+
+    let holder_window_id = (holder != MonitorNativeHolderFixture::None)
+        .then(|| combined_window_id("tab-1", "agent-holder"));
+    let holder_session_id = holder_window_id.as_ref().map(|_| {
+        let holder_session_id = format!("session-holder-{case_name}");
+        let holder_conversation_id = match holder {
+            MonitorNativeHolderFixture::ActiveOtherConversation => {
+                format!("native-other-{case_name}")
+            }
+            MonitorNativeHolderFixture::ActiveSameConversation
+            | MonitorNativeHolderFixture::ActiveSameConversationMissingWindow
+            | MonitorNativeHolderFixture::ActiveSameConversationStopped
+            | MonitorNativeHolderFixture::ActiveSameConversationError
+            | MonitorNativeHolderFixture::MaterializingSameConversation
+            | MonitorNativeHolderFixture::StaleMaterializingSameConversation => {
+                native_conversation_id.clone()
+            }
+            MonitorNativeHolderFixture::None => unreachable!("holder window implies holder"),
+        };
+        let holder_at = now - chrono::Duration::hours(1);
+        let mut holder_session =
+            gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
+        holder_session.id = holder_session_id.clone();
+        holder_session.agent_session_id = Some(holder_conversation_id);
+        holder_session.linked_issue_number = Some(3165);
+        holder_session.status = if matches!(
+            holder,
+            MonitorNativeHolderFixture::MaterializingSameConversation
+                | MonitorNativeHolderFixture::StaleMaterializingSameConversation
+        ) {
+            gwt_agent::AgentStatus::Stopped
+        } else {
+            gwt_agent::AgentStatus::Running
+        };
+        holder_session.created_at = holder_at;
+        holder_session.updated_at = holder_at;
+        holder_session.last_activity_at = holder_at;
+        holder_session
+            .save(&sessions_dir)
+            .expect("save native conversation holder Session");
+        holder_session_id
+    });
+
+    let codex_home = PathBuf::from(
+        std::env::var_os("CODEX_HOME").expect("CODEX_HOME is isolated for this test"),
+    );
+    let rollout_dir = codex_home.join("sessions/2026/08/13");
+    fs::create_dir_all(&rollout_dir).expect("create Codex rollout directory");
+    let rollout_path = rollout_dir.join(format!(
+        "rollout-2026-08-13T00-00-00-{native_conversation_id}.jsonl"
+    ));
+    match conversation {
+        MonitorProviderConversationFixture::Present
+        | MonitorProviderConversationFixture::Unknown => fs::write(
+            &rollout_path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{native_conversation_id}\",\"cwd\":{}}}}}\n",
+                serde_json::to_string(&worktree.display().to_string())
+                    .expect("serialize monitored worktree")
+            ),
+        )
+        .expect("write present Codex rollout"),
+        MonitorProviderConversationFixture::Foreign => {
+            let foreign = case_root.join("foreign-worktree");
+            fs::create_dir_all(&foreign).expect("create foreign worktree fixture");
+            fs::write(
+                &rollout_path,
+                format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{native_conversation_id}\",\"cwd\":{}}}}}\n",
+                    serde_json::to_string(&foreign.display().to_string())
+                        .expect("serialize foreign worktree")
+                ),
+            )
+            .expect("write foreign Codex rollout");
+        }
+        MonitorProviderConversationFixture::Corrupt => {
+            fs::write(&rollout_path, b"{corrupt rollout\n").expect("write corrupt Codex rollout");
+        }
+        MonitorProviderConversationFixture::Missing => {}
+    }
+
+    let delivery_id = durable_delivery.then(|| format!("launch:effect-{case_name}"));
+    let mut prefs = if let Some(delivery_id) = delivery_id.as_deref() {
+        let mut monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig {
+                enabled: true,
+                ..gwt::IssueMonitorConfig::default()
+            },
+            gwt::IssueMonitorPrefs {
+                queued_launch_session_strategies: std::collections::BTreeMap::from([(
+                    3165,
+                    gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+                )]),
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(gwt::IssueMonitorIssue {
+            number: 3165,
+            title: "SPEC: monitor relaunch safety".to_string(),
+            labels: vec!["gwt-spec".to_string()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::Ready,
+        });
+        assert!(monitor.apply_confirmed_claim(
+            3165,
+            format!("claim-{case_name}"),
+            "host/session",
+            delivery_id.trim_start_matches("launch:"),
+            "2026-08-13T00:00:00Z",
+        ));
+        monitor.prefs()
+    } else {
+        gwt::IssueMonitorPrefs::default()
+    };
+    prefs.launch_profile = Some(codex_issue_monitor_launch_profile());
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("save monitor relaunch prefs");
+
+    let holder_window_status = match holder {
+        MonitorNativeHolderFixture::ActiveSameConversationStopped => {
+            Some(WindowProcessStatus::Stopped)
+        }
+        MonitorNativeHolderFixture::ActiveSameConversationError => Some(WindowProcessStatus::Error),
+        MonitorNativeHolderFixture::ActiveSameConversation
+        | MonitorNativeHolderFixture::ActiveOtherConversation
+        | MonitorNativeHolderFixture::MaterializingSameConversation => {
+            Some(WindowProcessStatus::Running)
+        }
+        MonitorNativeHolderFixture::None
+        | MonitorNativeHolderFixture::ActiveSameConversationMissingWindow
+        | MonitorNativeHolderFixture::StaleMaterializingSameConversation => None,
+    };
+    let tab = match holder_window_status {
+        Some(status) => sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-holder",
+            repo.clone(),
+            WindowPreset::Agent,
+            status,
+        ),
+        None => sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]),
+    };
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
+    let mut agent_options = sample_agent_options();
+    agent_options.push(gwt::AgentOption {
+        id: "claude".to_string(),
+        name: "Claude Code".to_string(),
+        available: true,
+        installed_version: Some("latest".to_string()),
+        versions: vec!["latest".to_string()],
+        custom_agent: None,
+    });
+    runtime.launch_wizard_cache =
+        LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, agent_options);
+    runtime.agent_capability_issuer =
+        Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:43123/internal/hook-live",
+            "ws://127.0.0.1:43124/ws",
+            "ws://127.0.0.1:43123/internal/pane-ws",
+        ));
+    assert_eq!(
+        runtime
+            .latest_resumable_branch_session(&repo, target_branch)
+            .expect("latest resumable monitored Session")
+            .id,
+        source_session_id,
+        "holder fixtures must not replace the intended resume candidate",
+    );
+    if let (Some(holder_window_id), Some(holder_session_id)) =
+        (holder_window_id.as_ref(), holder_session_id)
+    {
+        match holder {
+            MonitorNativeHolderFixture::ActiveSameConversation
+            | MonitorNativeHolderFixture::ActiveSameConversationMissingWindow
+            | MonitorNativeHolderFixture::ActiveSameConversationStopped
+            | MonitorNativeHolderFixture::ActiveSameConversationError
+            | MonitorNativeHolderFixture::ActiveOtherConversation => {
+                runtime.active_agent_sessions.insert(
+                    holder_window_id.clone(),
+                    ActiveAgentSession {
+                        window_id: holder_window_id.clone(),
+                        session_id: holder_session_id,
+                        agent_id: "codex".to_string(),
+                        branch_name: target_branch.to_string(),
+                        display_name: "Codex".to_string(),
+                        worktree_path: worktree.clone(),
+                        agent_project_root: worktree.display().to_string(),
+                        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                        tab_id: "tab-1".to_string(),
+                    },
+                );
+                if holder == MonitorNativeHolderFixture::ActiveSameConversation {
+                    runtime
+                        .window_hook_states
+                        .insert(holder_window_id.clone(), WindowProcessStatus::Running);
+                }
+            }
+            MonitorNativeHolderFixture::MaterializingSameConversation
+            | MonitorNativeHolderFixture::StaleMaterializingSameConversation => {
+                runtime
+                    .pending_auto_resume_sources
+                    .insert(holder_window_id.clone(), holder_session_id);
+                if holder == MonitorNativeHolderFixture::MaterializingSameConversation {
+                    runtime.inflight_launches.insert(
+                        format!("monitor-holder-{case_name}"),
+                        (holder_window_id.clone(), Instant::now()),
+                    );
+                }
+            }
+            MonitorNativeHolderFixture::None => unreachable!("holder tuple excludes none"),
+        }
+    }
+
+    MonitorRelaunchFixture {
+        runtime,
+        recorded_events,
+        sessions_dir,
+        project_root: repo,
+        worktree,
+        repo_hash,
+        source_session_id,
+        native_conversation_id,
+        execution_owner,
+        predecessor_execution_binding,
+        holder_window_id,
+        delivery_id,
+    }
+}
+
+fn take_monitor_launch_complete(
+    label: &str,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> AgentLaunchResult {
+    // This integration-style fixture performs real Git setup plus managed
+    // asset/trust materialization in a debug build. Under parallel CI load it
+    // can legitimately exceed the generic 20-second unit-test poll budget.
+    wait_for_recorded_event_with_timeout(label, events, Duration::from_secs(60), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+    });
+    let mut events = events.lock().expect("event log");
+    let index = events
+        .iter()
+        .position(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        .expect("launch complete event");
+    let UserEvent::LaunchComplete { result, .. } = events.remove(index) else {
+        unreachable!("matched launch complete above")
+    };
+    result
+}
+
+fn assert_monitor_exact_resume(result: AgentLaunchResult, fixture: &MonitorRelaunchFixture) {
+    let Ok((process, session_id, _, _, _, _, _, _, _, session_mode, _, _)) = result else {
+        panic!("Issue Monitor exact Resume failed: {result:?}");
+    };
+    assert_eq!(session_mode, gwt_agent::SessionMode::Resume);
+    assert!(
+        process
+            .args
+            .iter()
+            .any(|argument| argument.contains(&fixture.native_conversation_id)),
+        "exact Resume must pass the selected native conversation id: {:?}",
+        process.args,
+    );
+    let resumed =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("load prepared exact Resume Session");
+    assert_eq!(resumed.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(
+        resumed.agent_session_id.as_deref(),
+        Some(fixture.native_conversation_id.as_str()),
+        "exact Resume must retain the provider conversation identity",
+    );
+    assert_eq!(resumed.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(resumed.reasoning_level.as_deref(), Some("low"));
+}
+
+fn assert_monitor_fresh_successor(result: AgentLaunchResult, fixture: &MonitorRelaunchFixture) {
+    let Ok((
+        process,
+        session_id,
+        branch,
+        _,
+        worktree,
+        agent_id,
+        linked_issue_number,
+        _,
+        runtime_target,
+        session_mode,
+        _,
+        _,
+    )) = result
+    else {
+        panic!("Issue Monitor fresh successor failed: {result:?}");
+    };
+    assert_eq!(session_mode, gwt_agent::SessionMode::Normal);
+    assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+    assert_eq!(agent_id, gwt_agent::AgentId::Codex);
+    assert_eq!(linked_issue_number, Some(fixture.execution_owner.number));
+    assert_eq!(branch, "work/issue-3165");
+    assert!(same_worktree_path(&worktree, &fixture.worktree));
+    assert_ne!(session_id, fixture.source_session_id);
+    assert!(
+        process
+            .args
+            .iter()
+            .all(|argument| !argument.contains(&fixture.native_conversation_id)),
+        "fresh successor must not receive the old native conversation id: {:?}",
+        process.args,
+    );
+    assert!(
+        process
+            .env
+            .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV),
+        "fresh fallback must prepare successor authority instead of minting genesis",
+    );
+    let successor =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("load prepared fresh successor Session");
+    assert_eq!(successor.session_mode, gwt_agent::SessionMode::Normal);
+    assert!(
+        successor.agent_session_id.is_none(),
+        "fresh successor launch config must clear the old resume_session_id",
+    );
+    assert_eq!(successor.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(successor.reasoning_level.as_deref(), Some("high"));
+    assert_eq!(successor.agent_id, gwt_agent::AgentId::Codex);
+    assert_eq!(successor.tool_version.as_deref(), Some("latest"));
+    assert!(successor.skip_permissions);
+    assert!(!successor.fast_mode);
+    assert!(!successor.codex_fast_mode);
+    assert_eq!(
+        successor.runtime_target,
+        gwt_agent::LaunchRuntimeTarget::Host
+    );
+    assert!(same_worktree_path(
+        &successor.worktree_path,
+        &fixture.worktree
+    ));
+    assert!(successor
+        .project_state_root
+        .as_deref()
+        .is_some_and(|root| same_worktree_path(root, &fixture.project_root)));
+    assert_eq!(
+        successor.repo_hash.as_deref(),
+        Some(fixture.repo_hash.as_str())
+    );
+    assert_eq!(successor.branch, "work/issue-3165");
+    assert_eq!(
+        successor.linked_issue_number,
+        Some(fixture.execution_owner.number)
+    );
+    let successor_binding = successor
+        .execution_binding
+        .as_ref()
+        .expect("fresh successor must carry a Prepared execution binding");
+    assert_eq!(
+        successor_binding.owner_kind,
+        fixture.execution_owner.kind.as_str()
+    );
+    assert_eq!(
+        successor_binding.owner_number,
+        fixture.execution_owner.number
+    );
+    assert_eq!(successor_binding.repo_hash, fixture.repo_hash);
+    assert_eq!(successor_binding.session_id, session_id);
+    assert_ne!(
+        successor_binding.identity.generation_id,
+        fixture.predecessor_execution_binding.generation_id,
+        "fresh successor must prepare a new execution generation",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(
+            &worktree,
+            fixture.execution_owner,
+        )
+        .expect("read predecessor fence after successor preparation")
+        .as_ref(),
+        Some(&fixture.predecessor_execution_binding),
+        "predecessor failure evidence and generation fence must remain current until spawn succeeds",
+    );
+}
+
+/// SPEC #3165 T-226 / FR-102: provider ownership is a fail-closed preflight;
+/// only a present rollout owned by the selected worktree may exact Resume.
+#[test]
+fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case_name, availability, exact_resume_expected) in [
+        ("present", MonitorProviderConversationFixture::Present, true),
+        (
+            "missing",
+            MonitorProviderConversationFixture::Missing,
+            false,
+        ),
+        (
+            "foreign",
+            MonitorProviderConversationFixture::Foreign,
+            false,
+        ),
+        (
+            "unknown",
+            MonitorProviderConversationFixture::Unknown,
+            false,
+        ),
+        (
+            "corrupt",
+            MonitorProviderConversationFixture::Corrupt,
+            false,
+        ),
+    ] {
+        let mut fixture = monitor_relaunch_fixture(
+            temp.path(),
+            case_name,
+            availability,
+            MonitorNativeHolderFixture::None,
+            false,
+        );
+        fixture.runtime.auto_launch_issue_monitor_delivery_events(
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
+        if exact_resume_expected {
+            assert_monitor_exact_resume(result, &fixture);
+        } else {
+            assert_monitor_fresh_successor(result, &fixture);
+        }
+    }
+}
+
+/// SPEC #3165 T-226 / FR-102: writer exclusion keys on the exact native
+/// conversation, not branch equality, and preserves a known holder window id.
+#[test]
+fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case_name, holder) in [
+        (
+            "active-same-native",
+            MonitorNativeHolderFixture::ActiveSameConversation,
+        ),
+        (
+            "materializing-same-native",
+            MonitorNativeHolderFixture::MaterializingSameConversation,
+        ),
+    ] {
+        let mut fixture = monitor_relaunch_fixture(
+            temp.path(),
+            case_name,
+            MonitorProviderConversationFixture::Present,
+            holder,
+            false,
+        );
+        let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        let holder_window_id = fixture
+            .holder_window_id
+            .as_deref()
+            .expect("same-native holder window id");
+        match holder {
+            MonitorNativeHolderFixture::ActiveSameConversation => assert_eq!(
+                fixture.runtime.window_status(holder_window_id),
+                Some(WindowProcessStatus::Running),
+                "the active holder case must represent a live Running window",
+            ),
+            MonitorNativeHolderFixture::MaterializingSameConversation => {
+                assert!(fixture.runtime.window_lookup.contains_key(holder_window_id));
+                assert!(fixture
+                    .runtime
+                    .inflight_launches
+                    .values()
+                    .any(|(window_id, _)| window_id == holder_window_id));
+            }
+            _ => unreachable!("same-native live holder matrix"),
+        }
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, .. }
+                    if message.contains(holder_window_id)
+            )),
+            "known holder diagnostic must include {holder_window_id}",
+        );
+        let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
+        assert_monitor_fresh_successor(result, &fixture);
+    }
+
+    let mut different = monitor_relaunch_fixture(
+        temp.path(),
+        "active-other-native",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveOtherConversation,
+        false,
+    );
+    different.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result = take_monitor_launch_complete(
+        "same branch different native conversation",
+        &different.recorded_events,
+    );
+    assert_monitor_exact_resume(result, &different);
+}
+
+/// SPEC #3165 T-228 / FR-104: if another live gwt window wins the native
+/// conversation after preflight, the typed late-race failure retains that
+/// known holder instead of degrading every production payload to `None`.
+#[test]
+fn app_runtime_late_writer_conflict_preserves_known_holder_window_id() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "late-known-holder",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        false,
+    );
+    let source_raw_id = fixture.runtime.tabs[0]
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds())
+        .id;
+    assert!(fixture.runtime.tabs[0]
+        .workspace
+        .set_session_id(&source_raw_id, Some(fixture.source_session_id.clone())));
+    fixture.runtime.register_window("tab-1", &source_raw_id);
+    let source_window_id = combined_window_id("tab-1", &source_raw_id);
+    fixture.runtime.active_agent_sessions.insert(
+        source_window_id.clone(),
+        ActiveAgentSession {
+            window_id: source_window_id.clone(),
+            session_id: fixture.source_session_id.clone(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/issue-3165".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: fixture.worktree.clone(),
+            agent_project_root: fixture.worktree.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+    let detail = "Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
+        thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
+        (code -32600)";
+
+    let failure = fixture.runtime.issue_monitor_failure_for_window(
+        &source_window_id,
+        detail,
+        gwt_agent::SessionMode::Resume,
+    );
+    assert_eq!(
+        failure,
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: fixture.holder_window_id.clone(),
+        })
+    );
+    let payload = AppRuntime::issue_monitor_agent_failed_payload_with_failure(
+        &source_window_id,
+        detail,
+        Some(3165),
+        failure.as_ref(),
+    );
+    assert_eq!(
+        payload
+            .pointer("/agent_failed/failure/holder_window_id")
+            .and_then(serde_json::Value::as_str),
+        fixture.holder_window_id.as_deref(),
+        "the production AgentFailed envelope must retain the resolved holder"
+    );
+    assert_eq!(
+        payload
+            .pointer("/agent_failed/failure/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("resume_writer_conflict")
+    );
+
+    fixture
+        .runtime
+        .active_agent_sessions
+        .remove(&source_window_id);
+    assert_eq!(
+        fixture.runtime.issue_monitor_failure_for_window(
+            &source_window_id,
+            detail,
+            gwt_agent::SessionMode::Resume,
+        ),
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: fixture.holder_window_id.clone(),
+        }),
+        "PTY teardown removes the active source before failure publication, so the persisted window Session must retain holder resolution"
+    );
+
+    let holder_window_id = fixture
+        .holder_window_id
+        .as_deref()
+        .expect("known holder window");
+    fixture
+        .runtime
+        .active_agent_sessions
+        .remove(holder_window_id);
+    assert_eq!(
+        fixture.runtime.issue_monitor_failure_for_window(
+            &source_window_id,
+            detail,
+            gwt_agent::SessionMode::Resume,
+        ),
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: None,
+        }),
+        "the failing source window must never identify itself as the holder"
+    );
+}
+
+#[test]
+fn app_runtime_monitor_holder_resolution_prefers_durable_session_over_stale_cache() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+    let fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "durable-holder-refresh",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveOtherConversation,
+        false,
+    );
+    let holder_window_id = fixture.holder_window_id.as_deref().expect("holder window");
+    let holder_session_id = fixture
+        .runtime
+        .active_agent_sessions
+        .get(holder_window_id)
+        .expect("active holder")
+        .session_id
+        .clone();
+    let holder_path = fixture
+        .sessions_dir
+        .join(format!("{holder_session_id}.toml"));
+    let mut durable_holder = gwt_agent::Session::load(&holder_path).expect("durable holder");
+    assert_ne!(
+        durable_holder.exact_resume_session_id(),
+        Some(fixture.native_conversation_id.as_str()),
+        "fixture cache and disk initially describe another conversation"
+    );
+    durable_holder.agent_session_id = Some(fixture.native_conversation_id.clone());
+    durable_holder
+        .save(&fixture.sessions_dir)
+        .expect("refresh durable holder");
+    assert_ne!(
+        fixture
+            .runtime
+            .launch_wizard_cache
+            .session_by_id(&holder_session_id)
+            .and_then(gwt_agent::Session::exact_resume_session_id),
+        Some(fixture.native_conversation_id.as_str()),
+        "the in-memory launch cache intentionally remains stale"
+    );
+    let candidate = gwt_agent::Session::load(
+        &fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id)),
+    )
+    .expect("resume candidate");
+
+    assert_eq!(
+        fixture
+            .runtime
+            .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+        Some(holder_window_id.to_string()),
+        "holder safety must use the latest durable Session written by hooks or another process"
+    );
+}
+
+/// Exact native identity alone is not a writer conflict: stale runtime maps
+/// must not force a fresh successor after their window has stopped or vanished.
+#[test]
+fn app_runtime_monitor_resume_if_safe_ignores_non_live_active_holder_entries() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case_name, holder, expected_status) in [
+        (
+            "active-same-native-missing-window",
+            MonitorNativeHolderFixture::ActiveSameConversationMissingWindow,
+            None,
+        ),
+        (
+            "active-same-native-stopped",
+            MonitorNativeHolderFixture::ActiveSameConversationStopped,
+            Some(WindowProcessStatus::Stopped),
+        ),
+        (
+            "active-same-native-error",
+            MonitorNativeHolderFixture::ActiveSameConversationError,
+            Some(WindowProcessStatus::Error),
+        ),
+    ] {
+        let mut fixture = monitor_relaunch_fixture(
+            temp.path(),
+            case_name,
+            MonitorProviderConversationFixture::Present,
+            holder,
+            false,
+        );
+        let holder_window_id = fixture
+            .holder_window_id
+            .as_deref()
+            .expect("stale active holder id");
+        assert_eq!(
+            fixture.runtime.window_status(holder_window_id),
+            expected_status,
+            "fixture must expose the intended non-live window status",
+        );
+        fixture.runtime.auto_launch_issue_monitor_delivery_events(
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
+        assert_monitor_exact_resume(result, &fixture);
+    }
+}
+
+/// A pending resume source blocks exact Resume only while its target window is
+/// actually materializing. A stale source map without lookup/inflight evidence
+/// is not a native-conversation writer.
+#[test]
+fn app_runtime_monitor_resume_if_safe_ignores_stale_pending_auto_resume_source() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let case_name = "pending-same-native-missing-window-and-inflight";
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        case_name,
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::StaleMaterializingSameConversation,
+        false,
+    );
+    let holder_window_id = fixture
+        .holder_window_id
+        .as_deref()
+        .expect("stale pending holder id");
+    assert!(!fixture.runtime.window_lookup.contains_key(holder_window_id));
+    assert!(!fixture
+        .runtime
+        .inflight_launches
+        .values()
+        .any(|(window_id, _)| window_id == holder_window_id));
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
+    assert_monitor_exact_resume(result, &fixture);
+}
+
+/// SPEC #3165 T-226 / FR-103: failover/retry delivery policy bypasses the
+/// resumable-session search and never forwards the old native conversation id.
+#[test]
+fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "fresh-required",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        fixture.delivery_id.clone(),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let delivery_id = fixture.delivery_id.as_deref().expect("durable delivery id");
+    let materializer_id = fixture.runtime.issue_monitor_materializer_id.clone();
+    let persisted = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("reload FreshRequired delivery after materializer claim");
+    assert_eq!(persisted.pending_launch_deliveries.len(), 1);
+    let delivery = &persisted.pending_launch_deliveries[0];
+    assert_eq!(delivery.delivery_id, delivery_id);
+    assert_eq!(delivery.claim_id, "claim-fresh-required");
+    assert_eq!(delivery.claim_owner, "host/session");
+    assert_eq!(
+        delivery.launch_session_strategy,
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+    );
+    assert_eq!(
+        delivery.materializer_id.as_deref(),
+        Some(materializer_id.as_str())
+    );
+    assert_eq!(delivery.materializer_pid, Some(std::process::id()));
+    let bound_window_id = delivery
+        .materializer_window_id
+        .as_deref()
+        .expect("FreshRequired delivery materializer window binding");
+    assert!(matches!(
+        fixture.runtime.issue_monitor_launch_deliveries.get(delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == bound_window_id
+    ));
+    let result = take_monitor_launch_complete("FreshRequired delivery", &fixture.recorded_events);
+    assert_monitor_fresh_successor(result, &fixture);
+}
+
+/// SPEC #3165 T-226 / FR-103: FreshRequired selects the current Monitor
+/// provider profile as a whole; the resumable source provider is not sticky.
+#[test]
+fn app_runtime_monitor_fresh_required_switches_to_current_provider_profile() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "fresh-required-provider-switch",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Codex Monitor profile");
+    prefs.launch_profile = Some(claude_issue_monitor_launch_profile());
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs)
+        .expect("save current Claude Monitor profile");
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let result = take_monitor_launch_complete(
+        "FreshRequired provider profile switch",
+        &fixture.recorded_events,
+    );
+    let Ok((process, session_id, _, _, _, agent_id, _, _, _, session_mode, _, _)) = result else {
+        panic!("Issue Monitor provider-switch launch failed: {result:?}");
+    };
+    assert_eq!(agent_id, gwt_agent::AgentId::ClaudeCode);
+    assert_eq!(session_mode, gwt_agent::SessionMode::Normal);
+    assert!(
+        process
+            .args
+            .iter()
+            .all(|argument| !argument.contains(&fixture.native_conversation_id)),
+        "provider switch must not pass the old Codex conversation id: {:?}",
+        process.args,
+    );
+    let successor =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("load Claude fresh successor Session");
+    assert_eq!(successor.agent_id, gwt_agent::AgentId::ClaudeCode);
+    assert_eq!(successor.session_mode, gwt_agent::SessionMode::Normal);
+    assert!(successor.agent_session_id.is_none());
+    assert_eq!(successor.model.as_deref(), Some("sonnet"));
+    assert_eq!(successor.reasoning_level.as_deref(), Some("low"));
+    assert_eq!(successor.tool_version.as_deref(), Some("latest"));
+    assert!(successor.skip_permissions);
+    assert!(!successor.fast_mode);
+    assert!(!successor.codex_fast_mode);
 }
 
 #[test]
@@ -42257,6 +43439,7 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
             issue_monitor_issue_number: Some(42),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo_b.clone()),
+            issue_monitor_session_mode: None,
         },
     );
 

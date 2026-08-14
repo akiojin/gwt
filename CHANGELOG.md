@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.78.2] - 2026-08-14
+
+### Bug Fixes
+
+- **daemon:** Resolve same-repo subscribe endpoints
+- **issue-monitor:** Prevent unsafe durable session resume
+- **issue-monitor:** Preserve late resume conflict recovery
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3492 completion
+- **work:** Record work event
+
 ## [9.78.1] - 2026-08-12
 
 ### Bug Fixes

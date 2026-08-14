@@ -573,7 +573,10 @@ fn run_monitor_failover<E: CliEnv>(
             prefs.clone(),
         );
         let outcome = monitor.failover_restart(&target, reason, &now);
-        if !matches!(outcome, crate::IssueMonitorFailoverOutcome::Mismatch(_)) {
+        if matches!(
+            outcome,
+            crate::IssueMonitorFailoverOutcome::Restarting { .. }
+        ) {
             *prefs = monitor.prefs();
         }
         Ok(outcome)
@@ -582,6 +585,18 @@ fn run_monitor_failover<E: CliEnv>(
 
     let stopped_window_id = match outcome {
         crate::IssueMonitorFailoverOutcome::Restarting { stopped_window_id } => stopped_window_id,
+        crate::IssueMonitorFailoverOutcome::AuthorityExhausted => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "reason": "effect_authority_epoch_exhausted",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
         crate::IssueMonitorFailoverOutcome::Mismatch(mismatch) => {
             out.push_str(
                 &serde_json::json!({
