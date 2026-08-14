@@ -312,6 +312,16 @@ impl HookForwardTarget {
         Ok(url)
     }
 
+    pub fn blocked_build_abort_terminalization_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/build-abort-terminalization");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
     pub fn execution_continuation_url(&self) -> Result<Url, String> {
         self.validate()?;
         let mut url =
@@ -504,6 +514,22 @@ pub fn send_work_terminalization_via_agent_bridge(
     request: &crate::AgentWorkTerminalizationRequest,
 ) -> Result<crate::AgentWorkTerminalizationReceipt, String> {
     let url = target.work_terminalization_url()?;
+    send_terminalization_via_agent_bridge(target, url, request)
+}
+
+pub fn send_blocked_build_abort_terminalization_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentBuildAbortTerminalizationRequest,
+) -> Result<crate::AgentWorkTerminalizationReceipt, String> {
+    let url = target.blocked_build_abort_terminalization_url()?;
+    send_terminalization_via_agent_bridge(target, url, request)
+}
+
+fn send_terminalization_via_agent_bridge(
+    target: &HookForwardTarget,
+    url: Url,
+    request: &impl Serialize,
+) -> Result<crate::AgentWorkTerminalizationReceipt, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -1070,6 +1096,13 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{host}: {error}"))
                     .as_str(),
                 format!("http://{host}:45123/internal/work-terminalization")
+            );
+            assert_eq!(
+                target
+                    .blocked_build_abort_terminalization_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/build-abort-terminalization")
             );
             assert_eq!(
                 target
