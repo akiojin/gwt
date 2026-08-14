@@ -8,9 +8,12 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import {
+  acquireLiveGwtBackendLock,
+  clearLiveGwtLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
   sendLiveGwtEvent,
+  suppressInitialFrontendReady,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
@@ -20,15 +23,31 @@ const BRANCH_NAME =
 
 test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
+  test.setTimeout(120_000);
+
+  let releaseBackendLock: (() => Promise<void>) | undefined;
 
   test.beforeEach(async ({ page }, testInfo) => {
     test.skip(
       testInfo.project.name !== "chromium-dark",
       "live Launch Wizard E2E runs once against the shared backend",
     );
+    releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
+    await suppressInitialFrontendReady(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
+    await clearLiveGwtLaunchWizard(page);
     await openLiveGwtProject(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    if (!releaseBackendLock) return;
+    try {
+      await clearLiveGwtLaunchWizard(page);
+    } finally {
+      await releaseBackendLock();
+      releaseBackendLock = undefined;
+    }
   });
 
   test("Claude Code Fast mode stays on after runtime context resolution", async ({
@@ -37,8 +56,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     await sendLiveGwtEvent(page, { kind: "open_intake_session" });
 
     const wizard = page.locator("#wizard-modal");
-    await expect(wizard).toBeVisible();
-    await wizard.getByRole("button", { name: "Configure and start" }).click();
+    await chooseWizardStartMethod(page, "Configure intake");
 
     await selectWizardAgent(page, "claude");
 
@@ -79,7 +97,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
 
       const wizard = page.locator("#wizard-modal");
       await expect(wizard).toBeVisible();
-      await chooseConfigureAndStart(page);
+      await chooseWizardStartMethod(page, /Configure and start/);
 
       await selectWizardAgent(page, "claude");
       await wizard
@@ -181,42 +199,23 @@ async function openLaunchWizardForCurrentBranch(page: Page): Promise<void> {
   });
 }
 
-async function chooseConfigureAndStart(page: Page): Promise<void> {
+async function chooseWizardStartMethod(
+  page: Page,
+  configureName: string | RegExp,
+): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const agentSelect = wizard.getByLabel("Agent", { exact: true });
   if (await agentSelect.isVisible().catch(() => false)) {
     return;
   }
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const configureButton = wizard
-      .getByRole("button", { name: /Configure and start/ })
-      .first();
-    if (!(await configureButton.count())) {
-      break;
-    }
-    await expect(configureButton).toBeEnabled({ timeout: 10_000 });
-    await configureButton.click();
-
-    try {
-      await agentSelect.waitFor({ state: "visible", timeout: 2_000 });
-      return;
-    } catch {
-      // Some start-method layouts require the footer submit after card selection.
-    }
-
-    const submit = page.locator("#wizard-submit-button");
-    if (await submit.isVisible()) {
-      const label = (await submit.textContent())?.trim() ?? "";
-      if (label === "Choose start method" && !(await submit.isDisabled())) {
-        await submit.click();
-        await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
-        return;
-      }
-    }
-    await page.waitForTimeout(500);
-  }
-  await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
+  const configureButton = wizard
+    .getByRole("button", { name: configureName })
+    .first();
+  await expect(configureButton).toBeVisible({ timeout: 90_000 });
+  await expect(configureButton).toBeEnabled({ timeout: 10_000 });
+  await configureButton.click();
+  await agentSelect.waitFor({ state: "visible", timeout: 90_000 });
 }
 
 async function createWorkWindow(page: Page) {

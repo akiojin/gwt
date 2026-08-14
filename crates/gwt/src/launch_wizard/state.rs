@@ -1319,9 +1319,9 @@ impl LaunchWizardState {
             self.model = model.to_string();
             self.sync_reasoning_state();
         } else if self.current_agent_supports_freetext_model() {
-            // SPEC-3152: Hermes models are provider-dependent free text, so any
-            // value (including empty to clear) is accepted without a fixed list.
-            self.model = model.to_string();
+            // Free-text agents own their model catalog. Trim the launch value
+            // so whitespace-only input delegates selection to the CLI/config.
+            self.model = model.trim().to_string();
         } else if model.is_empty() && !self.agent_has_models() {
             self.model.clear();
         } else {
@@ -1330,6 +1330,12 @@ impl LaunchWizardState {
     }
 
     pub(super) fn set_reasoning(&mut self, reasoning: &str) {
+        let reasoning = reasoning.trim();
+        if self.effective_agent_id() == "grok" && reasoning.is_empty() {
+            self.reasoning = "auto".to_string();
+            self.reasoning_explicit = false;
+            return;
+        }
         if self
             .current_reasoning_options()
             .iter()
@@ -1352,9 +1358,9 @@ impl LaunchWizardState {
     /// either way (SPEC-1921 US-20 / FR-123, PR #3270 review follow-up).
     fn apply_restored_reasoning(&mut self, reasoning: Option<String>) {
         match reasoning {
-            Some(reasoning) if !reasoning.is_empty() => {
+            Some(reasoning) if !reasoning.trim().is_empty() => {
                 self.reasoning_explicit = true;
-                self.reasoning = reasoning;
+                self.reasoning = reasoning.trim().to_string();
             }
             _ => {
                 self.reasoning_explicit = false;
@@ -1462,7 +1468,11 @@ impl LaunchWizardState {
 
         let models = current_model_options(&agent.id);
         if models.is_empty() {
-            self.model.clear();
+            if self.current_agent_supports_freetext_model() {
+                self.model = self.model.trim().to_string();
+            } else {
+                self.model.clear();
+            }
         } else if self.model.is_empty() || !models.iter().any(|model| model == &self.model) {
             self.model = models[0].to_string();
         }
@@ -1490,6 +1500,9 @@ impl LaunchWizardState {
 
     fn apply_saved_model(&mut self, model: Option<&str>) {
         let Some(model) = model else {
+            if self.current_agent_supports_freetext_model() {
+                self.model.clear();
+            }
             return;
         };
         if current_model_options(self.effective_agent_id())
@@ -1497,6 +1510,8 @@ impl LaunchWizardState {
             .any(|candidate| candidate == &model)
         {
             self.model = model.to_string();
+        } else if self.current_agent_supports_freetext_model() {
+            self.model = model.trim().to_string();
         }
     }
 
@@ -1532,6 +1547,10 @@ impl LaunchWizardState {
                     .map(|option| option.stored_value.to_string())
                     .unwrap_or_default();
             }
+        } else if self.effective_agent_id() == "grok" {
+            if !self.reasoning_explicit || self.reasoning.trim().is_empty() {
+                self.reasoning = default_value;
+            }
         } else if self.reasoning.is_empty() || !supported {
             self.reasoning = default_value;
         }
@@ -1551,6 +1570,12 @@ impl LaunchWizardState {
     pub(super) fn reasoning_level_for_launch(&self) -> Option<&str> {
         match self.effective_agent_id() {
             "codex" if !self.reasoning.is_empty() => Some(self.reasoning.as_str()),
+            "grok"
+                if !self.reasoning.trim().is_empty()
+                    && !self.reasoning.trim().eq_ignore_ascii_case("auto") =>
+            {
+                Some(self.reasoning.trim())
+            }
             "claude"
                 if !self.reasoning.is_empty()
                     && is_claude_effort_capable_model(self.model.as_str()) =>
@@ -1559,6 +1584,37 @@ impl LaunchWizardState {
             }
             _ => None,
         }
+    }
+
+    /// The fixed model pickers reserve `Default...` labels as provider-default
+    /// sentinels. Free-text agents do not: a provider may legitimately name a
+    /// model `DefaultXL`, so every non-blank value must reach the child.
+    pub(super) fn explicit_model_for_launch(&self) -> Option<&str> {
+        let model = self.model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        if self.current_agent_supports_freetext_model() || is_explicit_model_selection(model) {
+            Some(model)
+        } else {
+            None
+        }
+    }
+
+    /// Preserve an explicit saved Grok effort even when it is outside gwt's
+    /// common picker snapshot. The child CLI remains the authority and must be
+    /// allowed to surface a provider/model-specific validation error.
+    pub(super) fn unlisted_grok_reasoning(&self) -> Option<&str> {
+        let reasoning = self.reasoning.trim();
+        (self.effective_agent_id() == "grok"
+            && self.reasoning_explicit
+            && !reasoning.is_empty()
+            && !reasoning.eq_ignore_ascii_case("auto")
+            && !self
+                .current_reasoning_options()
+                .iter()
+                .any(|option| option.stored_value == reasoning))
+        .then_some(reasoning)
     }
 
     pub(super) fn launch_target_is_agent(&self) -> bool {
@@ -1770,7 +1826,9 @@ impl LaunchWizardState {
         if self.agent_is_codex() {
             return true;
         }
-        self.effective_agent_id() == "claude" && is_claude_effort_capable_model(self.model.as_str())
+        self.effective_agent_id() == "grok"
+            || (self.effective_agent_id() == "claude"
+                && is_claude_effort_capable_model(self.model.as_str()))
     }
 
     pub(super) fn has_docker_workflow(&self) -> bool {
@@ -1965,6 +2023,8 @@ impl LaunchWizardState {
     pub(super) fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
         if self.agent_is_codex() {
             codex_reasoning_options_for_model(&self.model)
+        } else if self.effective_agent_id() == "grok" {
+            GROK_REASONING_OPTIONS.to_vec()
         } else if self.effective_agent_id() == "claude"
             && is_claude_opus_tier_model(self.model.as_str())
         {
@@ -2104,6 +2164,25 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    fn grok_manual_state() -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.set_agent_id("grok");
+        state
+    }
+
     #[test]
     fn open_local_branch_without_quick_start_starts_at_branch_action() {
         let state = LaunchWizardState::open_with(
@@ -2172,6 +2251,156 @@ mod tests {
         );
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
+    }
+
+    #[test]
+    fn grok_build_model_accepts_arbitrary_free_text_and_blank_default() {
+        // SPEC-1921 T483: Grok's model catalog is owned by the CLI/config, so
+        // the wizard must not validate the launch value against a fixed list.
+        let mut state = grok_manual_state();
+
+        state.set_model("grok-4.20-beta");
+        assert_eq!(state.model, "grok-4.20-beta");
+        assert!(state.error.is_none());
+
+        state.set_model("");
+        assert_eq!(state.model, "");
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn grok_build_reasoning_accepts_common_effort_values_for_launch() {
+        let mut state = grok_manual_state();
+
+        for effort in [
+            "auto", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        ] {
+            state.set_reasoning(effort);
+            assert_eq!(state.reasoning, effort);
+            assert_eq!(
+                state.reasoning_level_for_launch(),
+                (effort != "auto").then_some(effort)
+            );
+            assert!(state.error.is_none());
+        }
+    }
+
+    #[test]
+    fn grok_build_quick_start_preserves_saved_model_and_effort() {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            vec![QuickStartEntry {
+                session_id: "gwt-session-grok".to_string(),
+                agent_id: "grok".to_string(),
+                tool_label: "Grok Build".to_string(),
+                model: Some("grok-4.20-beta".to_string()),
+                reasoning: Some("provider-experimental".to_string()),
+                version: Some("installed".to_string()),
+                resume_session_id: None,
+                live_window_id: None,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        assert_eq!(state.model, "grok-4.20-beta");
+        assert_eq!(state.reasoning, "provider-experimental");
+        assert!(state.view().reasoning_options.iter().any(|option| {
+            option.value == "provider-experimental" && option.label == "provider-experimental"
+        }));
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.model.as_deref(), Some("grok-4.20-beta"));
+                    assert_eq!(
+                        config.reasoning_level.as_deref(),
+                        Some("provider-experimental")
+                    );
+                    assert!(config
+                        .args
+                        .windows(2)
+                        .any(|pair| pair[0] == "--model" && pair[1] == "grok-4.20-beta"));
+                    assert!(config.args.windows(2).any(|pair| {
+                        pair[0] == "--effort" && pair[1] == "provider-experimental"
+                    }));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_build_quick_start_without_saved_tuning_uses_cli_defaults() {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            vec![QuickStartEntry {
+                session_id: "gwt-session-grok-default".to_string(),
+                agent_id: "grok".to_string(),
+                tool_label: "Grok Build".to_string(),
+                model: None,
+                reasoning: None,
+                version: Some("installed".to_string()),
+                resume_session_id: None,
+                live_window_id: None,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+        state.set_agent_id("codex");
+        state.set_model("gpt-5.5");
+        state.set_reasoning("high");
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        assert_eq!(state.model, "");
+        assert_eq!(state.reasoning, "auto");
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert!(config.model.is_none());
+                    assert_eq!(config.reasoning_level, None);
+                    assert!(!config.args.iter().any(|arg| arg == "--model"));
+                    assert!(!config.args.iter().any(|arg| arg == "--effort"));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
     }
 
     fn codex_manual_state() -> LaunchWizardState {

@@ -31,13 +31,38 @@ const RUNNING_STATUS = {
   auto_start: true,
   configured_agent_id: "claude",
   configured_model: null,
+  configured_reasoning: null,
   running_agent_id: "claude",
+  running_model: null,
+  running_reasoning: null,
   is_running: true,
   agent_options: [
     { id: "claude", name: "Claude Code" },
     { id: "codex", name: "Codex" },
+    { id: "grok", name: "Grok Build" },
   ],
 };
+
+const GROK_RUNNING_STATUS = {
+  ...RUNNING_STATUS,
+  configured_agent_id: "grok",
+  configured_model: "team/grok-code-fast",
+  configured_reasoning: "high",
+  running_agent_id: "grok",
+  running_model: "team/grok-code-fast",
+  running_reasoning: "high",
+};
+
+const GROK_COMMON_EFFORTS = [
+  "",
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 function fixture({ confirmAnswer = true } = {}) {
   const { document } = parseHTML(html);
@@ -150,7 +175,7 @@ test("FR-026: agent select は pm_status の選択肢から作られ set_pm_laun
   assert.ok(select, "agent select が必要");
   assert.deepEqual(
     [...select.querySelectorAll("option")].map((option) => option.value),
-    ["claude", "codex"],
+    ["claude", "codex", "grok"],
     "選択肢は backend の agent_options だけ",
   );
   assert.equal(select.value, "claude", "現在の設定値が選択されている");
@@ -165,9 +190,42 @@ test("FR-026: agent select は pm_status の選択肢から作られ set_pm_laun
   });
 });
 
-test("FR-026: model の変更も同じ set_pm_launch_profile に載る", () => {
+test("FR-120: Grok Build を Agent/Model/Effort の同一プロファイルとして送る", () => {
   const { document, sent, panel } = fixture();
-  panel.applyStatus({ ...RUNNING_STATUS, configured_agent_id: "codex" });
+  panel.applyStatus({
+    ...GROK_RUNNING_STATUS,
+    configured_agent_id: "codex",
+    configured_model: "gpt-5.6-sol",
+    configured_reasoning: "xhigh",
+    running_agent_id: "codex",
+    running_model: "gpt-5.6-sol",
+    running_reasoning: "xhigh",
+  });
+
+  const select = document.querySelector('[data-role="pm-agent-select"]');
+  assert.equal(
+    select.querySelector('option[value="grok"]')?.textContent,
+    "Grok Build",
+    "backend が投影した Grok Build を canonical label で選べる",
+  );
+
+  chooseAgent(document, select, "grok");
+
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_pm_launch_profile",
+    agent_id: "grok",
+    model: "gpt-5.6-sol",
+    reasoning: "xhigh",
+  });
+});
+
+test("FR-120: model の変更も reasoning を保った full profile event に載る", () => {
+  const { document, sent, panel } = fixture();
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    configured_agent_id: "codex",
+    configured_reasoning: "high",
+  });
 
   const model = document.querySelector('[data-role="pm-model-input"]');
   assert.ok(model, "model の入力が必要");
@@ -178,8 +236,137 @@ test("FR-026: model の変更も同じ set_pm_launch_profile に載る", () => {
     kind: "set_pm_launch_profile",
     agent_id: "codex",
     model: "gpt-5.1-codex-max",
+    reasoning: "high",
+  });
+});
+
+test("FR-120: agent 固有 catalog と保存済み未列挙 effort を full profile event で保持する", () => {
+  const { document, sent, panel } = fixture();
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    configured_agent_id: "codex",
+    configured_model: "gpt-5.6-sol",
+    configured_reasoning: "provider-experimental",
+  });
+
+  const effort = document.querySelector('[data-role="pm-effort-select"]');
+  const values = [...effort.querySelectorAll("option")].map((option) => option.value);
+  assert.ok(values.includes("ultra"), "Codex catalog は ultra を含む");
+  assert.ok(!values.includes("none"), "Grok 固有 none を Codex に提示しない");
+  assert.ok(!values.includes("minimal"), "Grok 固有 minimal を Codex に提示しない");
+  assert.equal(
+    effort.value,
+    "provider-experimental",
+    "未列挙の保存値も current option として表現する",
+  );
+
+  const model = document.querySelector('[data-role="pm-model-input"]');
+  model.value = "gpt-5.6-sol-next";
+  model.dispatchEvent(changeEvent(document));
+
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_pm_launch_profile",
+    agent_id: "codex",
+    model: "gpt-5.6-sol-next",
+    reasoning: "provider-experimental",
+  });
+
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    configured_agent_id: "claude",
+    configured_reasoning: "xhigh",
+  });
+  assert.equal(
+    document.querySelector('[data-role="pm-effort-select"]').value,
+    "xhigh",
+    "Claude の union catalog でも xhigh を新規選択・保持できる",
+  );
+});
+
+test("FR-120: Effort は Auto と公式 common values を持ち同じ full profile event を送る", () => {
+  const { document, sent, panel } = fixture();
+  panel.applyStatus(GROK_RUNNING_STATUS);
+
+  const effort = document.querySelector('[data-role="pm-effort-select"]');
+  assert.ok(effort, "PM 設定に Effort control が必要");
+  assert.equal(
+    effort.closest("label")?.querySelector(".pm-settings-panel__label")?.textContent,
+    "Effort",
+    "ユーザー向けラベルは Effort とする",
+  );
+  assert.deepEqual(
+    [...effort.querySelectorAll("option")].map((option) => option.value),
+    GROK_COMMON_EFFORTS,
+    "Auto は空値、残りは Grok CLI の common effort values",
+  );
+  assert.match(
+    effort.querySelector('option[value=""]')?.textContent || "",
+    /Auto/i,
+    "空値は provider default を保つ Auto と表示する",
+  );
+  assert.equal(effort.value, "high", "configured reasoning を Effort に反映する");
+
+  const xhigh = effort.querySelector('option[value="xhigh"]');
+  assert.ok(xhigh, "xhigh option が必要");
+  xhigh.selected = true;
+  effort.dispatchEvent(changeEvent(document));
+
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_pm_launch_profile",
+    agent_id: "grok",
+    model: "team/grok-code-fast",
+    reasoning: "xhigh",
+  });
+});
+
+test("FR-120: Effort の Auto は reasoning null として full profile event を送る", () => {
+  const { document, sent, panel } = fixture();
+  panel.applyStatus(GROK_RUNNING_STATUS);
+
+  const effort = document.querySelector('[data-role="pm-effort-select"]');
+  assert.ok(effort, "PM 設定に Effort control が必要");
+  const auto = effort.querySelector('option[value=""]');
+  assert.ok(auto, "Auto option が必要");
+  auto.selected = true;
+  effort.dispatchEvent(changeEvent(document));
+
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_pm_launch_profile",
+    agent_id: "grok",
+    model: "team/grok-code-fast",
     reasoning: null,
   });
+});
+
+test("FR-121: Running as は稼働中の agent/model/effort を configured 値と分けて表示する", () => {
+  const { document, panel } = fixture();
+  panel.applyStatus({
+    ...GROK_RUNNING_STATUS,
+    configured_model: "team/grok-code-quality",
+    configured_reasoning: "max",
+    running_model: "team/grok-code-fast",
+    running_reasoning: "medium",
+  });
+
+  const running = document.querySelector('[data-role="pm-running-as"]');
+  assert.match(running.textContent, /Grok Build/, "running agent を表示する");
+  assert.match(
+    running.textContent,
+    /team\/grok-code-fast/,
+    "configured model ではなく running model を表示する",
+  );
+  assert.match(running.textContent, /medium/i, "running effort を表示する");
+
+  assert.equal(
+    document.querySelector('[data-role="pm-model-input"]').value,
+    "team/grok-code-quality",
+    "編集欄は configured model を表示する",
+  );
+  assert.equal(
+    document.querySelector('[data-role="pm-effort-select"]').value,
+    "max",
+    "編集欄は configured effort を表示する",
+  );
 });
 
 test("FR-026: Auto start トグルは set_pm_auto_start を送る", () => {
@@ -238,6 +425,30 @@ test("FR-026: Pending チップは configured != running のときだけ出る",
     running_agent_id: null,
   });
   assert.equal(chip.hidden, true, "停止中に pending は意味を持たない");
+});
+
+test("FR-121: Pending チップは agent が同じでも model 差分を検出する", () => {
+  const { document, panel } = fixture();
+  panel.applyStatus({
+    ...GROK_RUNNING_STATUS,
+    configured_model: "team/grok-code-quality",
+    running_model: "team/grok-code-fast",
+  });
+
+  const chip = document.querySelector('[data-role="pm-pending-chip"]');
+  assert.equal(chip.hidden, false, "model だけの変更も再起動待ちになる");
+});
+
+test("FR-121: Pending チップは agent/model が同じでも effort 差分を検出する", () => {
+  const { document, panel } = fixture();
+  panel.applyStatus({
+    ...GROK_RUNNING_STATUS,
+    configured_reasoning: "max",
+    running_reasoning: "high",
+  });
+
+  const chip = document.querySelector('[data-role="pm-pending-chip"]');
+  assert.equal(chip.hidden, false, "effort だけの変更も再起動待ちになる");
 });
 
 test("FR-026: PM 設定の CSS は Operator トークンのみを使う", () => {

@@ -281,6 +281,57 @@ pub(super) const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = 
     },
 ];
 
+pub(super) const GROK_REASONING_OPTIONS: [ReasoningDisplayOption; 8] = [
+    ReasoningDisplayOption {
+        label: "Auto",
+        stored_value: "auto",
+        description: "Use Grok Build's configured default effort",
+        is_default: true,
+    },
+    ReasoningDisplayOption {
+        label: "None",
+        stored_value: "none",
+        description: "Disable additional reasoning",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Minimal",
+        stored_value: "minimal",
+        description: "Use minimal reasoning for the fastest response",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Use light reasoning for simple work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balance speed and reasoning depth",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Use deeper reasoning for complex work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "xHigh",
+        stored_value: "xhigh",
+        description: "Use extra-high reasoning depth",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Max",
+        stored_value: "max",
+        description: "Use maximum reasoning depth",
+        is_default: false,
+    },
+];
+
 // Full Codex reasoning ladder in ascending depth order. Per-model rows take a
 // prefix of this ladder up to the model's `max_effort` and mark the model's
 // `default_effort` row; descriptions mirror the Codex CLI picker copy.
@@ -533,6 +584,8 @@ impl<'a> LaunchWizardFlow<'a> {
             LaunchWizardStep::AgentSelect => {
                 if self.state.agent_has_models() {
                     Some(LaunchWizardStep::ModelSelect)
+                } else if self.state.agent_uses_reasoning_step() {
+                    Some(LaunchWizardStep::ReasoningLevel)
                 } else {
                     self.next_after_agent_configuration()
                 }
@@ -586,7 +639,13 @@ impl<'a> LaunchWizardFlow<'a> {
             }
             LaunchWizardStep::AgentSelect => Some(LaunchWizardStep::LaunchTarget),
             LaunchWizardStep::ModelSelect => Some(LaunchWizardStep::AgentSelect),
-            LaunchWizardStep::ReasoningLevel => Some(LaunchWizardStep::ModelSelect),
+            LaunchWizardStep::ReasoningLevel => {
+                if self.state.agent_has_models() {
+                    Some(LaunchWizardStep::ModelSelect)
+                } else {
+                    Some(LaunchWizardStep::AgentSelect)
+                }
+            }
             LaunchWizardStep::RuntimeTarget => {
                 if self.state.launch_target_is_shell() {
                     Some(LaunchWizardStep::LaunchTarget)
@@ -746,17 +805,19 @@ pub(super) fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizar
             .iter()
             .position(|model| model == &state.model)
             .unwrap_or(0),
-        LaunchWizardStep::ReasoningLevel => state
-            .current_reasoning_options()
-            .iter()
-            .position(|option| option.stored_value == state.reasoning)
-            .unwrap_or_else(|| {
-                state
-                    .current_reasoning_options()
-                    .iter()
-                    .position(|option| option.is_default)
-                    .unwrap_or(0)
-            }),
+        LaunchWizardStep::ReasoningLevel => {
+            let options = state.current_reasoning_options();
+            options
+                .iter()
+                .position(|option| option.stored_value == state.reasoning)
+                .or_else(|| state.unlisted_grok_reasoning().map(|_| options.len()))
+                .unwrap_or_else(|| {
+                    options
+                        .iter()
+                        .position(|option| option.is_default)
+                        .unwrap_or(0)
+                })
+        }
         LaunchWizardStep::RuntimeTarget => {
             usize::from(state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
         }
@@ -1113,6 +1174,25 @@ mod tests {
 
     use super::super::test_support::*;
     use super::*;
+
+    fn grok_manual_state() -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.set_agent_id("grok");
+        state
+    }
 
     #[test]
     fn agent_option_color_maps_known_ids_and_falls_back_to_gray() {
@@ -1562,6 +1642,45 @@ mod tests {
         assert_eq!(
             codex_capability_row("gpt-5.3-codex-spark"),
             (FOUR.to_vec(), "high")
+        );
+    }
+
+    #[test]
+    fn grok_build_reasoning_options_cover_common_effort_values_with_auto_default() {
+        // SPEC-1921 T483: these stored values are the launch contract. `auto`
+        // delegates to the Grok CLI/config and every other row maps verbatim
+        // to `--effort <LEVEL>`.
+        let options = grok_manual_state().current_reasoning_options();
+        let values: Vec<&str> = options.iter().map(|option| option.stored_value).collect();
+
+        assert_eq!(
+            values,
+            ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            options
+                .iter()
+                .filter(|option| option.is_default)
+                .map(|option| option.stored_value)
+                .collect::<Vec<_>>(),
+            ["auto"]
+        );
+        assert!(
+            current_model_options("grok").is_empty(),
+            "Grok model entry is free text, not a fixed catalog"
+        );
+
+        let state = grok_manual_state();
+        let flow = LaunchWizardFlow::new(&state);
+        assert_eq!(
+            flow.next_step(LaunchWizardStep::AgentSelect),
+            Some(LaunchWizardStep::ReasoningLevel),
+            "free-text model is edited in the form, but legacy flow must still visit effort"
+        );
+        assert_eq!(
+            flow.prev_step(LaunchWizardStep::ReasoningLevel),
+            Some(LaunchWizardStep::AgentSelect),
+            "Grok has no fixed ModelSelect step to return to"
         );
     }
 

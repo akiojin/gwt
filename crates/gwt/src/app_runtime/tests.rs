@@ -43734,6 +43734,137 @@ fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_projec
     assert_eq!(configured.model.as_deref(), Some("gpt-5.1-codex-max"));
     assert_eq!(configured.reasoning_level.as_deref(), Some("high"));
     assert!(configured.suppress_execution_control);
+
+    let grok = AppRuntime::pm_launch_config(
+        worktree,
+        &gwt::pm_registry::PmLaunchProfile {
+            agent_id: "grok".to_string(),
+            model: Some("DefaultXL".to_string()),
+            reasoning: Some("xhigh".to_string()),
+            version: None,
+        },
+    );
+    assert_eq!(grok.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(grok.model.as_deref(), Some("DefaultXL"));
+    assert_eq!(grok.reasoning_level.as_deref(), Some("xhigh"));
+    assert_eq!(
+        grok.args
+            .windows(2)
+            .filter(|pair| pair[0] == "--model" && pair[1] == "DefaultXL")
+            .count(),
+        1
+    );
+    assert_eq!(
+        grok.args
+            .windows(2)
+            .filter(|pair| pair[0] == "--effort" && pair[1] == "xhigh")
+            .count(),
+        1
+    );
+    assert!(grok.args.iter().any(|arg| arg == "$gwt-pm"));
+}
+
+/// SPEC-3431 FR-119/FR-120 / T-484: selecting Grok is a durable PM profile,
+/// including the free-text model and reasoning effort that the next launch
+/// must receive. Existing unsupported providers remain rejected by the
+/// neighboring regression test.
+#[test]
+fn set_pm_launch_profile_accepts_grok_and_persists_model_and_reasoning() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetPmLaunchProfile {
+            agent_id: "grok".to_string(),
+            model: Some("  grok-4.20-beta  ".to_string()),
+            reasoning: Some("  xhigh  ".to_string()),
+        },
+    );
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let profile = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("load PM prefs")
+        .settings
+        .launch_profile
+        .expect("Grok PM profile must be persisted");
+    assert_eq!(profile.agent_id, "grok");
+    assert_eq!(profile.model.as_deref(), Some("grok-4.20-beta"));
+    assert_eq!(profile.reasoning.as_deref(), Some("xhigh"));
+}
+
+/// SPEC-3431 FR-121 / T-484: configured and running launch identities are
+/// deliberately independent. A changed profile is pending restart until the
+/// live pane's agent, model, and reasoning all match the configured values.
+#[test]
+fn pm_status_projects_configured_and_running_agent_model_and_reasoning() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = "pm-session-live".to_string();
+    active.agent_id = "claude".to_string();
+    active.display_name = "Claude Code".to_string();
+    runtime.active_agent_sessions.insert(window_id, active);
+
+    let mut running = gwt_agent::Session::new(&repo, "pm", gwt_agent::AgentId::ClaudeCode);
+    running.id = "pm-session-live".to_string();
+    running.model = Some("claude-opus-4-1".to_string());
+    running.reasoning_level = Some("high".to_string());
+    running
+        .save(&runtime.sessions_dir)
+        .expect("save live PM session launch identity");
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.6".to_string()),
+            reasoning: Some("xhigh".to_string()),
+            version: None,
+        });
+    })
+    .expect("configure the next PM launch");
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("register the live PM");
+
+    let status = serde_json::to_value(runtime.pm_status_event().expect("PM status event"))
+        .expect("serialize PM status");
+    assert_eq!(status["configured_agent_id"], "codex");
+    assert_eq!(status["configured_model"], "gpt-5.6");
+    assert_eq!(status["configured_reasoning"], "xhigh");
+    assert_eq!(status["running_agent_id"], "claude");
+    assert_eq!(status["running_model"], "claude-opus-4-1");
+    assert_eq!(status["running_reasoning"], "high");
+    assert_eq!(status["is_running"], true);
 }
 
 /// SPEC-3431 FR-012 / FR-026 (2026-08-06 ユーザー裁定): the PM runs unattended

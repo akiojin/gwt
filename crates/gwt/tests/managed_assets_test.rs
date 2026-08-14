@@ -796,6 +796,50 @@ fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
     );
 }
 
+/// SPEC-3431 FR-122 / T-484: Grok consumes the existing Claude-compatible
+/// managed target. It gets the canonical PM and coordination guidance plus
+/// Claude hook settings, while tracked project assets remain untouched and no
+/// parallel `.grok` managed tree is invented.
+#[test]
+fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::GrokBuild, |worktree| {
+        let tracked = worktree.join(".claude/skills/gwt-register-issue/SKILL.md");
+        std::fs::create_dir_all(tracked.parent().expect("tracked skill parent"))
+            .expect("create tracked skill parent");
+        std::fs::write(&tracked, "tracked project skill").expect("seed tracked skill");
+        run_git(
+            worktree,
+            &["add", ".claude/skills/gwt-register-issue/SKILL.md"],
+        );
+    });
+
+    assert!(
+        worktree.join(".claude/skills/gwt-pm/SKILL.md").is_file(),
+        "Grok PM must receive the canonical Claude-compatible gwt-pm skill"
+    );
+    assert!(
+        worktree
+            .join(".claude/skills/gwt-coordination/SKILL.md")
+            .is_file(),
+        "Grok PM must receive Claude-compatible coordination guidance"
+    );
+    assert!(
+        worktree.join(".claude/settings.local.json").is_file(),
+        "Grok PM must receive Claude-compatible managed hook settings"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".claude/skills/gwt-register-issue/SKILL.md"))
+            .expect("read preserved tracked skill"),
+        "tracked project skill",
+        "persistent PM materialization must preserve tracked project assets"
+    );
+    assert!(
+        !worktree.join(".grok").exists(),
+        "Claude compatibility must not create a duplicate .grok managed tree"
+    );
+}
+
 /// The PM contract must never reach an implementation agent. Its description
 /// shares gwt-coordination's "use proactively at the start of every
 /// conversation" stem, so an agent that picked it up would adopt "you never

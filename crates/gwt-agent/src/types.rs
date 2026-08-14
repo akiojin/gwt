@@ -119,11 +119,12 @@ impl AgentId {
     }
 
     /// Whether this agent takes a free-text model string rather than a fixed
-    /// gwt model list, because the available models depend on the chosen
-    /// provider (Hermes `--model`, OpenCode `--model provider/model`).
-    /// SPEC-3152 / SPEC-3151 FR-008.
+    /// gwt model list, because the available models are owned by the selected
+    /// CLI or provider (Grok Build `--model`, Hermes `--model`, OpenCode
+    /// `--model provider/model`). SPEC-1921 T483 / SPEC-3152 / SPEC-3151
+    /// FR-008.
     pub fn supports_freetext_model(&self) -> bool {
-        matches!(self, Self::Hermes | Self::OpenCode)
+        matches!(self, Self::GrokBuild | Self::Hermes | Self::OpenCode)
     }
 }
 
@@ -667,6 +668,13 @@ mod tests {
     }
 
     #[test]
+    fn grok_build_advertises_freetext_model() {
+        // SPEC-1921 T483: Grok Build accepts an arbitrary launch model name;
+        // an empty value delegates model selection to the CLI/config.
+        assert!(AgentId::GrokBuild.supports_freetext_model());
+    }
+
+    #[test]
     fn hermes_advertises_provider_profile_and_freetext_model() {
         assert!(AgentId::Hermes.supports_provider_selection());
         assert!(AgentId::Hermes.supports_profile_selection());
@@ -676,12 +684,7 @@ mod tests {
         assert!(AgentId::OpenCode.supports_freetext_model());
         assert!(!AgentId::OpenCode.supports_provider_selection());
         assert!(!AgentId::OpenCode.supports_profile_selection());
-        for other in [
-            AgentId::ClaudeCode,
-            AgentId::Codex,
-            AgentId::GrokBuild,
-            AgentId::Gemini,
-        ] {
+        for other in [AgentId::ClaudeCode, AgentId::Codex, AgentId::Gemini] {
             assert!(!other.supports_provider_selection());
             assert!(!other.supports_profile_selection());
             assert!(!other.supports_freetext_model());

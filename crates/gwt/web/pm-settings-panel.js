@@ -20,6 +20,17 @@ const RESTART_CONFIRM =
   "Restart the Project Manager?\n\n"
   + "The current PM session ends and a new conversation starts on the "
   + "configured agent. History is not carried over.";
+const EFFORT_OPTIONS_BY_AGENT = {
+  claude: ["", "low", "medium", "high", "xhigh", "max", "ultracode"],
+  codex: ["", "low", "medium", "high", "xhigh", "max", "ultra"],
+  grok: ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+};
+
+function effortLabel(value) {
+  if (value === "") return "Auto";
+  if (value === "xhigh") return "Extra high";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
@@ -33,7 +44,10 @@ function emptyStatus() {
     autoStart: true,
     configuredAgentId: "",
     configuredModel: "",
+    configuredReasoning: "",
     runningAgentId: "",
+    runningModel: "",
+    runningReasoning: "",
     isRunning: false,
     agentOptions: [],
   };
@@ -45,7 +59,10 @@ function normalizeStatus(status) {
     autoStart: status?.auto_start !== false,
     configuredAgentId: String(status?.configured_agent_id ?? ""),
     configuredModel: String(status?.configured_model ?? ""),
+    configuredReasoning: String(status?.configured_reasoning ?? ""),
     runningAgentId: String(status?.running_agent_id ?? ""),
+    runningModel: String(status?.running_model ?? ""),
+    runningReasoning: String(status?.running_reasoning ?? ""),
     isRunning: Boolean(status?.is_running),
     agentOptions: options
       .filter((option) => option && option.id)
@@ -71,6 +88,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
   let toggleEl = null;
   let agentSelect = null;
   let modelInput = null;
+  let effortSelect = null;
   let autoStartInput = null;
   let runningLine = null;
   let pendingChip = null;
@@ -82,18 +100,19 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     return node;
   }
 
-  // The two selectors write the SAME event: the backend stores one profile, so
-  // sending a partial update from either control would silently drop the other
-  // field.
+  // All three controls write the SAME event: the backend stores one profile,
+  // so sending a partial update from any control would silently drop the other
+  // fields.
   function sendProfile() {
     const agentId = agentSelect?.value || state.configuredAgentId;
     if (!agentId) return;
     const model = (modelInput?.value ?? "").trim();
+    const reasoning = (effortSelect?.value ?? "").trim();
     dispatch({
       kind: "set_pm_launch_profile",
       agent_id: agentId,
       model: model === "" ? null : model,
-      reasoning: null,
+      reasoning: reasoning === "" ? null : reasoning,
     });
   }
 
@@ -130,6 +149,14 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     modelField.appendChild(modelInput);
     panelEl.appendChild(modelField);
 
+    const effortField = el("label", "pm-settings-panel__field");
+    effortField.appendChild(el("span", "pm-settings-panel__label", "Effort"));
+    effortSelect = el("select", "pm-settings-panel__select");
+    effortSelect.dataset.role = "pm-effort-select";
+    effortSelect.addEventListener("change", sendProfile);
+    effortField.appendChild(effortSelect);
+    panelEl.appendChild(effortField);
+
     const autoField = el("label", "pm-settings-panel__field pm-settings-panel__field--inline");
     autoStartInput = el("input");
     autoStartInput.type = "checkbox";
@@ -159,8 +186,13 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     if (!panelEl) return;
 
     const runningName = agentLabel(state, state.runningAgentId);
+    const runningProfile = [runningName];
+    if (state.runningModel) runningProfile.push(`Model: ${state.runningModel}`);
+    if (state.runningReasoning) {
+      runningProfile.push(`Effort: ${state.runningReasoning}`);
+    }
     runningLine.textContent = state.isRunning && runningName
-      ? `Running as: ${runningName}`
+      ? `Running as: ${runningProfile.join(" · ")}`
       : "Not running";
 
     // "Pending" only means something while a PM is actually running a
@@ -170,7 +202,11 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
       state.isRunning
       && state.runningAgentId !== ""
       && state.configuredAgentId !== ""
-      && state.configuredAgentId !== state.runningAgentId
+      && (
+        state.configuredAgentId !== state.runningAgentId
+        || state.configuredModel !== state.runningModel
+        || state.configuredReasoning !== state.runningReasoning
+      )
     );
 
     clear(agentSelect);
@@ -186,6 +222,23 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     }
 
     modelInput.value = state.configuredModel;
+    clear(effortSelect);
+    const effortValues = [
+      ...(EFFORT_OPTIONS_BY_AGENT[state.configuredAgentId] || [""]),
+    ];
+    if (
+      state.configuredReasoning
+      && !effortValues.includes(state.configuredReasoning)
+    ) {
+      effortValues.push(state.configuredReasoning);
+    }
+    for (const value of effortValues) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = effortLabel(value);
+      if (value === state.configuredReasoning) option.selected = true;
+      effortSelect.appendChild(option);
+    }
     autoStartInput.checked = state.autoStart;
   }
 

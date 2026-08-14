@@ -1370,7 +1370,19 @@ export function createLaunchWizardSurface({
                   agent_id: value,
                 }),
             );
-            if ((launchWizard.model_options || []).length > 0) {
+            if (launchWizard.selected_agent_id === "grok") {
+              appendTextField(
+                grid,
+                "Model",
+                launchWizard.selected_model,
+                "Grok model id (blank = config)",
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_model",
+                    model: value,
+                  }),
+              );
+            } else if ((launchWizard.model_options || []).length > 0) {
               appendSelectField(
                 grid,
                 "Model",
@@ -1384,9 +1396,12 @@ export function createLaunchWizardSurface({
               );
             }
             if (launchWizard.show_reasoning) {
+              const reasoningLabel = launchWizard.selected_agent_id === "grok"
+                ? "Effort"
+                : "Reasoning";
               appendReasoningField(
                 grid,
-                "Reasoning",
+                reasoningLabel,
                 launchWizard.reasoning_options || [],
                 launchWizard.selected_reasoning,
                 (value) =>

@@ -81,8 +81,8 @@ impl LaunchWizardState {
             }
         }
 
-        if is_explicit_model_selection(&self.model) {
-            builder = builder.model(self.model.clone());
+        if let Some(model) = self.explicit_model_for_launch() {
+            builder = builder.model(model.to_string());
         }
 
         if !self.version.is_empty() {
@@ -267,6 +267,103 @@ mod tests {
 
     use super::super::test_support::*;
     use super::*;
+
+    fn grok_launch_state(mode: &str, resume_session_id: Option<&str>) -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.set_agent_id("grok");
+        state.version = "installed".to_string();
+        state.mode = mode.to_string();
+        state.resume_session_id = resume_session_id.map(str::to_string);
+        state
+    }
+
+    #[test]
+    fn build_launch_config_maps_grok_model_and_effort_for_every_launch_mode() {
+        // SPEC-1921 T483: wizard values must survive into LaunchConfig and the
+        // exact Grok CLI option/value pairs for all supported session modes.
+        let cases = [
+            ("normal", gwt_agent::SessionMode::Normal, None),
+            ("continue", gwt_agent::SessionMode::Continue, None),
+            (
+                "resume",
+                gwt_agent::SessionMode::Resume,
+                Some("grok-session-42"),
+            ),
+        ];
+
+        for (mode, expected_mode, resume_session_id) in cases {
+            let mut state = grok_launch_state(mode, resume_session_id);
+            state.model = "grok-4.20-beta".to_string();
+            state.reasoning = "xhigh".to_string();
+
+            let config = state.build_launch_config().expect("Grok launch config");
+
+            assert_eq!(config.session_mode, expected_mode);
+            assert_eq!(config.model.as_deref(), Some("grok-4.20-beta"));
+            assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+            assert_eq!(
+                config
+                    .args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--model" && pair[1] == "grok-4.20-beta")
+                    .count(),
+                1,
+                "missing exact Grok model argv in {:?}",
+                config.args
+            );
+            assert_eq!(
+                config
+                    .args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--effort" && pair[1] == "xhigh")
+                    .count(),
+                1,
+                "missing exact Grok effort argv in {:?}",
+                config.args
+            );
+        }
+    }
+
+    #[test]
+    fn build_launch_config_omits_grok_whitespace_model_and_auto_effort_flags() {
+        let mut state = grok_launch_state("normal", None);
+        state.model = " \t ".to_string();
+        state.reasoning = "auto".to_string();
+
+        let config = state.build_launch_config().expect("Grok launch config");
+
+        assert!(config.model.is_none());
+        assert_eq!(config.reasoning_level, None);
+        assert!(!config.args.iter().any(|arg| arg == "--model"));
+        assert!(!config.args.iter().any(|arg| arg == "--effort"));
+    }
+
+    #[test]
+    fn build_launch_config_preserves_default_prefixed_grok_model_as_free_text() {
+        let mut state = grok_launch_state("normal", None);
+        state.set_model("DefaultXL");
+
+        let config = state.build_launch_config().expect("Grok launch config");
+
+        assert_eq!(config.model.as_deref(), Some("DefaultXL"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "DefaultXL"));
+    }
 
     #[test]
     fn build_launch_config_for_intake_is_ephemeral_and_branchless() {

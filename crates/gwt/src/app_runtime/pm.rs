@@ -249,14 +249,49 @@ impl AppRuntime {
             .registration
             .as_ref()
             .filter(|registration| self.pm_registration_is_live(registration));
+        let running_profile = running.map(|registration| self.pm_running_profile(registration));
+        let agent_options = Self::pm_agent_options(&configured.agent_id);
         Some(BackendEvent::PmStatus {
             auto_start: prefs.settings.auto_start,
-            agent_options: Self::pm_agent_options(&configured.agent_id),
+            agent_options,
             configured_agent_id: configured.agent_id,
             configured_model: configured.model,
-            running_agent_id: running.map(|registration| registration.agent_id.clone()),
-            is_running: running.is_some(),
+            configured_reasoning: configured.reasoning,
+            running_agent_id: running_profile
+                .as_ref()
+                .map(|profile| profile.agent_id.clone()),
+            running_model: running_profile
+                .as_ref()
+                .and_then(|profile| profile.model.clone()),
+            running_reasoning: running_profile
+                .as_ref()
+                .and_then(|profile| profile.reasoning.clone()),
+            is_running: running_profile.is_some(),
         })
+    }
+
+    /// Resolve the launch identity of the conversation that is running now.
+    /// The registration deliberately stays small; the durable Session already
+    /// owns agent/model/reasoning. Legacy or temporarily unreadable Session
+    /// records retain the registered agent and expose unknown tuning.
+    fn pm_running_profile(&self, registration: &PmRegistration) -> PmLaunchProfile {
+        let session_path = self
+            .sessions_dir
+            .join(format!("{}.toml", registration.session_id));
+        gwt_agent::Session::load_and_migrate(&session_path)
+            .map(|session| {
+                PmLaunchProfile {
+                    agent_id: session.agent_id.command().to_string(),
+                    model: session.model,
+                    reasoning: session.reasoning_level,
+                    version: session.tool_version,
+                }
+                .normalized()
+            })
+            .unwrap_or_else(|_| PmLaunchProfile {
+                agent_id: registration.agent_id.clone(),
+                ..PmLaunchProfile::default()
+            })
     }
 
     /// The PM settings snapshot as a broadcast, for the call sites that change
@@ -334,13 +369,13 @@ impl AppRuntime {
             );
             return Vec::new();
         }
-        let empty_to_none = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
         let profile = PmLaunchProfile {
             agent_id: agent_id.to_string(),
-            model: empty_to_none(model),
-            reasoning: empty_to_none(reasoning),
+            model,
+            reasoning,
             version: None,
-        };
+        }
+        .normalized();
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
             prefs.settings.launch_profile = Some(profile.clone());
@@ -1527,20 +1562,17 @@ impl AppRuntime {
         worktree: &Path,
         profile: &pm_registry::PmLaunchProfile,
     ) -> gwt_agent::LaunchConfig {
+        let profile = profile.clone().normalized();
         let agent_id = gwt_agent::resolve_agent_id(&profile.agent_id)
             .unwrap_or(gwt_agent::AgentId::ClaudeCode);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
             .working_dir(worktree.to_path_buf())
             .skip_permissions(true)
             .extra_arg(PM_BOOTSTRAP_PROMPT);
-        if let Some(model) = profile.model.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(model) = profile.model.as_deref() {
             builder = builder.model(model);
         }
-        if let Some(reasoning) = profile
-            .reasoning
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(reasoning) = profile.reasoning.as_deref() {
             builder = builder.reasoning_level(reasoning);
         }
         if let Some(version) = profile.version.as_deref().filter(|value| !value.is_empty()) {
