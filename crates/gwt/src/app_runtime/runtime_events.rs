@@ -27,6 +27,83 @@ const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 /// ever gets — promote it to an explicit diagnostic (SPEC-1921 exact session
 /// restore amendment: stale provider ids keep a visible diagnostic).
 const EXACT_RESUME_FAILURE_SIGNATURE: &str = "No conversation found with session ID";
+const PROVIDER_ERROR_PREFIX: &str = "Error: ";
+const RESUME_WRITER_CONFLICT_OUTER_PREFIX: &str = "Failed to resume session from ";
+const RESUME_WRITER_CONFLICT_PREFIX: &str = "thread/resume failed during TUI bootstrap:";
+const RESUME_WRITER_CONFLICT_SUFFIX: &str = "already has an active writer";
+const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
+
+fn marker_is_inside_double_quotes(line: &str, marker_offset: usize) -> bool {
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in line[..marker_offset].bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' => quoted = !quoted,
+            _ => {}
+        }
+    }
+    quoted
+}
+
+fn resume_writer_conflict_outer_offset(line: &str) -> Option<usize> {
+    let anchored_provider_output = |offset: usize| {
+        let output = &line[offset..];
+        if output.starts_with(RESUME_WRITER_CONFLICT_OUTER_PREFIX) {
+            Some(offset)
+        } else {
+            output
+                .strip_prefix(PROVIDER_ERROR_PREFIX)
+                .filter(|detail| detail.starts_with(RESUME_WRITER_CONFLICT_OUTER_PREFIX))
+                .map(|_| offset + PROVIDER_ERROR_PREFIX.len())
+        }
+    };
+
+    let trimmed = line.trim_start();
+    let leading_whitespace = line.len() - trimmed.len();
+    anchored_provider_output(leading_whitespace).or_else(|| {
+        let last_output = " — last output: ";
+        let output_offset = line.find(last_output)? + last_output.len();
+        anchored_provider_output(output_offset)
+    })
+}
+
+/// Classify the provider's exact late-resume writer race without promoting
+/// unrelated launch failures that happen to mention a writer.
+pub(super) fn classify_issue_monitor_failure(
+    detail: &str,
+    session_mode: gwt_agent::SessionMode,
+) -> Option<gwt::IssueMonitorFailure> {
+    if session_mode != gwt_agent::SessionMode::Resume {
+        return None;
+    }
+    detail.lines().find_map(|line| {
+        let outer_offset = resume_writer_conflict_outer_offset(line)?;
+        let prefix_offset =
+            outer_offset + line[outer_offset..].find(RESUME_WRITER_CONFLICT_PREFIX)?;
+        if marker_is_inside_double_quotes(line, prefix_offset) {
+            return None;
+        }
+        let after_prefix = prefix_offset + RESUME_WRITER_CONFLICT_PREFIX.len();
+        let writer_offset =
+            after_prefix + line[after_prefix..].find(RESUME_WRITER_CONFLICT_SUFFIX)?;
+        if marker_is_inside_double_quotes(line, writer_offset) {
+            return None;
+        }
+        let after_writer = writer_offset + RESUME_WRITER_CONFLICT_SUFFIX.len();
+        let code_offset = after_writer + line[after_writer..].find(RESUME_WRITER_CONFLICT_CODE)?;
+        if marker_is_inside_double_quotes(line, code_offset) {
+            return None;
+        }
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: None,
+        })
+    })
+}
 
 /// Compose the persistent window detail for an errored agent process from the
 /// plain exit detail and the final screen tail. Pure so the classification is
@@ -115,11 +192,26 @@ impl AppRuntime {
         self.handle_runtime_output_inner(id, data, true)
     }
 
+    pub(crate) fn handle_runtime_output_event(
+        &mut self,
+        id: String,
+        incarnation: u64,
+        data: Vec<u8>,
+    ) -> Vec<OutboundEvent> {
+        if !self.runtime_incarnation_is_current(&id, incarnation) {
+            return Vec::new();
+        }
+        self.handle_runtime_output(id, data)
+    }
+
     pub(crate) fn handle_daemon_runtime_output(
         &mut self,
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
+        // Daemon publications describe another process and intentionally keep
+        // their existing wire contract; a local PTY incarnation is neither
+        // available nor authoritative for this path.
         self.handle_runtime_output_inner(id, data, false)
     }
 
@@ -154,7 +246,45 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_status_inner(id, status, detail, true)
+        // Display and transport errors are not child-exit receipts. Callers
+        // that observed `try_wait == Some` use `handle_runtime_status_event`
+        // with the exact local incarnation and `exit_confirmed = true`.
+        self.handle_runtime_status_inner(id, status, detail, true, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_runtime_status_with_exit_confirmation(
+        &mut self,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+    ) -> Vec<OutboundEvent> {
+        // Unit fixtures that exercise downstream terminal cleanup do not own a
+        // live PTY incarnation. Production callers must use
+        // `handle_runtime_status_event`, which also applies the incarnation
+        // fence before accepting an exit receipt.
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+    }
+
+    pub(crate) fn handle_runtime_status_event(
+        &mut self,
+        id: String,
+        incarnation: u64,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+    ) -> Vec<OutboundEvent> {
+        if !self.runtime_incarnation_is_current(&id, incarnation) {
+            return Vec::new();
+        }
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+    }
+
+    fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
+        self.runtimes
+            .get(id)
+            .is_some_and(|runtime| runtime.incarnation == incarnation)
     }
 
     pub(crate) fn handle_daemon_runtime_status(
@@ -163,7 +293,10 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_status_inner(id, status, detail, false)
+        // The daemon wire format has no exact local PTY incarnation or child
+        // exit receipt. It may update diagnostics, but never terminalize a
+        // producing Session in this process.
+        self.handle_runtime_status_inner(id, status, detail, false, false)
     }
 
     fn handle_runtime_status_inner(
@@ -172,8 +305,12 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
         publish_to_daemon: bool,
+        exit_confirmed: bool,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
+            if !exit_confirmed {
+                return Vec::new();
+            }
             self.remove_window_state_tracking(&id);
             self.mark_agent_session_stopped(&id);
             self.deregister_pty_writer(&id);
@@ -195,6 +332,18 @@ impl AppRuntime {
             .active_agent_sessions
             .get(&id)
             .map(|session| session.session_id.clone());
+        // A terminal PTY status ends the input generation even when the Pane
+        // stays on screen for recovery diagnostics. Removing the registry
+        // pointer before invalidation lets an in-flight authorized write
+        // finish, while every worker still waiting to commit observes the
+        // missing/stale generation and fails closed.
+        if matches!(
+            status,
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
+        ) {
+            self.deregister_pty_writer(&id);
+        }
+        let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&id);
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {
                 if let Some(tab) = self.tab(&address.tab_id) {
@@ -211,8 +360,8 @@ impl AppRuntime {
             }
         }
 
-        let keep_active_agent_session_for_recovery =
-            self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
+        let keep_active_agent_session_for_recovery = !exit_confirmed
+            || self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
         // Issue #3274: an errored agent runtime is torn down below, dropping
         // its vt100 state — a client that reconnects later replays nothing and
         // an empty Error window gives no clue why. Capture the final screen
@@ -242,9 +391,9 @@ impl AppRuntime {
         // bug it was masking: the Issue Monitor was never told either, so the
         // launch's slot stayed held. Visibility and accounting are decided
         // independently below.
-        let should_auto_close =
-            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
-                && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
+        let should_auto_close = exit_confirmed
+            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
+            && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
@@ -280,10 +429,11 @@ impl AppRuntime {
                         .as_deref()
                         .unwrap_or("Agent exited without completing the work")
                         .to_string();
-                    events.extend(self.issue_monitor_agent_failed_events(
+                    events.extend(self.issue_monitor_agent_failed_events_with_mode(
                         project_root,
                         &id,
                         &message,
+                        issue_monitor_session_mode,
                     ));
                 }
             }
@@ -311,7 +461,11 @@ impl AppRuntime {
         // SPEC-3214 FR-002: a Stopped/Error status means the PTY process has
         // exited — drain any intake worktree cleanup queued by the session
         // stop above (or by an earlier explicit stop of this window).
-        let mut events = self.take_ephemeral_worktree_cleanup_events();
+        let mut events = if exit_confirmed {
+            self.take_ephemeral_worktree_cleanup_events()
+        } else {
+            Vec::new()
+        };
         // SPEC-3431 FR-065: notify the Issue Monitor whenever an agent window
         // reaches Error, including when the pane is kept on screen.
         //
@@ -342,7 +496,8 @@ impl AppRuntime {
         // the Monitor decides completion from the PR, not from an exit code,
         // so the only claim being made here is "this launch is over". Naming
         // it a success would be the lie, not naming it a failure.
-        if is_agent_window
+        if exit_confirmed
+            && is_agent_window
             && matches!(
                 composed_status,
                 WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -355,7 +510,12 @@ impl AppRuntime {
             };
             let message = detail.as_deref().unwrap_or(default_message).to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                events.extend(self.issue_monitor_agent_failed_events(project_root, &id, &message));
+                events.extend(self.issue_monitor_agent_failed_events_with_mode(
+                    project_root,
+                    &id,
+                    &message,
+                    issue_monitor_session_mode,
+                ));
             }
         }
         // SPEC-3431 FR-003: an unexpected exit of the registered PM records a
@@ -363,10 +523,12 @@ impl AppRuntime {
         // take the auto-close branch above (resident turnover: the ensure
         // gate revives the PM on the next project open); explicit closes run
         // `close_window_events`, which deregisters instead.
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) && !keep_active_agent_session_for_recovery
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+            && !keep_active_agent_session_for_recovery
         {
             if let (Some(session_id), Some(project_root)) = (
                 pm_crash_candidate.as_deref(),
@@ -376,10 +538,12 @@ impl AppRuntime {
                 events.extend(self.handle_pm_crash(&tab_id, project_root, session_id));
             }
         }
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+        {
             if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
                 events.push(event);
             }
@@ -440,6 +604,7 @@ impl AppRuntime {
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
+        let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
         // SPEC-3431 FR-068: a hook arrival is the one signal that an agent is
         // actually making progress. The PTY-status heartbeat below never fires
@@ -536,10 +701,11 @@ impl AppRuntime {
                 .unwrap_or("Agent entered error state")
                 .to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                events.extend(self.issue_monitor_agent_failed_events(
+                events.extend(self.issue_monitor_agent_failed_events_with_mode(
                     project_root,
                     &window_id,
                     &message,
+                    issue_monitor_session_mode,
                 ));
             }
         }
@@ -814,6 +980,151 @@ mod tests {
     #[cfg(unix)]
     use crate::WindowProcessStatus;
 
+    #[test]
+    fn late_provider_active_writer_error_is_classified_as_resume_writer_conflict() {
+        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
+            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
+            (code -32600)";
+
+        assert_eq!(
+            super::classify_issue_monitor_failure(detail, gwt_agent::SessionMode::Resume),
+            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+                holder_window_id: None,
+            }),
+            "a late provider race is typed immediately even when the external holder is unknown"
+        );
+        for prefixed_detail in [
+            "Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
+            "Agent exited — last output: Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
+        ] {
+            assert_eq!(
+                super::classify_issue_monitor_failure(
+                    prefixed_detail,
+                    gwt_agent::SessionMode::Resume,
+                ),
+                Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+                    holder_window_id: None,
+                }),
+                "the provider's observed Error: prefix must preserve typed recovery"
+            );
+        }
+        assert_eq!(
+            super::classify_issue_monitor_failure(
+                "thread/resume failed during TUI bootstrap: provider temporarily unavailable",
+                gwt_agent::SessionMode::Resume,
+            ),
+            None,
+            "generic provider failures must stay on the existing failure path"
+        );
+
+        for (case, unrelated_detail) in [
+            (
+                "reversed markers",
+                "thread/resume failed during TUI bootstrap: (code -32600) thread 019 already has an active writer",
+            ),
+            (
+                "markers split across lines",
+                "thread/resume failed during TUI bootstrap:\nthread 019 already has an active writer (code -32600)",
+            ),
+            (
+                "different provider code",
+                "thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32601)",
+            ),
+            (
+                "quoted compound diagnostic",
+                "provider wrapper repeated \"thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)\"",
+            ),
+            (
+                "unanchored Error prefix",
+                "provider wrapper: Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
+            ),
+            (
+                "nested last-output prefix",
+                "Agent exited — last output: Warning: Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
+            ),
+        ] {
+            assert_eq!(
+                super::classify_issue_monitor_failure(
+                    unrelated_detail,
+                    gwt_agent::SessionMode::Resume,
+                ),
+                None,
+                "{case} must not be promoted to a typed writer conflict"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_failed_payload_carries_classified_resume_writer_conflict_to_daemon() {
+        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
+            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
+            (code -32600)";
+
+        assert_eq!(
+            super::super::AppRuntime::issue_monitor_agent_failed_payload(
+                "tab-1::agent-42",
+                detail,
+                Some(42),
+                gwt_agent::SessionMode::Resume,
+            ),
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-42",
+                    "message": detail,
+                    "failure": {
+                        "kind": "resume_writer_conflict",
+                    },
+                }
+            }),
+            "the payload helper used by issue_monitor_agent_failed_events must bridge the classifier into the daemon envelope"
+        );
+        assert_eq!(
+            super::super::AppRuntime::issue_monitor_agent_failed_payload(
+                "tab-1::agent-42",
+                "provider temporarily unavailable",
+                Some(42),
+                gwt_agent::SessionMode::Resume,
+            ),
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-42",
+                    "message": "provider temporarily unavailable",
+                }
+            }),
+            "generic failures must keep the legacy message-only envelope"
+        );
+    }
+
+    #[test]
+    fn launch_failed_payload_carries_classified_resume_writer_conflict_and_source_identity() {
+        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
+            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
+            (code -32600)";
+
+        assert_eq!(
+            super::super::AppRuntime::issue_monitor_launch_failed_payload(
+                42,
+                detail,
+                Some("launch:effect-42"),
+                Some("gui-42"),
+                gwt_agent::SessionMode::Resume,
+            ),
+            serde_json::json!({
+                "launch_failed": {
+                    "issue_number": 42,
+                    "message": detail,
+                    "delivery_id": "launch:effect-42",
+                    "materializer_id": "gui-42",
+                    "failure": {
+                        "kind": "resume_writer_conflict",
+                    },
+                }
+            })
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
@@ -861,5 +1172,104 @@ mod tests {
             panic!("sender should be reused without spawning a second worker")
         })
         .is_some());
+    }
+
+    #[test]
+    fn resume_writer_conflict_classification_and_payload_require_resume_session_origin() {
+        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
+            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
+            (code -32600)";
+        let classify: fn(&str, gwt_agent::SessionMode) -> Option<gwt::IssueMonitorFailure> =
+            super::classify_issue_monitor_failure;
+        let agent_payload: fn(
+            &str,
+            &str,
+            Option<u64>,
+            gwt_agent::SessionMode,
+        ) -> serde_json::Value = super::super::AppRuntime::issue_monitor_agent_failed_payload;
+        let launch_payload: fn(
+            u64,
+            &str,
+            Option<&str>,
+            Option<&str>,
+            gwt_agent::SessionMode,
+        ) -> serde_json::Value = super::super::AppRuntime::issue_monitor_launch_failed_payload;
+
+        assert_eq!(
+            classify(detail, gwt_agent::SessionMode::Resume),
+            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+                holder_window_id: None,
+            }),
+            "the exact provider diagnostic is typed only for an actual Resume launch"
+        );
+        let composed = format!("Process exited with status 1 — last output: {detail}");
+        assert_eq!(
+            classify(&composed, gwt_agent::SessionMode::Resume),
+            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+                holder_window_id: None,
+            }),
+            "the runtime-composed error detail retains the anchored provider diagnostic",
+        );
+        for (case, echoed_detail) in [
+            ("raw normal output", detail),
+            (
+                "single-quoted fresh output echo",
+                "launcher echoed 'thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)'",
+            ),
+        ] {
+            assert_eq!(
+                classify(echoed_detail, gwt_agent::SessionMode::Normal),
+                None,
+                "{case} is generic because a Normal/fresh launch cannot encounter a real Resume writer race"
+            );
+        }
+
+        let resume_agent = agent_payload(
+            "tab-1::agent-42",
+            detail,
+            Some(42),
+            gwt_agent::SessionMode::Resume,
+        );
+        assert_eq!(
+            resume_agent
+                .pointer("/agent_failed/failure/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("resume_writer_conflict")
+        );
+        let fresh_agent = agent_payload(
+            "tab-1::agent-42",
+            detail,
+            Some(42),
+            gwt_agent::SessionMode::Normal,
+        );
+        assert!(
+            fresh_agent.pointer("/agent_failed/failure").is_none(),
+            "a fresh AgentFailed payload keeps the marker as a generic message"
+        );
+
+        let resume_launch = launch_payload(
+            42,
+            detail,
+            Some("launch:effect-42"),
+            Some("gui-42"),
+            gwt_agent::SessionMode::Resume,
+        );
+        assert_eq!(
+            resume_launch
+                .pointer("/launch_failed/failure/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("resume_writer_conflict")
+        );
+        let fresh_launch = launch_payload(
+            42,
+            detail,
+            Some("launch:effect-42"),
+            Some("gui-42"),
+            gwt_agent::SessionMode::Normal,
+        );
+        assert!(
+            fresh_launch.pointer("/launch_failed/failure").is_none(),
+            "a FreshRequired/Normal LaunchFailed payload cannot synthesize a Resume conflict"
+        );
     }
 }

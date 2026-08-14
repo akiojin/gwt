@@ -13,7 +13,8 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
-    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume, Session,
+    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume,
+    Session, SessionRuntimeState,
 };
 use serde::Serialize;
 
@@ -92,7 +93,25 @@ fn write_state_with_status(
         pending_discussion,
     };
 
-    let bytes = serde_json::to_vec_pretty(&state)?;
+    let mut value = serde_json::to_value(&state)?;
+    if let Ok(previous) = SessionRuntimeState::load(path) {
+        let object = value
+            .as_object_mut()
+            .expect("RuntimeState serializes as an object");
+        if let Some(identity) = previous.execution_identity {
+            object.insert(
+                "execution_identity".to_string(),
+                serde_json::to_value(identity)?,
+            );
+        }
+        if let Some(incarnation) = previous.runtime_incarnation {
+            object.insert(
+                "runtime_incarnation".to_string(),
+                serde_json::to_value(incarnation)?,
+            );
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&value)?;
     gwt_github::cache::write_atomic(path, &bytes)?;
     Ok(())
 }
@@ -501,6 +520,43 @@ mod tests {
                 next_question: Some("Should SessionStart surface the proposal?".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn hook_runtime_update_preserves_exact_execution_proof_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-state.json");
+        let mut session = Session::new(dir.path(), "work/issue-3547", AgentId::Codex);
+        session.project_state_root = Some(dir.path().to_path_buf());
+        session.repo_hash = Some("repo-hook-proof".to_string());
+        session.linked_issue_number = Some(3547);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: "repo-hook-proof".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-hook-proof".to_string(),
+                binding_id: "binding-hook-proof".to_string(),
+                ledger_head_hash: "head-hook-proof".to_string(),
+            },
+            capability_generation: 3,
+        };
+        session.set_execution_binding(Some(binding)).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution(AgentStatus::Running, &identity, 41)
+            .save(&path)
+            .unwrap();
+
+        write_for_event_with_pending_discussion(&path, "Stop", None).unwrap();
+
+        let updated = gwt_agent::SessionRuntimeState::load(&path).unwrap();
+        assert_eq!(updated.execution_identity.as_ref(), Some(&identity));
+        assert_eq!(updated.runtime_incarnation, Some(41));
+        assert_eq!(updated.source_event.as_deref(), Some("Stop"));
     }
 
     #[test]

@@ -529,6 +529,34 @@ pub enum ExecutionLaunchIntent {
     /// Launch a producing continuation already authorized by the execution
     /// coordinator. The binding is installed atomically at Session bootstrap.
     PreparedContinuation(SessionExecutionBinding),
+    /// Manual Launch Agent may settle one exact durably-terminal predecessor
+    /// and prepare this candidate before pane materialization. The opaque
+    /// operation id is stable across response-loss retries; no autonomous
+    /// launch adapter may manufacture this intent.
+    ManualSuccessor {
+        operation_id: String,
+        expected_binding: crate::ExecutionBindingIdentity,
+        expected_predecessor: Option<Box<crate::SessionExecutionIdentity>>,
+        expected_runtime: Option<ManualLaunchRuntimeProof>,
+        predecessor_kind: ManualLaunchSuccessorPredecessor,
+    },
+    /// Manual successor already prepared by the typed pre-pane coordinator.
+    /// The launch worker may install this exact Prepared binding but must not
+    /// classify or mutate predecessor authority itself.
+    PreparedManualSuccessor(crate::SessionExecutionBinding),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualLaunchRuntimeProof {
+    pub host_pid: u32,
+    pub runtime_incarnation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualLaunchSuccessorPredecessor {
+    Blocked,
+    Completed,
+    ExactTerminalActive,
 }
 
 /// Reuse a fresh Bun-created package executable for a host launch.

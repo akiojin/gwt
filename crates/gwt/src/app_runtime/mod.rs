@@ -115,7 +115,24 @@ impl BlockingTaskSpawner {
     }
 }
 
+static NEXT_WINDOW_RUNTIME_INCARNATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_window_runtime_incarnation() -> u64 {
+    NEXT_WINDOW_RUNTIME_INCARNATION
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |incarnation| incarnation.checked_add(1),
+        )
+        .expect("window runtime incarnation space exhausted")
+}
+
 pub struct WindowRuntime {
+    /// Process-local identity of this exact PTY runtime. A window id may be
+    /// reused by a successor, so background events must carry this value and
+    /// prove they still belong to the runtime currently stored for the id.
+    incarnation: u64,
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
@@ -174,6 +191,8 @@ use knowledge::KnowledgeRefreshTask;
 pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSearchRequest};
 #[cfg(test)]
 pub(crate) use launch::AgentLaunchCompletion;
+#[cfg(test)]
+pub(crate) use launch::AgentLaunchRuntimeContext;
 #[cfg(test)]
 use launch::{
     codex_hook_discovery_mode_for_launch_config,
@@ -552,6 +571,84 @@ pub struct LaunchWizardSession {
     pub(crate) auto_submit_after_runtime_resolution: Option<WindowGeometry>,
     pub(crate) issue_monitor_profile_save: Option<IssueMonitorProfileSaveContext>,
     pub(crate) issue_monitor_launch_issue_number: Option<u64>,
+    /// Typed front door for the wizard. Manual holder arbitration is allowed
+    /// only for an explicit Launch Agent invocation; it must never be inferred
+    /// from a linked Issue on Start Work, Knowledge, Monitor, or resume flows.
+    pub(crate) origin: LaunchWizardOrigin,
+    /// Exact manual-holder arbitration snapshot. `None` on autonomous,
+    /// startup, Resume, Continue Work, and Issue Monitor launch adapters.
+    pub(crate) manual_holder_intent: Option<ManualLaunchHolderIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualLaunchHolderIntent {
+    pub(crate) fingerprint: String,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) predecessor: gwt_agent::SessionExecutionIdentity,
+    pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    pub(crate) local_window_id: Option<String>,
+    pub(crate) local_runtime_incarnation: Option<u64>,
+    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManualLaunchGenerationDisposition {
+    NotApplicable,
+    Genesis,
+    Prepare(ManualLaunchPreparation),
+    ExistingSuccessorWindow(String),
+    ConfirmLive(ManualLaunchHolderIntent),
+    Conflict(String),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchWizardOrigin {
+    ManualLaunchAgent,
+    Knowledge,
+    StartWork,
+    IssueMonitor,
+    WorkspaceResume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualLaunchPreparation {
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) expected_binding: gwt_agent::ExecutionBindingIdentity,
+    pub(crate) expected_session: Option<gwt_agent::SessionExecutionIdentity>,
+    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    pub(crate) operation_id: String,
+}
+
+impl ManualLaunchHolderIntent {
+    fn preparation(&self) -> ManualLaunchPreparation {
+        ManualLaunchPreparation {
+            owner: self.owner,
+            expected_binding: self.predecessor.execution_binding.identity.clone(),
+            expected_session: Some(self.predecessor.clone()),
+            expected_runtime: self.runtime_proof,
+            predecessor_kind: self.predecessor_kind,
+            operation_id: self.operation_id.clone(),
+        }
+    }
+
+    fn decision_view(&self, holder_summary: String) -> gwt::LaunchWizardHolderDecisionView {
+        let local = self.local_window_id.is_some();
+        gwt::LaunchWizardHolderDecisionView {
+            fingerprint: self.fingerprint.clone(),
+            holder_session_id: self.predecessor.session_id.clone(),
+            holder_window_id: self.local_window_id.clone(),
+            holder_summary,
+            stop_available: local,
+            stop_unavailable_reason: (!local)
+                .then(|| "The current holder is not controlled by this gwt window.".to_string()),
+            move_available: local,
+            move_unavailable_reason: (!local)
+                .then(|| "The current holder pane is not available in this window.".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -573,6 +670,7 @@ pub struct LaunchFeedbackContext {
     pub(crate) issue_monitor_issue_number: Option<u64>,
     pub(crate) issue_monitor_delivery_id: Option<String>,
     pub(crate) issue_monitor_project_root: Option<PathBuf>,
+    pub(crate) issue_monitor_session_mode: Option<gwt_agent::SessionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,7 +687,32 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
     },
     LaunchFailed {
         message: String,
+        session_mode: gwt_agent::SessionMode,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueMonitorFailureCommit {
+    Committed(Option<u64>),
+    Rejected,
+    AuthorityExhausted,
+}
+
+fn issue_monitor_writer_conflict_commit(
+    outcome: gwt::IssueMonitorResumeWriterConflictOutcome,
+    issue_number: u64,
+) -> IssueMonitorFailureCommit {
+    match outcome {
+        gwt::IssueMonitorResumeWriterConflictOutcome::Requeued => {
+            IssueMonitorFailureCommit::Committed(Some(issue_number))
+        }
+        gwt::IssueMonitorResumeWriterConflictOutcome::Rejected => {
+            IssueMonitorFailureCommit::Rejected
+        }
+        gwt::IssueMonitorResumeWriterConflictOutcome::AuthorityExhausted => {
+            IssueMonitorFailureCommit::AuthorityExhausted
+        }
+    }
 }
 
 const ISSUE_MONITOR_MATERIALIZING_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -716,6 +839,10 @@ pub struct AppRuntime {
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
+    /// Single-use launch requests keyed by the exact wizard that produced
+    /// them. The visible modal may be replaced before the queued event runs;
+    /// materialization ownership must not move with that global UI slot.
+    pub(crate) pending_launch_wizard_materializations: HashMap<String, LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
     /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
@@ -1850,6 +1977,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_launch_wizard_materializations: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
@@ -2673,6 +2801,23 @@ impl AppRuntime {
         message: &str,
         delivery_id: Option<&str>,
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_launch_failed_delivery_events_with_mode(
+            project_root,
+            issue_number,
+            message,
+            delivery_id,
+            gwt_agent::SessionMode::Normal,
+        )
+    }
+
+    pub(crate) fn issue_monitor_launch_failed_delivery_events_with_mode(
+        &mut self,
+        project_root: Option<&Path>,
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
+    ) -> Vec<OutboundEvent> {
         let message = if gwt::issue_monitor::is_git_https_auth_error(message) {
             gwt::issue_monitor::git_https_auth_setup_message(message)
         } else {
@@ -2683,18 +2828,17 @@ impl AppRuntime {
                 delivery_id.to_string(),
                 IssueMonitorLaunchDeliveryState::LaunchFailed {
                     message: message.clone(),
+                    session_mode,
                 },
             );
         }
-        let mut launch_failed = serde_json::json!({
-            "issue_number": issue_number,
-            "message": message.clone(),
-        });
-        if let Some(delivery_id) = delivery_id {
-            launch_failed["delivery_id"] = serde_json::json!(delivery_id);
-            launch_failed["materializer_id"] =
-                serde_json::json!(self.issue_monitor_materializer_id.clone());
-        }
+        let launch_failed = Self::issue_monitor_launch_failed_payload(
+            issue_number,
+            &message,
+            delivery_id,
+            delivery_id.map(|_| self.issue_monitor_materializer_id.as_str()),
+            session_mode,
+        );
         let publication = project_root.map_or_else(
             || {
                 Err(
@@ -2706,7 +2850,7 @@ impl AppRuntime {
             |project_root| {
                 self.publish_issue_monitor_control(
                     project_root,
-                    serde_json::json!({ "launch_failed": launch_failed }),
+                    launch_failed,
                 )
             },
         );
@@ -2715,8 +2859,34 @@ impl AppRuntime {
             issue_number,
             &message,
             delivery_id,
+            session_mode,
             publication,
         )
+    }
+
+    pub(crate) fn issue_monitor_launch_failed_payload(
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
+    ) -> serde_json::Value {
+        let mut launch_failed = serde_json::json!({
+            "issue_number": issue_number,
+            "message": message,
+        });
+        if let Some(delivery_id) = delivery_id {
+            launch_failed["delivery_id"] = serde_json::json!(delivery_id);
+        }
+        if let Some(materializer_id) = materializer_id {
+            launch_failed["materializer_id"] = serde_json::json!(materializer_id);
+        }
+        if let Some(failure) = runtime_events::classify_issue_monitor_failure(message, session_mode)
+        {
+            launch_failed["failure"] =
+                serde_json::to_value(failure).expect("Issue Monitor failure serializes");
+        }
+        serde_json::json!({ "launch_failed": launch_failed })
     }
 
     #[cfg(test)]
@@ -2732,6 +2902,7 @@ impl AppRuntime {
             issue_number,
             message,
             None,
+            gwt_agent::SessionMode::Normal,
             publication,
         )
     }
@@ -2742,37 +2913,85 @@ impl AppRuntime {
         issue_number: u64,
         message: &str,
         delivery_id: Option<&str>,
+        session_mode: gwt_agent::SessionMode,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
-        let (mut events, committed) = match publication {
+        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
+        let (mut events, committed, retain_delivery) = match publication {
             Ok(()) => (
                 Vec::new(),
-                delivery_id.is_none_or(|delivery_id| {
-                    project_root.is_some_and(|project_root| {
-                        self.issue_monitor_launch_failure_committed(
-                            project_root,
-                            issue_number,
-                            message,
-                            delivery_id,
-                        )
-                    })
-                }),
+                match &failure {
+                    // The daemon only ACKs a typed failure after its exact
+                    // source identity committed. A stale delivery is rejected
+                    // at the control completion boundary, so no unrelated
+                    // FreshRequired state can be mistaken for this result.
+                    Some(gwt::IssueMonitorFailure::ResumeWriterConflict { .. }) => true,
+                    None => delivery_id.is_none_or(|delivery_id| {
+                        project_root.is_some_and(|project_root| {
+                            self.issue_monitor_launch_failure_committed(
+                                project_root,
+                                issue_number,
+                                message,
+                                delivery_id,
+                            )
+                        })
+                    }),
+                },
+                false,
             ),
             Err(error) if error.allows_local_fallback() && project_root.is_some() => {
                 let project_root = project_root.expect("guarded by is_some");
                 match self.commit_local_issue_monitor_control_for_project(project_root, |monitor| {
-                    monitor.record_launch_failed_delivery(
-                        issue_number,
-                        message.to_string(),
-                        delivery_id,
-                        delivery_id.map(|_| self.issue_monitor_materializer_id.as_str()),
-                    )
+                    match &failure {
+                        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+                            holder_window_id,
+                        }) => {
+                            let Some(delivery_id) = delivery_id else {
+                                return IssueMonitorFailureCommit::Rejected;
+                            };
+                            issue_monitor_writer_conflict_commit(
+                                monitor.try_requeue_launch_resume_writer_conflict(
+                                    issue_number,
+                                    delivery_id,
+                                    &self.issue_monitor_materializer_id,
+                                    message.to_string(),
+                                    holder_window_id.as_deref(),
+                                ),
+                                issue_number,
+                            )
+                        }
+                        None => {
+                            if monitor.record_launch_failed_delivery(
+                                issue_number,
+                                message.to_string(),
+                                delivery_id,
+                                delivery_id.map(|_| self.issue_monitor_materializer_id.as_str()),
+                            ) {
+                                IssueMonitorFailureCommit::Committed(Some(issue_number))
+                            } else {
+                                IssueMonitorFailureCommit::Rejected
+                            }
+                        }
+                    }
                 }) {
-                    Ok((monitor, true)) => (
+                    Ok((monitor, IssueMonitorFailureCommit::Committed(_))) => (
                         self.issue_monitor_snapshot_events_for(None, Some(project_root), monitor),
                         true,
+                        false,
                     ),
-                    Ok((_monitor, false)) => (Vec::new(), false),
+                    Ok((_monitor, IssueMonitorFailureCommit::Rejected)) => {
+                        (Vec::new(), false, false)
+                    }
+                    Ok((_monitor, IssueMonitorFailureCommit::AuthorityExhausted)) => (
+                        self.issue_monitor_control_error_events(
+                            None,
+                            gwt::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked,
+                            "launch-failed",
+                            Some(issue_number),
+                        ),
+                        false,
+                        true,
+                    ),
                     Err(local_error) => (
                         self.issue_monitor_control_error_events(
                             None,
@@ -2780,6 +2999,7 @@ impl AppRuntime {
                             "launch-failed",
                             Some(issue_number),
                         ),
+                        false,
                         false,
                     ),
                 }
@@ -2791,6 +3011,7 @@ impl AppRuntime {
                     "launch-failed",
                     Some(issue_number),
                 ),
+                false,
                 false,
             ),
         };
@@ -2806,8 +3027,10 @@ impl AppRuntime {
                     issue_number: Some(issue_number),
                 }),
             ]);
-        } else if let Some(delivery_id) = delivery_id {
-            self.issue_monitor_launch_deliveries.remove(delivery_id);
+        } else if !retain_delivery {
+            if let Some(delivery_id) = delivery_id {
+                self.issue_monitor_launch_deliveries.remove(delivery_id);
+            }
         }
         events
     }
@@ -2987,11 +3210,12 @@ impl AppRuntime {
             .filter(|stale| stale != fresh_window_id)
     }
 
-    pub(crate) fn issue_monitor_agent_failed_events(
+    pub(crate) fn issue_monitor_agent_failed_events_with_mode(
         &mut self,
         project_root: &Path,
         window_id: &str,
         message: &str,
+        session_mode: gwt_agent::SessionMode,
     ) -> Vec<OutboundEvent> {
         let message = message.trim();
         let message = if message.is_empty() {
@@ -3003,24 +3227,111 @@ impl AppRuntime {
             .pending_launch_feedback_contexts
             .get(window_id)
             .and_then(|context| context.issue_monitor_issue_number);
-        let mut agent_failed_payload = serde_json::json!({
-            "window_id": window_id,
-            "message": message,
-        });
-        if let Some(issue_number) = issue_number_hint {
-            agent_failed_payload["issue_number"] = serde_json::json!(issue_number);
-        }
+        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         let publication = self.publish_issue_monitor_control(
             project_root,
-            serde_json::json!({ "agent_failed": agent_failed_payload }),
+            Self::issue_monitor_agent_failed_payload_with_failure(
+                window_id,
+                message,
+                issue_number_hint,
+                failure.as_ref(),
+            ),
         );
         self.issue_monitor_agent_failed_result_events_for_project(
             project_root,
             window_id,
             message,
             issue_number_hint,
+            session_mode,
             publication,
         )
+    }
+
+    fn issue_monitor_session_mode_for_window(&self, window_id: &str) -> gwt_agent::SessionMode {
+        self.pending_launch_feedback_contexts
+            .get(window_id)
+            .and_then(|context| context.issue_monitor_session_mode)
+            .or_else(|| {
+                let active = self.active_agent_sessions.get(window_id)?;
+                gwt_agent::Session::load(
+                    &self
+                        .sessions_dir
+                        .join(format!("{}.toml", active.session_id)),
+                )
+                .ok()
+                .map(|session| session.session_mode)
+            })
+            .unwrap_or(gwt_agent::SessionMode::Normal)
+    }
+
+    fn issue_monitor_failure_for_window(
+        &self,
+        window_id: &str,
+        message: &str,
+        session_mode: gwt_agent::SessionMode,
+    ) -> Option<gwt::IssueMonitorFailure> {
+        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode)?;
+        let gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: None,
+        } = failure
+        else {
+            return Some(failure);
+        };
+        let source_session_id = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|active| active.session_id.clone())
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                self.tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?
+                    .session_id
+                    .clone()
+            });
+        let holder_window_id = source_session_id
+            .as_deref()
+            .and_then(|session_id| self.issue_monitor_session_by_id(session_id))
+            .and_then(|candidate| {
+                self.issue_monitor_native_conversation_holder_excluding(&candidate, Some(window_id))
+            });
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict { holder_window_id })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn issue_monitor_agent_failed_payload(
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        session_mode: gwt_agent::SessionMode,
+    ) -> serde_json::Value {
+        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
+        Self::issue_monitor_agent_failed_payload_with_failure(
+            window_id,
+            message,
+            issue_number_hint,
+            failure.as_ref(),
+        )
+    }
+
+    fn issue_monitor_agent_failed_payload_with_failure(
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        failure: Option<&gwt::IssueMonitorFailure>,
+    ) -> serde_json::Value {
+        let mut agent_failed = serde_json::json!({
+            "window_id": window_id,
+            "message": message,
+        });
+        if let Some(issue_number) = issue_number_hint {
+            agent_failed["issue_number"] = serde_json::json!(issue_number);
+        }
+        if let Some(failure) = failure {
+            agent_failed["failure"] =
+                serde_json::to_value(failure).expect("Issue Monitor failure serializes");
+        }
+        serde_json::json!({ "agent_failed": agent_failed })
     }
 
     #[cfg(test)]
@@ -3049,6 +3360,7 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
+            self.issue_monitor_session_mode_for_window(window_id),
             publication,
         )
     }
@@ -3059,8 +3371,10 @@ impl AppRuntime {
         window_id: &str,
         message: &str,
         issue_number_hint: Option<u64>,
+        session_mode: gwt_agent::SessionMode,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
+        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         match publication {
             Ok(()) => self.finalize_issue_monitor_agent_failed_events(
                 project_root,
@@ -3089,25 +3403,58 @@ impl AppRuntime {
                 match self.commit_local_issue_monitor_control_for_project(
                     project_root,
                     |monitor| {
-                        match loaded {
-                            Ok(loaded) => {
-                                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
-                                    monitor,
-                                    &loaded,
-                                    project_root,
-                                    expected_project_tab_id.as_deref(),
-                                    &now,
-                                );
+                        if failure.is_none() {
+                            match loaded {
+                                Ok(loaded) => {
+                                    gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
+                                        monitor,
+                                        &loaded,
+                                        project_root,
+                                        expected_project_tab_id.as_deref(),
+                                        &now,
+                                    );
+                                }
+                                Err(error) => monitor.record_scan_error(&now, error),
                             }
-                            Err(error) => monitor.record_scan_error(&now, error),
                         }
-                        let issue_number = if let Some(issue_number) = issue_number_hint {
-                            monitor.record_agent_issue_failed(issue_number, message.to_string());
-                            Some(issue_number)
-                        } else {
-                            monitor.record_agent_window_failed(window_id, message.to_string())
+                        let commit = match &failure {
+                            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+                                holder_window_id,
+                            }) => {
+                                let issue_number = issue_number_hint
+                                    .or_else(|| monitor.launched_window_issue(window_id));
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                issue_monitor_writer_conflict_commit(
+                                    monitor.try_requeue_agent_resume_writer_conflict(
+                                        issue_number,
+                                        window_id,
+                                        message.to_string(),
+                                        holder_window_id.as_deref(),
+                                    ),
+                                    issue_number,
+                                )
+                            }
+                            None => {
+                                let issue_number = if let Some(issue_number) = issue_number_hint {
+                                    monitor.record_agent_issue_failed(
+                                        issue_number,
+                                        message.to_string(),
+                                    );
+                                    Some(issue_number)
+                                } else {
+                                    monitor.record_agent_window_failed(
+                                        window_id,
+                                        message.to_string(),
+                                    )
+                                };
+                                IssueMonitorFailureCommit::Committed(issue_number)
+                            }
                         };
-                        if issue_number.is_none() {
+                        if commit == IssueMonitorFailureCommit::Committed(None)
+                            && failure.is_none()
+                        {
                             monitor.record_scan_error(
                                 &now,
                                 format!(
@@ -3115,17 +3462,27 @@ impl AppRuntime {
                                 ),
                             );
                         }
-                        issue_number
+                        commit
                     }
                 ) {
-                    Ok((monitor, issue_number)) => self.finalize_issue_monitor_agent_failed_events(
-                        project_root,
-                        window_id,
-                        message,
-                        issue_number,
-                        Some(monitor),
-                        true,
-                    ),
+                    Ok((monitor, IssueMonitorFailureCommit::Committed(issue_number))) => {
+                        self.finalize_issue_monitor_agent_failed_events(
+                            project_root,
+                            window_id,
+                            message,
+                            issue_number,
+                            Some(monitor),
+                            true,
+                        )
+                    }
+                    Ok((_monitor, IssueMonitorFailureCommit::Rejected)) => Vec::new(),
+                    Ok((_monitor, IssueMonitorFailureCommit::AuthorityExhausted)) => self
+                        .issue_monitor_control_error_events(
+                            None,
+                            gwt::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked,
+                            "agent-failed",
+                            issue_number_hint,
+                        ),
                     Err(local_error) => self.issue_monitor_control_error_events(
                         None,
                         local_error,
@@ -4017,6 +4374,7 @@ impl AppRuntime {
                 request.issue_number,
                 request.linked_issue_kind,
                 request.delivery_id.clone(),
+                request.launch_session_strategy,
             ));
         }
         events
@@ -4168,6 +4526,7 @@ impl AppRuntime {
                 request.issue_number,
                 request.linked_issue_kind,
                 request.delivery_id,
+                request.launch_session_strategy,
             ));
         }
         if let Ok(latest) = gwt::load_issue_monitor_prefs(prefs_path) {
@@ -4454,10 +4813,21 @@ impl AppRuntime {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
             FrontendEvent::PmPaneSendInput {
-                pm_session_id,
+                operation_id,
                 window_id,
-                text,
-            } => self.pm_pane_send_input_events(client_id, &pm_session_id, &window_id, &text),
+                ..
+            } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PmMessageSendResult {
+                    operation_id,
+                    status: "failed".to_string(),
+                    window_id: Some(window_id),
+                    reason: Some(
+                        "pm.message.send requires an authenticated agent WebSocket principal"
+                            .to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::PasteImage {
                 id,
                 data_base64,
@@ -5220,6 +5590,22 @@ impl AppRuntime {
                 );
                 AgentFrontendDispatchOutcome::Dispatched(Vec::new())
             }
+            AgentFrontendRequest::PmSendInput {
+                operation_id,
+                window_id,
+                text,
+                responder,
+            } => AgentFrontendDispatchOutcome::Dispatched(
+                self.authenticated_pm_pane_send_input_events(
+                    issuer,
+                    client_id,
+                    grant,
+                    &operation_id,
+                    &window_id,
+                    &text,
+                    responder,
+                ),
+            ),
             request => {
                 let principal = grant.principal().clone();
                 issuer
@@ -5291,6 +5677,13 @@ impl AppRuntime {
                     }
                 };
                 self.pane_send_input_to_window_events(client_id, &window_id, &text)
+            }
+            AgentFrontendRequest::PmSendInput { .. } => {
+                tracing::warn!(
+                    target: "gwt_security",
+                    "privileged PM send bypassed generation-aware dispatch"
+                );
+                Vec::new()
             }
         }
     }

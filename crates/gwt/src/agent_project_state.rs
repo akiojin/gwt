@@ -705,7 +705,6 @@ pub fn continue_authenticated_execution(
         exact_unbound,
         current_binding,
     } = authority;
-
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
         &worktree,
         owner,

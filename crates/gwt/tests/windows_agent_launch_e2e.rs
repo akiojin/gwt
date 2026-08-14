@@ -23,7 +23,7 @@ use std::{
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use gwt_agent::{
-    prepare_agent_launch, AgentId, AgentLaunchBuilder, Session, SessionMode,
+    prepare_agent_launch, AgentId, AgentLaunchBuilder, HostRunnerProbeKind, Session, SessionMode,
     ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
 };
 use gwt_core::test_support::{WindowsNpmRegistryFixture, WindowsRealGwtFixture};
@@ -35,6 +35,8 @@ use gwt_terminal::{
 const PROVIDER_ENV: &str = "GWT_WINDOWS_AGENT_PROVIDER";
 const SELECTOR_ENV: &str = "GWT_WINDOWS_AGENT_SELECTOR";
 const CREDENTIAL_FREE_ENV: &str = "GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE";
+const TEST_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
+const TEST_REGISTRY_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
@@ -143,6 +145,7 @@ fn selected_selector() -> String {
 #[test]
 #[ignore = "runs real npm/npx against a loopback registry"]
 fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
+    init_test_tracing();
     assert_eq!(
         required_env(CREDENTIAL_FREE_ENV),
         "1",
@@ -175,6 +178,13 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
     let _hook_bin =
         gwt_core::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"));
     let launch_env = launch_env_with_real_gwtd(&fixture);
+    assert_loopback_registry_preflight(
+        &fixture,
+        &launch_env,
+        &worktree,
+        provider,
+        requested_selector,
+    );
     assert_canonical_route_manifest();
     let public_route_only = std::env::var_os("GWT_WINDOWS_AGENT_E2E_PUBLIC_ROUTE_ONLY")
         .is_some_and(|value| value == "1");
@@ -838,24 +848,27 @@ fn run_shared_launch_boundary_case(
         builder = builder.env(key, value);
     }
     let mut config = builder.build();
-    config.remove_env.extend(
-        [
-            "CODEX_THREAD_ID",
-            "NODE_AUTH_TOKEN",
-            "NPM_TOKEN",
-            "NPM_AUTH_TOKEN",
-            "NPM_CONFIG__AUTH",
-            "NPM_CONFIG__AUTHTOKEN",
-        ]
-        .into_iter()
-        .map(str::to_string),
-    );
+    config.remove_env.extend(credential_env_removals());
 
+    let accepted_connection_count_before = fixture.accepted_connection_count();
+    let header_complete_request_count_before = fixture.requests().len();
     let prepared = prepare_agent_launch(worktree, sessions_dir, config, None, |path| {
         gwt::refresh_managed_gwt_assets_for_agent(path, &provider.agent_id())
             .map_err(|error| error.to_string())
     })
-    .unwrap_or_else(|error| panic!("{} must prepare an exact npx plan: {error}", route.id));
+    .unwrap_or_else(|error| {
+        let accepted_connection_count = fixture.accepted_connection_count();
+        let request_snapshot = registry_request_diagnostic_snapshot(fixture);
+        let header_complete_request_count = request_snapshot.len();
+        let accepted_connection_delta =
+            accepted_connection_count.saturating_sub(accepted_connection_count_before);
+        let header_complete_request_delta =
+            header_complete_request_count.saturating_sub(header_complete_request_count_before);
+        panic!(
+            "{} must prepare an exact npx plan: {error}; accepted_connection_delta={accepted_connection_delta}; header_complete_request_delta={header_complete_request_delta}; request_snapshot={request_snapshot:?}",
+            route.id
+        )
+    });
     assert!(runner_file_name_is(
         &prepared.process_launch.command,
         "npx.cmd"
@@ -1104,6 +1117,163 @@ fn launch_env_with_real_gwtd(
         env!("CARGO_BIN_EXE_gwtd").to_string(),
     );
     env
+}
+
+fn init_test_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_target(true)
+        .with_test_writer()
+        .try_init();
+}
+
+fn credential_env_removals() -> Vec<String> {
+    [
+        "CODEX_THREAD_ID",
+        "NODE_AUTH_TOKEN",
+        "NPM_TOKEN",
+        "NPM_AUTH_TOKEN",
+        "NPM_CONFIG__AUTH",
+        "NPM_CONFIG__AUTHTOKEN",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn registry_request_diagnostic_snapshot(fixture: &WindowsNpmRegistryFixture) -> Vec<String> {
+    fixture
+        .requests()
+        .into_iter()
+        .map(|request| format!("{} {}", request.method, request.path))
+        .collect()
+}
+
+fn panic_loopback_registry_preflight_failure(
+    fixture: &WindowsNpmRegistryFixture,
+    outcome: &gwt_agent::HostRunnerProbeOutcome,
+    observed_value: &str,
+    detail: &str,
+) -> ! {
+    let accepted_connection_count = fixture.accepted_connection_count();
+    let request_snapshot = registry_request_diagnostic_snapshot(fixture);
+    let header_complete_request_count = request_snapshot.len();
+    panic!(
+        "loopback registry preflight failure: {detail}; expected_registry={:?}; observed_value={observed_value:?}; outcome={outcome:?}; accepted_connection_count={accepted_connection_count}; header_complete_request_count={header_complete_request_count}; request_snapshot={request_snapshot:?}",
+        fixture.registry_url
+    );
+}
+
+fn assert_loopback_registry_preflight(
+    fixture: &WindowsNpmRegistryFixture,
+    launch_env: &std::collections::HashMap<String, String>,
+    worktree: &Path,
+    provider: Provider,
+    requested_selector: &str,
+) {
+    let remove_env = credential_env_removals();
+    let mut preflight_env = launch_env.clone();
+    assert_eq!(
+        preflight_env.remove("NPM_CONFIG_REGISTRY").as_deref(),
+        Some(fixture.registry_url.as_str()),
+        "preflight launch environment must contain the isolated registry URL"
+    );
+    assert!(
+        preflight_env
+            .values()
+            .all(|value| value != &fixture.registry_url),
+        "preflight probe redaction inputs must not contain the expected registry URL"
+    );
+    let outcome = gwt_agent::prepare::probe_host_runner_with_timeout(
+        HostRunnerProbeKind::Runner,
+        "npm.cmd",
+        ["config", "get", "registry", "--json"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        &preflight_env,
+        &remove_env,
+        Some(worktree.to_path_buf()),
+        TEST_PREFLIGHT_TIMEOUT,
+        Duration::from_millis(50),
+    );
+    let observed_registry = outcome.stdout.trim();
+    if !outcome.success || observed_registry != fixture.registry_url {
+        panic_loopback_registry_preflight_failure(
+            fixture,
+            &outcome,
+            observed_registry,
+            "npm config registry mismatch",
+        );
+    }
+    if let Err(error) = fixture.probe_registry_health(TEST_REGISTRY_HEALTH_TIMEOUT) {
+        panic_loopback_registry_preflight_failure(
+            fixture,
+            &outcome,
+            observed_registry,
+            &format!("loopback HTTP healthcheck failed: {error}"),
+        );
+    }
+    if requested_selector == "latest" {
+        let metadata_request_count_before = fixture.requests().len();
+        let metadata_outcome = gwt_agent::prepare::probe_host_runner_with_timeout(
+            HostRunnerProbeKind::Runner,
+            "npm.cmd",
+            vec![
+                "view".to_string(),
+                format!("{}@latest", provider.package()),
+                "version".to_string(),
+                "--json".to_string(),
+            ],
+            &preflight_env,
+            &remove_env,
+            Some(worktree.to_path_buf()),
+            TEST_PREFLIGHT_TIMEOUT,
+            Duration::from_millis(50),
+        );
+        let observed_metadata = metadata_outcome.stdout.trim();
+        if !metadata_outcome.success {
+            panic_loopback_registry_preflight_failure(
+                fixture,
+                &metadata_outcome,
+                observed_metadata,
+                "metadata preflight process failed",
+            );
+        }
+        let resolved_version =
+            serde_json::from_str::<String>(observed_metadata).unwrap_or_else(|error| {
+                panic_loopback_registry_preflight_failure(
+                    fixture,
+                    &metadata_outcome,
+                    observed_metadata,
+                    &format!("metadata preflight returned invalid JSON: {error}"),
+                )
+            });
+        if resolved_version != fixture.exact_version {
+            panic_loopback_registry_preflight_failure(
+                fixture,
+                &metadata_outcome,
+                &resolved_version,
+                "metadata preflight version mismatch",
+            );
+        }
+        let metadata_requests = fixture.requests();
+        let reached_packument = metadata_requests
+            .get(metadata_request_count_before..)
+            .is_some_and(|requests| {
+                requests.iter().any(|request| {
+                    let path = request.path.to_ascii_lowercase();
+                    path.contains("%2f") || path.contains(provider.package())
+                })
+            });
+        if !reached_packument {
+            panic_loopback_registry_preflight_failure(
+                fixture,
+                &metadata_outcome,
+                &resolved_version,
+                "metadata preflight did not reach the loopback packument",
+            );
+        }
+    }
 }
 
 fn route_capture_path(root: &Path, route_id: &str) -> PathBuf {

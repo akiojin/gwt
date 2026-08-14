@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1303,7 +1303,7 @@ dependencies = [
  "sysinfo",
  "tao",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml 1.1.2+spec-1.1.0",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "chrono",
  "dunce",
@@ -1335,7 +1335,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -1346,31 +1346,31 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "gwt-core",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "gwt-config"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "dirs 6.0.0",
  "serde",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "toml 1.1.2+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1400,7 +1400,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "chrono",
  "gwt-core",
@@ -1451,12 +1451,12 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "gwt-skills"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "chrono",
  "fs2",
@@ -1467,20 +1467,20 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
 name = "gwt-terminal"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "gwt-core",
  "libc",
  "nix 0.31.3",
  "portable-pty",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "vt100",
@@ -1488,11 +1488,11 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.78.1"
+version = "9.78.3"
 dependencies = [
  "gwt-core",
  "tempfile",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2254,7 +2254,7 @@ dependencies = [
  "objc2-foundation",
  "once_cell",
  "png",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "windows-sys 0.60.2",
 ]
 
@@ -2947,7 +2947,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "web-time",
@@ -2968,7 +2968,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tinyvec",
  "tracing",
  "web-time",
@@ -3098,7 +3098,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3753,11 +3753,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl 2.0.19",
+ "thiserror-impl 2.0.20",
 ]
 
 [[package]]
@@ -3773,9 +3773,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4073,7 +4073,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "time",
  "tracing-subscriber",
 ]
@@ -4159,7 +4159,7 @@ dependencies = [
  "objc2-foundation",
  "once_cell",
  "png",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "windows-sys 0.60.2",
 ]
 
@@ -4182,7 +4182,7 @@ dependencies = [
  "log",
  "rand 0.9.4",
  "sha1 0.10.6",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4198,7 +4198,7 @@ dependencies = [
  "log",
  "rand 0.10.2",
  "sha1 0.11.0",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

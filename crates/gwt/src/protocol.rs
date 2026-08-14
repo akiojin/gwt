@@ -364,12 +364,11 @@ pub enum FrontendEvent {
         text: String,
     },
     /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
-    /// agent pane of the same project. Carries the PM's own session id so the
-    /// server re-verifies the live PM principal immediately before the
-    /// injection; the general self-only contract of
+    /// agent pane of the same project. Caller identity comes only from the
+    /// authenticated WebSocket principal; the general self-only contract of
     /// [`FrontendEvent::PaneSendInput`] is unchanged for every other caller.
     PmPaneSendInput {
-        pm_session_id: String,
+        operation_id: String,
         window_id: String,
         text: String,
     },
@@ -1652,6 +1651,15 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    /// Origin-connection-only terminal result for one privileged PM message.
+    /// `queued` is reserved for a future durable payload queue; this slice
+    /// emits only `delivered` after exact acknowledgement or `failed`.
+    PmMessageSendResult {
+        operation_id: String,
+        status: String,
+        window_id: Option<String>,
+        reason: Option<String>,
+    },
     /// Direct, origin-connection-only acceptance for an authenticated
     /// self-close. The internal close ticket never crosses the wire.
     PaneCloseAccepted {
@@ -2408,6 +2416,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pm_message_send_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
@@ -2850,6 +2863,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
@@ -4876,6 +4890,39 @@ mod tests {
         let value = serde_json::to_value(&action).expect("serialize goto_step");
         assert_eq!(value["kind"], "goto_step");
         assert_eq!(value["phase"], "confirm");
+    }
+
+    #[test]
+    fn launch_wizard_holder_decision_actions_round_trip() {
+        use crate::launch_wizard::LaunchWizardAction;
+
+        let actions = [
+            (
+                LaunchWizardAction::StopAndStartSuccessor {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:successor".to_string(),
+                },
+                "stop_and_start_successor",
+            ),
+            (
+                LaunchWizardAction::MoveExistingPane {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:destination".to_string(),
+                },
+                "move_existing_pane",
+            ),
+        ];
+
+        for (action, expected_kind) in actions {
+            let value = serde_json::to_value(&action).expect("serialize holder decision action");
+            assert_eq!(value["kind"], expected_kind);
+            assert_eq!(value["fingerprint"], "repo:/tmp/gwt:work/issue-3547");
+            assert!(value["window_id"].as_str().is_some());
+
+            let round_tripped: LaunchWizardAction =
+                serde_json::from_value(value).expect("deserialize holder decision action");
+            assert_eq!(round_tripped, action);
+        }
     }
 
     #[test]

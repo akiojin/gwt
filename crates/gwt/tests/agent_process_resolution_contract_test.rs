@@ -52,7 +52,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
     assert!(policy.contains("health_report"));
     assert!(policy.contains("version_output"));
 
-    let launch = function_source(&source, "spawn_agent_window_async");
+    let launch = function_source(&source, "spawn_agent_window_async_with_claim");
     assert_eq!(
         launch
             .matches("resolve_host_runner_health_checked(")
@@ -352,8 +352,18 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
         );
     }
     let placement = function_source(&launch, "spawn_agent_window_with_placement");
-    assert!(placement.contains("Self::spawn_agent_window_async("));
-    let asynchronous = function_source(&launch, "spawn_agent_window_async");
+    let claim = placement
+        .find("claim_prepared_manual_successor_launch(")
+        .expect("prepared manual successor is claimed before pane creation");
+    let pane = placement
+        .find(".add_window_with_title(")
+        .expect("shared placement transaction creates the pane");
+    assert!(
+        claim < pane,
+        "durable successor claim must precede pane creation"
+    );
+    assert!(placement.contains("Self::spawn_agent_window_async_with_claim("));
+    let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
     for boundary in [
         "hydrate_tool_runtime_provenance_from_source_session(",
         "resolve_host_runner_health_checked(&mut config)",
