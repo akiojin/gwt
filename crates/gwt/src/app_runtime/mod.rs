@@ -4454,10 +4454,21 @@ impl AppRuntime {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
             FrontendEvent::PmPaneSendInput {
-                pm_session_id,
+                operation_id,
                 window_id,
-                text,
-            } => self.pm_pane_send_input_events(client_id, &pm_session_id, &window_id, &text),
+                ..
+            } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PmMessageSendResult {
+                    operation_id,
+                    status: "failed".to_string(),
+                    window_id: Some(window_id),
+                    reason: Some(
+                        "pm.message.send requires an authenticated agent WebSocket principal"
+                            .to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::PasteImage {
                 id,
                 data_base64,
@@ -5220,6 +5231,22 @@ impl AppRuntime {
                 );
                 AgentFrontendDispatchOutcome::Dispatched(Vec::new())
             }
+            AgentFrontendRequest::PmSendInput {
+                operation_id,
+                window_id,
+                text,
+                responder,
+            } => AgentFrontendDispatchOutcome::Dispatched(
+                self.authenticated_pm_pane_send_input_events(
+                    issuer,
+                    client_id,
+                    grant,
+                    &operation_id,
+                    &window_id,
+                    &text,
+                    responder,
+                ),
+            ),
             request => {
                 let principal = grant.principal().clone();
                 issuer
@@ -5291,6 +5318,13 @@ impl AppRuntime {
                     }
                 };
                 self.pane_send_input_to_window_events(client_id, &window_id, &text)
+            }
+            AgentFrontendRequest::PmSendInput { .. } => {
+                tracing::warn!(
+                    target: "gwt_security",
+                    "privileged PM send bypassed generation-aware dispatch"
+                );
+                Vec::new()
             }
         }
     }

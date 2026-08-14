@@ -30,6 +30,45 @@ use crate::pm_registry::{self, PmLoopState};
 /// revives a parked PM when new monitor activity arrives.
 const PM_LOOP_MAX_CONSECUTIVE: u32 = 12;
 
+/// Finalize a protected PM delivery only when the exact target Session's
+/// UserPromptSubmit hook observes the self-authenticating operation marker.
+/// Invalid or unrelated prompts are ordinary user input and remain silent.
+pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
+    let Some(prompt) = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("prompt")
+                .and_then(|prompt| prompt.as_str())
+                .map(str::to_string)
+        })
+    else {
+        return;
+    };
+    let Some((operation_id, body_sha256)) =
+        pm_registry::parse_protected_pm_delivery_prompt(&prompt)
+    else {
+        return;
+    };
+    let Some(target_session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|session_id| !session_id.trim().is_empty())
+    else {
+        return;
+    };
+    let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(worktree);
+    if let Err(error) = pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        &operation_id,
+        &target_session_id,
+        &body_sha256,
+        pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    ) {
+        tracing::warn!(%error, operation_id, "PM delivery acknowledgement was rejected");
+    }
+}
+
 /// UserPromptSubmit entry: real user contact re-arms the loop budget and
 /// stamps the conversation clock the T-093 wake path defers to.
 pub fn handle_user_prompt_submit(worktree: &Path) {
@@ -162,7 +201,7 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
     fn pm_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let home = tempfile::tempdir().expect("home");
@@ -202,6 +241,89 @@ mod tests {
         };
         assert!(reason.contains("daemon.subscribe"));
         assert!(reason.contains("issue.monitor.status"));
+    }
+
+    #[test]
+    fn exact_target_user_prompt_submit_verifies_the_delivery_receipt() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "target-session");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "report exact status";
+        let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        pm_registry::prepare_pm_delivery_receipt(
+            &receipt_path,
+            &pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.to_string(),
+                recorded_at: "2026-08-13T00:00:00Z".to_string(),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".to_string(),
+                target_window_id: "tab-1::agent-1".to_string(),
+                target_session_id: "target-session".to_string(),
+                body_sha256: body_sha256.clone(),
+                reason: None,
+            },
+        )
+        .expect("prepare receipt");
+        let input = serde_json::json!({
+            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+        })
+        .to_string();
+
+        handle_delivery_acknowledgement(&repo, &input);
+
+        assert!(pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("load receipt")
+            .iter()
+            .any(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified));
+    }
+
+    #[test]
+    fn wrong_session_or_body_hash_cannot_verify_a_delivery_receipt() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a4";
+        let body = "report exact status";
+        let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        pm_registry::prepare_pm_delivery_receipt(
+            &receipt_path,
+            &pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.to_string(),
+                recorded_at: "2026-08-13T00:00:00Z".to_string(),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".to_string(),
+                target_window_id: "tab-1::agent-1".to_string(),
+                target_session_id: "target-session".to_string(),
+                body_sha256: body_sha256.clone(),
+                reason: None,
+            },
+        )
+        .expect("prepare receipt");
+        let input = serde_json::json!({
+            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+        })
+        .to_string();
+        {
+            let _wrong_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "wrong-session");
+            handle_delivery_acknowledgement(&repo, &input);
+        }
+        let _target_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "target-session");
+        let forged = serde_json::json!({
+            "prompt": format!("tampered [gwt-delivery:{operation_id}:{body_sha256}]")
+        })
+        .to_string();
+        handle_delivery_acknowledgement(&repo, &forged);
+
+        assert!(!pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("load receipt")
+            .iter()
+            .any(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified));
     }
 
     /// The brakes: a floor between continuations and a cap without user
