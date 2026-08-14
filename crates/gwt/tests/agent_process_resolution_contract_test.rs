@@ -490,8 +490,13 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
     let workflow = fs::read_to_string(&workflow_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
 
+    let windows_job = workflow
+        .split("\n  test-windows-rust:")
+        .nth(1)
+        .and_then(|tail| tail.split("\n  test-windows-agent-launch-e2e:").next())
+        .expect("test-windows-rust job body");
     let marker = "      - name: Run Issue Monitor launch_now control-path contracts";
-    let (_, tail) = workflow
+    let (_, tail) = windows_job
         .split_once(marker)
         .unwrap_or_else(|| panic!("missing Windows CI step `{marker}`"));
     let step = tail
@@ -501,16 +506,23 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
         step.contains("\n        shell: bash\n"),
         "the multi-command Windows control-path step must fail fast"
     );
+    assert!(
+        !step.contains("--ignored"),
+        "the Windows launch_now contracts must run in ordinary CI"
+    );
+    let command_lines = step.lines().map(str::trim).collect::<Vec<_>>();
     for command in [
         "cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
+        "cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
         "cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        "cargo test -p gwt --bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
         "cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
         "cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1",
         "cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
         "cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1",
     ] {
         assert!(
-            step.contains(command),
+            command_lines.contains(&command),
             "Windows CI must exercise launch_now control-path command `{command}`"
         );
     }
