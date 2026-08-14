@@ -784,6 +784,9 @@ pub(crate) enum AgentFrontendRequest {
         text: String,
         responder: Option<AgentPmSendResponder>,
     },
+    IssueMonitorScanNow {
+        expected_project_scope: String,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
@@ -799,6 +802,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::PmSendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::PmSendInput(<redacted>)")
             }
+            Self::IssueMonitorScanNow { .. } => {
+                formatter.write_str("AgentFrontendRequest::IssueMonitorScanNow")
+            }
         }
     }
 }
@@ -807,7 +813,10 @@ impl AgentFrontendRequest {
     pub(crate) fn mutates_host_state(&self) -> bool {
         matches!(
             self,
-            Self::CloseWindow { .. } | Self::SendInput { .. } | Self::PmSendInput { .. }
+            Self::CloseWindow { .. }
+                | Self::SendInput { .. }
+                | Self::PmSendInput { .. }
+                | Self::IssueMonitorScanNow { .. }
         )
     }
 
@@ -2979,6 +2988,11 @@ impl AgentPaneSessionScope {
                     responder: None,
                 })
             }
+            FrontendEvent::AgentIssueMonitorScanNow {
+                expected_project_scope,
+            } => Some(AgentFrontendRequest::IssueMonitorScanNow {
+                expected_project_scope,
+            }),
             _ => None,
         }
     }
@@ -3000,6 +3014,7 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
+            "issue_monitor_scan_request_result" => Some(payload),
             _ => None,
         }
     }
@@ -4631,6 +4646,24 @@ mod tests {
                 .is_some(),
             "canonical PM replays must reach the runtime's durable project gate even when the target is absent from the current projection"
         );
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::AgentIssueMonitorScanNow {
+                expected_project_scope: "scope-123".to_string(),
+            }),
+            Some(AgentFrontendRequest::IssueMonitorScanNow {
+                expected_project_scope,
+            }) if expected_project_scope == "scope-123"
+        ));
+        assert!(scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "issue_monitor_scan_request_result",
+                    "accepted": false,
+                    "reason": "scan_already_in_flight"
+                })
+                .to_string()
+            )
+            .is_some());
         assert!(scope
             .filter_inbound(FrontendEvent::TerminalInput {
                 id: "tab-owned::agent-1".to_string(),
@@ -5254,6 +5287,111 @@ mod tests {
                 pane_queue.len(),
                 0,
                 "the correlated PM result must not enter ClientHub"
+            );
+        });
+        server.shutdown();
+    }
+
+    #[test]
+    fn authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let decoy = clients.register_pane("decoy-client".to_string());
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue(project.path(), "pm-session")
+            .expect("PM capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let expected_project_scope = gwt_core::paths::project_scope_hash(project.path())
+            .as_str()
+            .to_string();
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "agent_issue_monitor_scan_now",
+                        "expected_project_scope": expected_project_scope,
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send Monitor scan request");
+
+            let client_id = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let dispatched = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::AgentFrontend { .. }));
+                        position.map(|position| recorded.remove(position))
+                    };
+                    if let Some(UserEvent::AgentFrontend {
+                        client_id,
+                        grant,
+                        request:
+                            AgentFrontendRequest::IssueMonitorScanNow {
+                                expected_project_scope: routed_scope,
+                            },
+                    }) = dispatched
+                    {
+                        assert_eq!(grant.principal().session_id(), "pm-session");
+                        assert_eq!(routed_scope, expected_project_scope);
+                        break client_id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("Monitor scan runtime dispatch");
+
+            clients.dispatch(vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorScanRequestResult {
+                    accepted: true,
+                    reason: None,
+                },
+            )]);
+            let response = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("origin Monitor result")
+                .expect("Monitor result frame")
+                .expect("valid Monitor result frame");
+            let WebSocketMessage::Text(response) = response else {
+                panic!("Monitor result must be text");
+            };
+            let response: serde_json::Value =
+                serde_json::from_str(response.as_ref()).expect("Monitor result JSON");
+            assert_eq!(response["kind"], "issue_monitor_scan_request_result");
+            assert_eq!(response["accepted"], true);
+            assert!(
+                decoy.try_recv().is_none(),
+                "the Monitor result must not reach another pane client"
             );
         });
         server.shutdown();

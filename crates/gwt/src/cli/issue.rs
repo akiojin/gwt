@@ -428,10 +428,10 @@ fn run_monitor_priority_set<E: CliEnv>(
 
 /// SPEC-3431 FR-006: the PM's launch instruction. It does exactly two things —
 /// move the issue to the head of `priority_order` (prefs is the SOT the scan
-/// driver re-reads) and ask the daemon for one immediate scan. The launch
+/// driver re-reads) and ask the current platform authority for one immediate scan. The launch
 /// itself stays on the Monitor's claim/slot path, so this cannot produce a
-/// duplicate agent. Without a reachable daemon the reorder still lands and the
-/// next scheduled scan picks it up; the response says which happened.
+/// duplicate agent. Priority persistence and scan delivery are reported
+/// separately; no unacknowledged scheduler is presented as future delivery.
 fn run_monitor_launch_now<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -447,24 +447,21 @@ fn run_monitor_launch_now<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
 
-    let payload = crate::runtime_daemon_events::issue_monitor_payload(
-        "control",
-        serde_json::json!({ "scan_now": {} }),
-        std::process::id(),
-    );
-    let scan_requested = publish_monitor_config_set(&project_root, payload).is_ok();
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
 
     out.push_str(
         &serde_json::json!({
             "number": number,
             "priority_order": prefs.priority_order,
-            "scan_requested": scan_requested,
-            "scan_delivery": if scan_requested { "immediate" } else { "next-scheduled-scan" },
+            "priority_updated": true,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(0)
+    Ok(if delivery.scan_requested { 0 } else { 1 })
 }
 
 /// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
@@ -611,12 +608,7 @@ fn run_monitor_failover<E: CliEnv>(
         }
     };
 
-    let payload = crate::runtime_daemon_events::issue_monitor_payload(
-        "control",
-        serde_json::json!({ "scan_now": {} }),
-        std::process::id(),
-    );
-    let scan_requested = publish_monitor_config_set(&project_root, payload).is_ok();
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
 
     out.push_str(
         &serde_json::json!({
@@ -626,8 +618,9 @@ fn run_monitor_failover<E: CliEnv>(
             "stopped_window_id": stopped_window_id,
             "priority_order": prefs.priority_order,
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| &profile.agent_id),
-            "scan_requested": scan_requested,
-            "scan_delivery": if scan_requested { "immediate" } else { "next-scheduled-scan" },
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
             "pane_teardown": if stopped_window_id.is_some() {
                 "close the returned window with pane.close — it is no longer bound to the issue, so the close cannot requeue it"
             } else {
@@ -637,7 +630,63 @@ fn run_monitor_failover<E: CliEnv>(
         .to_string(),
     );
     out.push('\n');
+    // The failover mutation itself is complete even when the follow-up scan
+    // authority is unavailable. Keep the established command success
+    // contract while reporting scan delivery truthfully in the JSON fields.
     Ok(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IssueMonitorScanDelivery {
+    scan_requested: bool,
+    scan_delivery: &'static str,
+    scan_error: Option<String>,
+}
+
+fn issue_monitor_scan_delivery(result: Result<(), String>) -> IssueMonitorScanDelivery {
+    match result {
+        Ok(()) => IssueMonitorScanDelivery {
+            scan_requested: true,
+            scan_delivery: "immediate",
+            scan_error: None,
+        },
+        Err(error) => IssueMonitorScanDelivery {
+            scan_requested: false,
+            scan_delivery: "unavailable",
+            scan_error: Some(error),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "scan_now": {} }),
+        std::process::id(),
+    );
+    publish_monitor_config_set(project_root, payload).map_err(|error| match error {
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(_) => {
+            "daemon_control_unavailable".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_) => {
+            "scan_delivery_unknown".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Busy(_) => {
+            "scan_request_busy".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked => {
+            "authority_recovery_blocked".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_) => {
+            "scan_request_rejected".to_string()
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    super::pane::request_issue_monitor_scan_now(project_root)
 }
 
 /// SPEC-3431 FR-031: a stable, greppable name for each refusal.
@@ -1493,6 +1542,69 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(out.contains("#42 [OPEN] Issue family direct run"));
+    }
+
+    #[test]
+    fn immediate_scan_delivery_never_claims_an_unacknowledged_schedule() {
+        let immediate = issue_monitor_scan_delivery(Ok(()));
+        assert!(immediate.scan_requested);
+        assert_eq!(immediate.scan_delivery, "immediate");
+        assert_eq!(immediate.scan_error, None);
+
+        let unavailable = issue_monitor_scan_delivery(Err("gui_command_unavailable".to_string()));
+        assert!(!unavailable.scan_requested);
+        assert_eq!(unavailable.scan_delivery, "unavailable");
+        assert_eq!(
+            unavailable.scan_error.as_deref(),
+            Some("gui_command_unavailable")
+        );
+        assert_ne!(unavailable.scan_delivery, "next-scheduled-scan");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_now_persists_priority_but_fails_closed_without_scan_authority() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1, "unaccepted immediate delivery is not success");
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], false);
+        assert_eq!(result["scan_delivery"], "unavailable");
+        assert_eq!(result["scan_error"], "daemon_control_unavailable");
+        assert!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order
+                .starts_with(&[42]),
+            "the partial priority update remains explicit and durable"
+        );
     }
 
     #[test]
