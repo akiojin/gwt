@@ -25,6 +25,7 @@
 // - visibleBounds(): current canvas bounds for resume placement.
 // - launchPending: shared Resume/Launch pending controller.
 import { createFocusTrap } from "/focus-trap.js";
+import { createLaunchOperationId } from "./launch-pending-controller.js";
 
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
@@ -1503,14 +1504,20 @@ export function createKnowledgeKanbanSurface({
         if (!bounds) {
           return false;
         }
+        const operationId = createLaunchOperationId("resume");
         if (
           launchPending
-          && !launchPending.begin(knowledgeRelatedWorkPendingKey(sessionId), "Resume")
+          && !launchPending.begin(
+            knowledgeRelatedWorkPendingKey(sessionId),
+            "Resume",
+            operationId,
+          )
         ) {
           return false;
         }
         send({
           kind: "resume_workspace_agent",
+          operation_id: operationId,
           session_id: sessionId,
           agent_session_id: session?.agent_session_id || null,
           bounds,
@@ -2397,6 +2404,12 @@ export function createKnowledgeKanbanSurface({
 
         renderKnowledgeDetailPane(windowId, state, detailPane);
       }
+
+      function renderAllKnowledgeBridgeWindows() {
+        for (const windowId of knowledgeBridgeStateMap.keys()) {
+          renderKnowledgeBridge(windowId);
+        }
+      }
       // SPEC-3064 Phase 3 (E6d): Knowledge window mount moved verbatim from
       // app.js mountWindowBody (surface === "knowledge" branch).
       function mountKnowledgeWindow(windowData, body) {
@@ -2945,6 +2958,7 @@ export function createKnowledgeKanbanSurface({
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         openKanbanDrawer,
         closeKanbanDrawer,

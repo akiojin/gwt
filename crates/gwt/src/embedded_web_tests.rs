@@ -11,6 +11,26 @@ fn root_js_module_source(path: &str) -> &'static str {
         .source
 }
 
+fn js_braced_block_after<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
+    let marker_start = source.find(marker)?;
+    let search_start = marker_start + marker.len();
+    let open = search_start + source[search_start..].find('{')?;
+    let mut depth = 0_u32;
+    for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return source.get((open + 1)..(open + offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn project_tabs_renderer_js() -> &'static str {
     root_js_module_source("/project-tabs-renderer.js")
 }
@@ -4074,5 +4094,123 @@ fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
     assert!(
         !picker.contains("kind: \"continue_work\"") && !wizard.contains("kind: \"continue_work\""),
         "Resume surfaces must never synthesize the producing Continue work request",
+    );
+}
+
+#[test]
+fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
+    let knowledge = root_js_module_source("/knowledge-kanban-surface.js");
+    let resume = knowledge
+        .split("function resumeKnowledgeRelatedSession")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function renderKnowledgeRelatedSessionAction")
+                .next()
+        })
+        .expect("bounded Issue Related Work Resume producer");
+    assert!(
+        resume.contains("const operationId = createLaunchOperationId(\"resume\");"),
+        "the shipped Related Work producer must create one canonical Resume operation identity",
+    );
+    let pending_identity = regex::Regex::new(
+        r#"(?s)launchPending\.begin\(\s*knowledgeRelatedWorkPendingKey\(sessionId\),\s*"Resume",\s*operationId,?\s*\)"#,
+    )
+    .expect("pending identity regex");
+    assert!(
+        pending_identity.is_match(resume),
+        "the shipped pending entry must retain the producer operation identity",
+    );
+    let payload_identity = regex::Regex::new(
+        r#"(?s)send\(\{.*?kind:\s*"resume_workspace_agent",.*?operation_id:\s*operationId,.*?session_id:\s*sessionId,"#,
+    )
+    .expect("payload identity regex");
+    assert!(
+        payload_identity.is_match(resume),
+        "the shipped Resume payload must carry the same operation identity",
+    );
+
+    let app = app_js();
+    let pending_controller = app
+        .split("const launchPending = createLaunchPendingController({")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("const continueWorkDispatcher = createContinueWorkDispatcher({")
+                .next()
+        })
+        .expect("bounded launchPending onChange wiring");
+    let pending_on_change = js_braced_block_after(pending_controller, "onChange: () =>")
+        .expect("launchPending onChange block");
+    assert!(
+        pending_on_change.contains("renderKnowledgeBridge(")
+            || pending_on_change.contains("renderAllKnowledge"),
+        "the shipped pending listener must redraw Knowledge immediately after begin, settle, or timeout",
+    );
+
+    let error_case = app
+        .split("case \"workspace_resume_agent_error\":")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("case \"workspace_resume_agent_started\":")
+                .next()
+        })
+        .expect("bounded workspace Resume error case");
+    let picker = error_case
+        .find("workspaceResumePicker.handleError(event)")
+        .expect("picker error handler");
+    let exact_settle = regex::Regex::new(
+        r"const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*launchPending\.settleAck\(event\)",
+    )
+    .expect("exact settle regex")
+    .captures(error_case)
+    .expect("retained exact-settle result");
+    let settle = exact_settle
+        .get(0)
+        .expect("exact settle expression")
+        .start();
+    assert!(
+        picker < settle,
+        "the shipped picker handler must consume the local error before settlement rerenders it",
+    );
+    let settled_name = exact_settle.get(1).expect("exact settle binding").as_str();
+    let settled_guard = format!("if ({settled_name})");
+    let settled_feedback =
+        js_braced_block_after(error_case, &settled_guard).expect("exact-settle feedback block");
+    assert!(
+        settled_feedback.contains("alertsToasts.push({")
+            && settled_feedback.contains("level: \"error\"")
+            && (settled_feedback.contains("event?.message")
+                || settled_feedback.contains("event.message"))
+            && settled_feedback.contains("dismissible: true")
+            && settled_feedback.contains("timeoutMs: 0")
+            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh()"),
+        "only an exactly-settled shipped Resume error may show sticky feedback and schedule a cache-first Related Work refresh",
+    );
+    assert_eq!(
+        error_case.matches("launchPending.settleAck(event)").count(),
+        1,
+        "the shipped shared pending entry must settle exactly once",
+    );
+    assert_eq!(
+        error_case.matches("alertsToasts.push({").count(),
+        1,
+        "the shipped Resume error case must not show feedback outside the exact-settle guard",
+    );
+    assert_eq!(
+        error_case
+            .matches("scheduleKnowledgeRelatedWorkRefresh()")
+            .count(),
+        1,
+        "the shipped Resume error case must not refresh outside the exact-settle guard",
+    );
+    let related_refresh = knowledge
+        .split("function scheduleKnowledgeRelatedWorkRefresh")
+        .nth(1)
+        .and_then(|tail| tail.split("function applyLocalKnowledgeFilter").next())
+        .expect("bounded Related Work refresh scheduler");
+    assert!(
+        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)",)
+            .expect("cache-first refresh regex")
+            .is_match(related_refresh),
+        "the shipped Related Work refresh scheduler must stay cache-first",
     );
 }

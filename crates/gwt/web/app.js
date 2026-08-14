@@ -4381,6 +4381,11 @@
           } catch {
             // Picker may not be mounted yet during bootstrap.
           }
+          try {
+            renderAllKnowledgeBridgeWindows();
+          } catch {
+            // Knowledge surfaces may not be mounted yet during bootstrap.
+          }
           const notice = launchPending.consumeTimeoutNotice();
           if (notice) {
             console.warn("[launch-pending]", notice);
@@ -4417,6 +4422,7 @@
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         closeKanbanDrawer,
         mountKnowledgeWindow,
@@ -5992,7 +5998,20 @@
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);
-            launchPending.settleAck(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh();
+              }
+            }
             break;
           // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
           // accepted — settle pending UI and dismiss the picker.

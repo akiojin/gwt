@@ -5150,7 +5150,7 @@ impl AppRuntime {
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if !canonical_public_id(&operation_id, 256) || !canonical_public_id(&work_id, 512) {
-            return self.continue_work_failure_events(
+            return self.continue_work_uncached_failure_events(
                 client_id,
                 operation_id,
                 work_id,

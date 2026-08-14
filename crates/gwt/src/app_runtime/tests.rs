@@ -11627,6 +11627,199 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
 }
 
 #[test]
+fn continue_work_empty_operation_identity_failure_is_not_cached() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+    let events = runtime.continue_work_events(
+        "client-invalid",
+        String::new(),
+        "work-a".to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if operation_id.is_empty()
+            && work_id == "work-a"
+            && code == "invalid_request"
+            && !retryable
+    )));
+    assert!(
+        !runtime.continue_work_outcomes.contains_key(""),
+        "an invalid operation identity must never become a replay-cache key"
+    );
+}
+
+#[test]
+fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waiters() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let operation_id = "immutable-operation";
+    runtime.continue_work_outcomes.insert(
+        operation_id.to_string(),
+        CachedContinueWorkOutcome {
+            work_id: "work-a".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            message: None,
+            error_code: None,
+            retryable: false,
+        },
+    );
+    runtime.continue_work_waiters.insert(
+        operation_id.to_string(),
+        HashSet::from(["client-waiter".to_string()]),
+    );
+
+    let invalid = runtime.continue_work_events(
+        "client-invalid",
+        operation_id.to_string(),
+        String::new(),
+        canvas_bounds(),
+    );
+
+    assert!(invalid.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id: emitted_operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if emitted_operation_id == operation_id
+            && work_id.is_empty()
+            && code == "invalid_request"
+            && !retryable
+    )));
+    let cached_preserved = runtime
+        .continue_work_outcomes
+        .get(operation_id)
+        .is_some_and(|cached| {
+            cached.work_id == "work-a"
+                && cached.outcome == gwt::ContinueWorkOutcomeKind::ContinuedConversation
+                && cached.error_code.is_none()
+        });
+    let waiter_preserved = runtime
+        .continue_work_waiters
+        .get(operation_id)
+        .is_some_and(|waiters| waiters == &HashSet::from(["client-waiter".to_string()]));
+    let invalid_replied_only_to_caller = invalid.len() == 1
+        && matches!(
+            &invalid[0].target,
+            DispatchTarget::Client(client_id) if client_id == "client-invalid"
+        );
+    assert!(
+        cached_preserved && waiter_preserved && invalid_replied_only_to_caller,
+        "invalid identity mutated replay state: cached={:?}, waiters={:?}, events={invalid:?}",
+        runtime.continue_work_outcomes.get(operation_id),
+        runtime.continue_work_waiters.get(operation_id),
+    );
+
+    let replay = runtime.continue_work_events(
+        "client-replay",
+        operation_id.to_string(),
+        "work-a".to_string(),
+        canvas_bounds(),
+    );
+    let replay_clients = replay
+        .iter()
+        .filter_map(|event| match (&event.target, &event.event) {
+            (
+                DispatchTarget::Client(client_id),
+                BackendEvent::ContinueWorkOutcome {
+                    operation_id: emitted_operation_id,
+                    work_id,
+                    outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                    error_code: None,
+                    retryable: false,
+                    ..
+                },
+            ) if emitted_operation_id == operation_id && work_id == "work-a" => {
+                Some(client_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replay_clients.len(),
+        2,
+        "a valid replay must emit exactly one cached outcome per recipient: {replay:?}"
+    );
+    assert_eq!(
+        replay_clients
+            .iter()
+            .filter(|client_id| **client_id == "client-replay")
+            .count(),
+        1,
+        "the replay caller must receive the cached outcome exactly once: {replay:?}"
+    );
+    assert_eq!(
+        replay_clients
+            .iter()
+            .filter(|client_id| **client_id == "client-waiter")
+            .count(),
+        1,
+        "the retained waiter must receive the cached outcome exactly once: {replay:?}"
+    );
+    assert!(!runtime.continue_work_waiters.contains_key(operation_id));
+
+    let conflict = runtime.continue_work_events(
+        "client-conflict",
+        operation_id.to_string(),
+        "work-b".to_string(),
+        canvas_bounds(),
+    );
+    assert!(conflict.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id: emitted_operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if emitted_operation_id == operation_id
+            && work_id == "work-b"
+            && code == "operation_conflict"
+            && !retryable
+    )));
+    assert_eq!(
+        conflict
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    operation_id: emitted_operation_id,
+                    work_id,
+                    error_code: Some(code),
+                    ..
+                } if emitted_operation_id == operation_id
+                    && work_id == "work-b"
+                    && code == "operation_conflict"
+            ))
+            .count(),
+        1,
+        "a conflicting replay must emit exactly one conflict outcome: {conflict:?}"
+    );
+    assert!(runtime
+        .continue_work_outcomes
+        .get(operation_id)
+        .is_some_and(|cached| {
+            cached.work_id == "work-a"
+                && cached.outcome == gwt::ContinueWorkOutcomeKind::ContinuedConversation
+                && cached.error_code.is_none()
+        }));
+}
+
+#[test]
 fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
     let temp = tempdir().expect("tempdir");
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
