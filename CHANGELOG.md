@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.78.3] - 2026-08-14
+
+### Bug Fixes
+
+- **pm:** Guarantee verified pane message delivery
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger release checks for v9.78.2
+- **work:** Record issue 3550 completion
+- **ci:** Retrigger checks for PR #3565
+
 
 ## [9.78.2] - 2026-08-14
 
