@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{io::Read, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
@@ -14,6 +14,7 @@ use crate::cli::hook::{
 };
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
+const AGENT_BRIDGE_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentBridgeFailureReason {
@@ -123,6 +124,35 @@ impl std::fmt::Display for AgentBridgeFailure {
         }
         Ok(())
     }
+}
+
+fn read_bounded_agent_bridge_error_body(
+    response: reqwest::blocking::Response,
+    message: &'static str,
+) -> Result<Vec<u8>, AgentBridgeFailure> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > AGENT_BRIDGE_ERROR_BODY_MAX_BYTES)
+    {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            message,
+        ));
+    }
+    let mut body = Vec::new();
+    response
+        .take(AGENT_BRIDGE_ERROR_BODY_MAX_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| {
+            AgentBridgeFailure::new(AgentBridgeFailureReason::TransportFailure, message)
+        })?;
+    if body.len() as u64 > AGENT_BRIDGE_ERROR_BODY_MAX_BYTES {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            message,
+        ));
+    }
+    Ok(body)
 }
 
 fn safe_bridge_token(value: &Option<String>) -> Option<String> {
@@ -452,13 +482,12 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
         })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.bytes().ok();
-        let diagnostic = body.as_deref().and_then(|body| {
-            serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(body).ok()
-        });
-        let strict = body
-            .as_deref()
-            .and_then(|body| serde_json::from_slice::<WorkspaceBridgeErrorResponse>(body).ok());
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host workspace bridge rejection body could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        let strict = serde_json::from_slice::<WorkspaceBridgeErrorResponse>(&body).ok();
         let exact_workspace_ensure_required = strict.as_ref().is_some_and(|error| {
             status == reqwest::StatusCode::CONFLICT
                 && error.code == crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
@@ -569,10 +598,11 @@ fn send_terminalization_via_agent_bridge(
         })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.bytes().ok();
-        let diagnostic = body.as_deref().and_then(|body| {
-            serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(body).ok()
-        });
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host Work terminalization bridge rejection body could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
         let diagnostic_code = diagnostic
             .as_ref()
             .and_then(|error| safe_bridge_token(&error.code))
@@ -1200,6 +1230,24 @@ mod tests {
         let transport = send_workspace_update_via_agent_bridge(&unavailable, &request)
             .expect_err("unreachable Host must be typed");
         assert!(transport.contains("transport_failure"), "{transport}");
+
+        let oversized_server = BindingProbeServer::start(
+            StatusCode::NOT_FOUND,
+            serde_json::Value::String("x".repeat(64 * 1024 + 1)),
+        );
+        let oversized_target = HookForwardTarget {
+            url: oversized_server.forward_url.clone(),
+            token: "oversized-secret".to_string(),
+        };
+        let oversized =
+            send_workspace_update_via_agent_bridge_detailed(&oversized_target, &request)
+                .expect_err("oversized Host diagnostic must fail closed as transport");
+        assert_eq!(
+            oversized.reason,
+            AgentBridgeFailureReason::TransportFailure,
+            "oversized rejection bodies are not authoritative diagnostics: {oversized}"
+        );
+        oversized_server.receive();
 
         let authority_server = BindingProbeServer::start(
             StatusCode::CONFLICT,

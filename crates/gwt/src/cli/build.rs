@@ -171,10 +171,12 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
             .requires_blocked_build_abort_bridge()
             .map_err(|error| error.to_string())?;
         let receipt = if blocked_build_abort {
-            let reason = abort_reason.ok_or_else(|| {
-                "Blocked build abort requires a non-empty reason before Host terminalization"
-                    .to_string()
-            })?;
+            let reason = abort_reason
+                .filter(|reason| !reason.trim().is_empty())
+                .ok_or_else(|| {
+                    "Blocked build abort requires a non-empty reason before Host terminalization"
+                        .to_string()
+                })?;
             match crate::daemon_runtime::send_blocked_build_abort_terminalization_via_agent_bridge(
                 &target,
                 &crate::AgentBuildAbortTerminalizationRequest {
@@ -325,8 +327,11 @@ impl WorkTerminalKind {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{Read, Write},
+        net::TcpListener as StdTcpListener,
         path::{Path, PathBuf},
         sync::{mpsc, Arc},
+        thread::JoinHandle,
         time::Duration,
     };
 
@@ -349,6 +354,94 @@ mod tests {
         abort_rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
         redirect_rx: mpsc::Receiver<HeaderMap>,
         forward_url: String,
+    }
+
+    struct RawTerminalBridgeServer {
+        join_handle: Option<JoinHandle<()>>,
+        request_rx: mpsc::Receiver<()>,
+        forward_url: String,
+    }
+
+    impl RawTerminalBridgeServer {
+        fn start(
+            status: StatusCode,
+            declared_content_length: Option<usize>,
+            body: Vec<u8>,
+        ) -> Self {
+            let listener =
+                StdTcpListener::bind(("127.0.0.1", 0)).expect("raw terminal bridge listener");
+            let address = listener.local_addr().expect("raw terminal bridge address");
+            let (request_tx, request_rx) = mpsc::channel();
+            let join_handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("raw terminal bridge request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("raw terminal bridge read timeout");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).expect("read raw terminal request");
+                    assert_ne!(read, 0, "terminal bridge request ended before its body");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = std::str::from_utf8(&request[..header_end])
+                        .expect("raw terminal request headers");
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                request_tx.send(()).expect("capture raw terminal request");
+                let reason = status.canonical_reason().unwrap_or("Rejected");
+                write!(
+                    stream,
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nConnection: close\r\n",
+                    status.as_u16(),
+                    reason
+                )
+                .expect("write raw terminal response status");
+                if let Some(content_length) = declared_content_length {
+                    write!(stream, "Content-Length: {content_length}\r\n")
+                        .expect("write raw terminal response length");
+                }
+                write!(stream, "\r\n").expect("finish raw terminal response headers");
+                // The client may reject an oversized Content-Length before
+                // consuming the body and close the socket. That is the
+                // behavior this fixture exercises, not a server failure.
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            });
+            Self {
+                join_handle: Some(join_handle),
+                request_rx,
+                forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
+            }
+        }
+
+        fn receive(&self) {
+            self.request_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("raw build abort bridge request");
+        }
+    }
+
+    impl Drop for RawTerminalBridgeServer {
+        fn drop(&mut self) {
+            if let Some(join_handle) = self.join_handle.take() {
+                join_handle.join().expect("join raw terminal bridge server");
+            }
+        }
     }
 
     #[derive(Clone)]
@@ -511,6 +604,13 @@ mod tests {
             assert!(
                 matches!(self.rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "terminal bridge must not receive a request"
+            );
+        }
+
+        fn assert_no_abort_request(&self) {
+            assert!(
+                matches!(self.abort_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "build abort bridge must not receive a request"
             );
         }
 
@@ -1045,9 +1145,17 @@ mod tests {
         server: &TerminalBridgeServer,
         operation: impl FnOnce(&crate::cli::TestEnv) -> T,
     ) -> T {
+        with_terminal_bridge_url_env_for(repo, session_id, &server.forward_url, operation)
+    }
+
+    fn with_terminal_bridge_url_env_for<T>(
+        repo: &Path,
+        session_id: &str,
+        forward_url: &str,
+        operation: impl FnOnce(&crate::cli::TestEnv) -> T,
+    ) -> T {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
-        let _forward_url =
-            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &server.forward_url);
+        let _forward_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, forward_url);
         let _forward_token =
             ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
         let _runtime = ScopedEnvVar::set(
@@ -1453,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_build_abort_missing_host_route_falls_back_locally() {
+    fn blocked_build_abort_rejects_blank_reason_before_host_or_local_mutation() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1472,25 +1580,117 @@ mod tests {
                 &mut env,
                 SkillStateAction::Abort {
                     spec: 3327,
-                    reason: Some("blocked verification cannot proceed".to_string()),
+                    reason: Some("   ".to_string()),
                 },
                 &mut output,
             )
-            .expect("run build.abort after explicit Host rejection");
+            .expect("run build.abort with blank reason");
             (code, output)
         });
 
-        assert_eq!(code, 0, "{output}");
-        assert!(
-            !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
-                .expect("load reconciled build state")
-                .expect("reconciled build state")
-                .active
-        );
-        let work = fixture.canonical_work();
-        assert!(work.is_terminal());
-        assert!(work.discarded);
-        server.receive_abort();
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("non-empty reason"), "{output}");
+        assert_build_still_active(&fixture.git);
+        assert!(!fixture.canonical_work().is_terminal());
+        server.assert_no_abort_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_unreadable_or_oversized_rejection_body_fails_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let limit = 64 * 1024;
+
+        for (label, declared_content_length, body) in [
+            ("truncated", Some(64), b"{}".to_vec()),
+            ("declared-oversized", Some(limit + 1), vec![b' '; limit + 1]),
+            ("streamed-oversized", None, vec![b' '; limit + 1]),
+        ] {
+            let fixture = BoundTerminalFixture::new();
+            fixture.settle_execution_blocked();
+            let server = RawTerminalBridgeServer::start(
+                StatusCode::NOT_FOUND,
+                declared_content_length,
+                body,
+            );
+            let repo = fixture.git.repo.clone();
+
+            let (code, output) = with_terminal_bridge_url_env_for(
+                &fixture.git.repo,
+                &fixture.session.id,
+                &server.forward_url,
+                |_| {
+                    let mut env = crate::cli::TestEnv::new(repo);
+                    let mut output = String::new();
+                    let code = run(
+                        &mut env,
+                        SkillStateAction::Abort {
+                            spec: 3327,
+                            reason: Some("blocked verification cannot proceed".to_string()),
+                        },
+                        &mut output,
+                    )
+                    .expect("run build.abort after unsafe Host rejection body");
+                    (code, output)
+                },
+            );
+
+            assert_ne!(code, 0, "{label}: {output}");
+            assert!(output.contains("transport_failure"), "{label}: {output}");
+            assert_build_still_active(&fixture.git);
+            assert!(
+                !fixture.canonical_work().is_terminal(),
+                "{label}: unsafe rejection body must not trigger a local terminal write"
+            );
+            server.receive();
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_missing_host_route_falls_back_locally() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+            let fixture = BoundTerminalFixture::new();
+            fixture.settle_execution_blocked();
+            let server = TerminalBridgeServer::start(status, serde_json::Value::Null);
+            let repo = fixture.git.repo.clone();
+
+            let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(repo);
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("blocked verification cannot proceed".to_string()),
+                    },
+                    &mut output,
+                )
+                .expect("run build.abort after explicit Host rejection");
+                (code, output)
+            });
+
+            assert_eq!(code, 0, "{status}: {output}");
+            assert!(
+                !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                    .expect("load reconciled build state")
+                    .expect("reconciled build state")
+                    .active
+            );
+            let work = fixture.canonical_work();
+            assert!(work.is_terminal());
+            assert!(work.discarded);
+            server.receive_abort();
+        }
     }
 
     #[test]
