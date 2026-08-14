@@ -23,6 +23,41 @@ use super::{
     WindowProcessStatus,
 };
 
+#[cfg(test)]
+thread_local! {
+    static LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn launch_wizard_error_log_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+struct LaunchWizardErrorCaptureScope;
+
+#[cfg(test)]
+impl Drop for LaunchWizardErrorCaptureScope {
+    fn drop(&mut self) {
+        LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK.with(|owns_lock| owns_lock.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn with_launch_wizard_error_log_capture<T>(operation: impl FnOnce() -> T) -> T {
+    let _lock = launch_wizard_error_log_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK.with(|owns_lock| {
+        assert!(!owns_lock.replace(true), "launch error capture cannot nest");
+    });
+    let _scope = LaunchWizardErrorCaptureScope;
+    operation()
+}
+
 /// Agents whose missing-binary launch failure should be rewritten into an
 /// actionable install hint instead of leaking the raw PTY/PATH error. Each
 /// entry maps the spawn command token that appears in the raw error
@@ -124,6 +159,16 @@ impl AppRuntime {
         requested_agent_id: Option<&str>,
         error: &str,
     ) {
+        #[cfg(test)]
+        let _test_log_lock = if LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK.with(std::cell::Cell::get) {
+            None
+        } else {
+            Some(
+                launch_wizard_error_log_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        };
         let view = session.wizard.view();
         let sanitized_error = Self::sanitize_launch_log_error(error);
         let linked_issue_number = view

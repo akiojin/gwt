@@ -857,11 +857,21 @@ impl Visit for CaptureTracingVisitor {
 }
 
 fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
+    static CAPTURE_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    let _capture_lock = CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(CaptureTracingLayer {
         events: Arc::clone(&events),
     });
-    tracing::subscriber::with_default(subscriber, run);
+    super::launch_errors::with_launch_wizard_error_log_capture(|| {
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            run();
+        });
+    });
     let captured_events = events.lock().expect("captured tracing events").clone();
     captured_events
 }
@@ -5042,6 +5052,7 @@ fn install_manual_holder_capability(
 #[test]
 fn manual_launch_live_local_holder_requires_typed_decision_before_materialization() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5107,6 +5118,7 @@ fn manual_launch_live_local_holder_requires_typed_decision_before_materializatio
 #[test]
 fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_materialization() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5243,6 +5255,7 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
 #[test]
 fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5392,6 +5405,7 @@ enum StaleManualHolderAction {
 
 fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolderAction) {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5585,6 +5599,7 @@ fn manual_launch_move_rejects_intent_after_same_window_runtime_is_replaced() {
 #[test]
 fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5696,6 +5711,7 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
 #[test]
 fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5774,6 +5790,7 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
 #[test]
 fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -5863,6 +5880,7 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
 #[test]
 fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -6054,6 +6072,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
 #[test]
 fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -6173,7 +6192,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
                 && event.target == "gwt::agent_launch"
                 && event.fields.get("stage").map(String::as_str) == Some("spawn_agent_window")
         })
-        .expect("structured synchronous spawn failure log");
+        .unwrap_or_else(|| panic!("structured synchronous spawn failure log: {logs:#?}"));
     assert_eq!(
         log.fields.get("holder_session_id").map(String::as_str),
         Some(holder.session_id.as_str())
@@ -6220,6 +6239,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
 #[test]
 fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -6284,6 +6304,7 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
 #[test]
 fn manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_intent() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -6335,6 +6356,7 @@ fn manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_
 #[test]
 fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -6443,6 +6465,7 @@ fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight(
 #[test]
 fn manual_launch_unknown_terminal_proof_refuses_before_pane_and_authority_mutation() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -6715,6 +6738,7 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
     ];
     for origin in origins {
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo(&repo);
@@ -24685,6 +24709,7 @@ fn stale_runtime_events_cannot_mutate_same_window_successor() {
 #[test]
 fn unconfirmed_runtime_error_cannot_publish_terminal_execution_proof() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -24787,6 +24812,7 @@ fn bound_runtime_launch_completion(
 #[test]
 fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retains_it() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -24899,6 +24925,7 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
 #[test]
 fn production_bound_agent_launch_rejects_replaced_identity_without_runtime_sidecar_rewrite() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -25042,6 +25069,7 @@ fn production_bound_agent_spawn_failure_never_publishes_exact_runtime_proof() {
 #[test]
 fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit() {
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
