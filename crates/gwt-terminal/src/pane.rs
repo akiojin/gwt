@@ -3,7 +3,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
-    pty::{PtyHandle, SpawnConfig},
+    pty::{PendingPty, PtyHandle, SpawnConfig},
     scrollback::{ScrollbackLine, ScrollbackStorage},
     TerminalError,
 };
@@ -37,6 +37,41 @@ pub struct Pane {
     /// a plain-text rendering and the original byte stream so SGR formatting
     /// can be replayed later (SPEC-1919 FR-003j).
     line_buf: Vec<u8>,
+}
+
+/// A pane whose trusted gate helper is running but whose target is still
+/// blocked. It cannot expose PTY I/O or a Running status before release.
+pub struct PendingPane {
+    id: String,
+    rows: u16,
+    cols: u16,
+    pty: PendingPty,
+}
+
+impl PendingPane {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn process_id(&self) -> Option<u32> {
+        self.pty.process_id()
+    }
+
+    pub fn release(self) -> Result<Pane, TerminalError> {
+        let pty = Arc::new(self.pty.release()?);
+        Ok(Pane {
+            id: self.id,
+            pty,
+            parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
+            scrollback: ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY),
+            status: PaneStatus::Running,
+            line_buf: Vec::new(),
+        })
+    }
+
+    pub fn abort(self) -> Result<(), TerminalError> {
+        self.pty.abort()
+    }
 }
 
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
@@ -83,6 +118,26 @@ impl Pane {
             scrollback,
             status: PaneStatus::Running,
             line_buf: Vec::new(),
+        })
+    }
+
+    /// Create a pane whose target remains blocked behind a one-shot gate until
+    /// [`PendingPane::release`] succeeds.
+    pub fn new_pending_with_spawn_config(
+        id: String,
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+    ) -> Result<PendingPane, TerminalError> {
+        let rows = config.rows;
+        let cols = config.cols;
+        let pty = PtyHandle::spawn_pending(config, gate_program, gate_args_prefix, nonce)?;
+        Ok(PendingPane {
+            id,
+            rows,
+            cols,
+            pty,
         })
     }
 
@@ -185,6 +240,13 @@ impl Pane {
         Ok(&self.status)
     }
 
+    /// Probe the child directly, independent of the display-facing pane
+    /// status. `PaneStatus::Error` can be set without waiting on the child and
+    /// therefore is not process-exit evidence.
+    pub fn process_has_exited(&self) -> Result<bool, TerminalError> {
+        self.pty.try_wait().map(|status| status.is_some())
+    }
+
     /// Mark this pane as errored.
     pub fn mark_error(&mut self, message: impl Into<String>) {
         self.status = PaneStatus::Error(message.into());
@@ -277,6 +339,24 @@ mod tests {
         assert_eq!(pane.id(), "test-1");
         assert_eq!(pane.status(), &PaneStatus::Running);
         assert_eq!(pane.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn process_exit_probe_does_not_treat_display_error_as_child_exit() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-proof", sleep_command("60"));
+        pane.mark_error("display-only failure");
+
+        assert!(!pane.process_has_exited().expect("probe live child"));
+
+        pane.kill().expect("kill child");
+        for _ in 0..100 {
+            if pane.process_has_exited().expect("probe killed child") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("killed child was not reaped");
     }
 
     #[test]

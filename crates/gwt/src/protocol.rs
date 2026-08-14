@@ -4893,6 +4893,39 @@ mod tests {
     }
 
     #[test]
+    fn launch_wizard_holder_decision_actions_round_trip() {
+        use crate::launch_wizard::LaunchWizardAction;
+
+        let actions = [
+            (
+                LaunchWizardAction::StopAndStartSuccessor {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:successor".to_string(),
+                },
+                "stop_and_start_successor",
+            ),
+            (
+                LaunchWizardAction::MoveExistingPane {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:destination".to_string(),
+                },
+                "move_existing_pane",
+            ),
+        ];
+
+        for (action, expected_kind) in actions {
+            let value = serde_json::to_value(&action).expect("serialize holder decision action");
+            assert_eq!(value["kind"], expected_kind);
+            assert_eq!(value["fingerprint"], "repo:/tmp/gwt:work/issue-3547");
+            assert!(value["window_id"].as_str().is_some());
+
+            let round_tripped: LaunchWizardAction =
+                serde_json::from_value(value).expect("deserialize holder decision action");
+            assert_eq!(round_tripped, action);
+        }
+    }
+
+    #[test]
     fn frontend_event_workspace_projection_prune_defaults() {
         let payload = r#"{"kind":"workspace_projection_prune"}"#;
         let event: FrontendEvent = serde_json::from_str(payload).expect("deserialize defaults");
