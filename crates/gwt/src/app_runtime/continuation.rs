@@ -3,6 +3,8 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use fs2::FileExt;
+
 #[cfg(test)]
 type DurableLaunchRecoveryDirectorySyncHook = Box<dyn Fn(&Path) -> std::io::Result<()> + 'static>;
 
@@ -407,102 +409,6 @@ impl DurableContinueWorkAttempt {
 pub(super) enum ActiveOwnerLiveness {
     Stale(&'static str),
     Unknown,
-}
-
-pub(super) fn classify_nonlocal_active_owner_liveness_at(
-    sessions_dir: &Path,
-    session_id: &str,
-) -> ActiveOwnerLiveness {
-    let durable_path = sessions_dir.join(format!("{session_id}.toml"));
-    let durable = match gwt_agent::inspect_session_path(&durable_path) {
-        gwt_agent::SessionPathState::Present(session) => Some(session),
-        gwt_agent::SessionPathState::Missing => None,
-        gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
-    };
-    let runtime_root = sessions_dir.join("runtime");
-    let entries = match std::fs::read_dir(&runtime_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if durable.is_none() {
-                return ActiveOwnerLiveness::Stale("durable Session is missing");
-            }
-            return if durable.as_ref().is_some_and(|session| {
-                matches!(
-                    session.status,
-                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                )
-            }) {
-                ActiveOwnerLiveness::Stale("durable Session is stopped")
-            } else {
-                ActiveOwnerLiveness::Unknown
-            };
-        }
-        Err(_) => return ActiveOwnerLiveness::Unknown,
-    };
-    let mut saw_dead_runtime = false;
-    let mut saw_stopped_runtime = false;
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return ActiveOwnerLiveness::Unknown;
-        };
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let sidecar = entry.path().join(format!("{session_id}.json"));
-        match sidecar.try_exists() {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(_) => return ActiveOwnerLiveness::Unknown,
-        }
-        if gwt::process::is_host_process_alive(pid) {
-            match gwt_agent::SessionRuntimeState::load(&sidecar) {
-                Ok(state)
-                    if matches!(
-                        state.status,
-                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                    ) =>
-                {
-                    saw_stopped_runtime = true;
-                    continue;
-                }
-                Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
-            }
-        }
-        saw_dead_runtime = true;
-    }
-    if saw_stopped_runtime {
-        return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
-    }
-    if saw_dead_runtime {
-        return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
-    }
-    if durable.is_none() {
-        return ActiveOwnerLiveness::Stale("durable Session is missing");
-    }
-    if durable.as_ref().is_some_and(|session| {
-        matches!(
-            session.status,
-            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-        )
-    }) {
-        return ActiveOwnerLiveness::Stale("durable Session is stopped");
-    }
-    ActiveOwnerLiveness::Unknown
-}
-
-pub(super) fn manual_launch_generation_holder_is_terminal_at(
-    sessions_dir: &Path,
-    session_id: &str,
-) -> bool {
-    !durable_launch_recovery_exists(sessions_dir, session_id)
-        && matches!(
-            classify_nonlocal_active_owner_liveness_at(sessions_dir, session_id),
-            ActiveOwnerLiveness::Stale(_)
-        )
 }
 
 fn canonical_public_id(value: &str, max_len: usize) -> bool {
@@ -1379,6 +1285,14 @@ fn durable_launch_recovery_path(sessions_dir: &Path, session_id: &str) -> Result
     Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
 }
 
+fn durable_launch_recovery_lock_path(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    gwt_agent::validate_session_id_path_component(session_id)?;
+    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.lock")))
+}
+
 #[cfg(test)]
 // Only the `#[cfg(unix)]` directory-sync tests install this hook.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -1533,6 +1447,54 @@ pub(super) fn persist_durable_launch_recovery_with_identity(
         .parent()
         .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     create_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())?;
+    let lock_path = durable_launch_recovery_lock_path(sessions_dir, session_id)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<DurableLaunchRecoveryRecord>(&bytes).map_err(|error| {
+                format!("existing launch recovery receipt is malformed: {error}")
+            })?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Some(existing) = existing.as_ref() {
+        existing.owner()?;
+        let same_operation = existing.kind == record.kind
+            && existing.session_id == record.session_id
+            && existing.project_root == record.project_root
+            && existing.worktree_path == record.worktree_path
+            && existing.repo_hash == record.repo_hash
+            && existing.owner_kind == record.owner_kind
+            && existing.owner_number == record.owner_number;
+        let monotonic = existing == &record
+            || (same_operation
+                && existing.expected_binding.is_none()
+                && record.expected_binding.is_some());
+        if same_operation
+            && existing.expected_binding.is_some()
+            && record.expected_binding.is_none()
+        {
+            // A retry begins from the base receipt even when a previous
+            // response-loss attempt already advanced this same operation to
+            // an exact bound receipt. Keep the stronger evidence byte-for-byte
+            // and let the coordinator replay its Prepared attempt.
+            return Ok(());
+        }
+        if !monotonic {
+            return Err("launch recovery receipt cannot be downgraded or retargeted".to_string());
+        }
+        if existing == &record {
+            return Ok(());
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
     gwt_github::cache::write_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     sync_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())
@@ -1543,14 +1505,25 @@ pub(super) fn clear_durable_launch_recovery(
     session_id: &str,
 ) -> Result<(), String> {
     let path = durable_launch_recovery_path(sessions_dir, session_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
+    if !parent.exists() {
+        return Ok(());
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(durable_launch_recovery_lock_path(sessions_dir, session_id)?)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     let durability_barrier = if parent.exists() {
         Some(parent)
     } else {
@@ -1581,24 +1554,45 @@ pub(super) fn durable_launch_recovery_session_identity(
     Ok(record.expected_session_identity)
 }
 
+pub(super) fn bind_durable_launch_recovery_session_identity(
+    sessions_dir: &Path,
+    session: &gwt_agent::Session,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let path = durable_launch_recovery_path(sessions_dir, &session.id)?;
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    let record: DurableLaunchRecoveryRecord =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let owner = record.owner()?;
+    if record.session_id != session.id
+        || record.worktree_path != session.worktree_path
+        || session.project_state_root.as_deref() != Some(record.project_root.as_path())
+        || session.repo_hash.as_deref() != Some(record.repo_hash.as_str())
+        || session.linked_issue_number != Some(owner.number)
+        || binding.owner_kind != owner.kind.as_str()
+        || binding.owner_number != owner.number
+    {
+        return Err(
+            "launch recovery candidate does not match its durable base receipt".to_string(),
+        );
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::for_binding(session, binding)?;
+    persist_durable_launch_recovery_with_identity(
+        sessions_dir,
+        record.kind,
+        &record.session_id,
+        &record.project_root,
+        &record.worktree_path,
+        owner,
+        Some(binding),
+        Some(&session.agent_id),
+        Some(&identity),
+    )?;
+    Ok(identity)
+}
+
 pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
-    let recovery_dir = durable_launch_recovery_dir(sessions_dir);
-    match std::fs::symlink_metadata(&recovery_dir) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
-    }
-    let Ok(path) = durable_launch_recovery_path(sessions_dir, session_id) else {
-        return true;
-    };
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        // An unreadable recovery namespace cannot prove absence. Treat it as
-        // an in-flight handshake so every takeover path fails closed.
-        Err(_) => true,
-    }
+    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
 }
 
 fn durable_launch_recovery_records(
@@ -2992,14 +2986,7 @@ impl AppRuntime {
             }
             return;
         };
-        let linked_owner_successor = attempt.request.work_id.is_none()
-            && ((attempt.predecessor_status
-                == gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked
-                && attempt.request.source
-                    == gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE)
-                || attempt.request.source
-                    == gwt::cli::execution_state::MANUAL_LINKED_OWNER_LAUNCH_SOURCE);
-        if !linked_owner_successor
+        if !gwt::cli::execution_state::is_owner_launch_successor_attempt(&attempt)
             || attempt.request.initial_session_id != receipt.session_id
             || attempt.request.operation_id != operation_id
         {
@@ -3775,7 +3762,85 @@ impl AppRuntime {
         &self,
         session_id: &str,
     ) -> ActiveOwnerLiveness {
-        classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
+        let durable_path = self.sessions_dir.join(format!("{session_id}.toml"));
+        let durable = match gwt_agent::inspect_session_path(&durable_path) {
+            gwt_agent::SessionPathState::Present(session) => Some(session),
+            gwt_agent::SessionPathState::Missing => None,
+            gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
+        };
+        let runtime_root = self.sessions_dir.join("runtime");
+        let entries = match std::fs::read_dir(&runtime_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if durable.is_none() {
+                    return ActiveOwnerLiveness::Stale("durable Session is missing");
+                }
+                return if durable.as_ref().is_some_and(|session| {
+                    matches!(
+                        session.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    )
+                }) {
+                    ActiveOwnerLiveness::Stale("durable Session is stopped")
+                } else {
+                    ActiveOwnerLiveness::Unknown
+                };
+            }
+            Err(_) => return ActiveOwnerLiveness::Unknown,
+        };
+        let mut saw_dead_runtime = false;
+        let mut saw_stopped_runtime = false;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return ActiveOwnerLiveness::Unknown;
+            };
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let sidecar = entry.path().join(format!("{session_id}.json"));
+            match sidecar.try_exists() {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(_) => return ActiveOwnerLiveness::Unknown,
+            }
+            if gwt::process::is_host_process_alive(pid) {
+                match gwt_agent::SessionRuntimeState::load(&sidecar) {
+                    Ok(state)
+                        if matches!(
+                            state.status,
+                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                        ) =>
+                    {
+                        saw_stopped_runtime = true;
+                        continue;
+                    }
+                    Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
+                }
+            }
+            saw_dead_runtime = true;
+        }
+        if saw_stopped_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
+        }
+        if saw_dead_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
+        }
+        if durable.is_none() {
+            return ActiveOwnerLiveness::Stale("durable Session is missing");
+        }
+        if durable.as_ref().is_some_and(|session| {
+            matches!(
+                session.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            )
+        }) {
+            return ActiveOwnerLiveness::Stale("durable Session is stopped");
+        }
+        ActiveOwnerLiveness::Unknown
     }
 
     pub(crate) fn stop_pending_continue_work_session_without_projection(

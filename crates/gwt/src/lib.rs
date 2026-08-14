@@ -145,7 +145,7 @@ pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     has_gwt_spec_label, knowledge_launch_target_branch_name, load_agent_options, AgentOption,
     DockerWizardContext, LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion,
-    LaunchWizardContext, LaunchWizardGenerationConflictView, LaunchWizardHydration,
+    LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
     LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardLiveSessionView,
     LaunchWizardMode, LaunchWizardOptionView, LaunchWizardPreviousProfile,
     LaunchWizardPreviousProfiles, LaunchWizardProgressStepView, LaunchWizardQuickStartView,

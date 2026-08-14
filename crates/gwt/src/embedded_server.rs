@@ -1044,6 +1044,18 @@ struct AgentCapabilityRegistryState {
     token_by_project_session: HashMap<(PathBuf, String), String>,
     closing_by_ticket: HashMap<String, ClosingAgentCapability>,
     closing_ticket_by_project_session: HashMap<(PathBuf, String), String>,
+    manual_handoff_reservations: HashMap<String, ManualExecutionHandoffState>,
+}
+
+struct ManualExecutionHandoffState {
+    binding: gwt_agent::SessionExecutionBinding,
+    suspended: Option<SuspendedManualExecutionCapability>,
+}
+
+struct SuspendedManualExecutionCapability {
+    token: String,
+    principal: AgentSessionPrincipal,
+    principal_key: (PathBuf, String),
 }
 
 struct ClosingAgentCapability {
@@ -1066,6 +1078,23 @@ impl std::fmt::Debug for AgentSelfCloseCapabilityTicket {
 impl AgentSelfCloseCapabilityTicket {
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+}
+
+/// Opaque process-local fence held while the coordinator settles one exact
+/// manual-launch predecessor. It contains no durable or bearer authority.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ManualExecutionHandoffReservation {
+    id: String,
+    /// A committed stop fence may be claimed by the immediate successor
+    /// preparation. Failed replay must retain that fence instead of reopening
+    /// the predecessor capability issuance path.
+    inherited_committed_fence: bool,
+}
+
+impl std::fmt::Debug for ManualExecutionHandoffReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ManualExecutionHandoffReservation(<redacted>)")
     }
 }
 
@@ -1232,6 +1261,17 @@ impl AgentCapabilityRegistry {
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.manual_handoff_reservations.values().any(|reserved| {
+            reserved
+                .suspended
+                .as_ref()
+                .is_some_and(|suspended| suspended.principal_key == principal_key)
+                || principal
+                    .active_execution_binding()
+                    .is_some_and(|binding| reserved.binding == *binding)
+        }) {
+            return Err("agent capability is reserved for manual execution handoff".to_string());
+        }
         if state
             .closing_ticket_by_project_session
             .contains_key(&principal_key)
@@ -1259,6 +1299,188 @@ impl AgentCapabilityRegistry {
         }
         state.principals_by_token.insert(token.clone(), principal);
         Ok(token)
+    }
+
+    fn reserve_manual_execution_handoff(
+        &self,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .principals_by_token
+            .values()
+            .any(|principal| principal.active_execution_binding() == Some(expected_binding))
+        {
+            return Err(
+                "manual execution handoff refuses an active predecessor capability".to_string(),
+            );
+        }
+        if let Some((id, reserved)) = state
+            .manual_handoff_reservations
+            .iter()
+            .find(|(_, reserved)| reserved.binding == *expected_binding)
+        {
+            if reserved.suspended.is_some() {
+                return Err("manual execution handoff is already reserved".to_string());
+            }
+            return Ok(ManualExecutionHandoffReservation {
+                id: id.clone(),
+                inherited_committed_fence: true,
+            });
+        }
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: None,
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn begin_manual_execution_handoff(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("manual execution handoff is already reserved".to_string());
+        }
+        let issued_token = state
+            .principals_by_token
+            .keys()
+            .find(|candidate| constant_time_token_eq(token, candidate))
+            .cloned()
+            .ok_or_else(|| "exact holder capability is missing or no longer current".to_string())?;
+        let principal = state
+            .principals_by_token
+            .get(&issued_token)
+            .cloned()
+            .ok_or_else(|| "exact holder capability is missing or no longer current".to_string())?;
+        if principal.active_execution_binding() != Some(expected_binding) {
+            return Err("exact holder capability binding changed".to_string());
+        }
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if !state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&issued_token, current))
+        {
+            return Err("exact holder capability is missing or no longer current".to_string());
+        }
+        state.principals_by_token.remove(&issued_token);
+        state.token_by_project_session.remove(&principal_key);
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: Some(SuspendedManualExecutionCapability {
+                    token: issued_token,
+                    principal,
+                    principal_key,
+                }),
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn release_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .manual_handoff_reservations
+            .remove(&reservation.id)
+            .is_some()
+    }
+
+    fn rollback_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reservation.inherited_committed_fence {
+            return state
+                .manual_handoff_reservations
+                .get(&reservation.id)
+                .is_some_and(|handoff| handoff.suspended.is_none());
+        }
+        let Some(mut handoff) = state.manual_handoff_reservations.remove(&reservation.id) else {
+            return false;
+        };
+        let Some(suspended) = handoff.suspended.take() else {
+            return true;
+        };
+        if state.principals_by_token.contains_key(&suspended.token)
+            || state
+                .token_by_project_session
+                .contains_key(&suspended.principal_key)
+        {
+            handoff.suspended = Some(suspended);
+            state
+                .manual_handoff_reservations
+                .insert(reservation.id.clone(), handoff);
+            return false;
+        }
+        state
+            .token_by_project_session
+            .insert(suspended.principal_key, suspended.token.clone());
+        state
+            .principals_by_token
+            .insert(suspended.token, suspended.principal);
+        true
+    }
+
+    fn commit_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(handoff) = state.manual_handoff_reservations.get_mut(&reservation.id) else {
+            return false;
+        };
+        handoff.suspended = None;
+        true
     }
 
     fn promote_prepared(
@@ -1317,6 +1539,13 @@ impl AgentCapabilityRegistry {
             .is_some_and(|current| constant_time_token_eq(&issued_token, current))
         {
             return Err("agent capability is missing or no longer current".to_string());
+        }
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("agent capability is reserved for manual execution handoff".to_string());
         }
         match &principal.execution_authority {
             AgentExecutionAuthority::Inspection if allow_inspection => {
@@ -1746,6 +1975,44 @@ impl AgentCapabilityIssuer {
         let grant = AgentCapabilityGrant::new(token.to_string(), principal);
         self.registry.grant_is_current(&grant)
             && grant.principal().active_execution_binding() == Some(expected_binding)
+    }
+
+    pub(crate) fn reserve_manual_execution_handoff(
+        &self,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .reserve_manual_execution_handoff(expected_binding)
+    }
+
+    pub(crate) fn begin_manual_execution_handoff(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .begin_manual_execution_handoff(token, expected_binding)
+    }
+
+    pub(crate) fn release_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.release_manual_execution_handoff(reservation)
+    }
+
+    pub(crate) fn rollback_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.rollback_manual_execution_handoff(reservation)
+    }
+
+    pub(crate) fn commit_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.commit_manual_execution_handoff(reservation)
     }
 
     pub(crate) fn revoke_token(&self, token: &str) -> bool {
@@ -3761,6 +4028,156 @@ mod tests {
             registry.promote_prepared(&token, &mismatched).is_err(),
             "promotion cannot retarget a bearer to another execution identity"
         );
+    }
+
+    #[test]
+    fn manual_handoff_reservation_refuses_an_existing_active_predecessor() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-reserved-active".to_string(),
+            repo_hash: "repo-reserved-active".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-active".to_string(),
+                binding_id: "binding-reserved-active".to_string(),
+                ledger_head_hash: "head-reserved-active".to_string(),
+            },
+            capability_generation: 4,
+        };
+        issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("active predecessor capability");
+
+        let error = issuer
+            .reserve_manual_execution_handoff(&binding)
+            .expect_err("an active predecessor handshake must refuse reservation");
+
+        assert_eq!(
+            error,
+            "manual execution handoff refuses an active predecessor capability"
+        );
+        assert!(!format!("{error:?}").contains(&binding.identity.binding_id));
+    }
+
+    #[test]
+    fn manual_handoff_reservation_blocks_matching_issue_and_promotion_only() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let predecessor = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-reserved-predecessor".to_string(),
+            repo_hash: "repo-reserved".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-predecessor".to_string(),
+                binding_id: "binding-reserved-predecessor".to_string(),
+                ledger_head_hash: "head-reserved-predecessor".to_string(),
+            },
+            capability_generation: 7,
+        };
+        let prepared = issuer
+            .issue_prepared(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect("Prepared predecessor capability");
+        let reservation = issuer
+            .reserve_manual_execution_handoff(&predecessor)
+            .expect("reserve exact predecessor handoff");
+
+        let issue_error = issuer
+            .issue_bound(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect_err("matching Active issue must be fenced");
+        assert_eq!(
+            issue_error,
+            "agent capability is reserved for manual execution handoff"
+        );
+        let promotion_error = issuer
+            .promote_prepared(&prepared.token, &predecessor)
+            .expect_err("matching promotion must be fenced");
+        assert_eq!(
+            promotion_error,
+            "agent capability is reserved for manual execution handoff"
+        );
+
+        let successor = gwt_agent::SessionExecutionBinding {
+            session_id: "session-reserved-successor".to_string(),
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-successor".to_string(),
+                binding_id: "binding-reserved-successor".to_string(),
+                ledger_head_hash: "head-reserved-successor".to_string(),
+            },
+            capability_generation: 1,
+            ..predecessor.clone()
+        };
+        let successor_session_id = successor.session_id.clone();
+        issuer
+            .issue_prepared(project.path(), &successor_session_id, successor)
+            .expect("a distinct Prepared successor is not fenced");
+
+        assert!(issuer.release_manual_execution_handoff(&reservation));
+        issuer
+            .promote_prepared(&prepared.token, &predecessor)
+            .expect("exact promotion is allowed after release");
+        issuer
+            .issue_bound(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect("exact Active issue is allowed after release");
+        assert!(!issuer.release_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
+    fn manual_handoff_begin_suspends_exact_active_capability_and_can_rollback_or_commit() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-stop-handoff".to_string(),
+            repo_hash: "repo-stop-handoff".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-stop-handoff".to_string(),
+                binding_id: "binding-stop-handoff".to_string(),
+                ledger_head_hash: "head-stop-handoff".to_string(),
+            },
+            capability_generation: 9,
+        };
+        let active = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("issue exact active holder");
+
+        let reservation = issuer
+            .begin_manual_execution_handoff(&active.token, &binding)
+            .expect("suspend exact active holder");
+        assert!(!issuer.active_token_is_current(&active.token, &binding));
+        assert!(issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .is_err());
+        assert!(issuer.rollback_manual_execution_handoff(&reservation));
+        assert!(issuer.active_token_is_current(&active.token, &binding));
+
+        let reservation = issuer
+            .begin_manual_execution_handoff(&active.token, &binding)
+            .expect("suspend exact active holder again");
+        assert!(issuer.commit_manual_execution_handoff(&reservation));
+        assert!(!issuer.active_token_is_current(&active.token, &binding));
+        assert!(issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .is_err());
+        assert!(issuer.release_manual_execution_handoff(&reservation));
     }
 
     #[test]

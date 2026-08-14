@@ -16,6 +16,7 @@
 //!   [`AppRuntime::status_events`])
 
 use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 
 use super::{
     AppRuntime, BackendEvent, LaunchFeedbackContext, LaunchWizardSession, OutboundEvent,
@@ -64,11 +65,9 @@ impl AppRuntime {
             | gwt::LaunchWizardAction::SelectQuickStart { .. }
             | gwt::LaunchWizardAction::SelectLiveSession { .. }
             | gwt::LaunchWizardAction::UseStartMethod { .. } => "launch_path_select",
-            gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
-            gwt::LaunchWizardAction::FocusGenerationHolder => "focus_generation_holder",
-            gwt::LaunchWizardAction::StopAndStartGenerationSuccessor => {
-                "stop_and_start_generation_successor"
-            }
+            gwt::LaunchWizardAction::FocusExistingSession { .. }
+            | gwt::LaunchWizardAction::MoveExistingPane { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::StopAndStartSuccessor { .. } => "stop_and_start_successor",
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
             gwt::LaunchWizardAction::Select { .. } => "wizard_select",
@@ -81,10 +80,6 @@ impl AppRuntime {
             gwt::LaunchWizardAction::Select { .. } => "select",
             gwt::LaunchWizardAction::Back => "back",
             gwt::LaunchWizardAction::Cancel => "cancel",
-            gwt::LaunchWizardAction::FocusGenerationHolder => "focus_generation_holder",
-            gwt::LaunchWizardAction::StopAndStartGenerationSuccessor => {
-                "stop_and_start_generation_successor"
-            }
             gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
             gwt::LaunchWizardAction::UseStartMethod { .. } => "use_start_method",
@@ -92,6 +87,8 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
             gwt::LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::StopAndStartSuccessor { .. } => "stop_and_start_successor",
+            gwt::LaunchWizardAction::MoveExistingPane { .. } => "move_existing_pane",
             gwt::LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
             gwt::LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
             gwt::LaunchWizardAction::SetBranchName { .. } => "set_branch_name",
@@ -135,6 +132,30 @@ impl AppRuntime {
             .unwrap_or_else(|| "none".to_string());
         let requested_agent_id = requested_agent_id.unwrap_or("none");
         let selected_docker_service = view.selected_docker_service.as_deref().unwrap_or("none");
+        let holder_session_id = session
+            .manual_holder_intent
+            .as_ref()
+            .map(|intent| intent.predecessor.session_id.as_str())
+            .unwrap_or("none");
+        let holder_window_id = session
+            .manual_holder_intent
+            .as_ref()
+            .and_then(|intent| intent.local_window_id.as_deref())
+            .unwrap_or("none");
+        let holder_runtime_incarnation = session
+            .manual_holder_intent
+            .as_ref()
+            .and_then(|intent| intent.local_runtime_incarnation)
+            .map(|incarnation| incarnation.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let holder_fingerprint_digest = session
+            .manual_holder_intent
+            .as_ref()
+            .map(|intent| {
+                let digest = Sha256::digest(intent.fingerprint.as_bytes());
+                hex::encode(digest)[..16].to_string()
+            })
+            .unwrap_or_else(|| "none".to_string());
         tracing::error!(
             target: "gwt::agent_launch",
             stage = %stage,
@@ -148,6 +169,10 @@ impl AppRuntime {
             selected_tool_version = %view.selected_version,
             selected_docker_service = %selected_docker_service,
             linked_issue_number = %linked_issue_number,
+            holder_session_id = %holder_session_id,
+            holder_window_id = %holder_window_id,
+            holder_runtime_incarnation = %holder_runtime_incarnation,
+            holder_fingerprint_digest = %holder_fingerprint_digest,
             error = %sanitized_error,
             "launch wizard action failed"
         );

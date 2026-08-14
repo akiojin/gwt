@@ -4879,78 +4879,36 @@ mod tests {
     }
 
     #[test]
-    fn launch_wizard_generation_conflict_actions_round_trip() {
-        // SPEC-1921 Phase 81 / Issue #3547: the browser returns only an
-        // operator intent. Generation/session/window authority stays on the
-        // backend and must never be accepted from the public action payload.
-        for kind in [
-            "focus_generation_holder",
-            "stop_and_start_generation_successor",
-        ] {
-            let payload = serde_json::json!({
-                "kind": "launch_wizard_action",
-                "action": { "kind": kind }
-            });
-            let event: FrontendEvent = serde_json::from_value(payload)
-                .unwrap_or_else(|error| panic!("deserialize {kind}: {error}"));
-            let FrontendEvent::LaunchWizardAction { action, .. } = event else {
-                panic!("expected launch_wizard_action for {kind}");
-            };
+    fn launch_wizard_holder_decision_actions_round_trip() {
+        use crate::launch_wizard::LaunchWizardAction;
 
-            let value = serde_json::to_value(action)
-                .unwrap_or_else(|error| panic!("serialize {kind}: {error}"));
-            assert_eq!(value["kind"], kind);
-            assert_eq!(
-                value.as_object().map(serde_json::Map::len),
-                Some(1),
-                "the frontend action must not carry a generation/session/window fence"
-            );
-        }
-    }
+        let actions = [
+            (
+                LaunchWizardAction::StopAndStartSuccessor {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:successor".to_string(),
+                },
+                "stop_and_start_successor",
+            ),
+            (
+                LaunchWizardAction::MoveExistingPane {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:destination".to_string(),
+                },
+                "move_existing_pane",
+            ),
+        ];
 
-    #[test]
-    fn launch_wizard_generation_conflict_view_is_public_safe() {
-        // Keep the view DTO deliberately presentation-only. The exact
-        // generation/head/session/window fence is retained in server state so
-        // a stale or forged browser action cannot select execution authority.
-        let source = include_str!("launch_wizard/mod.rs");
-        let view_start = source
-            .find("pub struct LaunchWizardGenerationConflictView")
-            .expect("LaunchWizardGenerationConflictView must define the public-safe DTO");
-        let view_tail = &source[view_start..];
-        let view_end = view_tail
-            .find("\n}\n")
-            .expect("generation conflict view struct must terminate");
-        let contract = &view_tail[..view_end];
+        for (action, expected_kind) in actions {
+            let value = serde_json::to_value(&action).expect("serialize holder decision action");
+            assert_eq!(value["kind"], expected_kind);
+            assert_eq!(value["fingerprint"], "repo:/tmp/gwt:work/issue-3547");
+            assert!(value["window_id"].as_str().is_some());
 
-        for field in [
-            "pub holder_label: String",
-            "pub detail: String",
-            "pub can_focus: bool",
-            "pub can_stop_and_start: bool",
-        ] {
-            assert!(
-                contract.contains(field),
-                "missing public-safe field: {field}"
-            );
+            let round_tripped: LaunchWizardAction =
+                serde_json::from_value(value).expect("deserialize holder decision action");
+            assert_eq!(round_tripped, action);
         }
-        for authority_field in [
-            "generation_id",
-            "session_id",
-            "window_id",
-            "predecessor_id",
-            "observed_head",
-            "worktree_path",
-        ] {
-            assert!(
-                !contract.contains(authority_field),
-                "authority field must remain server-side: {authority_field}"
-            );
-        }
-        assert!(
-            source.contains("pub generation_conflict: Option<LaunchWizardGenerationConflictView>"),
-            "LaunchWizardView must expose the optional public-safe conflict"
-        );
     }
 
     #[test]

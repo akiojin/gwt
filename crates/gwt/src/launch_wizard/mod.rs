@@ -278,6 +278,18 @@ pub struct LaunchWizardSummaryView {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardHolderDecisionView {
+    pub fingerprint: String,
+    pub holder_session_id: String,
+    pub holder_window_id: Option<String>,
+    pub holder_summary: String,
+    pub stop_available: bool,
+    pub stop_unavailable_reason: Option<String>,
+    pub move_available: bool,
+    pub move_unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
     pub label: String,
@@ -286,17 +298,10 @@ pub struct LaunchWizardProgressStepView {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct LaunchWizardGenerationConflictView {
-    pub holder_label: String,
-    pub detail: String,
-    pub can_focus: bool,
-    pub can_stop_and_start: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
     pub mode: LaunchWizardMode,
+    pub holder_decision: Option<LaunchWizardHolderDecisionView>,
     pub branch_name: String,
     pub selected_branch_name: String,
     /// SPEC-2359 US-83 / FR-444: existing remote branches offered by the "open
@@ -391,7 +396,6 @@ pub struct LaunchWizardView {
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
     pub error: Option<String>,
-    pub generation_conflict: Option<LaunchWizardGenerationConflictView>,
 }
 
 #[derive(Debug, Clone)]
@@ -756,8 +760,6 @@ pub enum LaunchWizardAction {
     },
     Back,
     Cancel,
-    FocusGenerationHolder,
-    StopAndStartGenerationSuccessor,
     SubmitText {
         value: String,
     },
@@ -779,6 +781,14 @@ pub enum LaunchWizardAction {
     },
     FocusExistingSession {
         index: usize,
+    },
+    StopAndStartSuccessor {
+        fingerprint: String,
+        window_id: String,
+    },
+    MoveExistingPane {
+        fingerprint: String,
+        window_id: String,
     },
     SetBranchMode {
         create_new: bool,
@@ -875,6 +885,7 @@ pub enum LaunchWizardAction {
 pub struct LaunchWizardState {
     pub context: LaunchWizardContext,
     pub wizard_mode: LaunchWizardMode,
+    pub holder_decision: Option<LaunchWizardHolderDecisionView>,
     pub step: LaunchWizardStep,
     pub selected: usize,
     pub launch_path: LaunchWizardLaunchPath,

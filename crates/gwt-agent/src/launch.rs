@@ -10,10 +10,7 @@ use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
-    session::{
-        ExecutionBindingIdentity, SessionExecutionBinding, ToolRuntimeProvenance,
-        GWT_SESSION_RUNTIME_PATH_ENV,
-    },
+    session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
@@ -521,12 +518,6 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
 /// Execution lifecycle intent is independent from provider conversation
 /// continuity. In particular, `SessionMode::Resume` can resume the same
 /// conversation while a coordinator starts a new producing generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManualExecutionSuccessorIntent {
-    pub holder_session_id: String,
-    pub predecessor_binding: ExecutionBindingIdentity,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ExecutionLaunchIntent {
     /// Launch without a pre-authorized producing binding. The launch path
@@ -538,10 +529,34 @@ pub enum ExecutionLaunchIntent {
     /// Launch a producing continuation already authorized by the execution
     /// coordinator. The binding is installed atomically at Session bootstrap.
     PreparedContinuation(SessionExecutionBinding),
-    /// User-approved recovery of an exact terminal linked-owner holder. The
-    /// Host rechecks this opaque fence under the owner lease before preparing
-    /// a successor; it is never accepted from a browser payload.
-    ManualSuccessor(ManualExecutionSuccessorIntent),
+    /// Manual Launch Agent may settle one exact durably-terminal predecessor
+    /// and prepare this candidate before pane materialization. The opaque
+    /// operation id is stable across response-loss retries; no autonomous
+    /// launch adapter may manufacture this intent.
+    ManualSuccessor {
+        operation_id: String,
+        expected_binding: crate::ExecutionBindingIdentity,
+        expected_predecessor: Option<Box<crate::SessionExecutionIdentity>>,
+        expected_runtime: Option<ManualLaunchRuntimeProof>,
+        predecessor_kind: ManualLaunchSuccessorPredecessor,
+    },
+    /// Manual successor already prepared by the typed pre-pane coordinator.
+    /// The launch worker may install this exact Prepared binding but must not
+    /// classify or mutate predecessor authority itself.
+    PreparedManualSuccessor(crate::SessionExecutionBinding),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualLaunchRuntimeProof {
+    pub host_pid: u32,
+    pub runtime_incarnation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualLaunchSuccessorPredecessor {
+    Blocked,
+    Completed,
+    ExactTerminalActive,
 }
 
 /// Reuse a fresh Bun-created package executable for a host launch.

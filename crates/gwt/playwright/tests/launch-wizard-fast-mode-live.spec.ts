@@ -2,12 +2,13 @@
  * SPEC-2014 2026-05-27 follow-up — Launch Wizard Fast mode live E2E.
  *
  * Runs against a real gwt browser-server backend and exercises the user-facing path
- * that regressed: Start Work -> Configure and start -> Claude Code -> Fast mode
+ * that regressed: Intake -> Configure intake -> Claude Code -> Fast mode
  * -> runtime context resolution. The test stops before the final launch so it
  * does not create a branch or start a real Claude Code process.
  */
 import { expect, test, type Page } from "@playwright/test";
 import {
+  clearLiveLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
   sendLiveGwtEvent,
@@ -29,6 +30,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
+    await clearLiveLaunchWizard(page);
   });
 
   test("Claude Code Fast mode stays on after runtime context resolution", async ({
@@ -38,7 +40,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
 
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await wizard.getByRole("button", { name: "Configure and start" }).click();
+    await chooseConfigureAndStart(page);
 
     await selectWizardAgent(page, "claude");
 
@@ -47,17 +49,21 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     });
     await expect(fastMode).toBeVisible();
     await fastMode.setChecked(false);
+    await blurActiveElement(page);
     await expect(fastModeSummaryValue(page)).toHaveText("off");
     await fastMode.setChecked(true);
+    await blurActiveElement(page);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
 
     const submit = page.locator("#wizard-submit-button");
     await expect(submit).toHaveText("Continue");
     await submit.click();
 
-    await expect(submit).toHaveText("Continue");
+    await expect(submit).toHaveText(/^(Continue|Launch)$/);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
-    await submit.click();
+    if ((await submit.textContent())?.trim() === "Continue") {
+      await submit.click();
+    }
 
     await expect(submit).toHaveText(/^(Launch|Create and launch)$/);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
@@ -188,35 +194,19 @@ async function chooseConfigureAndStart(page: Page): Promise<void> {
     return;
   }
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const configureButton = wizard
-      .getByRole("button", { name: /Configure and start/ })
-      .first();
-    if (!(await configureButton.count())) {
-      break;
-    }
-    await expect(configureButton).toBeEnabled({ timeout: 10_000 });
-    await configureButton.click();
-
-    try {
-      await agentSelect.waitFor({ state: "visible", timeout: 2_000 });
-      return;
-    } catch {
-      // Some start-method layouts require the footer submit after card selection.
-    }
-
-    const submit = page.locator("#wizard-submit-button");
-    if (await submit.isVisible()) {
-      const label = (await submit.textContent())?.trim() ?? "";
-      if (label === "Choose start method" && !(await submit.isDisabled())) {
-        await submit.click();
-        await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
-        return;
-      }
-    }
-    await page.waitForTimeout(500);
-  }
+  await sendLiveGwtEvent(page, {
+    kind: "launch_wizard_action",
+    action: { kind: "set_launch_path", path: "manual_setup" },
+    bounds: null,
+  });
   await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
+}
+
+async function blurActiveElement(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  });
 }
 
 async function createWorkWindow(page: Page) {

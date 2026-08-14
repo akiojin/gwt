@@ -151,6 +151,25 @@ export async function sendLiveGwtEvent(page: Page, payload: unknown): Promise<vo
   }, payload);
 }
 
+export async function clearLiveLaunchWizard(page: Page): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await sendLiveGwtEvent(page, {
+      kind: "launch_wizard_action",
+      action: { kind: "cancel" },
+      bounds: null,
+    });
+    await page.waitForTimeout(150);
+    await sendLiveGwtEvent(page, { kind: "frontend_ready" });
+    await page.waitForTimeout(250);
+    const isOpen = await wizard.evaluate((node) =>
+      node.classList.contains("open") || node.getAttribute("aria-hidden") === "false"
+    );
+    if (!isOpen) return;
+  }
+  throw new Error("live Launch Wizard did not clear before the test");
+}
+
 export async function suppressInitialFrontendReady(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const originalSend = WebSocket.prototype.send;
