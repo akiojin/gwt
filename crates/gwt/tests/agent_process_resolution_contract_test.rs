@@ -475,6 +475,38 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
 }
 
 #[test]
+fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
+    let workflow_path = repo_root().join(".github/workflows/test.yml");
+    let workflow = fs::read_to_string(&workflow_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
+
+    let marker = "      - name: Run Issue Monitor launch_now control-path contracts";
+    let (_, tail) = workflow
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("missing Windows CI step `{marker}`"));
+    let step = tail
+        .split_once("\n      - name:")
+        .map_or(tail, |(step, _)| step);
+    assert!(
+        step.contains("\n        shell: bash\n"),
+        "the multi-command Windows control-path step must fail fast"
+    );
+    for command in [
+        "cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
+        "cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        "cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
+        "cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1",
+        "cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
+        "cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1",
+    ] {
+        assert!(
+            step.contains(command),
+            "Windows CI must exercise launch_now control-path command `{command}`"
+        );
+    }
+}
+
+#[test]
 fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
     let workflow_path = repo_root().join(".github/workflows/test.yml");
     let workflow = fs::read_to_string(&workflow_path)

@@ -115,6 +115,16 @@ jobs:
           cargo test -p gwt --bin gwt app_runtime_local_driver_ -- --test-threads=1
           cargo test -p gwt --lib local_fallback_lease -- --test-threads=1
         timeout-minutes: 15
+      - name: Run Issue Monitor launch_now control-path contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1
+          cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
+          cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1
+          cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1
+          cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
+          cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1
+        timeout-minutes: 15
       - name: Run agent process resolver caller contracts
         run: cargo test -p gwt --test agent_process_resolution_contract_test
         timeout-minutes: 15
