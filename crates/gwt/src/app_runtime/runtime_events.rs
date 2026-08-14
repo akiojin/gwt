@@ -192,11 +192,26 @@ impl AppRuntime {
         self.handle_runtime_output_inner(id, data, true)
     }
 
+    pub(crate) fn handle_runtime_output_event(
+        &mut self,
+        id: String,
+        incarnation: u64,
+        data: Vec<u8>,
+    ) -> Vec<OutboundEvent> {
+        if !self.runtime_incarnation_is_current(&id, incarnation) {
+            return Vec::new();
+        }
+        self.handle_runtime_output(id, data)
+    }
+
     pub(crate) fn handle_daemon_runtime_output(
         &mut self,
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
+        // Daemon publications describe another process and intentionally keep
+        // their existing wire contract; a local PTY incarnation is neither
+        // available nor authoritative for this path.
         self.handle_runtime_output_inner(id, data, false)
     }
 
@@ -231,7 +246,45 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_status_inner(id, status, detail, true)
+        // Display and transport errors are not child-exit receipts. Callers
+        // that observed `try_wait == Some` use `handle_runtime_status_event`
+        // with the exact local incarnation and `exit_confirmed = true`.
+        self.handle_runtime_status_inner(id, status, detail, true, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_runtime_status_with_exit_confirmation(
+        &mut self,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+    ) -> Vec<OutboundEvent> {
+        // Unit fixtures that exercise downstream terminal cleanup do not own a
+        // live PTY incarnation. Production callers must use
+        // `handle_runtime_status_event`, which also applies the incarnation
+        // fence before accepting an exit receipt.
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+    }
+
+    pub(crate) fn handle_runtime_status_event(
+        &mut self,
+        id: String,
+        incarnation: u64,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+        exit_confirmed: bool,
+    ) -> Vec<OutboundEvent> {
+        if !self.runtime_incarnation_is_current(&id, incarnation) {
+            return Vec::new();
+        }
+        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed)
+    }
+
+    fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
+        self.runtimes
+            .get(id)
+            .is_some_and(|runtime| runtime.incarnation == incarnation)
     }
 
     pub(crate) fn handle_daemon_runtime_status(
@@ -240,7 +293,10 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_status_inner(id, status, detail, false)
+        // The daemon wire format has no exact local PTY incarnation or child
+        // exit receipt. It may update diagnostics, but never terminalize a
+        // producing Session in this process.
+        self.handle_runtime_status_inner(id, status, detail, false, false)
     }
 
     fn handle_runtime_status_inner(
@@ -249,8 +305,12 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
         publish_to_daemon: bool,
+        exit_confirmed: bool,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
+            if !exit_confirmed {
+                return Vec::new();
+            }
             self.remove_window_state_tracking(&id);
             self.mark_agent_session_stopped(&id);
             self.deregister_pty_writer(&id);
@@ -300,8 +360,8 @@ impl AppRuntime {
             }
         }
 
-        let keep_active_agent_session_for_recovery =
-            self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
+        let keep_active_agent_session_for_recovery = !exit_confirmed
+            || self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
         // Issue #3274: an errored agent runtime is torn down below, dropping
         // its vt100 state — a client that reconnects later replays nothing and
         // an empty Error window gives no clue why. Capture the final screen
@@ -331,9 +391,9 @@ impl AppRuntime {
         // bug it was masking: the Issue Monitor was never told either, so the
         // launch's slot stayed held. Visibility and accounting are decided
         // independently below.
-        let should_auto_close =
-            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
-                && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
+        let should_auto_close = exit_confirmed
+            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
+            && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
@@ -401,7 +461,11 @@ impl AppRuntime {
         // SPEC-3214 FR-002: a Stopped/Error status means the PTY process has
         // exited — drain any intake worktree cleanup queued by the session
         // stop above (or by an earlier explicit stop of this window).
-        let mut events = self.take_ephemeral_worktree_cleanup_events();
+        let mut events = if exit_confirmed {
+            self.take_ephemeral_worktree_cleanup_events()
+        } else {
+            Vec::new()
+        };
         // SPEC-3431 FR-065: notify the Issue Monitor whenever an agent window
         // reaches Error, including when the pane is kept on screen.
         //
@@ -432,7 +496,8 @@ impl AppRuntime {
         // the Monitor decides completion from the PR, not from an exit code,
         // so the only claim being made here is "this launch is over". Naming
         // it a success would be the lie, not naming it a failure.
-        if is_agent_window
+        if exit_confirmed
+            && is_agent_window
             && matches!(
                 composed_status,
                 WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -458,10 +523,12 @@ impl AppRuntime {
         // take the auto-close branch above (resident turnover: the ensure
         // gate revives the PM on the next project open); explicit closes run
         // `close_window_events`, which deregisters instead.
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) && !keep_active_agent_session_for_recovery
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+            && !keep_active_agent_session_for_recovery
         {
             if let (Some(session_id), Some(project_root)) = (
                 pm_crash_candidate.as_deref(),
@@ -471,10 +538,12 @@ impl AppRuntime {
                 events.extend(self.handle_pm_crash(&tab_id, project_root, session_id));
             }
         }
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+        {
             if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
                 events.push(event);
             }
