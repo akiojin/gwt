@@ -278,6 +278,18 @@ pub struct LaunchWizardSummaryView {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardHolderDecisionView {
+    pub fingerprint: String,
+    pub holder_session_id: String,
+    pub holder_window_id: Option<String>,
+    pub holder_summary: String,
+    pub stop_available: bool,
+    pub stop_unavailable_reason: Option<String>,
+    pub move_available: bool,
+    pub move_unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
     pub label: String,
@@ -289,6 +301,7 @@ pub struct LaunchWizardProgressStepView {
 pub struct LaunchWizardView {
     pub title: String,
     pub mode: LaunchWizardMode,
+    pub holder_decision: Option<LaunchWizardHolderDecisionView>,
     pub branch_name: String,
     pub selected_branch_name: String,
     /// SPEC-2359 US-83 / FR-444: existing remote branches offered by the "open
@@ -769,6 +782,14 @@ pub enum LaunchWizardAction {
     FocusExistingSession {
         index: usize,
     },
+    StopAndStartSuccessor {
+        fingerprint: String,
+        window_id: String,
+    },
+    MoveExistingPane {
+        fingerprint: String,
+        window_id: String,
+    },
     SetBranchMode {
         create_new: bool,
     },
@@ -864,6 +885,7 @@ pub enum LaunchWizardAction {
 pub struct LaunchWizardState {
     pub context: LaunchWizardContext,
     pub wizard_mode: LaunchWizardMode,
+    pub holder_decision: Option<LaunchWizardHolderDecisionView>,
     pub step: LaunchWizardStep,
     pub selected: usize,
     pub launch_path: LaunchWizardLaunchPath,

@@ -160,7 +160,7 @@ jobs:
           GWT_WINDOWS_AGENT_PROVIDER: ${{ matrix.provider }}
           GWT_WINDOWS_AGENT_SELECTOR: ${{ matrix.selector }}
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
-        run: cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1
+        run: cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture
         timeout-minutes: 30
 
   test-frontend:
