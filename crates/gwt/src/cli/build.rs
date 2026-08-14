@@ -170,12 +170,12 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         let blocked_build_abort = compatibility_authority
             .requires_blocked_build_abort_bridge()
             .map_err(|error| error.to_string())?;
-        let bridge_result = if blocked_build_abort {
+        let receipt = if blocked_build_abort {
             let reason = abort_reason.ok_or_else(|| {
                 "Blocked build abort requires a non-empty reason before Host terminalization"
                     .to_string()
             })?;
-            crate::daemon_runtime::send_blocked_build_abort_terminalization_via_agent_bridge(
+            match crate::daemon_runtime::send_blocked_build_abort_terminalization_via_agent_bridge(
                 &target,
                 &crate::AgentBuildAbortTerminalizationRequest {
                     schema_version: crate::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
@@ -184,25 +184,24 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
                     reason: reason.to_string(),
                     observation: request.observation.clone(),
                 },
-            )
-        } else {
-            crate::daemon_runtime::send_work_terminalization_via_agent_bridge(&target, &request)
-        };
-        let receipt = match bridge_result {
-            Ok(receipt) => receipt,
-            Err(bridge_error) if blocked_build_abort => {
-                return crate::agent_project_state::continue_bound_terminal_compatibility(
-                    &compatibility_authority,
-                    request,
-                )
-                .map(|_| ())
-                .map_err(|local_error| {
-                    format!(
-                        "{bridge_error}; local Blocked build abort reconciliation was also refused: {local_error}"
+            ) {
+                Ok(receipt) => receipt,
+                Err(bridge_error) if bridge_error.is_missing_route_rejection() => {
+                    return crate::agent_project_state::continue_bound_terminal_compatibility(
+                        &compatibility_authority,
+                        request,
                     )
-                });
+                    .map(|_| ())
+                    .map_err(|local_error| {
+                        format!(
+                            "{bridge_error}; local Blocked build abort reconciliation was also refused: {local_error}"
+                        )
+                    });
+                }
+                Err(bridge_error) => return Err(bridge_error.to_string()),
             }
-            Err(error) => return Err(error),
+        } else {
+            crate::daemon_runtime::send_work_terminalization_via_agent_bridge(&target, &request)?
         };
         return match receipt.outcome {
             crate::AgentWorkTerminalizationOutcome::Emitted => {
@@ -440,11 +439,20 @@ mod tests {
                                 .send((headers, body))
                                 .expect("capture build abort bridge request");
                             (state.before_response)();
-                            (
+                            let mut response = (
                                 state.status,
                                 [(axum::http::header::CONTENT_TYPE, "application/json")],
                                 state.body,
                             )
+                                .into_response();
+                            if let Some(location) = state.redirect_location.as_deref() {
+                                response.headers_mut().insert(
+                                    axum::http::header::LOCATION,
+                                    axum::http::HeaderValue::from_str(location)
+                                        .expect("valid redirect location"),
+                                );
+                            }
+                            response
                         },
                     ),
                 )
@@ -756,6 +764,21 @@ mod tests {
                 receipt.outcome,
                 crate::AgentWorkTerminalizationOutcome::Emitted
             );
+        }
+
+        fn settle_execution_blocked(&self) {
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    &self.git.repo,
+                    &self.session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                )
+                .expect("settle fixture execution"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
         }
 
         fn canonical_work(&self) -> gwt_core::workspace_projection::WorkspaceWorkItem {
@@ -1375,6 +1398,229 @@ mod tests {
         assert_build_still_active(&complete_fixture.git);
         assert!(!complete_fixture.canonical_work().is_terminal());
         complete_server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_transport_failure_never_falls_back_locally() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+
+        let unavailable = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve unavailable bridge address");
+        let port = unavailable
+            .local_addr()
+            .expect("unavailable bridge address")
+            .port();
+        drop(unavailable);
+        let unavailable_url = format!("http://127.0.0.1:{port}/internal/hook-live");
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &fixture.session.id);
+        let _forward_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &unavailable_url);
+        let _forward_token =
+            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            fixture.git.repo.join("managed-runtime.json"),
+        );
+        let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+        let mut output = String::new();
+
+        let code = run(
+            &mut env,
+            SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("blocked verification cannot proceed".to_string()),
+            },
+            &mut output,
+        )
+        .expect("run build.abort with unavailable Host bridge");
+
+        assert_ne!(code, 0, "{output}");
+        assert!(
+            output.contains("outcome may be unknown"),
+            "transport failure must remain fail-closed: {output}"
+        );
+        assert_build_still_active(&fixture.git);
+        assert!(
+            !fixture.canonical_work().is_terminal(),
+            "unknown Host outcome must not trigger a local terminal write"
+        );
+    }
+
+    #[test]
+    fn blocked_build_abort_missing_host_route_falls_back_locally() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let server = TerminalBridgeServer::start(StatusCode::NOT_FOUND, serde_json::Value::Null);
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("blocked verification cannot proceed".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run build.abort after explicit Host rejection");
+            (code, output)
+        });
+
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .expect("load reconciled build state")
+                .expect("reconciled build state")
+                .active
+        );
+        let work = fixture.canonical_work();
+        assert!(work.is_terminal());
+        assert!(work.discarded);
+        server.receive_abort();
+    }
+
+    #[test]
+    fn blocked_build_abort_host_denials_and_unknown_responses_fail_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        for (label, status, body) in [
+            (
+                "unauthorized",
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({
+                    "code": "invalid_request",
+                    "reason": "invalid_request",
+                    "message": "agent capability is invalid"
+                }),
+            ),
+            (
+                "forbidden",
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "code": "invalid_request",
+                    "reason": "invalid_request",
+                    "message": "agent capability is forbidden"
+                }),
+            ),
+            (
+                "authority-mismatch",
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "code": "execution_binding_mismatch",
+                    "reason": "authority_mismatch",
+                    "message": "execution binding is stale"
+                }),
+            ),
+            (
+                "unknown-conflict",
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "code": "future_conflict",
+                    "reason": "future_conflict",
+                    "message": "future Host rejection"
+                }),
+            ),
+            (
+                "internal",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({
+                    "code": "internal",
+                    "reason": "internal",
+                    "message": "Host mutation outcome is unknown"
+                }),
+            ),
+            (
+                "unsupported-receipt",
+                StatusCode::OK,
+                serde_json::json!({
+                    "schema_version": 2,
+                    "outcome": "already_matching"
+                }),
+            ),
+            ("invalid-receipt", StatusCode::OK, serde_json::Value::Null),
+        ] {
+            let fixture = BoundTerminalFixture::new();
+            fixture.settle_execution_blocked();
+            let server = TerminalBridgeServer::start(status, body);
+            let repo = fixture.git.repo.clone();
+
+            let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(repo);
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("blocked verification cannot proceed".to_string()),
+                    },
+                    &mut output,
+                )
+                .expect("run build.abort after Host denial");
+                (code, output)
+            });
+
+            assert_ne!(code, 0, "{label}: {output}");
+            assert_build_still_active(&fixture.git);
+            assert!(
+                !fixture.canonical_work().is_terminal(),
+                "{label}: Host denial or unknown outcome must not trigger a local terminal write"
+            );
+            server.receive_abort();
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_redirect_never_falls_back_or_forwards_its_bearer() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let server = TerminalBridgeServer::start_redirect();
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("blocked verification cannot proceed".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run redirected build.abort");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert_build_still_active(&fixture.git);
+        assert!(!fixture.canonical_work().is_terminal());
+        server.receive_abort();
+        server.assert_no_redirect();
     }
 
     #[test]
