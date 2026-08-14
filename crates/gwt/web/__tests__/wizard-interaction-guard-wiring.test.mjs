@@ -673,6 +673,24 @@ test("wizardBody releases the guard on focusout over a <select>", () => {
   );
 });
 
+test("wizardBody guards segmented choices until focus leaves the committed option", () => {
+  assert.match(
+    wizardSource,
+    /const\s+isGuardedSegmentedOption[\s\S]{0,240}?launch-segmented__option/,
+    "expected a shared segmented-option interaction guard predicate",
+  );
+  assert.match(
+    wizardSource,
+    /wizardBody\.addEventListener\(\s*"pointerdown"[\s\S]{0,500}?isGuardedSegmentedOption\(target\)[\s\S]{0,200}?wizardInteractionGuard\.activate\(\)/,
+    "expected segmented pointerdown to activate the interaction guard",
+  );
+  assert.match(
+    wizardSource,
+    /wizardBody\.addEventListener\(\s*"focusout"[\s\S]{0,500}?isGuardedSegmentedOption\(target\)[\s\S]{0,200}?wizardInteractionGuard\.release\(\)/,
+    "expected segmented focusout to flush the authoritative state",
+  );
+});
+
 test("wizardModal releases the guard when Escape is pressed during interaction", () => {
   assert.match(
     wizardSource,

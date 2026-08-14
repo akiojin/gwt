@@ -159,13 +159,18 @@ export async function clearLiveLaunchWizard(page: Page): Promise<void> {
       action: { kind: "cancel" },
       bounds: null,
     });
-    await page.waitForTimeout(150);
+    const closedAfterCancel = await wizard
+      .waitFor({ state: "hidden", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (closedAfterCancel) return;
+
     await sendLiveGwtEvent(page, { kind: "frontend_ready" });
-    await page.waitForTimeout(250);
-    const isOpen = await wizard.evaluate((node) =>
-      node.classList.contains("open") || node.getAttribute("aria-hidden") === "false"
-    );
-    if (!isOpen) return;
+    const closedAfterReconcile = await wizard
+      .waitFor({ state: "hidden", timeout: 2_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (closedAfterReconcile) return;
   }
   throw new Error("live Launch Wizard did not clear before the test");
 }

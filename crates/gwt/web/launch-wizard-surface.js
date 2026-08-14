@@ -2,7 +2,7 @@
 // Owns the wizard state (launchWizard / launchWizardOpenError /
 // launchWizardOpening / branch draft / pending action), the
 // wizardInteractionGuard that defers destructive re-renders while a native
-// <select> dropdown or the reasoning slider is mid-interaction, the field
+// <select>, segmented choice, or reasoning slider is mid-interaction, the field
 // builders, the state transitions, renderLaunchWizard, the wizard chrome
 // listeners (installWizardChrome), and the wizard branch of the global Esc
 // handler. Pure movement from app.js: behavior, DOM output, and WS protocol
@@ -2046,14 +2046,30 @@ export function createLaunchWizardSurface({
       // are coalesced for the whole interaction, not committed on every step.
       const isGuardedRange = (el) =>
         Boolean(el && el.classList && el.classList.contains("launch-range__input"));
+      const isGuardedSegmentedOption = (el) =>
+        Boolean(
+          el
+            && el.classList
+            && el.classList.contains("launch-segmented__option"),
+        );
       wizardBody.addEventListener("pointerdown", (event) => {
         const target = event.target;
-        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+        if (
+          target
+          && (
+            target.tagName === "SELECT"
+            || isGuardedRange(target)
+            || isGuardedSegmentedOption(target)
+          )
+        ) {
           wizardInteractionGuard.activate();
         }
       });
       wizardBody.addEventListener("focusin", (event) => {
-        if (isGuardedRange(event.target)) {
+        if (
+          isGuardedRange(event.target)
+          || isGuardedSegmentedOption(event.target)
+        ) {
           wizardInteractionGuard.activate();
         }
       });
@@ -2067,7 +2083,14 @@ export function createLaunchWizardSurface({
       });
       wizardBody.addEventListener("focusout", (event) => {
         const target = event.target;
-        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+        if (
+          target
+          && (
+            target.tagName === "SELECT"
+            || isGuardedRange(target)
+            || isGuardedSegmentedOption(target)
+          )
+        ) {
           wizardInteractionGuard.release();
         }
       });
