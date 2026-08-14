@@ -323,12 +323,91 @@ fn spawn_issue_monitor_worker_with_config(
     )
 }
 
+#[derive(Clone, Default)]
+struct IssueMonitorWorkerTestHooks {
+    #[cfg(test)]
+    scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct IssueMonitorScanConcurrencyProbe {
+    active: AtomicUsize,
+    overlap_observed: AtomicBool,
+}
+
+#[cfg(test)]
+impl IssueMonitorScanConcurrencyProbe {
+    fn enter(self: &Arc<Self>) -> IssueMonitorScanConcurrencyGuard {
+        if self.active.fetch_add(1, Ordering::AcqRel) > 0 {
+            self.overlap_observed.store(true, Ordering::Release);
+        }
+        IssueMonitorScanConcurrencyGuard {
+            probe: Arc::clone(self),
+        }
+    }
+
+    fn overlap_observed(&self) -> bool {
+        self.overlap_observed.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+struct IssueMonitorScanConcurrencyGuard {
+    probe: Arc<IssueMonitorScanConcurrencyProbe>,
+}
+
+#[cfg(test)]
+impl Drop for IssueMonitorScanConcurrencyGuard {
+    fn drop(&mut self) {
+        self.probe.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+fn spawn_issue_monitor_worker_with_config_and_scan_probe(
+    scope: RuntimeScope,
+    hub: BroadcastHub,
+    shutdown: Arc<DaemonShutdown>,
+    config: crate::IssueMonitorConfig,
+    scan_concurrency_probe: Arc<IssueMonitorScanConcurrencyProbe>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+        scope,
+        hub,
+        shutdown,
+        config,
+        ISSUE_MONITOR_SCAN_TIMEOUT,
+        IssueMonitorWorkerTestHooks {
+            scan_concurrency_probe: Some(scan_concurrency_probe),
+        },
+    )
+}
+
 fn spawn_issue_monitor_worker_with_config_and_timeout(
     scope: RuntimeScope,
     hub: BroadcastHub,
     shutdown: Arc<DaemonShutdown>,
     config: crate::IssueMonitorConfig,
     operation_timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+        scope,
+        hub,
+        shutdown,
+        config,
+        operation_timeout,
+        IssueMonitorWorkerTestHooks::default(),
+    )
+}
+
+fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+    scope: RuntimeScope,
+    hub: BroadcastHub,
+    shutdown: Arc<DaemonShutdown>,
+    config: crate::IssueMonitorConfig,
+    operation_timeout: Duration,
+    test_hooks: IssueMonitorWorkerTestHooks,
 ) -> tokio::task::JoinHandle<()> {
     // Establish the control-lane state from the durable snapshot before the
     // server can accept a publisher connection. Starting publishers wait on
@@ -889,6 +968,7 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                         monitor.clone(),
                         issue_monitor_gui_connected(&hub),
                         deadline,
+                        test_hooks.clone(),
                     ),
                     deadline,
                     watchdog_fired: false,
@@ -2343,7 +2423,13 @@ fn spawn_issue_monitor_scan(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     let deadline = Instant::now() + ISSUE_MONITOR_SCAN_TIMEOUT;
-    spawn_issue_monitor_scan_with_deadline(scope, monitor, gui_connected, deadline)
+    spawn_issue_monitor_scan_with_deadline(
+        scope,
+        monitor,
+        gui_connected,
+        deadline,
+        IssueMonitorWorkerTestHooks::default(),
+    )
 }
 
 fn spawn_issue_monitor_scan_with_deadline(
@@ -2351,10 +2437,18 @@ fn spawn_issue_monitor_scan_with_deadline(
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
     deadline: Instant,
+    test_hooks: IssueMonitorWorkerTestHooks,
 ) -> tokio::task::JoinHandle<
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _scan_concurrency_guard = test_hooks
+            .scan_concurrency_probe
+            .as_ref()
+            .map(IssueMonitorScanConcurrencyProbe::enter);
+        #[cfg(not(test))]
+        let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
@@ -3794,8 +3888,9 @@ mod tests {
         apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
         issue_monitor_control_is_authorizing, run_server,
         run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
+        spawn_issue_monitor_worker_with_config_and_scan_probe,
         spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, DaemonShutdown,
-        IssueMonitorControl,
+        IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
     };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
@@ -3903,15 +3998,27 @@ if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
     active_pid=$(sed -n '1p' "$candidate" 2>/dev/null || true)
     expected_start=$(sed -n '2p' "$candidate" 2>/dev/null || true)
     if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
-      active_start=$(ps -o lstart= -p "$active_pid" 2>/dev/null) || exit 1
-      if [ -z "$expected_start" ] || [ -z "$active_start" ]; then
+      active_state=$(ps -o stat= -p "$active_pid" 2>/dev/null) || exit 1
+      if [ -z "$active_state" ]; then
         exit 1
       fi
-      if [ "$active_start" = "$expected_start" ]; then
-        : > "$GWT_FAKE_GH_OVERLAP"
-      else
-        rm -f "$candidate"
-      fi
+      case "$active_state" in
+        *Z*)
+          # kill -0 also succeeds for an unreaped zombie. It has already
+          # stopped executing and cannot overlap the recovery invocation.
+          rm -f "$candidate"
+          ;;
+        *)
+          active_start=$(ps -o lstart= -p "$active_pid" 2>/dev/null) || exit 1
+          if [ -z "$expected_start" ] || [ -z "$active_start" ]; then
+            exit 1
+          elif [ "$active_start" = "$expected_start" ]; then
+            : > "$GWT_FAKE_GH_OVERLAP"
+          else
+            rm -f "$candidate"
+          fi
+          ;;
+      esac
     else
       rm -f "$candidate"
     fi
@@ -4032,6 +4139,10 @@ exit 0
             self.reaped = true;
         }
 
+        fn kill_without_wait(&mut self) {
+            self.child.kill().expect("kill fake gh");
+        }
+
         fn wait(&mut self) {
             self.child.wait().expect("reap fake gh");
             self.reaped = true;
@@ -4045,6 +4156,22 @@ exit 0
                 let _ = self.child.wait();
             }
         }
+    }
+
+    #[test]
+    fn issue_monitor_scan_probe_distinguishes_sequential_and_overlapping_tasks() {
+        let sequential = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        drop(sequential.enter());
+        drop(sequential.enter());
+        assert!(!sequential.overlap_observed());
+
+        let overlapping = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let first = overlapping.enter();
+        let second = overlapping.enter();
+        assert!(overlapping.overlap_observed());
+        drop(second);
+        drop(first);
+        assert!(overlapping.overlap_observed());
     }
 
     #[tokio::test]
@@ -4111,6 +4238,87 @@ exit 0
                 .count(),
             0,
             "the recovery owner must remove every per-process marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_gh_reclaims_an_unreaped_zombie_marker_without_reporting_overlap() {
+        // The deadline cleanup has a bounded grace period. If its future is
+        // dropped after SIGKILL but before wait(2), the old shell remains a
+        // zombie briefly: kill -0 still succeeds even though it cannot overlap
+        // any subsequent work.
+        let temp = TempDir::new().expect("tempdir");
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let started_path = temp.path().join("started");
+        let release_path = temp.path().join("release");
+        let active_path = temp.path().join("active");
+        let overlap_path = temp.path().join("overlap");
+        let killed_pid_path = temp.path().join("killed-pid");
+        let killed_owner_marker_path = temp.path().join("killed-owner-marker");
+
+        let mut killed = BlockingFakeGhChild::new(
+            blocking_fake_gh_command(
+                &fake_gh,
+                &started_path,
+                &release_path,
+                &active_path,
+                &overlap_path,
+                &killed_pid_path,
+                &killed_owner_marker_path,
+            )
+            .spawn()
+            .expect("spawn first fake gh"),
+        );
+        assert!(
+            wait_for_path(&killed_owner_marker_path, Duration::from_secs(2)).await,
+            "first fake gh must publish its owner marker"
+        );
+        let killed_pid = fs::read_to_string(&killed_pid_path)
+            .expect("read killed fake gh pid")
+            .trim()
+            .parse::<u32>()
+            .expect("parse killed fake gh pid");
+        killed.kill_without_wait();
+        let became_zombie = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let output = gwt_core::process::hidden_command("ps")
+                    .args(["-o", "stat=", "-p", &killed_pid.to_string()])
+                    .output()
+                    .expect("read fake gh process state");
+                if String::from_utf8_lossy(&output.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+
+        fs::write(&release_path, b"release").expect("release recovery fake gh");
+        let recovery = blocking_fake_gh_command(
+            &fake_gh,
+            &started_path,
+            &release_path,
+            &active_path,
+            &overlap_path,
+            &temp.path().join("recovery-pid"),
+            &temp.path().join("recovery-owner-marker"),
+        )
+        .status()
+        .expect("run recovery fake gh");
+        killed.wait();
+
+        assert!(
+            became_zombie,
+            "killed fake gh must remain unreaped for the test"
+        );
+        assert!(recovery.success(), "recovery fake gh must exit cleanly");
+        assert!(
+            !overlap_path.exists(),
+            "an unreaped zombie owner is stale, not an overlap"
         );
     }
 
@@ -6759,7 +6967,8 @@ exit 0
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let shutdown = Arc::new(DaemonShutdown::new());
-        let worker = spawn_issue_monitor_worker_with_config(
+        let scan_concurrency_probe = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let worker = spawn_issue_monitor_worker_with_config_and_scan_probe(
             scope,
             hub.clone(),
             Arc::clone(&shutdown),
@@ -6767,6 +6976,7 @@ exit 0
                 poll_interval_secs: 1,
                 ..crate::IssueMonitorConfig::default()
             },
+            Arc::clone(&scan_concurrency_probe),
         );
 
         let scan_started = wait_for_path(&scan_started_path, Duration::from_secs(2)).await;
@@ -6815,7 +7025,6 @@ exit 0
             .unwrap_or_default()
             .lines()
             .count();
-        let scan_overlap_while_blocked = overlap_scan_path.exists();
         let disabled_queued = hub
             .publish_issue_monitor_control(DaemonFrame::Event {
                 channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
@@ -6892,7 +7101,7 @@ exit 0
             "the blocking scan fixture must observe at least one scan"
         );
         assert!(
-            !scan_overlap_while_blocked,
+            !scan_concurrency_probe.overlap_observed(),
             "should-scan controls and ticks must not overlap fake gh scans; a watchdog may finish \
              one attempt and start its recovery attempt under a heavily loaded full suite"
         );
