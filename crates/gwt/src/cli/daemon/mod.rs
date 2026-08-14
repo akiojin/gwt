@@ -3,6 +3,8 @@
 //! - `mod.rs` (this file): argv parsing + dispatch + status reporting.
 //! - `server.rs`: tokio-based IPC listener (Unix domain socket today;
 //!   Windows named-pipe support is a follow-up).
+//! - `subscribe_resolver.rs`: exact-first, read-only endpoint selection for
+//!   bounded Unix subscriptions from linked worktrees.
 //!
 //! The contract layer (`gwt_core::daemon::*`) defines the on-disk endpoint
 //! file, handshake protocol, and `DaemonBootstrapAction`. `Start` honours
@@ -18,6 +20,8 @@ pub(crate) mod broadcast;
 pub mod client;
 #[cfg(unix)]
 pub(crate) mod server;
+#[cfg(unix)]
+mod subscribe_resolver;
 
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -205,29 +209,25 @@ fn subscribe_command<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let scope = resolve_scope(env)?;
     let gwt_home = gwt_core::paths::gwt_home();
-    let action = resolve_bootstrap_action(
-        &gwt_home,
-        &scope,
-        DAEMON_PROTOCOL_VERSION,
-        is_process_alive_pid,
-    )
-    .map_err(|err| config_error(err.to_string()))?;
-
-    let endpoint = match action {
-        DaemonBootstrapAction::Reuse(endpoint) => endpoint,
-        DaemonBootstrapAction::Spawn { endpoint_path } => {
-            out.push_str(&format!(
-                "gwtd daemon subscribe: no daemon registered (endpoint={})\n",
-                endpoint_path.display()
-            ));
-            return Ok(2);
-        }
-    };
-
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| config_error(format!("tokio runtime build failed: {err}")))?;
+    let resolved = match runtime.block_on(subscribe_resolver::resolve(
+        &gwt_home,
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        is_process_alive_pid,
+    )) {
+        Ok(resolved) => resolved,
+        Err(failure) => {
+            out.push_str(&failure.to_string());
+            out.push('\n');
+            return Ok(2);
+        }
+    };
+    let endpoint = resolved;
+
     runtime.block_on(async {
         let mut client = client::DaemonClient::connect(&endpoint)
             .await
@@ -506,5 +506,117 @@ mod tests {
         assert_eq!(formatted, "ok uptime=12s channels=2 connections=1");
         #[cfg(not(unix))]
         assert_eq!(formatted, "ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_command_reaches_unique_same_repo_sibling_daemon() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            sync::mpsc,
+            thread,
+        };
+
+        use gwt_core::{
+            daemon::{persist_endpoint, IpcHandshakeRequest, IpcHandshakeResponse, RuntimeTarget},
+            test_support::ScopedGwtHome,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let caller_root = temp.path().join("caller");
+        let sibling_root = temp.path().join("sibling");
+        std::fs::create_dir_all(&caller_root).expect("caller root");
+        std::fs::create_dir_all(&sibling_root).expect("sibling root");
+        let mut env = crate::cli::TestEnv::new(caller_root.clone());
+        env.repo_path = caller_root;
+        let caller_scope = resolve_scope(&env).expect("caller scope");
+        let sibling_scope = RuntimeScope::new(
+            caller_scope.repo_hash.clone(),
+            "sibling-worktree",
+            sibling_root,
+            RuntimeTarget::Host,
+        )
+        .expect("sibling scope");
+        let socket_path = temp.path().join("sibling.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind sibling socket");
+        let endpoint = DaemonEndpoint::new(
+            sibling_scope.clone(),
+            std::process::id(),
+            socket_path.display().to_string(),
+            "sibling-secret".to_string(),
+            "test-daemon".to_string(),
+        );
+        persist_endpoint(
+            &sibling_scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .expect("persist sibling endpoint");
+
+        let (release_server, await_command_exit) = mpsc::channel();
+        let server_endpoint = endpoint.clone();
+        let server = thread::spawn(move || {
+            for connection_index in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept subscriber");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read handshake");
+                let handshake: IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end()).expect("parse handshake");
+                assert_eq!(handshake.scope, server_endpoint.scope);
+                assert_eq!(handshake.auth_token, server_endpoint.auth_token);
+                let response = IpcHandshakeResponse {
+                    protocol_version: server_endpoint.protocol_version,
+                    daemon_version: server_endpoint.daemon_version.clone(),
+                    accepted: true,
+                    rejection_reason: None,
+                };
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).expect("serialize response")
+                )
+                .expect("write handshake response");
+                stream.flush().expect("flush handshake response");
+
+                if connection_index == 0 {
+                    continue;
+                }
+                line.clear();
+                reader.read_line(&mut line).expect("read subscribe");
+                assert!(matches!(
+                    serde_json::from_str::<ClientFrame>(line.trim_end()).expect("parse subscribe"),
+                    ClientFrame::Subscribe { .. }
+                ));
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&DaemonFrame::Ack).expect("serialize ack")
+                )
+                .expect("write ack");
+                stream.flush().expect("flush ack");
+                await_command_exit
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("command must finish before server closes subscriber");
+            }
+        });
+
+        let mut output = String::new();
+        let exit = subscribe_command(
+            &mut env,
+            vec!["issue-monitor".to_string()],
+            Some(1),
+            &mut output,
+        )
+        .expect("subscribe command");
+
+        assert_eq!(exit, 0);
+        assert!(output.is_empty());
+        release_server.send(()).expect("release server");
+        server.join().expect("server thread");
     }
 }
