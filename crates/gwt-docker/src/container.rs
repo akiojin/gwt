@@ -344,8 +344,7 @@ where
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
-    let mut child = command
-        .spawn()
+    let mut child = crate::retry_executable_file_busy(|| command.spawn())
         .map_err(|e| GwtError::Docker(format!("failed to run {action}: {e}")))?;
 
     let stdout = child
