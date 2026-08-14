@@ -10823,6 +10823,14 @@ fn run_repair(
     }
 }
 
+fn blocked_build_abort_guidance(record: &ExecutionControlRecord) -> String {
+    format!(
+        "execution: active build lifecycle remains for {kind} #{number}; run JSON operation `build.abort` with the same owner and a non-empty `params.reason` to close it\n",
+        kind = record.owner_kind.as_str(),
+        number = record.owner_number,
+    )
+}
+
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
 /// settlement binds to the session that owns the record.
 pub(super) fn run<E: CliEnv>(
@@ -11070,10 +11078,7 @@ pub(super) fn run<E: CliEnv>(
                     .iter()
                     .any(|recovery| recovery == "build.abort")
             {
-                out.push_str(&format!(
-                    "execution: active build lifecycle remains for SPEC-{number}; run JSON operation `build.abort` with the same owner and a non-empty `params.reason` to close it\n",
-                    number = record.owner_number,
-                ));
+                out.push_str(&blocked_build_abort_guidance(&record));
             }
             Ok(0)
         }
@@ -11116,10 +11121,7 @@ pub(super) fn run<E: CliEnv>(
                     .iter()
                     .any(|recovery| recovery == "build.abort")
             {
-                out.push_str(&format!(
-                    "execution: active build lifecycle remains for SPEC-{number}; run JSON operation `build.abort` with the same owner and a non-empty `params.reason` to close it\n",
-                    number = record.owner_number,
-                ));
+                out.push_str(&blocked_build_abort_guidance(&record));
             }
             Ok(0)
         }
@@ -16786,13 +16788,27 @@ mod tests {
             owner_number: u64,
             status: ExecutionControlStatus,
         ) -> ExecutionOwnerKey {
+            prepare_generation_bound_execution_for_owner(
+                repo,
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: owner_number,
+                },
+                status,
+            )
+        }
+
+        fn prepare_generation_bound_execution_for_owner(
+            repo: &Path,
+            session_id: &str,
+            owner: ExecutionOwnerKey,
+            status: ExecutionControlStatus,
+        ) -> ExecutionOwnerKey {
             crate::cli::trusted_store::init_git_repo_with_origin(repo);
-            let owner = ExecutionOwnerKey {
-                kind: ExecutionOwnerKind::Spec,
-                number: owner_number,
-            };
             let mut active = active_record(session_id);
-            active.owner_number = owner_number;
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
             save(repo, &active).expect("save active execution fixture");
             ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live)
                 .expect("materialize generation ledger fixture");
@@ -16931,13 +16947,54 @@ exit 1
 
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("build.abort"), "{out}");
-            assert!(out.contains("SPEC-3248"), "{out}");
+            assert!(
+                out.contains("active build lifecycle remains for spec #3248;"),
+                "{out}"
+            );
             assert!(
                 gwt_core::skill_state::load(repo.path(), crate::cli::build::SKILL_NAME)
                     .expect("load build lifecycle after blocked settlement")
                     .expect("build lifecycle after blocked settlement")
                     .active,
                 "execution.blocked must guide cleanup without auto-aborting the build lifecycle"
+            );
+        }
+
+        #[test]
+        fn blocked_output_uses_issue_owner_label_in_build_abort_guidance() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-blocked-issue-output";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            prepare_generation_bound_execution_for_owner(
+                repo.path(),
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 3580,
+                },
+                ExecutionControlStatus::Active,
+            );
+            save_build_state(repo.path(), session_id, Some(3580), true);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle Issue execution as blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                out.contains("active build lifecycle remains for issue #3580;"),
+                "{out}"
             );
         }
 
