@@ -168,6 +168,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   );
   await option.click();
   await expect(option).toHaveAttribute("aria-checked", "true");
+  await blurActiveElement(page);
 }
 
 function fastModeSummaryValue(page: Page) {

@@ -98,6 +98,13 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     await auto.setChecked(false);
     await blurActiveElement(page);
     await expect(range).toBeEnabled();
+
+    // Last-used effort is intentionally persistent. Drive the control to the
+    // middle ordinal explicitly so retries and prior live sessions cannot
+    // change the assertion's starting point.
+    await range.press("Home");
+    await range.press("ArrowRight");
+    await range.blur();
     await expect(effortSummaryValue(page)).toHaveText("medium");
 
     // ArrowRight snaps from Medium to High and reports the stored value.
