@@ -178,7 +178,13 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
     let _hook_bin =
         gwt_core::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"));
     let launch_env = launch_env_with_real_gwtd(&fixture);
-    assert_loopback_registry_preflight(&fixture, &launch_env, &worktree);
+    assert_loopback_registry_preflight(
+        &fixture,
+        &launch_env,
+        &worktree,
+        provider,
+        requested_selector,
+    );
     assert_canonical_route_manifest();
     let public_route_only = std::env::var_os("GWT_WINDOWS_AGENT_E2E_PUBLIC_ROUTE_ONLY")
         .is_some_and(|value| value == "1");
@@ -1145,14 +1151,14 @@ fn registry_request_diagnostic_snapshot(fixture: &WindowsNpmRegistryFixture) -> 
 fn panic_loopback_registry_preflight_failure(
     fixture: &WindowsNpmRegistryFixture,
     outcome: &gwt_agent::HostRunnerProbeOutcome,
-    observed_registry: &str,
+    observed_value: &str,
     detail: &str,
 ) -> ! {
     let accepted_connection_count = fixture.accepted_connection_count();
     let request_snapshot = registry_request_diagnostic_snapshot(fixture);
     let header_complete_request_count = request_snapshot.len();
     panic!(
-        "loopback registry preflight failure: {detail}; expected_registry={:?}; observed_registry={observed_registry:?}; outcome={outcome:?}; accepted_connection_count={accepted_connection_count}; header_complete_request_count={header_complete_request_count}; request_snapshot={request_snapshot:?}",
+        "loopback registry preflight failure: {detail}; expected_registry={:?}; observed_value={observed_value:?}; outcome={outcome:?}; accepted_connection_count={accepted_connection_count}; header_complete_request_count={header_complete_request_count}; request_snapshot={request_snapshot:?}",
         fixture.registry_url
     );
 }
@@ -1161,6 +1167,8 @@ fn assert_loopback_registry_preflight(
     fixture: &WindowsNpmRegistryFixture,
     launch_env: &std::collections::HashMap<String, String>,
     worktree: &Path,
+    provider: Provider,
+    requested_selector: &str,
 ) {
     let remove_env = credential_env_removals();
     let mut preflight_env = launch_env.clone();
@@ -1204,6 +1212,67 @@ fn assert_loopback_registry_preflight(
             observed_registry,
             &format!("loopback HTTP healthcheck failed: {error}"),
         );
+    }
+    if requested_selector == "latest" {
+        let metadata_request_count_before = fixture.requests().len();
+        let metadata_outcome = gwt_agent::prepare::probe_host_runner_with_timeout(
+            HostRunnerProbeKind::Runner,
+            "npm.cmd",
+            vec![
+                "view".to_string(),
+                format!("{}@latest", provider.package()),
+                "version".to_string(),
+                "--json".to_string(),
+            ],
+            &preflight_env,
+            &remove_env,
+            Some(worktree.to_path_buf()),
+            TEST_PREFLIGHT_TIMEOUT,
+            Duration::from_millis(50),
+        );
+        let observed_metadata = metadata_outcome.stdout.trim();
+        if !metadata_outcome.success {
+            panic_loopback_registry_preflight_failure(
+                fixture,
+                &metadata_outcome,
+                observed_metadata,
+                "metadata preflight process failed",
+            );
+        }
+        let resolved_version =
+            serde_json::from_str::<String>(observed_metadata).unwrap_or_else(|error| {
+                panic_loopback_registry_preflight_failure(
+                    fixture,
+                    &metadata_outcome,
+                    observed_metadata,
+                    &format!("metadata preflight returned invalid JSON: {error}"),
+                )
+            });
+        if resolved_version != fixture.exact_version {
+            panic_loopback_registry_preflight_failure(
+                fixture,
+                &metadata_outcome,
+                &resolved_version,
+                "metadata preflight version mismatch",
+            );
+        }
+        let metadata_requests = fixture.requests();
+        let reached_packument = metadata_requests
+            .get(metadata_request_count_before..)
+            .is_some_and(|requests| {
+                requests.iter().any(|request| {
+                    let path = request.path.to_ascii_lowercase();
+                    path.contains("%2f") || path.contains(provider.package())
+                })
+            });
+        if !reached_packument {
+            panic_loopback_registry_preflight_failure(
+                fixture,
+                &metadata_outcome,
+                &resolved_version,
+                "metadata preflight did not reach the loopback packument",
+            );
+        }
     }
 }
 

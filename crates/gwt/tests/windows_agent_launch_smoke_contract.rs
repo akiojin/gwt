@@ -133,6 +133,9 @@ fn windows_launch_e2e_preflights_the_loopback_registry_with_bounded_diagnostics(
         "config",
         "get",
         "registry",
+        "view",
+        "version",
+        "metadata preflight",
         "--json",
         "loopback registry preflight failure",
         "accepted_connection_count",
@@ -152,10 +155,6 @@ fn windows_launch_e2e_preflights_the_loopback_registry_with_bounded_diagnostics(
         );
     }
     assert!(
-        !e2e.contains("npm view"),
-        "the test-only preflight must not warm registry metadata"
-    );
-    assert!(
         e2e.lines().any(|line| {
             line.trim() == "const TEST_REGISTRY_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);"
         }),
@@ -169,8 +168,40 @@ fn windows_launch_e2e_preflights_the_loopback_registry_with_bounded_diagnostics(
     assert!(
         e2e.lines().any(|line| {
             line.trim() == "const TEST_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);"
-        }) && preflight.contains("TEST_PREFLIGHT_TIMEOUT,"),
-        "the npm config preflight must use its explicit 60-second bound"
+        }) && preflight.matches("TEST_PREFLIGHT_TIMEOUT,").count() >= 2,
+        "the npm config and metadata preflights must share the explicit 60-second bound"
+    );
+    for required in [
+        "if requested_selector == \"latest\"",
+        "provider.package()",
+        "format!(\"{}@latest\", provider.package())",
+        "serde_json::from_str::<String>",
+        "fixture.exact_version",
+        "metadata_request_count_before",
+        "metadata_outcome",
+        "metadata preflight process failed",
+        "reached_packument",
+        ".get(metadata_request_count_before..)",
+        "metadata preflight did not reach the loopback packument",
+    ] {
+        assert!(
+            preflight.contains(required),
+            "latest-selector metadata preflight must contain {required:?}"
+        );
+    }
+    assert!(
+        !preflight.contains("ToolRuntimeProvenance"),
+        "the test-only metadata preflight must not inject resolved provenance"
+    );
+    let metadata_success_guard_offset = preflight
+        .find("if !metadata_outcome.success")
+        .expect("metadata preflight process failure guard");
+    let metadata_parse_offset = preflight
+        .find("serde_json::from_str::<String>")
+        .expect("metadata preflight JSON parse");
+    assert!(
+        metadata_success_guard_offset < metadata_parse_offset,
+        "metadata process failures must retain their primary outcome before JSON parsing"
     );
     let clone_offset = preflight
         .find("let mut preflight_env = launch_env.clone();")
