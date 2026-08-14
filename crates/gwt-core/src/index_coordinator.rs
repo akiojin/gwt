@@ -1243,16 +1243,20 @@ mod tests {
         let coordinator = open(tmp.path());
         let key = TargetKey::verification("repo-a", "wt-1");
         let guard = own(&coordinator, &key, JobPriority::ManualRebuild);
-        let lease = guard
-            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_millis(40))
+        let mut lease = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(600))
             .unwrap();
         assert!(!lease.is_expired());
         assert!(lease.remaining().is_some());
 
-        std::thread::sleep(Duration::from_millis(60));
+        // Move the deadline into the past instead of sleeping up to a short
+        // TTL: expiry is a plain `now >= expires_at` comparison either way,
+        // and a wall-clock wait would make this test fail under exactly the
+        // CPU contention the lease exists to prevent.
+        lease.extend_until(lease.acquired_at_ms()).unwrap();
         assert!(
             lease.is_expired(),
-            "the lease must expire once its TTL ends"
+            "the lease must expire once its deadline passes"
         );
         assert_eq!(lease.remaining(), Some(Duration::ZERO));
 

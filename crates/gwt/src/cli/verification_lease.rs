@@ -56,6 +56,11 @@ const CONTROL_POLL: Duration = Duration::from_millis(50);
 /// A contended attempt answers immediately with the current holder instead of
 /// queueing, so no agent ever sits in a wait loop (US-1 / FR-3).
 const NON_BLOCKING: Duration = Duration::from_millis(250);
+/// How long a control directory is treated as "still being set up" rather than
+/// residue left by a killed holder. Mirrors the coordinator's own
+/// `REGISTRATION_RESIDUE_GRACE`, and must stay comfortably above
+/// [`HANDSHAKE_TIMEOUT`] so a slow-starting holder is never swept.
+const CONTROL_RESIDUE_GRACE: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationLeaseCommand {
@@ -131,6 +136,7 @@ fn acquire<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     validate_ttl_minutes(ttl_minutes)?;
     let root = coordinator_root();
+    sweep_abandoned_control_dirs(&root, status()?.lease_id.as_deref());
     let control = root
         .join(CONTROL_DIR)
         .join(uuid::Uuid::new_v4().to_string());
@@ -172,6 +178,9 @@ fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32
     fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
         .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
     await_settled(lease_id)?;
+    // A holder that exited normally already removed this; a holder that was
+    // killed cannot, so clean up on the caller's side too.
+    let _ = fs::remove_dir_all(&control);
     out.push_str("verification lease: released\n");
     out.push_str(&format!("lease_id: {lease_id}\n"));
     if let Some(reason) = reason {
@@ -217,13 +226,30 @@ fn hold<E: CliEnv>(
     control: &Path,
     reason: Option<&str>,
 ) -> Result<i32, SpecOpsError> {
-    let ttl = validate_ttl_minutes(ttl_minutes)?;
-    let key = verification_key(env)?;
-    let coordinator = open_coordinator()?;
+    ensure_control_dir_is_ours(control)?;
+    // Past this point the caller is waiting on `outcome.json`, so a failure
+    // has to be published rather than returned: the spawning invocation reads
+    // our stdout from `Stdio::null()` and would otherwise learn nothing until
+    // its handshake timeout.
+    let prepared = validate_ttl_minutes(ttl_minutes)
+        .and_then(|ttl| verification_key(env).map(|key| (ttl, key)))
+        .and_then(|(ttl, key)| open_coordinator().map(|coordinator| (ttl, key, coordinator)));
+    let (ttl, key, coordinator) = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            publish_outcome(control, &LeaseOutcome::failed(err.to_string()));
+            return Err(err);
+        }
+    };
 
-    let admission = coordinator
-        .request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING)
-        .map_err(|err| unexpected(format!("verification job admission failed: {err}")))?;
+    let admission = match coordinator.request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING) {
+        Ok(admission) => admission,
+        Err(err) => {
+            let message = format!("verification job admission failed: {err}");
+            publish_outcome(control, &LeaseOutcome::failed(message.clone()));
+            return Err(unexpected(message));
+        }
+    };
     let guard = match admission {
         JobAdmission::Owner(guard) => guard,
         JobAdmission::Joined(waiter) => {
@@ -319,9 +345,13 @@ fn await_outcome(control: &Path) -> Result<LeaseOutcome, SpecOpsError> {
             return Ok(outcome);
         }
         if Instant::now() >= deadline {
-            let _ = fs::remove_dir_all(control);
+            // Deliberately leave the directory in place: the holder may still
+            // be starting and would lose its release channel — and therefore
+            // hold the lease until its TTL — if we removed it here. The
+            // grace-gated sweep collects it if the holder never arrives.
             return Err(unexpected(format!(
-                "the verification lease holder did not answer within {}s",
+                "the verification lease holder did not answer within {}s — check \
+                 `verify.lease.status`; if a lease is now held, release it with its lease_id",
                 HANDSHAKE_TIMEOUT.as_secs()
             )));
         }
@@ -361,6 +391,53 @@ fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
                 outcome.granted && outcome.status.lease_id.as_deref() == Some(lease_id)
             })
         })
+}
+
+/// Drop control directories whose holder is gone. A killed holder cannot
+/// clean up after itself, and its directory would otherwise sit next to the
+/// live one forever.
+///
+/// `current_lease_id` is a snapshot taken before this scan, so it can go stale
+/// the moment another claimant wins the lease. Deleting a live holder's
+/// directory would be unrecoverable — the holder watches it for the release
+/// signal, and `control_dir_for` needs it to route `release` / `extend` — so a
+/// directory is only swept once it has sat untouched for
+/// [`CONTROL_RESIDUE_GRACE`]. A directory that appeared or was published
+/// during the snapshot gap is younger than that by construction, which is the
+/// same protection [`gwt_core::index_coordinator`] gives its own registration
+/// files.
+fn sweep_abandoned_control_dirs(root: &Path, current_lease_id: Option<&str>) {
+    let Ok(entries) = fs::read_dir(root.join(CONTROL_DIR)) else {
+        return;
+    };
+    for dir in entries.flatten().map(|entry| entry.path()) {
+        let outcome_path = dir.join(OUTCOME_FILE);
+        match read_json::<LeaseOutcome>(&outcome_path) {
+            // A granted directory naming the current holder is the live
+            // control channel; anything else granted belonged to a holder
+            // that is no longer on the lease.
+            Some(outcome)
+                if outcome.granted && outcome.status.lease_id.as_deref() == current_lease_id =>
+            {
+                continue
+            }
+            // A directory with no published outcome may belong to a holder
+            // that is still starting up; the grace window covers that.
+            Some(_) | None => {}
+        }
+        if older_than(&outcome_path, CONTROL_RESIDUE_GRACE)
+            .unwrap_or_else(|| older_than(&dir, CONTROL_RESIDUE_GRACE).unwrap_or(false))
+        {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// `Some(true)` when `path` was last modified more than `grace` ago,
+/// `None` when the timestamp cannot be read (never treat that as abandoned).
+fn older_than(path: &Path, grace: Duration) -> Option<bool> {
+    let age = fs::metadata(path).ok()?.modified().ok()?.elapsed().ok()?;
+    Some(age > grace)
 }
 
 fn publish_outcome(control: &Path, outcome: &LeaseOutcome) {
@@ -445,6 +522,14 @@ impl LeaseOutcome {
             error: None,
         }
     }
+
+    fn failed(error: String) -> Self {
+        Self {
+            granted: false,
+            status: LeaseStatusSnapshot::default(),
+            error: Some(error),
+        }
+    }
 }
 
 fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
@@ -457,6 +542,24 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
 fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     IndexCoordinator::open_default()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
+}
+
+/// `verify.lease.hold` is reachable through the ordinary envelope dispatcher,
+/// so refuse a control directory outside the coordinator runtime. A holder
+/// pointed elsewhere would take the real host-wide lease while
+/// [`control_dir_for`] could never find it, leaving it unreleasable until its
+/// TTL.
+fn ensure_control_dir_is_ours(control: &Path) -> Result<(), SpecOpsError> {
+    let expected_parent = coordinator_root().join(CONTROL_DIR);
+    if control.parent() == Some(expected_parent.as_path()) {
+        return Ok(());
+    }
+    Err(unexpected(format!(
+        "verify.lease.hold is internal: params.control must be a directory directly under {} \
+         (got {}). Use verify.lease.acquire instead.",
+        expected_parent.display(),
+        control.display()
+    )))
 }
 
 fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
@@ -511,11 +614,29 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Distinguish "that lease is already gone" from "that lease is held but its
+/// control channel is missing" — the second is not resolvable by retrying, so
+/// saying the holder died would send the caller down the wrong path.
 fn missing_lease(lease_id: &str) -> SpecOpsError {
-    unexpected(format!(
-        "no live verification lease {lease_id} — check `verify.lease.status`; \
-         a holder that died has already released the lease"
-    ))
+    let held = status()
+        .ok()
+        .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
+    match held {
+        Some(status) => unexpected(format!(
+            "verification lease {lease_id} is still held but has no control channel, so it \
+             cannot be released or extended. It lapses on its own at expires_at_ms={}. \
+             This means the control directory under the coordinator runtime was removed \
+             while the holder was alive.",
+            status
+                .expires_at_ms
+                .map(|at| at.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        )),
+        None => unexpected(format!(
+            "no live verification lease {lease_id} — check `verify.lease.status`; \
+             a holder that died has already released the lease"
+        )),
+    }
 }
 
 fn unexpected(message: String) -> SpecOpsError {
@@ -591,6 +712,107 @@ mod tests {
         assert!(!parsed.granted);
         assert_eq!(parsed.status.lease_id.as_deref(), Some("lease-9"));
         assert_eq!(parsed.status.remaining_ms, Some(1_234));
+    }
+
+    fn control_dir(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(CONTROL_DIR).join(name);
+        fs::create_dir_all(&path).expect("control dir");
+        path
+    }
+
+    fn published(root: &Path, name: &str, granted: bool, lease_id: &str) -> PathBuf {
+        let path = control_dir(root, name);
+        publish_outcome(
+            &path,
+            &LeaseOutcome {
+                granted,
+                status: LeaseStatusSnapshot {
+                    held: true,
+                    lease_id: Some(lease_id.to_string()),
+                    ..LeaseStatusSnapshot::default()
+                },
+                error: None,
+            },
+        );
+        path
+    }
+
+    /// Backdate a directory and its outcome past the grace window so the sweep
+    /// treats it as residue without the test having to wait.
+    fn age_out(dir: &Path) {
+        let stale = std::time::SystemTime::now() - CONTROL_RESIDUE_GRACE * 2;
+        for path in [dir.join(OUTCOME_FILE), dir.to_path_buf()] {
+            if path.exists() {
+                let file = fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .or_else(|_| fs::File::open(&path))
+                    .expect("open for backdating");
+                file.set_modified(stale).expect("backdate");
+            }
+        }
+    }
+
+    #[test]
+    fn sweep_removes_only_aged_out_residue() {
+        let root = tempfile::tempdir().expect("coordinator root");
+        let live = published(root.path(), "live", true, "lease-live");
+        let abandoned = published(root.path(), "abandoned", true, "lease-dead");
+        let starting_up = control_dir(root.path(), "starting-up");
+        age_out(&live);
+        age_out(&abandoned);
+        age_out(&starting_up);
+
+        sweep_abandoned_control_dirs(root.path(), Some("lease-live"));
+
+        assert!(live.is_dir(), "the live control channel must survive");
+        assert!(
+            !abandoned.is_dir(),
+            "a dead holder's aged-out directory is swept"
+        );
+        assert!(
+            !starting_up.is_dir(),
+            "a directory that never published an outcome is residue once aged out"
+        );
+    }
+
+    /// The regression that matters: `current_lease_id` is a snapshot taken
+    /// before the scan, so a claimant that wins the lease during that gap is
+    /// invisible to it. Deleting that holder's directory would strand the
+    /// host-wide lease until its TTL, because the holder watches that
+    /// directory for the release signal.
+    #[test]
+    fn sweep_never_removes_a_freshly_published_control_dir() {
+        let root = tempfile::tempdir().expect("coordinator root");
+        let raced_in = published(root.path(), "raced-in", true, "lease-new");
+        let starting_up = control_dir(root.path(), "starting-up");
+
+        // Snapshot said the lease was free; another claimant took it since.
+        sweep_abandoned_control_dirs(root.path(), None);
+
+        assert!(
+            raced_in.is_dir(),
+            "a holder that published during the snapshot gap must not be swept"
+        );
+        assert!(
+            starting_up.is_dir(),
+            "a holder that has not published yet must not be swept"
+        );
+    }
+
+    #[test]
+    fn hold_refuses_a_control_dir_outside_the_coordinator_runtime() {
+        let outside = tempfile::tempdir().expect("outside dir");
+        let error = ensure_control_dir_is_ours(&outside.path().join("lease-1"))
+            .expect_err("an out-of-tree control dir must be refused");
+        assert!(
+            error.to_string().contains("verify.lease.hold is internal"),
+            "the refusal must name the cause: {error}"
+        );
+        assert!(
+            ensure_control_dir_is_ours(&coordinator_root().join(CONTROL_DIR).join("lease-1"))
+                .is_ok()
+        );
     }
 
     #[test]
