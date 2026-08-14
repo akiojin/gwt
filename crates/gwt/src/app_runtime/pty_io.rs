@@ -47,6 +47,52 @@ fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
     (text, None)
 }
 
+/// Result of a body-once, submit-until-verified delivery. Verification is a
+/// semantic target acknowledgement, never merely a successful PTY write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerifiedPaneSubmitOutcome {
+    Verified { submit_attempts: usize },
+    Unverified { submit_attempts: usize },
+}
+
+/// Write the prompt body once, then retry only its submit terminator until the
+/// injected semantic acknowledgement says the exact target turn started.
+pub(super) fn drive_verified_pane_submit(
+    text: &str,
+    max_submit_attempts: usize,
+    mut write: impl FnMut(&[u8]) -> Result<(), String>,
+    mut settle: impl FnMut(Duration),
+    mut is_verified: impl FnMut() -> Result<bool, String>,
+) -> Result<VerifiedPaneSubmitOutcome, String> {
+    let (body, submit) = split_pane_submit(text);
+    if !body.is_empty() {
+        write(body.as_bytes())?;
+    }
+    let Some(submit) = submit else {
+        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
+    };
+
+    // Give the TUI composer time to consume the body before the first submit.
+    settle(PANE_SUBMIT_SETTLE);
+    for submit_attempts in 1..=max_submit_attempts {
+        if submit_attempts > 1 && is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified {
+                submit_attempts: submit_attempts - 1,
+            });
+        }
+        write(submit.as_bytes())?;
+        // Every submit, including the final attempt, receives a full semantic
+        // ACK grace period before the operation can become Ambiguous.
+        settle(PANE_SUBMIT_SETTLE);
+        if is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts });
+        }
+    }
+    Ok(VerifiedPaneSubmitOutcome::Unverified {
+        submit_attempts: max_submit_attempts,
+    })
+}
+
 /// Write one pane payload as the TUIs expect it: the body first, then the
 /// submit byte on its own once the TUI has settled (SPEC-3431 FR-108c). The
 /// delay runs on a detached thread holding an `Arc` clone of the pane, so the
@@ -56,30 +102,30 @@ pub(super) fn write_pane_input_then_submit(
     text: &str,
 ) -> Result<(), String> {
     let (body, submit) = split_pane_submit(text);
-    if !body.is_empty() {
-        pane.lock()
-            .map_err(|error| error.to_string())
-            .and_then(|pane| {
-                pane.write_input(body.as_bytes())
-                    .map_err(|error| error.to_string())
-            })?;
-    }
     let Some(submit) = submit else {
-        return Ok(());
+        return if body.is_empty() {
+            Ok(())
+        } else {
+            pane.lock()
+                .map_err(|error| error.to_string())?
+                .write_input(body.as_bytes())
+                .map_err(|error| error.to_string())
+        };
     };
+    let pty = pane.lock().map_err(|error| error.to_string())?.shared_pty();
+    let reservation = pty
+        .reserve_input_transaction()
+        .map_err(|error| error.to_string())?;
+    if !body.is_empty() {
+        reservation
+            .write_input(body.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
     let submit = submit.to_string();
-    let pane = Arc::clone(pane);
     thread::spawn(move || {
         thread::sleep(PANE_SUBMIT_SETTLE);
-        match pane.lock() {
-            Ok(pane) => {
-                if let Err(error) = pane.write_input(submit.as_bytes()) {
-                    tracing::warn!(%error, "pane submit byte could not be written");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "pane submit byte skipped: pane lock poisoned");
-            }
+        if let Err(error) = reservation.write_input(submit.as_bytes()) {
+            tracing::warn!(%error, "pane submit byte could not be written");
         }
     });
     Ok(())
@@ -273,7 +319,11 @@ impl AppRuntime {
         drop(pane_guard);
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                guard.insert(id.to_string(), pty);
+                let previous = guard.insert(id.to_string(), Arc::clone(&pty));
+                drop(guard);
+                if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
+                    previous.invalidate_input_generation();
+                }
             }
             Err(_error) => {
                 tracing::warn!(
@@ -290,7 +340,11 @@ impl AppRuntime {
     pub(crate) fn deregister_pty_writer(&self, id: &str) {
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                guard.remove(id);
+                let previous = guard.remove(id);
+                drop(guard);
+                if let Some(previous) = previous {
+                    previous.invalidate_input_generation();
+                }
             }
             Err(_error) => {
                 tracing::warn!(
@@ -803,7 +857,7 @@ impl AppRuntime {
 
 #[cfg(test)]
 mod submit_split_tests {
-    use super::split_pane_submit;
+    use super::{drive_verified_pane_submit, split_pane_submit, VerifiedPaneSubmitOutcome};
 
     /// SPEC-3431 FR-108c: the body and the submit byte must be separable, so
     /// the writer can put the carriage return in its own PTY write. A single
@@ -834,6 +888,97 @@ mod submit_split_tests {
     #[test]
     fn bare_terminator_has_an_empty_body() {
         assert_eq!(split_pane_submit("\r"), ("", Some("\r")));
+    }
+
+    #[test]
+    fn unverified_submit_retries_only_the_carriage_return() {
+        let writes = std::cell::RefCell::new(Vec::new());
+
+        let outcome = drive_verified_pane_submit(
+            "protected body\r",
+            2,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {},
+            || Ok(writes.borrow().len() == 3),
+        )
+        .expect("second submit is verified");
+
+        assert_eq!(*writes.borrow(), ["protected body", "\r", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 2 }
+        );
+    }
+
+    #[test]
+    fn delayed_ack_before_retry_suppresses_the_extra_carriage_return() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let acknowledged = std::cell::Cell::new(false);
+        let settles = std::cell::Cell::new(0_usize);
+
+        let outcome = drive_verified_pane_submit(
+            "protected body\r",
+            2,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {
+                let next = settles.get() + 1;
+                settles.set(next);
+                if next == 2 {
+                    acknowledged.set(true);
+                }
+            },
+            || Ok(acknowledged.get()),
+        )
+        .expect("delayed acknowledgement settles the original submit");
+
+        assert_eq!(*writes.borrow(), ["protected body", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+    }
+
+    #[test]
+    fn final_submit_gets_an_ack_grace_period() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let acknowledged = std::cell::Cell::new(false);
+        let settles = std::cell::Cell::new(0_usize);
+
+        let outcome = drive_verified_pane_submit(
+            "protected body\r",
+            1,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {
+                let next = settles.get() + 1;
+                settles.set(next);
+                if next == 2 {
+                    acknowledged.set(true);
+                }
+            },
+            || Ok(acknowledged.get()),
+        )
+        .expect("final submit acknowledgement is observed during its grace period");
+
+        assert_eq!(*writes.borrow(), ["protected body", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
     }
 }
 

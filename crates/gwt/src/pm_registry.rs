@@ -171,6 +171,324 @@ pub fn pm_prefs_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm.json")
 }
 
+pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("project-state/pm-delivery-receipts.jsonl")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmDeliveryReceiptStatus {
+    Prepared,
+    Verified,
+    Refused,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmDeliveryReceipt {
+    pub operation_id: String,
+    pub recorded_at: String,
+    pub status: PmDeliveryReceiptStatus,
+    pub principal_session_id: String,
+    pub target_window_id: String,
+    pub target_session_id: String,
+    pub body_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmDeliveryPrepareOutcome {
+    Prepared,
+    Existing(PmDeliveryReceiptStatus),
+}
+
+pub fn pm_delivery_prompt_sha256(prompt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(prompt.as_bytes()))
+}
+
+pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Result<String> {
+    if uuid::Uuid::parse_str(operation_id)
+        .ok()
+        .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
+        || body.is_empty()
+        || body.contains(['\r', '\n'])
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PM delivery prompt identity must be one non-empty line",
+        ));
+    }
+    let body_sha256 = pm_delivery_prompt_sha256(body);
+    Ok(format!(
+        "{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
+    ))
+}
+
+pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, String)> {
+    let prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
+    let marker_start = prompt.rfind(" [gwt-delivery:")?;
+    let body = &prompt[..marker_start];
+    let marker = prompt[marker_start..]
+        .strip_prefix(" [gwt-delivery:")?
+        .strip_suffix(']')?;
+    let (operation_id, body_sha256) = marker.split_once(':')?;
+    if uuid::Uuid::parse_str(operation_id)
+        .ok()
+        .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
+        || !is_canonical_sha256(body_sha256)
+        || pm_delivery_prompt_sha256(body) != body_sha256
+    {
+        return None;
+    }
+    Some((operation_id.to_string(), body_sha256.to_string()))
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Discard only a torn final JSONL row. A malformed complete row remains a
+/// hard error so corruption cannot silently erase an accepted operation.
+fn repair_pm_delivery_receipt_tail(path: &Path) -> io::Result<()> {
+    let existing = match fs::read(path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if existing.ends_with(b"\n") {
+        return Ok(());
+    }
+    let row_start = existing
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |position| position + 1);
+    let final_row = &existing[row_start..];
+    if serde_json::from_slice::<PmDeliveryReceipt>(final_row).is_ok() {
+        let mut file = fs::OpenOptions::new().append(true).open(path)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        return sync_parent_directory(path);
+    }
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    file.set_len(row_start as u64)?;
+    file.sync_all()?;
+    sync_parent_directory(path)
+}
+
+fn load_pm_delivery_receipts_unlocked(path: &Path) -> io::Result<Vec<PmDeliveryReceipt>> {
+    repair_pm_delivery_receipt_tail(path)?;
+    match fs::read_to_string(path) {
+        Ok(raw) => raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).map_err(io::Error::other))
+            .collect(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn append_pm_delivery_receipt_unlocked(path: &Path, receipt: &PmDeliveryReceipt) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    repair_pm_delivery_receipt_tail(path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, receipt).map_err(io::Error::other)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    sync_parent_directory(path)
+}
+
+pub fn load_pm_delivery_receipts(path: &Path) -> io::Result<Vec<PmDeliveryReceipt>> {
+    with_pm_prefs_lock(path, || load_pm_delivery_receipts_unlocked(path))
+}
+
+fn validated_pm_delivery_operation<'a>(
+    receipts: &'a [PmDeliveryReceipt],
+    operation_id: &str,
+) -> io::Result<Vec<&'a PmDeliveryReceipt>> {
+    let operation = receipts
+        .iter()
+        .filter(|receipt| receipt.operation_id == operation_id)
+        .collect::<Vec<_>>();
+    let Some(prepared) = operation.first().copied() else {
+        return Ok(operation);
+    };
+    if prepared.status != PmDeliveryReceiptStatus::Prepared {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PM delivery operation does not begin with Prepared",
+        ));
+    }
+    let mut latest = PmDeliveryReceiptStatus::Prepared;
+    for receipt in &operation {
+        if receipt.principal_session_id != prepared.principal_session_id
+            || receipt.target_window_id != prepared.target_window_id
+            || receipt.target_session_id != prepared.target_session_id
+            || receipt.body_sha256 != prepared.body_sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PM delivery operation identity conflicts across durable receipts",
+            ));
+        }
+        let transition_is_valid = match (latest, receipt.status) {
+            (PmDeliveryReceiptStatus::Prepared, PmDeliveryReceiptStatus::Prepared) => true,
+            (PmDeliveryReceiptStatus::Prepared, terminal)
+                if terminal != PmDeliveryReceiptStatus::Prepared =>
+            {
+                true
+            }
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => true,
+            _ => false,
+        };
+        if !transition_is_valid {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PM delivery operation has an invalid durable state transition",
+            ));
+        }
+        latest = receipt.status;
+    }
+    Ok(operation)
+}
+
+pub fn pm_delivery_receipt_for_operation(
+    path: &Path,
+    operation_id: &str,
+) -> io::Result<Option<PmDeliveryReceipt>> {
+    with_pm_prefs_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        Ok(validated_pm_delivery_operation(&receipts, operation_id)?
+            .last()
+            .copied()
+            .cloned())
+    })
+}
+
+pub fn prepare_pm_delivery_receipt(
+    path: &Path,
+    prepared: &PmDeliveryReceipt,
+) -> io::Result<PmDeliveryPrepareOutcome> {
+    if prepared.status != PmDeliveryReceiptStatus::Prepared
+        || uuid::Uuid::parse_str(&prepared.operation_id)
+            .ok()
+            .is_none_or(|operation_id| {
+                operation_id.hyphenated().to_string() != prepared.operation_id
+            })
+        || prepared.principal_session_id.is_empty()
+        || prepared.target_window_id.is_empty()
+        || prepared.target_session_id.is_empty()
+        || !is_canonical_sha256(&prepared.body_sha256)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PM delivery Prepared receipt has an invalid identity",
+        ));
+    }
+    with_pm_prefs_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let existing = validated_pm_delivery_operation(&receipts, &prepared.operation_id)?;
+        if let Some(first) = existing.first() {
+            if first.principal_session_id != prepared.principal_session_id
+                || first.target_window_id != prepared.target_window_id
+                || first.target_session_id != prepared.target_session_id
+                || first.body_sha256 != prepared.body_sha256
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PM delivery operation identity conflicts with its durable receipt",
+                ));
+            }
+            let status = existing
+                .iter()
+                .rev()
+                .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
+                .map_or(PmDeliveryReceiptStatus::Prepared, |receipt| receipt.status);
+            return Ok(PmDeliveryPrepareOutcome::Existing(status));
+        }
+        append_pm_delivery_receipt_unlocked(path, prepared)?;
+        Ok(PmDeliveryPrepareOutcome::Prepared)
+    })
+}
+
+pub fn finish_pm_delivery_receipt(
+    path: &Path,
+    operation_id: &str,
+    target_session_id: &str,
+    body_sha256: &str,
+    status: PmDeliveryReceiptStatus,
+    reason: Option<&str>,
+) -> io::Result<PmDeliveryReceiptStatus> {
+    if status == PmDeliveryReceiptStatus::Prepared {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PM delivery terminal receipt cannot be Prepared",
+        ));
+    }
+    with_pm_prefs_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let operation = validated_pm_delivery_operation(&receipts, operation_id)?;
+        let Some(prepared) = operation.first().copied() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "PM delivery Prepared receipt is missing",
+            ));
+        };
+        if prepared.target_session_id != target_session_id || prepared.body_sha256 != body_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "PM delivery acknowledgement does not match its Prepared receipt",
+            ));
+        }
+        if let Some(existing) = operation
+            .iter()
+            .rev()
+            .copied()
+            .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
+        {
+            match (existing.status, status) {
+                (existing, requested) if existing == requested => return Ok(existing),
+                (PmDeliveryReceiptStatus::Verified, PmDeliveryReceiptStatus::Ambiguous) => {
+                    return Ok(PmDeliveryReceiptStatus::Verified)
+                }
+                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => {}
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "PM delivery already has a different terminal receipt",
+                    ))
+                }
+            }
+        }
+        let terminal = PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            status,
+            principal_session_id: prepared.principal_session_id.clone(),
+            target_window_id: prepared.target_window_id.clone(),
+            target_session_id: prepared.target_session_id.clone(),
+            body_sha256: prepared.body_sha256.clone(),
+            reason: reason.map(str::to_string),
+        };
+        append_pm_delivery_receipt_unlocked(path, &terminal)?;
+        Ok(status)
+    })
+}
+
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
@@ -1014,5 +1332,119 @@ mod tests {
 
         assert_eq!(monitor.active_count(), before);
         assert_eq!(monitor.active_count(), 0);
+    }
+
+    #[test]
+    fn delivery_receipt_is_write_ahead_idempotent_and_body_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join("project-state")
+            .join("pm-delivery-receipts.jsonl");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "report exact status";
+        let prepared = PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: "2026-08-13T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab-1::agent-1".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256(body),
+            reason: None,
+        };
+
+        assert_eq!(
+            prepare_pm_delivery_receipt(&path, &prepared).expect("prepare"),
+            PmDeliveryPrepareOutcome::Prepared
+        );
+        assert_eq!(
+            prepare_pm_delivery_receipt(&path, &prepared).expect("idempotent prepare"),
+            PmDeliveryPrepareOutcome::Existing(PmDeliveryReceiptStatus::Prepared)
+        );
+
+        let mut conflicting = prepared.clone();
+        conflicting.body_sha256 = pm_delivery_prompt_sha256("different body");
+        assert!(prepare_pm_delivery_receipt(&path, &conflicting).is_err());
+
+        assert_eq!(
+            finish_pm_delivery_receipt(
+                &path,
+                operation_id,
+                "agent-session",
+                &prepared.body_sha256,
+                PmDeliveryReceiptStatus::Verified,
+                None,
+            )
+            .expect("verify"),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            prepare_pm_delivery_receipt(&path, &prepared).expect("terminal replay"),
+            PmDeliveryPrepareOutcome::Existing(PmDeliveryReceiptStatus::Verified)
+        );
+        assert!(load_pm_delivery_receipts(&path)
+            .expect("load receipts")
+            .iter()
+            .any(|receipt| receipt.status == PmDeliveryReceiptStatus::Verified));
+        assert!(!fs::read_to_string(path)
+            .expect("receipt file")
+            .contains(body));
+    }
+
+    #[test]
+    fn delivery_receipt_tail_repair_preserves_a_complete_row_without_newline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pm-delivery-receipts.jsonl");
+        let receipt = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a4".to_string(),
+            recorded_at: "2026-08-13T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab-1::agent-1".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            reason: None,
+        };
+        fs::write(
+            &path,
+            serde_json::to_vec(&receipt).expect("serialize receipt"),
+        )
+        .expect("write complete row without newline");
+
+        assert_eq!(
+            load_pm_delivery_receipts(&path).expect("repair complete row"),
+            vec![receipt]
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_rejects_a_terminal_row_with_conflicting_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pm-delivery-receipts.jsonl");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a5";
+        let prepared = PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: "2026-08-13T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab-1::agent-1".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            reason: None,
+        };
+        let mut forged = prepared.clone();
+        forged.status = PmDeliveryReceiptStatus::Verified;
+        forged.target_window_id = "tab-1::agent-2".to_string();
+        let rows = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&prepared).expect("serialize Prepared"),
+            serde_json::to_string(&forged).expect("serialize forged terminal")
+        );
+        fs::write(&path, rows).expect("write forged receipt log");
+
+        let error = prepare_pm_delivery_receipt(&path, &prepared)
+            .expect_err("terminal identity conflict must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

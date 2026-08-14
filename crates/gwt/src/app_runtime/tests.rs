@@ -69,6 +69,7 @@ use super::{
     ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent, WindowRuntime,
     WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
+use crate::embedded_server::AgentPmSendResponder;
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
     AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
@@ -318,6 +319,135 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
     assert!(
         repo.join(".gwt").join("drop-files").exists(),
         "attachment bytes must be staged for a resumed agent window"
+    );
+}
+
+#[test]
+fn deregistering_pty_writer_invalidates_the_removed_generation() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let window_id = "tab-1::agent-1";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let pane = runtime
+        .runtimes
+        .get(window_id)
+        .expect("runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(window_id, &pane);
+    let old_generation = runtime
+        .pty_writers
+        .read()
+        .expect("PTY writer registry")
+        .get(window_id)
+        .cloned()
+        .expect("registered writer");
+
+    runtime.deregister_pty_writer(window_id);
+
+    assert!(
+        old_generation.write_input(b"late submit").is_err(),
+        "a detached PM worker must not write into a deregistered PTY generation"
+    );
+}
+
+#[test]
+fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let window_id = "tab-1::agent-1";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let pane = runtime
+        .runtimes
+        .get(window_id)
+        .expect("runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(window_id, &pane);
+    let old_generation = runtime
+        .pty_writers
+        .read()
+        .expect("PTY writer registry")
+        .get(window_id)
+        .cloned()
+        .expect("registered writer");
+    let _reservation = Arc::clone(&old_generation)
+        .reserve_input_transaction()
+        .expect("reserve protected submit");
+
+    let started = Instant::now();
+    runtime.deregister_pty_writer(window_id);
+
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "registry teardown must not wait for a worker-held reservation"
+    );
+}
+
+#[test]
+fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let pane = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&window_id, &pane);
+    let generation = runtime
+        .pty_writers
+        .read()
+        .expect("PTY writer registry")
+        .get(&window_id)
+        .cloned()
+        .expect("registered generation");
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Idle",
+        "Stop",
+        "session-1",
+    ));
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("PTY process exited".to_string()),
+    );
+
+    assert!(
+        runtime.runtimes.contains_key(&window_id),
+        "the final pane remains available for diagnostics"
+    );
+    assert!(runtime.recoverable_agent_error_windows.contains(&window_id));
+    assert!(!runtime
+        .pty_writers
+        .read()
+        .expect("PTY writer registry")
+        .contains_key(&window_id));
+    assert!(
+        generation.write_input(b"late PM body").is_err(),
+        "a delivery prepared before terminal status must not begin a later physical write"
     );
 }
 
@@ -47260,7 +47390,7 @@ fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
         WindowProcessStatus::Running,
     ));
     persisted.next_z_index = 3;
-    let tab = ProjectTabRuntime {
+    let mut tab = ProjectTabRuntime {
         id: "tab-1".to_string(),
         title: "Repo".to_string(),
         project_root: repo.clone(),
@@ -47269,6 +47399,12 @@ fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
+    assert!(tab
+        .workspace
+        .set_session_id("pm-window", Some("pm-session-live".to_string())));
+    assert!(tab
+        .workspace
+        .set_session_id("other-window", Some("other-session".to_string())));
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let pm_window_id = "tab-1::pm-window".to_string();
@@ -48584,6 +48720,495 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
 /// sessions, stale registrations, and unknown windows are refused with a
 /// typed reply and zero writes; only the live registered PM reaches the
 /// authorized injection path.
+#[test]
+fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643ae";
+    let body = "verify this exact body";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let ack_receipt_path = receipt_path.clone();
+    let ack_body_sha256 = body_sha256.clone();
+    let ack = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let prepared = gwt::pm_registry::load_pm_delivery_receipts(&ack_receipt_path)
+                .unwrap_or_default()
+                .iter()
+                .any(|receipt| {
+                    receipt.operation_id == operation_id
+                        && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+                });
+            if prepared {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Prepared receipt was not committed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(450));
+        gwt::pm_registry::finish_pm_delivery_receipt(
+            &ack_receipt_path,
+            operation_id,
+            "other-session",
+            &ack_body_sha256,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .expect("exact target hook acknowledgement");
+    });
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            &format!("{body}\r"),
+            Some(responder),
+        )
+        .is_empty());
+    let result = result.blocking_recv().expect("terminal delivery result");
+    ack.join().expect("ack thread");
+
+    assert!(matches!(
+        result,
+        BackendEvent::PmMessageSendResult {
+            status,
+            reason: None,
+            ..
+        } if status == "delivered"
+    ));
+    assert_eq!(
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("delivery receipts")
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .map(|receipt| receipt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        ]
+    );
+}
+
+#[test]
+fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643af";
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            "unacknowledged body\r",
+            Some(responder),
+        )
+        .is_empty());
+    let result = result.blocking_recv().expect("terminal delivery result");
+
+    assert!(matches!(
+        result,
+        BackendEvent::PmMessageSendResult {
+            status,
+            reason: Some(reason),
+            ..
+        } if status == "failed"
+            && reason.contains("not verified")
+            && reason.contains("do not retry")
+    ));
+    assert!(gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+        .expect("delivery receipts")
+        .iter()
+        .any(|receipt| {
+            receipt.operation_id == operation_id
+                && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Ambiguous
+        }));
+}
+
+#[test]
+fn authenticated_pm_send_replays_verified_receipt_without_a_live_target() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let target_window = "tab-1::other-window";
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b2";
+    let body = "already verified body";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let prepared = gwt::pm_registry::PmDeliveryReceipt {
+        operation_id: operation_id.to_string(),
+        recorded_at: "2026-08-13T00:00:00Z".to_string(),
+        status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+        principal_session_id: "pm-session-live".to_string(),
+        target_window_id: target_window.to_string(),
+        target_session_id: "other-session".to_string(),
+        body_sha256: body_sha256.clone(),
+        reason: None,
+    };
+    gwt::pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared)
+        .expect("prepare delivered operation");
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        operation_id,
+        "other-session",
+        &body_sha256,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    )
+    .expect("verify delivered operation");
+    runtime.active_agent_sessions.remove(target_window);
+    runtime.deregister_pty_writer(target_window);
+    runtime.runtimes.remove(target_window);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "reconnected-origin".to_string(),
+            grant,
+            operation_id,
+            target_window,
+            &format!("{body}\r"),
+            Some(responder),
+        )
+        .is_empty());
+    assert!(matches!(
+        result.blocking_recv().expect("replayed result"),
+        BackendEvent::PmMessageSendResult {
+            status,
+            reason: None,
+            ..
+        } if status == "delivered"
+    ));
+    assert_eq!(
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("delivery receipts")
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .count(),
+        2,
+        "a response-loss replay must not append or re-inject a Verified operation"
+    );
+}
+
+#[test]
+fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    for window_id in [pm_window_id.as_str(), "tab-1::other-window"] {
+        insert_test_pane_runtime(&mut runtime, window_id);
+        let pane = runtime
+            .runtimes
+            .get(window_id)
+            .expect("runtime")
+            .pane
+            .clone();
+        runtime.register_pty_writer(window_id, &pane);
+    }
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b3";
+    let body = "one prepared delivery";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let (first_responder, first_result, _first_cancellation) = AgentPmSendResponder::channel();
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "first-origin".to_string(),
+            grant.clone(),
+            operation_id,
+            "tab-1::other-window",
+            &format!("{body}\r"),
+            Some(first_responder),
+        )
+        .is_empty());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+        .unwrap_or_default()
+        .iter()
+        .any(|receipt| {
+            receipt.operation_id == operation_id
+                && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+        })
+    {
+        assert!(
+            Instant::now() < deadline,
+            "Prepared receipt was not committed"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (replay_responder, replay_result, _replay_cancellation) = AgentPmSendResponder::channel();
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "replay-origin".to_string(),
+            grant,
+            operation_id,
+            "tab-1::other-window",
+            &format!("{body}\r"),
+            Some(replay_responder),
+        )
+        .is_empty());
+    thread::sleep(Duration::from_millis(450));
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        operation_id,
+        "other-session",
+        &body_sha256,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    )
+    .expect("exact target acknowledgement");
+
+    for result in [first_result, replay_result] {
+        assert!(matches!(
+            result.blocking_recv().expect("terminal result"),
+            BackendEvent::PmMessageSendResult { status, .. } if status == "delivered"
+        ));
+    }
+    let receipts = gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+        .expect("delivery receipts")
+        .into_iter()
+        .filter(|receipt| receipt.operation_id == operation_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared)
+            .count(),
+        1,
+        "same-operation replay must join the durable Prepared operation instead of starting a second body"
+    );
+    assert_eq!(
+        receipts.last().map(|receipt| receipt.status),
+        Some(gwt::pm_registry::PmDeliveryReceiptStatus::Verified)
+    );
+}
+
+#[test]
+fn authenticated_pm_send_refuses_foreign_project_without_a_durable_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+
+    let foreign = temp.path().join("foreign-repo");
+    fs::create_dir_all(&foreign).expect("create foreign repo");
+    init_repo(&foreign);
+    let mut foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign,
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    assert!(foreign_tab
+        .workspace
+        .set_session_id("agent-foreign", Some("foreign-session".to_string())));
+    runtime.tabs.push(foreign_tab);
+    let foreign_window_id = "tab-foreign::agent-foreign";
+    let mut foreign_session = sample_active_agent_session("tab-foreign", foreign_window_id);
+    foreign_session.session_id = "foreign-session".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(foreign_window_id.to_string(), foreign_session);
+    insert_test_pane_runtime(&mut runtime, foreign_window_id);
+    let foreign_pane = runtime
+        .runtimes
+        .get(foreign_window_id)
+        .expect("foreign runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(foreign_window_id, &foreign_pane);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let oversized_operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b1";
+    let (oversized_responder, oversized_result, _oversized_cancellation) =
+        AgentPmSendResponder::channel();
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant.clone(),
+            oversized_operation_id,
+            "tab-1::other-window",
+            &format!("{}\r", "x".repeat(16 * 1024 + 1)),
+            Some(oversized_responder),
+        )
+        .is_empty());
+    assert!(matches!(
+        oversized_result
+            .blocking_recv()
+            .expect("oversized terminal refusal"),
+        BackendEvent::PmMessageSendResult {
+            status,
+            reason: Some(reason),
+            ..
+        } if status == "failed" && reason.contains("byte limit")
+    ));
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b0";
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant,
+            operation_id,
+            foreign_window_id,
+            "must not cross projects\r",
+            Some(responder),
+        )
+        .is_empty());
+    assert!(matches!(
+        result.blocking_recv().expect("terminal refusal"),
+        BackendEvent::PmMessageSendResult {
+            status,
+            reason: Some(reason),
+            ..
+        } if status == "failed" && reason.contains("not an authorized live agent pane")
+    ));
+    assert!(
+        gwt::pm_registry::load_pm_delivery_receipts(
+            &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+        )
+        .expect("delivery receipts")
+        .iter()
+        .all(|receipt| receipt.operation_id != operation_id),
+        "a cross-project refusal must not consume durable receipt storage"
+    );
+}
+
 #[test]
 fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
     let _env_lock = env_test_lock()
