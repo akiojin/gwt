@@ -225,14 +225,19 @@ impl AppRuntime {
         };
 
         match write_result {
-            Ok(()) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::PaneSendResult {
-                    ok: true,
-                    window_id: Some(window_id.to_string()),
-                    error: None,
-                },
-            )],
+            Ok(()) => {
+                if gwt::window_state::is_approval_resolution_input(text) {
+                    self.begin_runtime_approval_resolution(window_id);
+                }
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneSendResult {
+                        ok: true,
+                        window_id: Some(window_id.to_string()),
+                        error: None,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneSendResult {
@@ -293,7 +298,12 @@ impl AppRuntime {
         };
 
         match write_result {
-            Ok(()) => Vec::new(),
+            Ok(()) => {
+                if gwt::window_state::is_approval_resolution_input(data) {
+                    self.begin_runtime_approval_resolution(id);
+                }
+                Vec::new()
+            }
             Err(error) => {
                 self.handle_runtime_status(id.to_string(), WindowProcessStatus::Error, Some(error))
             }

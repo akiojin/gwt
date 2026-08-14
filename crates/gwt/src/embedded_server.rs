@@ -3659,7 +3659,18 @@ fn handle_frontend_message(
         }
     };
 
+    let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
+    let mut resolution_marked = false;
     if let Some(pty) = pty_handle {
+        if approval_resolution {
+            // `EventLoopProxy::send_event` completes the tao channel enqueue
+            // synchronously. Enqueue the causal marker before the PTY write so
+            // provider output cannot overtake it on the event-loop receiver.
+            state
+                .proxy
+                .send(UserEvent::RuntimeApprovalResolutionStarted { id: id.clone() });
+            resolution_marked = true;
+        }
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
@@ -3675,14 +3686,20 @@ fn handle_frontend_message(
                 return;
             }
             Err(_error) => {
+                if resolution_marked {
+                    state
+                        .proxy
+                        .send(UserEvent::RuntimeApprovalResolutionCancelled { id: id.clone() });
+                }
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "fast_path_write_err",
                     client_id = %client_id,
                     seq,
                     window_id = %id,
-                    "fast-path PTY write failed; forwarding to event loop for error handling"
+                    "fast-path PTY write failed; dropping input to preserve the generation fence"
                 );
+                return;
             }
         }
     } else {
@@ -3696,13 +3713,7 @@ fn handle_frontend_message(
         );
     }
 
-    state.proxy.send(UserEvent::Frontend {
-        client_id: client_id.to_string(),
-        event: FrontendEvent::TerminalInput {
-            id: id.clone(),
-            data,
-        },
-    });
+    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data);
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_dispatch",
@@ -3712,6 +3723,18 @@ fn handle_frontend_message(
         ok = true,
         "terminal_input forwarded to event loop proxy (fallback)"
     );
+}
+
+fn forward_terminal_input_to_event_loop(
+    state: &ServerState,
+    client_id: &str,
+    id: String,
+    data: String,
+) {
+    state.proxy.send(UserEvent::Frontend {
+        client_id: client_id.to_string(),
+        event: FrontendEvent::TerminalInput { id, data },
+    });
 }
 
 #[cfg(test)]
@@ -6518,6 +6541,119 @@ mod tests {
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalidated_fast_path_generation_cancels_resolution_without_fallback_input() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "stale-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running stale pane");
+        let stale_generation = pane.shared_pty();
+        stale_generation.invalidate_input_generation();
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::agent-1".to_string(), stale_generation);
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "1\r".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                UserEvent::RuntimeApprovalResolutionStarted { id: started },
+                UserEvent::RuntimeApprovalResolutionCancelled { id: cancelled },
+            ] if started == "tab-1::agent-1" && cancelled == "tab-1::agent-1"
+        ));
+        assert!(recorded.iter().all(|event| !matches!(
+            event,
+            UserEvent::Frontend {
+                event: FrontendEvent::TerminalInput { .. },
+                ..
+            }
+        )));
+        drop(recorded);
+        drop(pane);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_frontend_message_fast_path_marks_submit_before_write_and_ignores_navigation() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "test-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running test pane");
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::agent-1".to_string(), pane.shared_pty());
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "1\r".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(1),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "\u{1b}[A".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(2),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "x".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            recorded.as_slice(),
+            [UserEvent::RuntimeApprovalResolutionStarted { id }]
+                if id == "tab-1::agent-1"
+        ));
+        drop(recorded);
+        drop(pane);
     }
 
     fn terminal_output(pane: &str, data: &str) -> BackendEvent {

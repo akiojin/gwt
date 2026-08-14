@@ -7,6 +7,7 @@ use crate::WindowProcessStatus;
 pub const RUNTIME_OUTPUT_CHANNEL: &str = "runtime_output";
 pub const RUNTIME_STATUS_CHANNEL: &str = "runtime_status";
 pub const RUNTIME_HOOK_CHANNEL: &str = "runtime_hook";
+pub const RUNTIME_APPROVAL_OVERLAY_CHANNEL: &str = "runtime_approval_overlay";
 pub const ISSUE_MONITOR_CHANNEL: &str = "issue_monitor";
 pub const ISSUE_MONITOR_CONTROL_CHANNEL: &str = "issue_monitor_control";
 pub const ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR: &str =
@@ -60,6 +61,10 @@ pub enum RuntimeDaemonEvent {
     Hook {
         event: crate::RuntimeHookEvent,
     },
+    ApprovalOverlay {
+        id: String,
+        waiting: bool,
+    },
     IssueMonitor {
         event: Value,
     },
@@ -84,6 +89,13 @@ struct RuntimeStatusPayload {
 struct RuntimeHookPayload {
     source_pid: u32,
     event: crate::RuntimeHookEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeApprovalOverlayPayload {
+    source_pid: u32,
+    id: String,
+    waiting: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +134,15 @@ pub fn runtime_hook_payload(event: &crate::RuntimeHookEvent, source_pid: u32) ->
     event.continuation_readiness_nonce = None;
     serde_json::to_value(RuntimeHookPayload { source_pid, event })
         .expect("runtime hook payload serializes")
+}
+
+pub fn runtime_approval_overlay_payload(id: &str, waiting: bool, source_pid: u32) -> Value {
+    serde_json::to_value(RuntimeApprovalOverlayPayload {
+        source_pid,
+        id: id.to_string(),
+        waiting,
+    })
+    .expect("runtime approval overlay payload serializes")
 }
 
 pub fn issue_monitor_payload(event: &str, payload: Value, source_pid: u32) -> Value {
@@ -172,6 +193,16 @@ pub fn decode_runtime_daemon_event(
                 event: payload.event,
             })
         }
+        RUNTIME_APPROVAL_OVERLAY_CHANNEL => {
+            let payload: RuntimeApprovalOverlayPayload = serde_json::from_value(payload).ok()?;
+            if payload.source_pid == current_pid {
+                return None;
+            }
+            Some(RuntimeDaemonEvent::ApprovalOverlay {
+                id: payload.id,
+                waiting: payload.waiting,
+            })
+        }
         ISSUE_MONITOR_CHANNEL => {
             let payload: IssueMonitorPayload = serde_json::from_value(payload).ok()?;
             if payload.source_pid == current_pid {
@@ -191,9 +222,10 @@ pub fn decode_runtime_daemon_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_runtime_daemon_event, issue_monitor_payload, runtime_hook_payload,
-        runtime_output_payload, runtime_status_payload, RuntimeDaemonEvent, ISSUE_MONITOR_CHANNEL,
-        RUNTIME_HOOK_CHANNEL, RUNTIME_OUTPUT_CHANNEL, RUNTIME_STATUS_CHANNEL,
+        decode_runtime_daemon_event, issue_monitor_payload, runtime_approval_overlay_payload,
+        runtime_hook_payload, runtime_output_payload, runtime_status_payload, RuntimeDaemonEvent,
+        ISSUE_MONITOR_CHANNEL, RUNTIME_APPROVAL_OVERLAY_CHANNEL, RUNTIME_HOOK_CHANNEL,
+        RUNTIME_OUTPUT_CHANNEL, RUNTIME_STATUS_CHANNEL,
     };
     use crate::{RuntimeHookEvent, RuntimeHookEventKind, WindowProcessStatus};
 
@@ -235,6 +267,27 @@ mod tests {
             decode_runtime_daemon_event(RUNTIME_STATUS_CHANNEL, payload, 42),
             None
         );
+    }
+
+    #[test]
+    fn runtime_approval_overlay_payload_is_sanitized_and_ignores_same_process() {
+        let payload = runtime_approval_overlay_payload("tab-1::agent-1", true, 42);
+        let serialized = serde_json::to_string(&payload).expect("serialize overlay payload");
+
+        assert_eq!(
+            decode_runtime_daemon_event(RUNTIME_APPROVAL_OVERLAY_CHANNEL, payload.clone(), 99,),
+            Some(RuntimeDaemonEvent::ApprovalOverlay {
+                id: "tab-1::agent-1".to_string(),
+                waiting: true,
+            })
+        );
+        assert_eq!(
+            decode_runtime_daemon_event(RUNTIME_APPROVAL_OVERLAY_CHANNEL, payload, 42),
+            None
+        );
+        assert!(!serialized.contains("fingerprint"));
+        assert!(!serialized.contains("screen"));
+        assert!(!serialized.contains("prompt"));
     }
 
     #[test]

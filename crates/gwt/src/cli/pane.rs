@@ -1199,6 +1199,16 @@ mod tests {
     }
 
     #[test]
+    fn render_pane_list_projects_approval_wait_as_waiting() {
+        let mut windows = vec![window("tab-1::agent-1", WindowPreset::Agent, Some("codex"))];
+        windows[0].status = WindowState::Waiting;
+
+        let rendered = render_pane_list(&windows);
+
+        assert!(rendered.contains("tab-1::agent-1\twaiting\tcodex"));
+    }
+
+    #[test]
     fn workspace_windows_are_scoped_to_project_root() {
         let value = serde_json::json!({
             "kind": "workspace_state",

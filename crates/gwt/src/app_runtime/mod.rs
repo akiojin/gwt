@@ -724,6 +724,14 @@ fn build_ai_summary_inputs(project_root: &Path, cap: usize) -> Vec<gwt_ai::WorkS
     inputs
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ApprovalPromptLatch {
+    pub(crate) active_fingerprint: Option<u64>,
+    pub(crate) resolving_fingerprint: Option<u64>,
+    pub(crate) resolution_started: bool,
+    pub(crate) pending_settle_token: Option<u64>,
+}
+
 pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
@@ -872,6 +880,12 @@ pub struct AppRuntime {
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
+    /// Live Agent panes whose rendered provider UI is blocked on a human tool
+    /// approval. Runtime-only and never persisted. A remote daemon overlay has
+    /// no fingerprint; a locally classified prompt records only its u64
+    /// identity, never screen text.
+    pub(crate) window_approval_waiting: HashMap<String, ApprovalPromptLatch>,
+    pub(crate) approval_settle_epoch: u64,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
     /// SPEC-3431 FR-068: when each agent window last showed activity, so the
     /// heartbeat published to the Issue Monitor can be throttled instead of
@@ -1913,6 +1927,8 @@ impl AppRuntime {
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
+            window_approval_waiting: HashMap::new(),
+            approval_settle_epoch: 0,
             recoverable_agent_error_windows: HashSet::new(),
             last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
@@ -2498,7 +2514,7 @@ impl AppRuntime {
         self.persist_dispatcher
             .flush_workspace_durable(
                 gwt::workspace_state_path(&tab.project_root),
-                tab.workspace.persistable_state(),
+                self.persistable_workspace_state(tab),
             )
             .map_err(|error| {
                 gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
@@ -6205,24 +6221,68 @@ impl AppRuntime {
     }
 
     pub(crate) fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
-        let pty_state = self
-            .window_pty_statuses
-            .get(window_id)
-            .copied()
-            .or_else(|| {
-                let address = self.window_lookup.get(window_id)?;
-                let tab = self.tab(&address.tab_id)?;
-                let window = tab.workspace.window(&address.raw_id)?;
-                Some(window.status)
-            })?;
-        let hook_state = self.window_hook_states.get(window_id).copied();
+        let base = self.base_window_status(window_id)?;
         let preset = self.window_preset(window_id)?;
+        Some(
+            if self.window_approval_waiting.contains_key(window_id)
+                && gwt::window_state::uses_agent_hook_state(preset)
+                && !matches!(
+                    base,
+                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                )
+            {
+                WindowProcessStatus::Waiting
+            } else {
+                base
+            },
+        )
+    }
+
+    fn base_window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
+        let preset = self.window_preset(window_id)?;
+        let pty_state = if preset.requires_process() {
+            self.window_pty_statuses
+                .get(window_id)
+                .copied()
+                .or_else(|| {
+                    let address = self.window_lookup.get(window_id)?;
+                    let tab = self.tab(&address.tab_id)?;
+                    Some(tab.workspace.window(&address.raw_id)?.status)
+                })?
+        } else {
+            self.window_pty_statuses
+                .get(window_id)
+                .copied()
+                .or_else(|| {
+                    let address = self.window_lookup.get(window_id)?;
+                    let tab = self.tab(&address.tab_id)?;
+                    let window = tab.workspace.window(&address.raw_id)?;
+                    Some(window.status)
+                })?
+        };
+        let hook_state = self.window_hook_states.get(window_id).copied();
         Some(gwt::window_state::compose_window_state_with_active_session(
             pty_state,
             preset,
             hook_state,
             self.active_agent_sessions.contains_key(window_id),
         ))
+    }
+
+    fn persistable_workspace_state(
+        &self,
+        tab: &ProjectTabRuntime,
+    ) -> gwt::PersistedWindowCanvasState {
+        let mut state = tab.workspace.persistable_state();
+        for window in &mut state.windows {
+            let window_id = combined_window_id(&tab.id, &window.id);
+            if self.window_approval_waiting.contains_key(&window_id) {
+                if let Some(base) = self.base_window_status(&window_id) {
+                    window.status = base;
+                }
+            }
+        }
+        state
     }
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
@@ -6327,6 +6387,7 @@ impl AppRuntime {
             }
         }
         self.window_hook_states.clear();
+        self.window_approval_waiting.clear();
         self.recoverable_agent_error_windows.clear();
     }
 
@@ -6346,18 +6407,21 @@ impl AppRuntime {
     }
 
     fn recompute_window_state(&mut self, window_id: &str) -> Option<WindowProcessStatus> {
-        let pty_state = self
-            .window_pty_statuses
-            .get(window_id)
-            .copied()
-            .or_else(|| self.window_status(window_id))?;
-        let hook_state = self.window_hook_states.get(window_id).copied();
         let preset = self.window_preset(window_id)?;
-        let composed = gwt::window_state::compose_window_state_with_active_session(
+        let pty_state = if preset.requires_process() {
+            self.window_pty_statuses.get(window_id).copied()?
+        } else {
+            let address = self.window_lookup.get(window_id)?;
+            let tab = self.tab(&address.tab_id)?;
+            tab.workspace.window(&address.raw_id)?.status
+        };
+        let hook_state = self.window_hook_states.get(window_id).copied();
+        let composed = gwt::window_state::compose_window_state_with_approval_wait(
             pty_state,
             preset,
             hook_state,
             self.active_agent_sessions.contains_key(window_id),
+            self.window_approval_waiting.contains_key(window_id),
         );
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
@@ -6370,6 +6434,7 @@ impl AppRuntime {
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
         self.window_hook_states.remove(window_id);
+        self.clear_runtime_approval_latch_without_status(window_id, true);
         self.recoverable_agent_error_windows.remove(window_id);
         self.board_all_view_windows.remove(window_id);
     }
@@ -6474,7 +6539,7 @@ impl AppRuntime {
                 .map(|tab| {
                     (
                         workspace_state_path(&tab.project_root),
-                        tab.workspace.persistable_state(),
+                        self.persistable_workspace_state(tab),
                     )
                 })
                 .collect(),

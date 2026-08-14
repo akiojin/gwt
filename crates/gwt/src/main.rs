@@ -846,6 +846,7 @@ fn daemon_subscriber_channels() -> Vec<String> {
         gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL.to_string(),
         gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL.to_string(),
         gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL.to_string(),
+        gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
         gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
     ]
 }
@@ -877,6 +878,9 @@ fn daemon_broadcast_user_event(
         }
         gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } => {
             Some(UserEvent::DaemonRuntimeHook(event))
+        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::ApprovalOverlay { id, waiting } => {
+            Some(UserEvent::DaemonRuntimeApprovalOverlay { id, waiting })
         }
         gwt::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
             issue_monitor_daemon_user_event(event, project_root)
@@ -1052,6 +1056,19 @@ enum UserEvent {
         id: String,
         data: Vec<u8>,
     },
+    /// A submit-terminated choice or standalone Escape is about to be written
+    /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
+    /// mirror only this sanitized causal boundary back to the event loop.
+    RuntimeApprovalResolutionStarted {
+        id: String,
+    },
+    RuntimeApprovalResolutionCancelled {
+        id: String,
+    },
+    RuntimeApprovalSettle {
+        id: String,
+        token: u64,
+    },
     DaemonRuntimeOutput {
         id: String,
         data: Vec<u8>,
@@ -1114,6 +1131,10 @@ enum UserEvent {
     },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
+    DaemonRuntimeApprovalOverlay {
+        id: String,
+        waiting: bool,
+    },
     IssueMonitorLaunchRequest {
         project_root: PathBuf,
         issue_number: u64,
@@ -1409,6 +1430,9 @@ mod tests {
         assert!(channels
             .iter()
             .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL));
+        assert!(channels.iter().any(|channel| {
+            channel == gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL
+        }));
     }
 
     #[cfg(unix)]
@@ -1437,6 +1461,11 @@ mod tests {
             occurred_at: "2026-05-10T00:00:00Z".to_string(),
         };
         let hook_payload = gwt::runtime_daemon_events::runtime_hook_payload(&hook_event, 42);
+        let approval_payload = gwt::runtime_daemon_events::runtime_approval_overlay_payload(
+            "tab-1::agent-1",
+            true,
+            42,
+        );
 
         match super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
@@ -1474,10 +1503,29 @@ mod tests {
             }
             other => panic!("unexpected runtime hook event: {other:?}"),
         }
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL,
+            approval_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeApprovalOverlay { id, waiting }) => {
+                assert_eq!(id, "tab-1::agent-1");
+                assert!(waiting);
+            }
+            other => panic!("unexpected runtime approval overlay event: {other:?}"),
+        }
 
         assert!(super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
             output_payload,
+            project_root,
+            42,
+        )
+        .is_none());
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL,
+            approval_payload,
             project_root,
             42,
         )
@@ -2731,6 +2779,8 @@ mod tests {
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
+            window_approval_waiting: std::collections::HashMap::new(),
+            approval_settle_epoch: 0,
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
@@ -8224,6 +8274,15 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_runtime_output(id, data);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
+                app.begin_runtime_approval_resolution(&id);
+            }
+            Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
+                app.cancel_runtime_approval_resolution(&id);
+            }
+            Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
+                clients.dispatch(app.handle_runtime_approval_settle(&id, token));
+            }
             Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data }) => {
                 let events = app.handle_daemon_runtime_output(id, data);
                 clients.dispatch(events);
@@ -8235,6 +8294,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {
                 let events = app.handle_daemon_runtime_status(id, status, detail);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::DaemonRuntimeApprovalOverlay { id, waiting }) => {
+                clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
