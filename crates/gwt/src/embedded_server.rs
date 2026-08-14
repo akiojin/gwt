@@ -3,7 +3,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU16,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, AtomicU8, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -66,6 +69,10 @@ pub(super) const AGENT_AUTHORITY_UNAVAILABLE_CLOSE: ClientCloseFrame = ClientClo
 /// reaches the cap. SPEC-1942 US-14 follow-up review: previous unbounded Vec
 /// would grow without limit in long-running browser-server sessions.
 const ACCESS_LOG_RING_CAPACITY: usize = 1024;
+const AGENT_PM_SEND_ACCEPTANCE_DEADLINE: Duration = Duration::from_secs(5);
+const AGENT_PM_TERMINAL_SEND_DEADLINE: Duration = Duration::from_secs(1);
+const AGENT_PM_TARGET_REFUSAL: &str =
+    "pm.message.send refused: target is not an authorized live agent pane";
 
 /// One captured HTTP / WebSocket access event. Emitted both as
 /// `tracing::info!(target: "gwt_access", ...)` (or `debug!` for `/healthz`)
@@ -771,6 +778,12 @@ pub(crate) enum AgentFrontendRequest {
     SendInput {
         text: String,
     },
+    PmSendInput {
+        operation_id: String,
+        window_id: String,
+        text: String,
+        responder: Option<AgentPmSendResponder>,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
@@ -783,13 +796,19 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::SendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
             }
+            Self::PmSendInput { .. } => {
+                formatter.write_str("AgentFrontendRequest::PmSendInput(<redacted>)")
+            }
         }
     }
 }
 
 impl AgentFrontendRequest {
     pub(crate) fn mutates_host_state(&self) -> bool {
-        matches!(self, Self::CloseWindow { .. } | Self::SendInput { .. })
+        matches!(
+            self,
+            Self::CloseWindow { .. } | Self::SendInput { .. } | Self::PmSendInput { .. }
+        )
     }
 
     pub(crate) fn requires_producing_authority(&self) -> bool {
@@ -1044,6 +1063,18 @@ struct AgentCapabilityRegistryState {
     token_by_project_session: HashMap<(PathBuf, String), String>,
     closing_by_ticket: HashMap<String, ClosingAgentCapability>,
     closing_ticket_by_project_session: HashMap<(PathBuf, String), String>,
+    manual_handoff_reservations: HashMap<String, ManualExecutionHandoffState>,
+}
+
+struct ManualExecutionHandoffState {
+    binding: gwt_agent::SessionExecutionBinding,
+    suspended: Option<SuspendedManualExecutionCapability>,
+}
+
+struct SuspendedManualExecutionCapability {
+    token: String,
+    principal: AgentSessionPrincipal,
+    principal_key: (PathBuf, String),
 }
 
 struct ClosingAgentCapability {
@@ -1069,12 +1100,133 @@ impl AgentSelfCloseCapabilityTicket {
     }
 }
 
+/// Opaque process-local fence held while the coordinator settles one exact
+/// manual-launch predecessor. It contains no durable or bearer authority.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ManualExecutionHandoffReservation {
+    id: String,
+    /// A committed stop fence may be claimed by the immediate successor
+    /// preparation. Failed replay must retain that fence instead of reopening
+    /// the predecessor capability issuance path.
+    inherited_committed_fence: bool,
+}
+
+impl std::fmt::Debug for ManualExecutionHandoffReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ManualExecutionHandoffReservation(<redacted>)")
+    }
+}
+
 /// One direct, origin-socket response channel for a correlated agent
 /// self-close. It is deliberately absent from the shared [`ClientHub`], so an
 /// acceptance can neither be broadcast nor replayed to another connection.
 #[derive(Clone)]
 pub(crate) struct AgentSelfCloseResponder {
     sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseDirectAcceptance>>>>,
+}
+
+/// Direct origin-socket response channel for one privileged PM send.
+/// Delivery results never enter the ambient browser/client event stream.
+#[derive(Clone)]
+pub(crate) struct AgentPmSendResponder {
+    sender: Arc<Mutex<Option<oneshot::Sender<BackendEvent>>>>,
+    mutation_state: Arc<AtomicU8>,
+    deadline: Instant,
+}
+
+pub(crate) struct AgentPmSendCancellation {
+    mutation_state: Arc<AtomicU8>,
+}
+
+const AGENT_PM_MUTATION_PENDING: u8 = 0;
+const AGENT_PM_MUTATION_COMMITTED: u8 = 1;
+const AGENT_PM_MUTATION_CANCELLED: u8 = 2;
+
+impl AgentPmSendCancellation {
+    /// Cancel a mutation that has not crossed its physical-I/O commit point.
+    /// Returns `true` when input was already committed, so callers must report
+    /// an ambiguous outcome rather than a safe refusal.
+    pub(crate) fn cancel(&self) -> bool {
+        match self.mutation_state.compare_exchange(
+            AGENT_PM_MUTATION_PENDING,
+            AGENT_PM_MUTATION_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => false,
+            Err(state) => state == AGENT_PM_MUTATION_COMMITTED,
+        }
+    }
+}
+
+impl Drop for AgentPmSendCancellation {
+    fn drop(&mut self) {
+        let _ = self.cancel();
+    }
+}
+
+impl std::fmt::Debug for AgentPmSendResponder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentPmSendResponder(<redacted>)")
+    }
+}
+
+impl AgentPmSendResponder {
+    pub(crate) fn channel() -> (
+        Self,
+        oneshot::Receiver<BackendEvent>,
+        AgentPmSendCancellation,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        let mutation_state = Arc::new(AtomicU8::new(AGENT_PM_MUTATION_PENDING));
+        let responder = Self {
+            sender: Arc::new(Mutex::new(Some(sender))),
+            mutation_state: Arc::clone(&mutation_state),
+            deadline: Instant::now() + AGENT_PM_SEND_ACCEPTANCE_DEADLINE,
+        };
+        (
+            responder,
+            receiver,
+            AgentPmSendCancellation { mutation_state },
+        )
+    }
+
+    pub(crate) fn mutation_is_current(&self) -> bool {
+        self.mutation_state.load(Ordering::Acquire) != AGENT_PM_MUTATION_CANCELLED
+            && Instant::now() < self.deadline
+    }
+
+    pub(crate) fn try_commit_mutation(&self) -> bool {
+        if Instant::now() >= self.deadline {
+            return false;
+        }
+        match self.mutation_state.compare_exchange(
+            AGENT_PM_MUTATION_PENDING,
+            AGENT_PM_MUTATION_COMMITTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == AGENT_PM_MUTATION_COMMITTED,
+        }
+    }
+
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn send(&self, event: BackendEvent) -> Result<(), BackendEvent> {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(sender) = sender else {
+            return Err(event);
+        };
+        sender.send(event)
+    }
 }
 
 impl std::fmt::Debug for AgentSelfCloseResponder {
@@ -1232,6 +1384,17 @@ impl AgentCapabilityRegistry {
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.manual_handoff_reservations.values().any(|reserved| {
+            reserved
+                .suspended
+                .as_ref()
+                .is_some_and(|suspended| suspended.principal_key == principal_key)
+                || principal
+                    .active_execution_binding()
+                    .is_some_and(|binding| reserved.binding == *binding)
+        }) {
+            return Err("agent capability is reserved for manual execution handoff".to_string());
+        }
         if state
             .closing_ticket_by_project_session
             .contains_key(&principal_key)
@@ -1259,6 +1422,188 @@ impl AgentCapabilityRegistry {
         }
         state.principals_by_token.insert(token.clone(), principal);
         Ok(token)
+    }
+
+    fn reserve_manual_execution_handoff(
+        &self,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .principals_by_token
+            .values()
+            .any(|principal| principal.active_execution_binding() == Some(expected_binding))
+        {
+            return Err(
+                "manual execution handoff refuses an active predecessor capability".to_string(),
+            );
+        }
+        if let Some((id, reserved)) = state
+            .manual_handoff_reservations
+            .iter()
+            .find(|(_, reserved)| reserved.binding == *expected_binding)
+        {
+            if reserved.suspended.is_some() {
+                return Err("manual execution handoff is already reserved".to_string());
+            }
+            return Ok(ManualExecutionHandoffReservation {
+                id: id.clone(),
+                inherited_committed_fence: true,
+            });
+        }
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: None,
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn begin_manual_execution_handoff(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("manual execution handoff is already reserved".to_string());
+        }
+        let issued_token = state
+            .principals_by_token
+            .keys()
+            .find(|candidate| constant_time_token_eq(token, candidate))
+            .cloned()
+            .ok_or_else(|| "exact holder capability is missing or no longer current".to_string())?;
+        let principal = state
+            .principals_by_token
+            .get(&issued_token)
+            .cloned()
+            .ok_or_else(|| "exact holder capability is missing or no longer current".to_string())?;
+        if principal.active_execution_binding() != Some(expected_binding) {
+            return Err("exact holder capability binding changed".to_string());
+        }
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if !state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&issued_token, current))
+        {
+            return Err("exact holder capability is missing or no longer current".to_string());
+        }
+        state.principals_by_token.remove(&issued_token);
+        state.token_by_project_session.remove(&principal_key);
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: Some(SuspendedManualExecutionCapability {
+                    token: issued_token,
+                    principal,
+                    principal_key,
+                }),
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn release_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .manual_handoff_reservations
+            .remove(&reservation.id)
+            .is_some()
+    }
+
+    fn rollback_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reservation.inherited_committed_fence {
+            return state
+                .manual_handoff_reservations
+                .get(&reservation.id)
+                .is_some_and(|handoff| handoff.suspended.is_none());
+        }
+        let Some(mut handoff) = state.manual_handoff_reservations.remove(&reservation.id) else {
+            return false;
+        };
+        let Some(suspended) = handoff.suspended.take() else {
+            return true;
+        };
+        if state.principals_by_token.contains_key(&suspended.token)
+            || state
+                .token_by_project_session
+                .contains_key(&suspended.principal_key)
+        {
+            handoff.suspended = Some(suspended);
+            state
+                .manual_handoff_reservations
+                .insert(reservation.id.clone(), handoff);
+            return false;
+        }
+        state
+            .token_by_project_session
+            .insert(suspended.principal_key, suspended.token.clone());
+        state
+            .principals_by_token
+            .insert(suspended.token, suspended.principal);
+        true
+    }
+
+    fn commit_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(handoff) = state.manual_handoff_reservations.get_mut(&reservation.id) else {
+            return false;
+        };
+        handoff.suspended = None;
+        true
     }
 
     fn promote_prepared(
@@ -1317,6 +1662,13 @@ impl AgentCapabilityRegistry {
             .is_some_and(|current| constant_time_token_eq(&issued_token, current))
         {
             return Err("agent capability is missing or no longer current".to_string());
+        }
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("agent capability is reserved for manual execution handoff".to_string());
         }
         match &principal.execution_authority {
             AgentExecutionAuthority::Inspection if allow_inspection => {
@@ -1535,6 +1887,17 @@ impl AgentCapabilityRegistry {
         Some(dispatch())
     }
 
+    /// Commit one mutation while this exact grant remains current. The
+    /// registry lock covers only the caller's non-blocking commit CAS and is
+    /// released before any PTY I/O.
+    fn commit_mutation_if_current(
+        &self,
+        grant: &AgentCapabilityGrant,
+        commit: impl FnOnce() -> bool,
+    ) -> bool {
+        self.with_current_grant(grant, commit).unwrap_or(false)
+    }
+
     fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         let state = self
             .inner
@@ -1748,12 +2111,60 @@ impl AgentCapabilityIssuer {
             && grant.principal().active_execution_binding() == Some(expected_binding)
     }
 
+    pub(crate) fn reserve_manual_execution_handoff(
+        &self,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .reserve_manual_execution_handoff(expected_binding)
+    }
+
+    pub(crate) fn begin_manual_execution_handoff(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .begin_manual_execution_handoff(token, expected_binding)
+    }
+
+    pub(crate) fn release_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.release_manual_execution_handoff(reservation)
+    }
+
+    pub(crate) fn rollback_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.rollback_manual_execution_handoff(reservation)
+    }
+
+    pub(crate) fn commit_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.commit_manual_execution_handoff(reservation)
+    }
+
     pub(crate) fn revoke_token(&self, token: &str) -> bool {
         self.registry.revoke_token(token)
     }
 
     pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         self.registry.grant_is_current(grant)
+    }
+
+    /// Linearize one operation commit against capability rotation/revocation
+    /// without carrying the global registry lock into physical I/O.
+    pub(crate) fn commit_mutation_if_current(
+        &self,
+        grant: &AgentCapabilityGrant,
+        commit: impl FnOnce() -> bool,
+    ) -> bool {
+        self.registry.commit_mutation_if_current(grant, commit)
     }
 
     pub(crate) fn durable_authority(&self, grant: &AgentCapabilityGrant) -> AgentDurableAuthority {
@@ -2821,6 +3232,20 @@ impl AgentPaneSessionScope {
             {
                 Some(AgentFrontendRequest::SendInput { text })
             }
+            FrontendEvent::PmPaneSendInput {
+                operation_id,
+                window_id,
+                text,
+            } if Uuid::parse_str(&operation_id)
+                .is_ok_and(|parsed| parsed.hyphenated().to_string() == operation_id) =>
+            {
+                Some(AgentFrontendRequest::PmSendInput {
+                    operation_id,
+                    window_id,
+                    text,
+                    responder: None,
+                })
+            }
             _ => None,
         }
     }
@@ -2923,6 +3348,10 @@ enum ScopedFrontendRequest {
         grant: AgentCapabilityGrant,
         request: AgentFrontendRequest,
     },
+    AgentPmRefusal {
+        operation_id: String,
+        window_id: String,
+    },
 }
 
 impl ClientSessionScope {
@@ -2943,6 +3372,21 @@ impl ClientSessionScope {
         match self {
             Self::Browser => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
+                if let FrontendEvent::PmPaneSendInput {
+                    operation_id,
+                    window_id,
+                    ..
+                } = &event
+                {
+                    let canonical_operation_id = Uuid::parse_str(operation_id)
+                        .is_ok_and(|parsed| parsed.hyphenated().to_string() == *operation_id);
+                    if !canonical_operation_id {
+                        return Some(ScopedFrontendRequest::AgentPmRefusal {
+                            operation_id: operation_id.clone(),
+                            window_id: window_id.clone(),
+                        });
+                    }
+                }
                 scope
                     .filter_inbound(event)
                     .map(|request| ScopedFrontendRequest::Agent {
@@ -3009,6 +3453,66 @@ async fn send_agent_self_close_acceptance<S>(
     // result. If this future is cancelled while awaiting the sink, Rust drops
     // the owned acceptance and runs the same finalizer.
     drop(acceptance);
+}
+
+async fn send_agent_pm_terminal_result<S>(
+    sender: &mut S,
+    event: BackendEvent,
+    deadline_after: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match serde_json::to_string(&event) {
+        Ok(payload) => {
+            let _ =
+                tokio::time::timeout(deadline_after, sender.send(Message::Text(payload.into())))
+                    .await;
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize direct PM message result");
+        }
+    }
+}
+
+fn correlate_agent_pm_terminal_result(
+    operation_id: String,
+    requested_window_id: String,
+    event: BackendEvent,
+) -> BackendEvent {
+    match event {
+        BackendEvent::PmMessageSendResult {
+            operation_id: result_operation_id,
+            status,
+            window_id,
+            reason,
+        } if result_operation_id == operation_id
+            && window_id
+                .as_deref()
+                .is_none_or(|window_id| window_id == requested_window_id) =>
+        {
+            BackendEvent::PmMessageSendResult {
+                operation_id,
+                status,
+                window_id: Some(requested_window_id),
+                reason,
+            }
+        }
+        _ => BackendEvent::PmMessageSendResult {
+            operation_id,
+            status: "failed".to_string(),
+            window_id: Some(requested_window_id),
+            reason: Some("PM delivery returned a mismatched terminal result".to_string()),
+        },
+    }
+}
+
+fn opaque_agent_pm_target_refusal(operation_id: String, window_id: String) -> BackendEvent {
+    BackendEvent::PmMessageSendResult {
+        operation_id,
+        status: "failed".to_string(),
+        window_id: Some(window_id),
+        reason: Some(AGENT_PM_TARGET_REFUSAL.to_string()),
+    }
 }
 
 async fn send_agent_fence_close<S>(sender: &mut S, close_frame: ClientCloseFrame)
@@ -3105,6 +3609,18 @@ async fn client_session_with_scope(
                                             event,
                                         );
                                     }
+                                    Some(ScopedFrontendRequest::AgentPmRefusal {
+                                        operation_id,
+                                        window_id,
+                                    }) => {
+                                        send_agent_pm_terminal_result(
+                                            &mut sender,
+                                            opaque_agent_pm_target_refusal(operation_id, window_id),
+                                            AGENT_PM_TERMINAL_SEND_DEADLINE,
+                                        )
+                                        .await;
+                                        break;
+                                    }
                                     Some(ScopedFrontendRequest::Agent {
                                         grant,
                                         mut request,
@@ -3160,6 +3676,7 @@ async fn client_session_with_scope(
                                                 }
                                             }
                                         }
+                                        let mut direct_pm_result = None;
                                         let direct_acceptance = match &mut request {
                                             AgentFrontendRequest::CloseWindow {
                                                 request_id: Some(_),
@@ -3170,6 +3687,23 @@ async fn client_session_with_scope(
                                                     AgentSelfCloseResponder::channel();
                                                 *responder = Some(direct_responder);
                                                 Some(acceptance)
+                                            }
+                                            AgentFrontendRequest::PmSendInput {
+                                                operation_id,
+                                                window_id,
+                                                responder,
+                                                ..
+                                            } => {
+                                                let (direct_responder, result, cancellation) =
+                                                    AgentPmSendResponder::channel();
+                                                *responder = Some(direct_responder.clone());
+                                                direct_pm_result = Some((
+                                                    result,
+                                                    cancellation,
+                                                    operation_id.clone(),
+                                                    window_id.clone(),
+                                                ));
+                                                None
                                             }
                                             _ => None,
                                         };
@@ -3189,11 +3723,100 @@ async fn client_session_with_scope(
                                                 target: "gwt_security",
                                                 "agent pane WebSocket capability rotated or revoked before dispatch"
                                             );
-                                            send_agent_fence_close(
-                                                &mut sender,
-                                                AGENT_STALE_BINDING_CLOSE,
-                                            )
-                                            .await;
+                                            if let Some((
+                                                _direct_result,
+                                                cancellation,
+                                                operation_id,
+                                                window_id,
+                                            )) = direct_pm_result.take()
+                                            {
+                                                let _ = cancellation.cancel();
+                                                send_agent_pm_terminal_result(
+                                                    &mut sender,
+                                                    BackendEvent::PmMessageSendResult {
+                                                        operation_id,
+                                                        status: "failed".to_string(),
+                                                        window_id: Some(window_id),
+                                                        reason: Some(
+                                                            "PM capability changed before dispatch"
+                                                                .to_string(),
+                                                        ),
+                                                    },
+                                                    AGENT_PM_TERMINAL_SEND_DEADLINE,
+                                                )
+                                                .await;
+                                            } else {
+                                                send_agent_fence_close(
+                                                    &mut sender,
+                                                    AGENT_STALE_BINDING_CLOSE,
+                                                )
+                                                .await;
+                                            }
+                                            break;
+                                        }
+                                        if let Some((
+                                            mut direct_result,
+                                            cancellation,
+                                            operation_id,
+                                            window_id,
+                                        )) = direct_pm_result
+                                        {
+                                            let deadline = tokio::time::Instant::now()
+                                                + AGENT_PM_SEND_ACCEPTANCE_DEADLINE;
+                                            let mut connected = true;
+                                            let mut timed_out = false;
+                                            let result = loop {
+                                                tokio::select! {
+                                                    result = &mut direct_result => break result.ok(),
+                                                    incoming = receiver.next() => {
+                                                        match incoming {
+                                                            Some(Ok(Message::Close(_)))
+                                                            | Some(Err(_))
+                                                            | None => {
+                                                                connected = false;
+                                                                break None;
+                                                            }
+                                                            Some(Ok(_)) => {}
+                                                        }
+                                                    }
+                                                    _ = tokio::time::sleep_until(deadline) => {
+                                                        timed_out = true;
+                                                        break None;
+                                                    }
+                                                }
+                                            };
+                                            let event = if let Some(result) = result {
+                                                correlate_agent_pm_terminal_result(
+                                                    operation_id,
+                                                    window_id,
+                                                    result,
+                                                )
+                                            } else {
+                                                let mutation_committed = cancellation.cancel();
+                                                BackendEvent::PmMessageSendResult {
+                                                    operation_id,
+                                                    status: "failed".to_string(),
+                                                    window_id: Some(window_id),
+                                                    reason: Some(if mutation_committed {
+                                                        "PM delivery may already have staged its prompt body — do not retry with a new operation"
+                                                            .to_string()
+                                                    } else if timed_out {
+                                                        "PM delivery exceeded the server acceptance deadline"
+                                                            .to_string()
+                                                    } else {
+                                                        "PM delivery origin disconnected before a terminal result"
+                                                            .to_string()
+                                                    }),
+                                                }
+                                            };
+                                            if connected {
+                                                send_agent_pm_terminal_result(
+                                                    &mut sender,
+                                                    event,
+                                                    AGENT_PM_TERMINAL_SEND_DEADLINE,
+                                                )
+                                                .await;
+                                            }
                                             break;
                                         }
                                         if let Some(mut direct_acceptance) = direct_acceptance {
@@ -3764,6 +4387,156 @@ mod tests {
     }
 
     #[test]
+    fn manual_handoff_reservation_refuses_an_existing_active_predecessor() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-reserved-active".to_string(),
+            repo_hash: "repo-reserved-active".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-active".to_string(),
+                binding_id: "binding-reserved-active".to_string(),
+                ledger_head_hash: "head-reserved-active".to_string(),
+            },
+            capability_generation: 4,
+        };
+        issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("active predecessor capability");
+
+        let error = issuer
+            .reserve_manual_execution_handoff(&binding)
+            .expect_err("an active predecessor handshake must refuse reservation");
+
+        assert_eq!(
+            error,
+            "manual execution handoff refuses an active predecessor capability"
+        );
+        assert!(!format!("{error:?}").contains(&binding.identity.binding_id));
+    }
+
+    #[test]
+    fn manual_handoff_reservation_blocks_matching_issue_and_promotion_only() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let predecessor = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-reserved-predecessor".to_string(),
+            repo_hash: "repo-reserved".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-predecessor".to_string(),
+                binding_id: "binding-reserved-predecessor".to_string(),
+                ledger_head_hash: "head-reserved-predecessor".to_string(),
+            },
+            capability_generation: 7,
+        };
+        let prepared = issuer
+            .issue_prepared(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect("Prepared predecessor capability");
+        let reservation = issuer
+            .reserve_manual_execution_handoff(&predecessor)
+            .expect("reserve exact predecessor handoff");
+
+        let issue_error = issuer
+            .issue_bound(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect_err("matching Active issue must be fenced");
+        assert_eq!(
+            issue_error,
+            "agent capability is reserved for manual execution handoff"
+        );
+        let promotion_error = issuer
+            .promote_prepared(&prepared.token, &predecessor)
+            .expect_err("matching promotion must be fenced");
+        assert_eq!(
+            promotion_error,
+            "agent capability is reserved for manual execution handoff"
+        );
+
+        let successor = gwt_agent::SessionExecutionBinding {
+            session_id: "session-reserved-successor".to_string(),
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-successor".to_string(),
+                binding_id: "binding-reserved-successor".to_string(),
+                ledger_head_hash: "head-reserved-successor".to_string(),
+            },
+            capability_generation: 1,
+            ..predecessor.clone()
+        };
+        let successor_session_id = successor.session_id.clone();
+        issuer
+            .issue_prepared(project.path(), &successor_session_id, successor)
+            .expect("a distinct Prepared successor is not fenced");
+
+        assert!(issuer.release_manual_execution_handoff(&reservation));
+        issuer
+            .promote_prepared(&prepared.token, &predecessor)
+            .expect("exact promotion is allowed after release");
+        issuer
+            .issue_bound(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect("exact Active issue is allowed after release");
+        assert!(!issuer.release_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
+    fn manual_handoff_begin_suspends_exact_active_capability_and_can_rollback_or_commit() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-stop-handoff".to_string(),
+            repo_hash: "repo-stop-handoff".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-stop-handoff".to_string(),
+                binding_id: "binding-stop-handoff".to_string(),
+                ledger_head_hash: "head-stop-handoff".to_string(),
+            },
+            capability_generation: 9,
+        };
+        let active = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("issue exact active holder");
+
+        let reservation = issuer
+            .begin_manual_execution_handoff(&active.token, &binding)
+            .expect("suspend exact active holder");
+        assert!(!issuer.active_token_is_current(&active.token, &binding));
+        assert!(issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .is_err());
+        assert!(issuer.rollback_manual_execution_handoff(&reservation));
+        assert!(issuer.active_token_is_current(&active.token, &binding));
+
+        let reservation = issuer
+            .begin_manual_execution_handoff(&active.token, &binding)
+            .expect("suspend exact active holder again");
+        assert!(issuer.commit_manual_execution_handoff(&reservation));
+        assert!(!issuer.active_token_is_current(&active.token, &binding));
+        assert!(issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .is_err());
+        assert!(issuer.release_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
     fn agent_capability_registry_promotes_legacy_inspection_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
         let registry = AgentCapabilityRegistry::default();
@@ -4167,7 +4940,12 @@ mod tests {
                     {
                         "id": "tab-owned",
                         "project_root": project.path(),
-                        "workspace": { "windows": [{ "id": "tab-owned::agent-1" }] }
+                        "workspace": { "windows": [{
+                            "id": "tab-owned::agent-1",
+                            "preset": "codex",
+                            "status": "idle",
+                            "session_id": "target-session"
+                        }] }
                     },
                     {
                         "id": "tab-foreign",
@@ -4250,6 +5028,26 @@ mod tests {
                 text: "hello".to_string(),
             })
             .is_none());
+        assert!(
+            scope
+                .filter_inbound(FrontendEvent::PmPaneSendInput {
+                    operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+                    window_id: "tab-owned::agent-1".to_string(),
+                    text: "report status\r".to_string(),
+                })
+                .is_some(),
+            "an authenticated principal must route PM delivery to the runtime gate instead of silently dropping it"
+        );
+        assert!(
+            scope
+                .filter_inbound(FrontendEvent::PmPaneSendInput {
+                    operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a4".to_string(),
+                    window_id: "tab-foreign::agent-2".to_string(),
+                    text: "must not cross projects\r".to_string(),
+                })
+                .is_some(),
+            "canonical PM replays must reach the runtime's durable project gate even when the target is absent from the current projection"
+        );
         assert!(scope
             .filter_inbound(FrontendEvent::TerminalInput {
                 id: "tab-owned::agent-1".to_string(),
@@ -4506,6 +5304,38 @@ mod tests {
     }
 
     #[test]
+    fn dropping_pm_origin_cancels_its_pending_mutation() {
+        let (responder, _result, cancellation) = super::AgentPmSendResponder::channel();
+        assert!(responder.mutation_is_current());
+
+        drop(cancellation);
+
+        assert!(
+            !responder.mutation_is_current(),
+            "an aborted origin task must revoke a pending PTY mutation"
+        );
+    }
+
+    #[test]
+    fn pm_origin_timeout_distinguishes_zero_mutation_from_committed_input() {
+        let (pending, _pending_result, pending_cancellation) =
+            super::AgentPmSendResponder::channel();
+        assert!(
+            !pending_cancellation.cancel(),
+            "cancellation that wins the CAS proves zero mutation"
+        );
+        assert!(!pending.try_commit_mutation());
+
+        let (committed, _committed_result, committed_cancellation) =
+            super::AgentPmSendResponder::channel();
+        assert!(committed.try_commit_mutation());
+        assert!(
+            committed_cancellation.cancel(),
+            "timeout after the commit CAS must be reported as ambiguous"
+        );
+    }
+
+    #[test]
     fn correlated_agent_self_close_acceptance_uses_only_the_origin_socket() {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, events) = AppEventProxy::stub();
@@ -4683,6 +5513,166 @@ mod tests {
             .expect("accepted response attempt must schedule finalization")
         });
         assert!(issuer.finish_self_close(&ticket));
+        server.shutdown();
+    }
+
+    #[test]
+    fn authenticated_pm_send_routes_to_runtime_and_returns_only_on_origin_socket() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue(project.path(), "pm-session")
+            .expect("PM capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b0";
+        let window_id = "tab-owned::agent-1";
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+            let pane_queue = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let queue = clients
+                        .clients
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .find(|registration| !registration.receives_broadcasts)
+                        .map(|registration| registration.queue.clone());
+                    if let Some(queue) = queue {
+                        break queue;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("pane client registration");
+            assert!(!pane_queue.enqueue(&PreparedOutbound {
+                payload: serde_json::json!({
+                    "kind": "workspace_state",
+                    "workspace": {
+                        "active_tab_id": "tab-owned",
+                        "recent_projects": [],
+                        "tabs": [{
+                            "id": "tab-owned",
+                            "project_root": project.path(),
+                            "workspace": { "windows": [{
+                                "id": window_id,
+                                "preset": "agent",
+                                "status": "idle",
+                                "session_id": "target-session"
+                            }] }
+                        }]
+                    }
+                })
+                .to_string(),
+                kind: "workspace_state",
+                coalesce_key: None,
+                repair_pane_id: None,
+                class: QueueClass::IdempotentLatest,
+            }));
+            let _workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("scoped workspace response")
+                .expect("workspace frame")
+                .expect("valid workspace frame");
+
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "pm_pane_send_input",
+                        "operation_id": operation_id,
+                        "window_id": window_id,
+                        "text": "report status\r",
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send PM request");
+
+            let responder = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let dispatched = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::AgentFrontend { .. }));
+                        position.map(|position| recorded.remove(position))
+                    };
+                    if let Some(UserEvent::AgentFrontend {
+                        grant,
+                        request:
+                            AgentFrontendRequest::PmSendInput {
+                                operation_id: routed_operation,
+                                window_id: routed_window,
+                                responder: Some(responder),
+                                ..
+                            },
+                        ..
+                    }) = dispatched
+                    {
+                        assert_eq!(grant.principal().session_id(), "pm-session");
+                        assert_eq!(routed_operation, operation_id);
+                        assert_eq!(routed_window, window_id);
+                        break responder;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("PM runtime dispatch");
+            responder
+                .send(BackendEvent::PmMessageSendResult {
+                    operation_id: operation_id.to_string(),
+                    status: "delivered".to_string(),
+                    window_id: Some(window_id.to_string()),
+                    reason: None,
+                })
+                .expect("origin response task is waiting");
+
+            let response = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("direct PM terminal result")
+                .expect("terminal frame")
+                .expect("valid terminal frame");
+            let WebSocketMessage::Text(response) = response else {
+                panic!("PM result must be text");
+            };
+            let response: serde_json::Value =
+                serde_json::from_str(response.as_ref()).expect("PM result JSON");
+            assert_eq!(response["kind"], "pm_message_send_result");
+            assert_eq!(response["operation_id"], operation_id);
+            assert_eq!(response["status"], "delivered");
+            assert_eq!(response["window_id"], window_id);
+            assert_eq!(
+                pane_queue.len(),
+                0,
+                "the correlated PM result must not enter ClientHub"
+            );
+        });
         server.shutdown();
     }
 

@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.79.0] - 2026-08-14
+
+### Bug Fixes
+
+- Recover manual launches from terminal generations
+- **launch:** Stabilize segmented wizard commits
+- **test:** Stabilize Windows agent launch E2E
+- **test:** Warm Windows metadata probe in E2E
+- **test:** Isolate manual launch authority fixtures
+
+### Features
+
+- **launch:** Harden manual successor handoff
+
+### Miscellaneous Tasks
+
+- Record issue 3547 verification status
+
+### Testing
+
+- **launch:** Fence live wizard state cleanup
+- **playwright:** Isolate logs preset from launch wizard
+
+## [9.78.3] - 2026-08-14
+
+### Bug Fixes
+
+- **pm:** Guarantee verified pane message delivery
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger release checks for v9.78.2
+- **work:** Record issue 3550 completion
+- **ci:** Retrigger checks for PR #3565
+
+
+## [9.78.2] - 2026-08-14
+
+### Bug Fixes
+
+- **daemon:** Resolve same-repo subscribe endpoints
+- **issue-monitor:** Prevent unsafe durable session resume
+- **issue-monitor:** Preserve late resume conflict recovery
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3492 completion
+- **work:** Record work event
+
 ## [9.78.1] - 2026-08-12
 
 ### Bug Fixes

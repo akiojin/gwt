@@ -470,6 +470,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.message.send" | "pm.pane.send" => CliCommand::Pane(PaneCommand::PmSend {
+            project_root: optional_string(params, "project_root")?,
             id: required_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
@@ -2011,6 +2012,7 @@ mod tests {
                 json!({"id": "tab-1::agent-1", "text": "please report status"})
             ),
             CliCommand::Pane(PaneCommand::PmSend {
+                project_root: None,
                 id: "tab-1::agent-1".to_string(),
                 text: "please report status".to_string(),
             })
@@ -2022,6 +2024,30 @@ mod tests {
         assert!(matches!(
             err("pm.message.send", json!({"id": "tab-1::agent-1"})),
             CliParseError::MissingFlag("text")
+        ));
+
+        let default_scope = ok(
+            "pm.message.send",
+            json!({"id": "tab-1::agent-1", "text": "status"}),
+        );
+        let explicit_scope = ok(
+            "pm.message.send",
+            json!({
+                "project_root": "/projects/canonical",
+                "id": "tab-1::agent-1",
+                "text": "status"
+            }),
+        );
+        assert_ne!(
+            explicit_scope, default_scope,
+            "pm.message.send must preserve the same explicit project scope accepted by pm.status"
+        );
+        assert!(matches!(
+            explicit_scope,
+            CliCommand::Pane(PaneCommand::PmSend {
+                project_root: Some(project_root),
+                ..
+            }) if project_root == "/projects/canonical"
         ));
     }
 

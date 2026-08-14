@@ -56,7 +56,15 @@ test.describe("Operator chrome smoke", () => {
   });
 
   test("⌘K opens the command palette", async ({ page }) => {
-    await page.keyboard.press("Meta+K");
+    // Headed Chromium reserves the physical Meta+K chord for browser chrome
+    // before the page sees it. Dispatch the same trusted-shape DOM event so
+    // this browser E2E exercises gwt's global hotkey registry deterministically.
+    await page.locator("body").dispatchEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      metaKey: true,
+      bubbles: true,
+    });
     await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
     await page.keyboard.press("Escape");
     await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute("data-open", "true");

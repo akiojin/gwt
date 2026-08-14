@@ -115,7 +115,24 @@ impl BlockingTaskSpawner {
     }
 }
 
+static NEXT_WINDOW_RUNTIME_INCARNATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_window_runtime_incarnation() -> u64 {
+    NEXT_WINDOW_RUNTIME_INCARNATION
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |incarnation| incarnation.checked_add(1),
+        )
+        .expect("window runtime incarnation space exhausted")
+}
+
 pub struct WindowRuntime {
+    /// Process-local identity of this exact PTY runtime. A window id may be
+    /// reused by a successor, so background events must carry this value and
+    /// prove they still belong to the runtime currently stored for the id.
+    incarnation: u64,
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
@@ -174,6 +191,8 @@ use knowledge::KnowledgeRefreshTask;
 pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSearchRequest};
 #[cfg(test)]
 pub(crate) use launch::AgentLaunchCompletion;
+#[cfg(test)]
+pub(crate) use launch::AgentLaunchRuntimeContext;
 #[cfg(test)]
 use launch::{
     codex_hook_discovery_mode_for_launch_config,
@@ -552,6 +571,84 @@ pub struct LaunchWizardSession {
     pub(crate) auto_submit_after_runtime_resolution: Option<WindowGeometry>,
     pub(crate) issue_monitor_profile_save: Option<IssueMonitorProfileSaveContext>,
     pub(crate) issue_monitor_launch_issue_number: Option<u64>,
+    /// Typed front door for the wizard. Manual holder arbitration is allowed
+    /// only for an explicit Launch Agent invocation; it must never be inferred
+    /// from a linked Issue on Start Work, Knowledge, Monitor, or resume flows.
+    pub(crate) origin: LaunchWizardOrigin,
+    /// Exact manual-holder arbitration snapshot. `None` on autonomous,
+    /// startup, Resume, Continue Work, and Issue Monitor launch adapters.
+    pub(crate) manual_holder_intent: Option<ManualLaunchHolderIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualLaunchHolderIntent {
+    pub(crate) fingerprint: String,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) predecessor: gwt_agent::SessionExecutionIdentity,
+    pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    pub(crate) local_window_id: Option<String>,
+    pub(crate) local_runtime_incarnation: Option<u64>,
+    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManualLaunchGenerationDisposition {
+    NotApplicable,
+    Genesis,
+    Prepare(ManualLaunchPreparation),
+    ExistingSuccessorWindow(String),
+    ConfirmLive(ManualLaunchHolderIntent),
+    Conflict(String),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchWizardOrigin {
+    ManualLaunchAgent,
+    Knowledge,
+    StartWork,
+    IssueMonitor,
+    WorkspaceResume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualLaunchPreparation {
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) expected_binding: gwt_agent::ExecutionBindingIdentity,
+    pub(crate) expected_session: Option<gwt_agent::SessionExecutionIdentity>,
+    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+    pub(crate) operation_id: String,
+}
+
+impl ManualLaunchHolderIntent {
+    fn preparation(&self) -> ManualLaunchPreparation {
+        ManualLaunchPreparation {
+            owner: self.owner,
+            expected_binding: self.predecessor.execution_binding.identity.clone(),
+            expected_session: Some(self.predecessor.clone()),
+            expected_runtime: self.runtime_proof,
+            predecessor_kind: self.predecessor_kind,
+            operation_id: self.operation_id.clone(),
+        }
+    }
+
+    fn decision_view(&self, holder_summary: String) -> gwt::LaunchWizardHolderDecisionView {
+        let local = self.local_window_id.is_some();
+        gwt::LaunchWizardHolderDecisionView {
+            fingerprint: self.fingerprint.clone(),
+            holder_session_id: self.predecessor.session_id.clone(),
+            holder_window_id: self.local_window_id.clone(),
+            holder_summary,
+            stop_available: local,
+            stop_unavailable_reason: (!local)
+                .then(|| "The current holder is not controlled by this gwt window.".to_string()),
+            move_available: local,
+            move_unavailable_reason: (!local)
+                .then(|| "The current holder pane is not available in this window.".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -742,6 +839,10 @@ pub struct AppRuntime {
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
+    /// Single-use launch requests keyed by the exact wizard that produced
+    /// them. The visible modal may be replaced before the queued event runs;
+    /// materialization ownership must not move with that global UI slot.
+    pub(crate) pending_launch_wizard_materializations: HashMap<String, LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
     /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
@@ -1876,6 +1977,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_launch_wizard_materializations: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
@@ -4711,10 +4813,21 @@ impl AppRuntime {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
             FrontendEvent::PmPaneSendInput {
-                pm_session_id,
+                operation_id,
                 window_id,
-                text,
-            } => self.pm_pane_send_input_events(client_id, &pm_session_id, &window_id, &text),
+                ..
+            } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PmMessageSendResult {
+                    operation_id,
+                    status: "failed".to_string(),
+                    window_id: Some(window_id),
+                    reason: Some(
+                        "pm.message.send requires an authenticated agent WebSocket principal"
+                            .to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::PasteImage {
                 id,
                 data_base64,
@@ -5477,6 +5590,22 @@ impl AppRuntime {
                 );
                 AgentFrontendDispatchOutcome::Dispatched(Vec::new())
             }
+            AgentFrontendRequest::PmSendInput {
+                operation_id,
+                window_id,
+                text,
+                responder,
+            } => AgentFrontendDispatchOutcome::Dispatched(
+                self.authenticated_pm_pane_send_input_events(
+                    issuer,
+                    client_id,
+                    grant,
+                    &operation_id,
+                    &window_id,
+                    &text,
+                    responder,
+                ),
+            ),
             request => {
                 let principal = grant.principal().clone();
                 issuer
@@ -5548,6 +5677,13 @@ impl AppRuntime {
                     }
                 };
                 self.pane_send_input_to_window_events(client_id, &window_id, &text)
+            }
+            AgentFrontendRequest::PmSendInput { .. } => {
+                tracing::warn!(
+                    target: "gwt_security",
+                    "privileged PM send bypassed generation-aware dispatch"
+                );
+                Vec::new()
             }
         }
     }

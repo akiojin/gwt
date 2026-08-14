@@ -350,10 +350,14 @@ pub enum PaneCommand {
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
     /// `pm.message.send` (SPEC-3431 FR-111 / T-206): PM-privileged delivery
-    /// into another agent pane of the same project. The live registered PM
-    /// principal is verified client-side and re-verified by the server
-    /// immediately before the injection.
-    PmSend { id: String, text: String },
+    /// into another agent pane of the same project. The authenticated server
+    /// principal is the sole caller authority; `project_root` only selects an
+    /// explicit project view with the same semantics as `pm.status`.
+    PmSend {
+        project_root: Option<String>,
+        id: String,
+        text: String,
+    },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
 #[derive(Debug, Clone, PartialEq, Eq)]

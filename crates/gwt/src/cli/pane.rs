@@ -30,6 +30,10 @@ use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
+const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
+const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
+const PM_TARGET_REFUSAL: &str =
+    "pm.message.send refused: target is not an authorized live agent pane";
 
 type PaneWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -103,126 +107,114 @@ async fn run_async(
         PaneCommand::Send { id, text } => {
             send_pane_input(ws_url, project_root, id.as_deref(), &text).await
         }
-        PaneCommand::PmSend { id, text } => {
-            send_pm_pane_input(ws_url, project_root, &id, &text).await
-        }
+        PaneCommand::PmSend {
+            project_root: explicit_project_root,
+            id,
+            text,
+        } => send_pm_pane_input(ws_url, explicit_project_root.as_deref(), &id, &text).await,
     }
 }
 
 /// SPEC-3431 FR-111 (T-206): PM-privileged delivery into another agent pane
 /// of the same project. Not a loosened `pane.send`: the SPEC-3050 self-only
 /// contract stays intact for every ordinary agent, and this path exists only
-/// for the live registered PM. The client verifies the durable registration
-/// up front (fast, typed refusal), the server re-verifies the live principal
-/// immediately before the injection, and the outcome is appended to a
-/// durable per-project receipt log either way.
+/// for the live registered PM. The authenticated WebSocket principal is the
+/// sole caller identity; all registration and target authority checks remain
+/// server-side and the terminal result returns on this same connection.
 async fn send_pm_pane_input(
     ws_url: &str,
-    project_root: &str,
+    project_root: Option<&str>,
     requested_id: &str,
     text: &str,
 ) -> Result<String, String> {
-    let session_id = std::env::var(GWT_SESSION_ID_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!("{GWT_SESSION_ID_ENV} is not set; pm.message.send requires the PM session")
-        })?;
-    let project_path = std::path::PathBuf::from(project_root);
-    let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_path);
-    if !crate::pm_registry::session_is_registered_pm(&prefs_path, &session_id) {
-        let refusal =
-            "pm.message.send refused: the calling session is not the registered PM for this \
-             project (FR-111; ordinary agents keep the self-only pane.send contract)"
-                .to_string();
-        append_pm_message_receipt(
-            &project_path,
-            &session_id,
-            requested_id,
-            false,
-            Some(&refusal),
-        );
-        return Err(refusal);
-    }
+    let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
+        let mut expected_window_id = None::<String>;
+        let mut response_loss = None::<String>;
+        for attempt in 0..2 {
+            let mut socket = connect_pane_websocket(ws_url).await?;
+            send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
+            let windows = next_pm_workspace_windows(&mut socket, project_root).await?;
+            let window_id = if let Some(expected) = expected_window_id.as_deref() {
+                expected.to_string()
+            } else {
+                resolve_pm_send_target(&windows, requested_id)?.id.clone()
+            };
+            if expected_window_id
+                .as_deref()
+                .is_some_and(|expected| expected != window_id)
+            {
+                return Err(
+                    "pm.message.send target changed before same-operation replay".to_string(),
+                );
+            }
+            expected_window_id.get_or_insert_with(|| window_id.clone());
+            if let Err(error) = send_frontend_event(
+                &mut socket,
+                json!({
+                    "kind": "pm_pane_send_input",
+                    "operation_id": operation_id,
+                    "window_id": window_id,
+                    "text": ensure_trailing_submit(text),
+                }),
+            )
+            .await
+            {
+                if attempt == 0 {
+                    response_loss = Some(error);
+                    continue;
+                }
+                return Err(format!(
+                    "pm.message.send request transmission was lost after same-operation replay: {error}"
+                ));
+            }
 
-    let windows = request_window_list(ws_url, project_root).await?;
-    let Some(window_id) = resolve_window_id(&windows, requested_id) else {
-        let refusal = format!("pm.message.send: unknown pane {requested_id}");
-        append_pm_message_receipt(
-            &project_path,
-            &session_id,
-            requested_id,
-            false,
-            Some(&refusal),
-        );
-        return Err(refusal);
-    };
-    let window_id = window_id.to_string();
-    let line = ensure_trailing_submit(text);
-
-    let mut socket = connect_pane_websocket(ws_url).await?;
-    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
-    let _scoped = next_workspace_windows(&mut socket, project_root, "pm pane send").await?;
-    send_frontend_event(
-        &mut socket,
-        json!({
-            "kind": "pm_pane_send_input",
-            "pm_session_id": session_id,
-            "window_id": window_id,
-            "text": line,
-        }),
-    )
-    .await?;
-
-    for _ in 0..128 {
-        let value = next_backend_json(&mut socket).await?;
-        let Some(reply) = parse_pane_send_result(&value)? else {
-            continue;
-        };
-        return if reply.ok {
-            let delivered = reply.window_id.unwrap_or(window_id);
-            append_pm_message_receipt(&project_path, &session_id, &delivered, true, None);
-            Ok(format!("pm message delivered to {delivered}\n"))
-        } else {
-            let error = reply.error.unwrap_or_else(|| "unknown error".to_string());
-            append_pm_message_receipt(&project_path, &session_id, &window_id, false, Some(&error));
-            Err(format!("pm message refused: {error}"))
-        };
-    }
-    let error = "pm pane send: backend did not return pane_send_result".to_string();
-    append_pm_message_receipt(&project_path, &session_id, &window_id, false, Some(&error));
-    Err(error)
-}
-
-/// FR-111 audit trail: one JSONL line per delivery attempt, durable beside
-/// the project state so refusals are as visible as deliveries.
-fn append_pm_message_receipt(
-    project_root: &std::path::Path,
-    pm_session_id: &str,
-    window_id: &str,
-    delivered: bool,
-    error: Option<&str>,
-) {
-    let path = gwt_core::paths::gwt_project_dir_for_repo_path(project_root)
-        .join("project-state/pm-messages.jsonl");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let line = json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "pm_session_id": pm_session_id,
-        "window_id": window_id,
-        "delivered": delivered,
-        "error": error,
-    });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        use std::io::Write as _;
-        let _ = writeln!(file, "{line}");
-    }
+            let reply = match wait_for_pm_message_send_result(
+                &mut socket,
+                &operation_id,
+                &window_id,
+                PM_MESSAGE_RESULT_DEADLINE,
+            )
+            .await
+            {
+                Ok(reply) => Some(reply),
+                Err(error) if attempt == 0 => {
+                    response_loss = Some(error);
+                    None
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "pm.message.send response was lost after same-operation replay: {error}"
+                    ))
+                }
+            };
+            let Some(reply) = reply else {
+                continue;
+            };
+            return match reply.status.as_str() {
+                "delivered" => Ok(format!("pm message delivered to {window_id}\n")),
+                "queued" => Ok(format!("pm message queued for {window_id}\n")),
+                "failed" => Err(format!(
+                    "pm message failed: {}",
+                    reply.reason.unwrap_or_else(|| "unknown reason".to_string())
+                )),
+                status => Err(format!(
+                    "pm_message_send_result has invalid status {status}"
+                )),
+            };
+        }
+        Err(format!(
+            "pm.message.send response was lost: {}",
+            response_loss.unwrap_or_else(|| "unknown transport error".to_string())
+        ))
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "pm.message.send timed out after {} seconds",
+            PM_MESSAGE_SEND_DEADLINE.as_secs()
+        )
+    })?
 }
 
 /// SPEC-3050 FR-001/FR-002: queue one line into the calling agent's own pane.
@@ -433,9 +425,15 @@ async fn send_frontend_event(socket: &mut PaneWebSocket, payload: Value) -> Resu
 }
 
 async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
-    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+    tokio::time::timeout(Duration::from_secs(2), next_backend_json_unbounded(socket))
         .await
         .map_err(|_| "pane websocket timed out waiting for backend response".to_string())?
+}
+
+async fn next_backend_json_unbounded(socket: &mut PaneWebSocket) -> Result<Value, String> {
+    let message = socket
+        .next()
+        .await
         .ok_or_else(|| "pane websocket closed before backend response".to_string())?
         .map_err(|err| format!("pane websocket receive failed: {err}"))?;
 
@@ -450,6 +448,26 @@ async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> 
     }
 }
 
+async fn wait_for_pm_message_send_result(
+    socket: &mut PaneWebSocket,
+    expected_operation_id: &str,
+    expected_window_id: &str,
+    deadline_after: Duration,
+) -> Result<PmMessageSendReply, String> {
+    tokio::time::timeout(deadline_after, async {
+        loop {
+            let value = next_backend_json_unbounded(socket).await?;
+            if let Some(reply) =
+                parse_pm_message_send_result(&value, expected_operation_id, expected_window_id)?
+            {
+                return Ok::<PmMessageSendReply, String>(reply);
+            }
+        }
+    })
+    .await
+    .map_err(|_| "pm.message.send timed out waiting for its terminal result".to_string())?
+}
+
 async fn next_workspace_windows(
     socket: &mut PaneWebSocket,
     project_root: &str,
@@ -462,6 +480,62 @@ async fn next_workspace_windows(
         }
     }
     Err(format!("{context}: backend did not return workspace_state"))
+}
+
+/// Read the project projection from the same authenticated connection used
+/// for the PM mutation. When no explicit root is supplied, the server-side
+/// capability projection is authoritative and no ambient cwd/env path is
+/// consulted.
+async fn next_pm_workspace_windows(
+    socket: &mut PaneWebSocket,
+    project_root: Option<&str>,
+) -> Result<Vec<PersistedWindowState>, String> {
+    for _ in 0..32 {
+        let value = next_backend_json(socket).await?;
+        if value.get("kind").and_then(Value::as_str) != Some("workspace_state") {
+            continue;
+        }
+        let tabs = value
+            .get("workspace")
+            .and_then(|workspace| workspace.get("tabs"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| "pm.message.send: workspace_state missing tabs".to_string())?;
+        let scope_key = |root: &str| {
+            gwt_core::paths::project_scope_hash(Path::new(root))
+                .as_str()
+                .to_string()
+        };
+        let mut matched = project_root.is_none();
+        let mut windows = Vec::new();
+        for tab in tabs {
+            let tab_root = tab.get("project_root").and_then(Value::as_str);
+            let authorized = match (project_root, tab_root) {
+                (None, _) => true,
+                (Some(requested), Some(root)) => tab_owns_caller(root, requested, &scope_key),
+                (Some(_), None) => false,
+            };
+            if !authorized {
+                continue;
+            }
+            matched = true;
+            let Some(tab_windows) = tab
+                .get("workspace")
+                .and_then(|workspace| workspace.get("windows"))
+            else {
+                continue;
+            };
+            let mut parsed = serde_json::from_value::<Vec<PersistedWindowState>>(
+                tab_windows.clone(),
+            )
+            .map_err(|error| format!("pm.message.send: invalid workspace projection: {error}"))?;
+            windows.append(&mut parsed);
+        }
+        if !matched {
+            return Err("pm.message.send failed: explicit project_root is outside the authenticated project scope".to_string());
+        }
+        return Ok(windows);
+    }
+    Err("pm.message.send: backend did not return workspace_state".to_string())
 }
 
 fn parse_send_args(args: &[String]) -> Result<(Option<String>, String), CliParseError> {
@@ -507,6 +581,12 @@ struct PaneSendReply {
     ok: bool,
     window_id: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PmMessageSendReply {
+    status: String,
+    reason: Option<String>,
 }
 
 fn parse_pane_close_acceptance(
@@ -567,6 +647,31 @@ fn parse_pane_send_result(value: &Value) -> Result<Option<PaneSendReply>, String
         window_id,
         error,
     }))
+}
+
+fn parse_pm_message_send_result(
+    value: &Value,
+    expected_operation_id: &str,
+    expected_window_id: &str,
+) -> Result<Option<PmMessageSendReply>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("pm_message_send_result") {
+        return Ok(None);
+    }
+    if value.get("operation_id").and_then(Value::as_str) != Some(expected_operation_id)
+        || value.get("window_id").and_then(Value::as_str) != Some(expected_window_id)
+    {
+        return Ok(None);
+    }
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pm_message_send_result missing status".to_string())?
+        .to_string();
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some(PmMessageSendReply { status, reason }))
 }
 
 /// The injected text must end with a submit key so the runtime actually
@@ -773,6 +878,44 @@ fn resolve_window_id<'a>(
                 .find(|window| window.id.ends_with(&format!("::{requested_id}")))
         })
         .map(|window| window.id.as_str())
+}
+
+fn resolve_pm_send_target<'a>(
+    windows: &'a [PersistedWindowState],
+    requested_id: &str,
+) -> Result<&'a PersistedWindowState, String> {
+    let window = if let Some(exact) = windows.iter().find(|window| window.id == requested_id) {
+        exact
+    } else {
+        let mut suffix_matches = windows
+            .iter()
+            .filter(|window| window.id.ends_with(&format!("::{requested_id}")));
+        let Some(candidate) = suffix_matches.next() else {
+            return Err(PM_TARGET_REFUSAL.to_string());
+        };
+        if suffix_matches.next().is_some() {
+            return Err(PM_TARGET_REFUSAL.to_string());
+        }
+        candidate
+    };
+    let supported_preset = pm_window_has_exact_prompt_ack(window);
+    let live_status = matches!(
+        window.status,
+        WindowState::Running | WindowState::Idle | WindowState::Waiting
+    );
+    let valid_session = window.session_id.as_deref().is_some_and(|session_id| {
+        gwt_agent::validate_session_id_path_component(session_id).is_ok()
+    });
+    if !supported_preset || !live_status || !valid_session {
+        return Err(PM_TARGET_REFUSAL.to_string());
+    }
+    Ok(window)
+}
+
+fn pm_window_has_exact_prompt_ack(window: &PersistedWindowState) -> bool {
+    matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
+        || (window.preset == WindowPreset::Agent
+            && matches!(window.agent_id.as_deref(), Some("claude" | "codex")))
 }
 
 fn status_label(status: WindowState) -> &'static str {
@@ -1450,6 +1593,135 @@ mod tests {
             drop(socket);
             server.abort();
             let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn pm_message_result_wait_covers_the_server_acceptance_window() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind delayed PM result mock");
+            let address = listener.local_addr().expect("PM result mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept PM result connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept PM result websocket");
+                tokio::time::sleep(Duration::from_millis(2_100)).await;
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "kind": "pm_message_send_result",
+                            "operation_id": "00000000-0000-4000-8000-000000000001",
+                            "status": "delivered",
+                            "window_id": "tab::agent",
+                            "reason": null,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send delayed PM result");
+            });
+            let (mut socket, _) = connect_async(format!("ws://{address}/internal/pane-ws"))
+                .await
+                .expect("connect delayed PM result websocket");
+
+            let reply = wait_for_pm_message_send_result(
+                &mut socket,
+                "00000000-0000-4000-8000-000000000001",
+                "tab::agent",
+                Duration::from_millis(2_500),
+            )
+            .await
+            .expect("server result inside its acceptance window");
+
+            assert_eq!(reply.status, "delivered");
+            server.await.expect("PM result mock task");
+        });
+    }
+
+    #[test]
+    fn pm_message_transport_replay_reuses_exact_operation_and_target() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind PM replay mock");
+            let address = listener.local_addr().expect("PM replay mock address");
+            let mut target = window("tab::codex-1", WindowPreset::Codex, Some("codex"));
+            target.session_id = Some("codex-session".to_string());
+            let workspace = workspace_state_for_test("/repo/pm", vec![target]);
+            let server = tokio::spawn(async move {
+                let mut mutations = Vec::new();
+                for attempt in 0..2 {
+                    let (stream, _) = listener.accept().await.expect("accept PM connection");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept PM websocket");
+                    assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                    socket
+                        .send(Message::Text(workspace.to_string().into()))
+                        .await
+                        .expect("send workspace state");
+                    let mutation = next_frontend_json(&mut socket).await;
+                    mutations.push(mutation.clone());
+                    if attempt == 0 {
+                        socket.close(None).await.expect("drop first response");
+                    } else {
+                        socket
+                            .send(Message::Text(
+                                json!({
+                                    "kind": "pm_message_send_result",
+                                    "operation_id": mutation["operation_id"],
+                                    "status": "delivered",
+                                    "window_id": mutation["window_id"],
+                                    "reason": null,
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .expect("send replay result");
+                    }
+                }
+                mutations
+            });
+            let result = send_pm_pane_input(
+                &format!("ws://{address}/internal/pane-ws"),
+                None,
+                "codex-1",
+                "same operation body",
+            )
+            .await;
+            let mutations = server.await.expect("PM replay mock task");
+
+            assert_eq!(
+                result,
+                Ok("pm message delivered to tab::codex-1\n".to_string())
+            );
+            assert_eq!(mutations.len(), 2);
+            assert_eq!(mutations[0]["kind"], "pm_pane_send_input");
+            assert_eq!(mutations[0]["operation_id"], mutations[1]["operation_id"]);
+            assert_eq!(mutations[0]["window_id"], mutations[1]["window_id"]);
+            assert_eq!(mutations[0]["text"], mutations[1]["text"]);
         });
     }
 
