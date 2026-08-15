@@ -1064,16 +1064,23 @@ mod tests {
             );
             discard.agent_session_id = Some(session.id.clone());
             legacy.apply_event(discard.clone());
-            let legacy_work_items_path =
-                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&worktree);
+            // #3466: before the project store followed the repository
+            // identity, a linked worktree got its own store keyed by the hash
+            // of its *path*. Old Hosts wrote terminals there, so that store
+            // still exists on disk after upgrading. Address it the way those
+            // Hosts did, not through the (now canonical) worktree lookup.
+            let legacy_store = gwt_core::paths::gwt_project_dir(
+                &gwt_core::repo_hash::compute_path_hash(&worktree),
+            )
+            .join("project-state");
+            let legacy_work_items_path = legacy_store.join("works.json");
             assert_ne!(canonical_path, legacy_work_items_path);
             gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
                 &legacy_work_items_path,
                 &legacy,
             )
             .expect("save stale linked-worktree WorkItems");
-            let legacy_close_path =
-                gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&worktree);
+            let legacy_close_path = legacy_store.join("work-events-closed.jsonl");
             std::fs::create_dir_all(legacy_close_path.parent().expect("legacy close parent"))
                 .expect("legacy close parent");
             std::fs::write(

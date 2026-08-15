@@ -1708,6 +1708,19 @@ fn save_assigned_workspace_projection_for_test(
     )
 }
 
+fn materialized_project_state_sots(name: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path().join("project-state").join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    paths
+}
+
 #[test]
 fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     let _env_guard = env_test_lock()
@@ -1770,11 +1783,15 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         .iter()
         .any(|agent| agent.session_id == session.session_id));
     assert!(gwt_core::paths::gwt_repo_local_work_events_path(&worktree).exists());
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&worktree)
-            .expect("load worktree WorkItems shadow")
-            .is_none(),
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "launch must not create a topology-dependent worktree WorkItems SOT"
+    );
+    assert_eq!(
+        materialized_project_state_sots("current.json"),
+        vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
+        "launch must not create a topology-dependent worktree Project State SOT"
     );
 
     let tab = sample_project_tab(
@@ -1819,10 +1836,9 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
             .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pause),
         "stop must append Pause to the same Session-bound Work"
     );
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&worktree)
-            .expect("load stopped worktree WorkItems shadow")
-            .is_none(),
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "stop must not create a worktree-specific WorkItems SOT"
     );
     let mut saved = gwt_core::workspace_projection::load_workspace_projection(&project_root)
@@ -10163,10 +10179,10 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
         .expect("repo-global WorkItems");
     assert_eq!(work_items.work_items.len(), 1);
     assert!(work_items.work_items[0].discarded);
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&worktree)
-            .expect("read worktree-local WorkItems shadow")
-            .is_none()
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
+        "terminalization must leave exactly one repository WorkItems SOT"
     );
     assert!(
         std::fs::read_to_string(gwt_core::paths::gwt_repo_local_work_events_path(&worktree))
@@ -20471,10 +20487,9 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         .agents
         .iter()
         .any(|agent| agent.session_id == candidate_session_id));
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&repo)
-            .expect("load worktree WorkItems shadow")
-            .is_none(),
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "Continue Work must not create a worktree-local WorkItems shadow"
     );
 
