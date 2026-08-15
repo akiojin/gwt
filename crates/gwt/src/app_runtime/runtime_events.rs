@@ -7,6 +7,8 @@
 
 use base64::Engine as _;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::sync::mpsc as std_mpsc;
@@ -22,6 +24,10 @@ use super::{
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
 const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
+/// Provider TUIs commonly clear and redraw the approval block after Enter.
+/// This bounded settle window avoids a false Running frame between the clear
+/// and the redraw without ever blocking the tao event loop.
+const APPROVAL_SETTLE_DELAY: Duration = Duration::from_millis(100);
 /// Claude Code's exact-resume failure line. When a resumed conversation no
 /// longer exists in the agent's store, this is the only explanation the user
 /// ever gets — promote it to an explicit diagnostic (SPEC-1921 exact session
@@ -234,10 +240,272 @@ impl AppRuntime {
                 publish_runtime_output_change(&tab.project_root, &id, &data);
             }
         }
-        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
+        let output_id = id.clone();
+        let mut events = vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
             id,
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-        })]
+        })];
+        if publish_to_daemon {
+            let prompt = self.current_screen_approval_prompt(&output_id);
+            events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
+        }
+        events
+    }
+
+    fn current_screen_approval_prompt(&self, id: &str) -> Option<u64> {
+        let (provider, screen) = self.current_approval_screen(id)?;
+        gwt::window_state::approval_prompt_fingerprint(provider, &screen)
+    }
+
+    fn current_approval_screen(
+        &self,
+        id: &str,
+    ) -> Option<(gwt::window_state::ApprovalPromptProvider, String)> {
+        let provider = self.approval_prompt_provider(id);
+        if provider == gwt::window_state::ApprovalPromptProvider::Unsupported {
+            return None;
+        }
+        let runtime = self.runtimes.get(id)?;
+        let pane = runtime.pane.lock().ok()?;
+        Some((provider, pane.screen().contents()))
+    }
+
+    fn approval_prompt_provider(
+        &self,
+        window_id: &str,
+    ) -> gwt::window_state::ApprovalPromptProvider {
+        use gwt::window_state::ApprovalPromptProvider;
+
+        match self.window_preset(window_id) {
+            Some(WindowPreset::Codex) => return ApprovalPromptProvider::Codex,
+            Some(WindowPreset::Claude) => return ApprovalPromptProvider::ClaudeCode,
+            Some(WindowPreset::Agent) => {}
+            _ => return ApprovalPromptProvider::Unsupported,
+        }
+        let live_agent = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|session| session.agent_id.as_str());
+        let persisted_agent = self.window_lookup.get(window_id).and_then(|address| {
+            self.tab(&address.tab_id)
+                .and_then(|tab| tab.workspace.window(&address.raw_id))
+                .and_then(|window| window.agent_id.as_deref())
+        });
+        match live_agent
+            .or(persisted_agent)
+            .and_then(gwt_agent::resolve_agent_id)
+        {
+            Some(gwt_agent::AgentId::Codex) => ApprovalPromptProvider::Codex,
+            Some(gwt_agent::AgentId::ClaudeCode) => ApprovalPromptProvider::ClaudeCode,
+            _ => ApprovalPromptProvider::Unsupported,
+        }
+    }
+
+    pub(crate) fn observe_runtime_approval_prompt(
+        &mut self,
+        window_id: &str,
+        observed: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        let current = self.window_approval_waiting.get(window_id).copied();
+        match (current, observed) {
+            (None, None) => Vec::new(),
+            (None, Some(fingerprint)) => self.set_runtime_approval_latch(
+                window_id,
+                Some(super::ApprovalPromptLatch {
+                    active_fingerprint: Some(fingerprint),
+                    resolving_fingerprint: None,
+                    resolution_started: false,
+                    pending_settle_token: None,
+                }),
+                true,
+                false,
+            ),
+            (Some(latch), None)
+                if latch.resolution_started
+                    && (latch.active_fingerprint.is_none()
+                        || latch.resolving_fingerprint == latch.active_fingerprint) =>
+            {
+                if latch.pending_settle_token.is_none() {
+                    self.schedule_runtime_approval_settle(window_id);
+                }
+                Vec::new()
+            }
+            (Some(_), None) => Vec::new(),
+            (Some(mut latch), Some(fingerprint))
+                if latch.active_fingerprint.is_none()
+                    || latch.active_fingerprint == Some(fingerprint) =>
+            {
+                latch.active_fingerprint = Some(fingerprint);
+                if latch.resolution_started {
+                    latch.resolving_fingerprint = None;
+                    latch.resolution_started = false;
+                    latch.pending_settle_token = None;
+                }
+                self.window_approval_waiting
+                    .insert(window_id.to_string(), latch);
+                Vec::new()
+            }
+            (Some(_), Some(fingerprint)) => {
+                let mut events = self.set_runtime_approval_latch(window_id, None, true, true);
+                events.extend(self.set_runtime_approval_latch(
+                    window_id,
+                    Some(super::ApprovalPromptLatch {
+                        active_fingerprint: Some(fingerprint),
+                        resolving_fingerprint: None,
+                        resolution_started: false,
+                        pending_settle_token: None,
+                    }),
+                    true,
+                    true,
+                ));
+                events
+            }
+        }
+    }
+
+    pub(crate) fn begin_runtime_approval_resolution(&mut self, window_id: &str) {
+        let Some(latch) = self.window_approval_waiting.get_mut(window_id) else {
+            return;
+        };
+        latch.resolving_fingerprint = latch.active_fingerprint;
+        latch.resolution_started = true;
+        latch.pending_settle_token = None;
+    }
+
+    pub(crate) fn cancel_runtime_approval_resolution(&mut self, window_id: &str) {
+        let Some(latch) = self.window_approval_waiting.get_mut(window_id) else {
+            return;
+        };
+        latch.resolving_fingerprint = None;
+        latch.resolution_started = false;
+        latch.pending_settle_token = None;
+    }
+
+    fn schedule_runtime_approval_settle(&mut self, window_id: &str) {
+        self.approval_settle_epoch = self.approval_settle_epoch.wrapping_add(1).max(1);
+        let token = self.approval_settle_epoch;
+        let Some(latch) = self.window_approval_waiting.get_mut(window_id) else {
+            return;
+        };
+        latch.pending_settle_token = Some(token);
+        let proxy = self.proxy.clone();
+        let id = window_id.to_string();
+        thread::spawn(move || {
+            thread::sleep(APPROVAL_SETTLE_DELAY);
+            proxy.send(super::UserEvent::RuntimeApprovalSettle { id, token });
+        });
+    }
+
+    pub(crate) fn handle_runtime_approval_settle(
+        &mut self,
+        window_id: &str,
+        token: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(latch) = self.window_approval_waiting.get(window_id).copied() else {
+            return Vec::new();
+        };
+        if latch.pending_settle_token != Some(token) || !latch.resolution_started {
+            return Vec::new();
+        }
+        let Some((provider, screen)) = self.current_approval_screen(window_id) else {
+            return Vec::new();
+        };
+        if let Some(fingerprint) = gwt::window_state::approval_prompt_fingerprint(provider, &screen)
+        {
+            return self.observe_runtime_approval_prompt(window_id, Some(fingerprint));
+        }
+        if gwt::window_state::has_approval_prompt_evidence(provider, &screen) {
+            if let Some(latch) = self.window_approval_waiting.get_mut(window_id) {
+                if latch.pending_settle_token == Some(token) {
+                    latch.pending_settle_token = None;
+                }
+            }
+            return Vec::new();
+        }
+        self.set_runtime_approval_latch(window_id, None, true, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_runtime_approval_wait_state(
+        &mut self,
+        window_id: &str,
+        waiting: bool,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_approval_wait_state_inner(window_id, waiting, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_approval_wait_state(
+        &mut self,
+        window_id: &str,
+        waiting: bool,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_approval_wait_state_inner(window_id, waiting, false)
+    }
+
+    fn handle_runtime_approval_wait_state_inner(
+        &mut self,
+        window_id: &str,
+        waiting: bool,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
+        let latch = waiting.then_some(super::ApprovalPromptLatch::default());
+        self.set_runtime_approval_latch(window_id, latch, publish_to_daemon, false)
+    }
+
+    fn set_runtime_approval_latch(
+        &mut self,
+        window_id: &str,
+        latch: Option<super::ApprovalPromptLatch>,
+        publish_to_daemon: bool,
+        force_status: bool,
+    ) -> Vec<OutboundEvent> {
+        if !self.tracked_window_exists(window_id) {
+            self.window_approval_waiting.remove(window_id);
+            return Vec::new();
+        }
+        let before = self.window_status(window_id);
+        let was_waiting = self.window_approval_waiting.contains_key(window_id);
+        let waiting = latch.is_some();
+        if let Some(latch) = latch {
+            self.window_approval_waiting
+                .insert(window_id.to_string(), latch);
+        } else {
+            self.window_approval_waiting.remove(window_id);
+        }
+        let overlay_changed = was_waiting != waiting;
+        if !overlay_changed && !force_status {
+            return Vec::new();
+        }
+        if overlay_changed && publish_to_daemon {
+            if let Some(address) = self.window_lookup.get(window_id) {
+                if let Some(tab) = self.tab(&address.tab_id) {
+                    publish_runtime_approval_overlay_change(&tab.project_root, window_id, waiting);
+                }
+            }
+        }
+        let Some(composed) = self.recompute_window_state(window_id) else {
+            return Vec::new();
+        };
+        if force_status || before != Some(composed) {
+            Self::status_events(window_id.to_string(), composed, None)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(crate) fn clear_runtime_approval_latch_without_status(
+        &mut self,
+        window_id: &str,
+        publish_to_daemon: bool,
+    ) {
+        if self.window_approval_waiting.remove(window_id).is_none() || !publish_to_daemon {
+            return;
+        }
+        if let Some(address) = self.window_lookup.get(window_id) {
+            if let Some(tab) = self.tab(&address.tab_id) {
+                publish_runtime_approval_overlay_change(&tab.project_root, window_id, false);
+            }
+        }
     }
 
     pub(crate) fn handle_runtime_status(
@@ -332,6 +600,14 @@ impl AppRuntime {
             .active_agent_sessions
             .get(&id)
             .map(|session| session.session_id.clone());
+        let approval_was_active = self.window_approval_waiting.contains_key(&id)
+            || (status == WindowProcessStatus::Error
+                && self.current_screen_approval_prompt(&id).is_some());
+        let detail = if approval_was_active && status == WindowProcessStatus::Error {
+            Some("Agent approval prompt ended unexpectedly".to_string())
+        } else {
+            detail
+        };
         // A terminal PTY status ends the input generation even when the Pane
         // stays on screen for recovery diagnostics. Removing the registry
         // pointer before invalidation lets an in-flight authorized write
@@ -368,6 +644,7 @@ impl AppRuntime {
         // tail into the persistent detail before the state is gone; the raw
         // output stays available in logs.
         let detail = if matches!(status, WindowProcessStatus::Error)
+            && !approval_was_active
             && matches!(
                 self.window_preset(&id),
                 Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
@@ -381,6 +658,12 @@ impl AppRuntime {
         }
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
+        if matches!(
+            status,
+            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+        ) {
+            self.clear_runtime_approval_latch_without_status(&id, publish_to_daemon);
+        }
         // The `window_hook_states == Some(Stopped)` condition is unreachable
         // (`window_state_for_hook_event` only returns `Idle` / `Running`), so
         // in practice an exiting agent window is never auto-closed. That is
@@ -605,6 +888,11 @@ impl AppRuntime {
             return events;
         };
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
+        let effective_before = self.window_status(&window_id);
+        let approval_wait_cleared = self.window_approval_waiting.contains_key(&window_id);
+        if approval_wait_cleared {
+            self.clear_runtime_approval_latch_without_status(&window_id, publish_to_daemon);
+        }
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
         // SPEC-3431 FR-068: a hook arrival is the one signal that an agent is
         // actually making progress. The PTY-status heartbeat below never fires
@@ -647,10 +935,19 @@ impl AppRuntime {
         }
         let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
+            if approval_wait_cleared {
+                if let Some(composed) = self.recompute_window_state(&window_id) {
+                    if effective_before != Some(composed) {
+                        events.extend(Self::status_events(window_id, composed, None));
+                    }
+                }
+            }
             return events;
         };
         self.recoverable_agent_error_windows.remove(&window_id);
-        if self.window_hook_states.get(&window_id).copied() == Some(hook_state) {
+        let hook_state_changed =
+            self.window_hook_states.get(&window_id).copied() != Some(hook_state);
+        if !hook_state_changed && !approval_wait_cleared {
             return events;
         }
         self.window_hook_states
@@ -717,7 +1014,9 @@ impl AppRuntime {
                 events.push(event);
             }
         }
-        events.extend(Self::status_events(window_id, composed_state, detail));
+        if hook_state_changed || effective_before != Some(composed_state) {
+            events.extend(Self::status_events(window_id, composed_state, detail));
+        }
         events
     }
 
@@ -766,6 +1065,14 @@ enum RuntimeDaemonPublish {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
+struct RuntimeDaemonApprovalPublish {
+    project_root: PathBuf,
+    id: String,
+    waiting: bool,
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeDaemonPublishEnqueueError {
     Full,
@@ -775,6 +1082,11 @@ enum RuntimeDaemonPublishEnqueueError {
 #[cfg(unix)]
 static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
     Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+static RUNTIME_DAEMON_APPROVAL_PUBLISH_QUEUE: std::sync::OnceLock<
+    Mutex<Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>>,
 > = std::sync::OnceLock::new();
 
 #[cfg(unix)]
@@ -818,6 +1130,52 @@ fn runtime_daemon_publish_sender_from(
 fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
     for publish in receiver {
         publish_runtime_daemon_event(publish);
+    }
+}
+
+#[cfg(unix)]
+fn runtime_daemon_approval_publish_sender() -> Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>
+{
+    let queue = RUNTIME_DAEMON_APPROVAL_PUBLISH_QUEUE.get_or_init(|| Mutex::new(None));
+    runtime_daemon_approval_publish_sender_from(queue, |receiver| {
+        std::thread::Builder::new()
+            .name("gwt-runtime-daemon-approval-publish-worker".to_string())
+            .spawn(move || run_runtime_daemon_approval_publish_worker(receiver))
+            .map(|_handle| ())
+    })
+}
+
+#[cfg(unix)]
+fn runtime_daemon_approval_publish_sender_from(
+    queue: &Mutex<Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>>,
+    spawn_worker: impl FnOnce(std_mpsc::Receiver<RuntimeDaemonApprovalPublish>) -> std::io::Result<()>,
+) -> Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>> {
+    let Ok(mut queue) = queue.lock() else {
+        tracing::debug!("runtime daemon approval publish queue lock poisoned");
+        return None;
+    };
+    if let Some(sender) = queue.as_ref() {
+        return Some(sender.clone());
+    }
+    let (sender, receiver) = std_mpsc::channel();
+    match spawn_worker(receiver) {
+        Ok(()) => {
+            *queue = Some(sender.clone());
+            Some(sender)
+        }
+        Err(err) => {
+            tracing::debug!(error = %err, "runtime daemon approval publish worker spawn failed");
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run_runtime_daemon_approval_publish_worker(
+    receiver: std_mpsc::Receiver<RuntimeDaemonApprovalPublish>,
+) {
+    for publish in receiver {
+        publish_runtime_daemon_approval_event(publish);
     }
 }
 
@@ -918,6 +1276,29 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
 }
 
 #[cfg(unix)]
+fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) {
+    let payload = gwt::runtime_daemon_events::runtime_approval_overlay_payload(
+        &publish.id,
+        publish.waiting,
+        std::process::id(),
+    );
+    let result = gwt::daemon_publisher::publish_event(
+        &publish.project_root,
+        gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL,
+        payload,
+    );
+    if let Err(err) = result {
+        tracing::debug!(
+            error = %err,
+            project_root = %publish.project_root.display(),
+            window_id = %publish.id,
+            waiting = publish.waiting,
+            "runtime approval overlay daemon publish failed (non-fatal)"
+        );
+    }
+}
+
+#[cfg(unix)]
 fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
     enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
         project_root: project_root.to_path_buf(),
@@ -964,6 +1345,26 @@ fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEven
 #[cfg(not(unix))]
 fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
 
+#[cfg(unix)]
+fn publish_runtime_approval_overlay_change(project_root: &Path, id: &str, waiting: bool) {
+    let Some(sender) = runtime_daemon_approval_publish_sender() else {
+        return;
+    };
+    if sender
+        .send(RuntimeDaemonApprovalPublish {
+            project_root: project_root.to_path_buf(),
+            id: id.to_string(),
+            waiting,
+        })
+        .is_err()
+    {
+        tracing::debug!("runtime daemon approval publish queue disconnected");
+    }
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_approval_overlay_change(_project_root: &Path, _id: &str, _waiting: bool) {}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -974,8 +1375,9 @@ mod tests {
 
     #[cfg(unix)]
     use super::{
-        runtime_daemon_publish_sender_from, try_enqueue_runtime_daemon_publish,
-        RuntimeDaemonPublish, RuntimeDaemonPublishEnqueueError,
+        runtime_daemon_approval_publish_sender_from, runtime_daemon_publish_sender_from,
+        try_enqueue_runtime_daemon_publish, RuntimeDaemonApprovalPublish, RuntimeDaemonPublish,
+        RuntimeDaemonPublishEnqueueError,
     };
     #[cfg(unix)]
     use crate::WindowProcessStatus;
@@ -1152,6 +1554,52 @@ mod tests {
             ),
             Err(RuntimeDaemonPublishEnqueueError::Full)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_approval_overlay_lane_survives_output_queue_saturation_in_order() {
+        let (output_sender, _output_receiver) = mpsc::sync_channel(1);
+        let project_root = PathBuf::from("/tmp/gwt-project");
+        try_enqueue_runtime_daemon_publish(
+            &output_sender,
+            RuntimeDaemonPublish::Output {
+                project_root: project_root.clone(),
+                id: "tab-1::agent-1".to_string(),
+                data: b"flood".to_vec(),
+            },
+        )
+        .expect("fill output lane");
+
+        let queue = Mutex::new(None);
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let approval_sender =
+            runtime_daemon_approval_publish_sender_from(&queue, move |receiver| {
+                std::thread::spawn(move || {
+                    for event in receiver {
+                        captured_tx.send(event).expect("capture overlay event");
+                    }
+                });
+                Ok(())
+            })
+            .expect("approval lane");
+        approval_sender
+            .send(RuntimeDaemonApprovalPublish {
+                project_root: project_root.clone(),
+                id: "tab-1::agent-1".to_string(),
+                waiting: true,
+            })
+            .expect("waiting true");
+        approval_sender
+            .send(RuntimeDaemonApprovalPublish {
+                project_root,
+                id: "tab-1::agent-1".to_string(),
+                waiting: false,
+            })
+            .expect("waiting false");
+
+        assert!(captured_rx.recv().expect("true").waiting);
+        assert!(!captured_rx.recv().expect("false").waiting);
     }
 
     #[cfg(unix)]
