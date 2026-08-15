@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{io::Read, path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
@@ -14,6 +14,7 @@ use crate::cli::hook::{
 };
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
+const AGENT_BRIDGE_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentBridgeFailureReason {
@@ -90,6 +91,15 @@ impl AgentBridgeFailure {
                 == Some(crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired)
             && self.bridge_reason.as_deref() == Some("workspace_ensure_required")
     }
+
+    pub(crate) fn is_missing_route_rejection(&self) -> bool {
+        self.reason == AgentBridgeFailureReason::OperationRejected
+            && matches!(
+                self.http_status,
+                Some(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED)
+            )
+            && self.error_code != Some(crate::AgentWorkspaceUpdateErrorCode::Internal)
+    }
 }
 
 impl std::fmt::Display for AgentBridgeFailure {
@@ -114,6 +124,35 @@ impl std::fmt::Display for AgentBridgeFailure {
         }
         Ok(())
     }
+}
+
+fn read_bounded_agent_bridge_error_body(
+    response: reqwest::blocking::Response,
+    message: &'static str,
+) -> Result<Vec<u8>, AgentBridgeFailure> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > AGENT_BRIDGE_ERROR_BODY_MAX_BYTES)
+    {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            message,
+        ));
+    }
+    let mut body = Vec::new();
+    response
+        .take(AGENT_BRIDGE_ERROR_BODY_MAX_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| {
+            AgentBridgeFailure::new(AgentBridgeFailureReason::TransportFailure, message)
+        })?;
+    if body.len() as u64 > AGENT_BRIDGE_ERROR_BODY_MAX_BYTES {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            message,
+        ));
+    }
+    Ok(body)
 }
 
 fn safe_bridge_token(value: &Option<String>) -> Option<String> {
@@ -312,6 +351,16 @@ impl HookForwardTarget {
         Ok(url)
     }
 
+    pub fn blocked_build_abort_terminalization_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/build-abort-terminalization");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
     pub fn execution_continuation_url(&self) -> Result<Url, String> {
         self.validate()?;
         let mut url =
@@ -433,13 +482,12 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
         })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.bytes().ok();
-        let diagnostic = body.as_deref().and_then(|body| {
-            serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(body).ok()
-        });
-        let strict = body
-            .as_deref()
-            .and_then(|body| serde_json::from_slice::<WorkspaceBridgeErrorResponse>(body).ok());
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host workspace bridge rejection body could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        let strict = serde_json::from_slice::<WorkspaceBridgeErrorResponse>(&body).ok();
         let exact_workspace_ensure_required = strict.as_ref().is_some_and(|error| {
             status == reqwest::StatusCode::CONFLICT
                 && error.code == crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
@@ -504,43 +552,94 @@ pub fn send_work_terminalization_via_agent_bridge(
     request: &crate::AgentWorkTerminalizationRequest,
 ) -> Result<crate::AgentWorkTerminalizationReceipt, String> {
     let url = target.work_terminalization_url()?;
+    send_terminalization_via_agent_bridge(target, url, request).map_err(|error| error.to_string())
+}
+
+pub(crate) fn send_blocked_build_abort_terminalization_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentBuildAbortTerminalizationRequest,
+) -> Result<crate::AgentWorkTerminalizationReceipt, AgentBridgeFailure> {
+    let url = target
+        .blocked_build_abort_terminalization_url()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "Host build abort terminalization bridge target is invalid",
+            )
+        })?;
+    send_terminalization_via_agent_bridge(target, url, request)
+}
+
+fn send_terminalization_via_agent_bridge(
+    target: &HookForwardTarget,
+    url: Url,
+    request: &impl Serialize,
+) -> Result<crate::AgentWorkTerminalizationReceipt, AgentBridgeFailure> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| "failed to build the Host Work terminalization bridge client".to_string())?;
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "failed to build the Host Work terminalization bridge client",
+            )
+        })?;
     let response = client
         .post(url)
         .bearer_auth(&target.token)
         .json(request)
         .send()
         .map_err(|_| {
-            "Host Work terminalization bridge is unavailable; the close was not retried locally and its outcome may be unknown"
-                .to_string()
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "Host Work terminalization bridge is unavailable; the close was not retried locally and its outcome may be unknown",
+            )
         })?;
     let status = response.status();
     if !status.is_success() {
-        return match response.json::<crate::AgentWorkspaceUpdateError>() {
-            Ok(error) => Err(format!(
-                "Host Work terminalization bridge rejected the close ({:?}); no local fallback was attempted",
-                error.code
-            )),
-            Err(_) => Err(format!(
-                "Host Work terminalization bridge rejected the close with HTTP {status}; no local fallback was attempted"
-            )),
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host Work terminalization bridge rejection body could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        let diagnostic_code = diagnostic
+            .as_ref()
+            .and_then(|error| safe_bridge_token(&error.code))
+            .as_deref()
+            .and_then(parse_workspace_update_error_code);
+        let diagnostic_reason = diagnostic
+            .as_ref()
+            .and_then(|error| safe_bridge_token(&error.reason));
+        let reason = if diagnostic_code
+            == Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch)
+            || diagnostic_reason.as_deref() == Some("authority_mismatch")
+        {
+            AgentBridgeFailureReason::AuthorityMismatch
+        } else {
+            AgentBridgeFailureReason::OperationRejected
         };
+        return Err(AgentBridgeFailure::rejected(
+            reason,
+            status,
+            diagnostic.as_ref(),
+            false,
+            "Host Work terminalization bridge rejected the close; no local fallback was attempted",
+        ));
     }
     let receipt = response
         .json::<crate::AgentWorkTerminalizationReceipt>()
         .map_err(|_| {
-            "Host Work terminalization bridge returned an invalid success response; no local fallback was attempted"
-                .to_string()
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::ReceiptMismatch,
+                "Host Work terminalization bridge returned an invalid success response; no local fallback was attempted",
+            )
         })?;
     if receipt.schema_version != crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION {
-        return Err(
-            "Host Work terminalization bridge returned an unsupported response schema; no local fallback was attempted"
-                .to_string(),
-        );
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host Work terminalization bridge returned an unsupported response schema; no local fallback was attempted",
+        ));
     }
     Ok(receipt)
 }
@@ -1073,6 +1172,13 @@ mod tests {
             );
             assert_eq!(
                 target
+                    .blocked_build_abort_terminalization_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/build-abort-terminalization")
+            );
+            assert_eq!(
+                target
                     .execution_continuation_url()
                     .unwrap_or_else(|error| panic!("{host}: {error}"))
                     .as_str(),
@@ -1124,6 +1230,24 @@ mod tests {
         let transport = send_workspace_update_via_agent_bridge(&unavailable, &request)
             .expect_err("unreachable Host must be typed");
         assert!(transport.contains("transport_failure"), "{transport}");
+
+        let oversized_server = BindingProbeServer::start(
+            StatusCode::NOT_FOUND,
+            serde_json::Value::String("x".repeat(64 * 1024 + 1)),
+        );
+        let oversized_target = HookForwardTarget {
+            url: oversized_server.forward_url.clone(),
+            token: "oversized-secret".to_string(),
+        };
+        let oversized =
+            send_workspace_update_via_agent_bridge_detailed(&oversized_target, &request)
+                .expect_err("oversized Host diagnostic must fail closed as transport");
+        assert_eq!(
+            oversized.reason,
+            AgentBridgeFailureReason::TransportFailure,
+            "oversized rejection bodies are not authoritative diagnostics: {oversized}"
+        );
+        oversized_server.receive();
 
         let authority_server = BindingProbeServer::start(
             StatusCode::CONFLICT,
