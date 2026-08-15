@@ -495,6 +495,12 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
         .nth(1)
         .and_then(|tail| tail.split("\n  test-windows-agent-launch-e2e:").next())
         .expect("test-windows-rust job body");
+    assert!(
+        windows_job
+            .lines()
+            .any(|line| line.trim() == "runs-on: windows-latest"),
+        "launch_now platform contracts must execute on a native Windows runner"
+    );
     let marker = "      - name: Run Issue Monitor launch_now control-path contracts";
     let (_, tail) = windows_job
         .split_once(marker)
@@ -512,6 +518,7 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
     );
     let command_lines = step.lines().map(str::trim).collect::<Vec<_>>();
     for command in [
+        "cargo test -p gwt --lib cli::issue::tests::windows_launch_now_ -- --test-threads=1",
         "cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
         "cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
         "cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",

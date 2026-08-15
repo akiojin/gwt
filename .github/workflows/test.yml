@@ -118,6 +118,7 @@ jobs:
       - name: Run Issue Monitor launch_now control-path contracts
         shell: bash
         run: |
+          cargo test -p gwt --lib cli::issue::tests::windows_launch_now_ -- --test-threads=1
           cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1
           cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
           cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
