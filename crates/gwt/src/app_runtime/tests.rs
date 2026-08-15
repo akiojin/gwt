@@ -17026,6 +17026,137 @@ fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_bloc
 }
 
 #[test]
+fn fresh_execution_missing_session_start_nonce_aborts_candidate_and_preserves_blocked_predecessor()
+{
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-missing-nonce");
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                if detail.contains("readiness nonce did not match")
+        )),
+        "missing nonce must produce a fail-closed diagnostic: {events:#?}"
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_session_start_via_daemon_fanout_preserves_readiness_nonce() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-daemon-fanout");
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.continuation_readiness_nonce = Some(readiness_nonce);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let current_pid = std::process::id();
+    let source_pid = current_pid.wrapping_add(1);
+    let payload = gwt::runtime_daemon_events::runtime_hook_payload(&session_start, source_pid);
+    let gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } =
+        gwt::runtime_daemon_events::decode_runtime_daemon_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            payload,
+            current_pid,
+        )
+        .expect("decode foreign daemon fanout")
+    else {
+        panic!("expected runtime hook fanout");
+    };
+
+    let events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+
+    assert!(
+        !events.is_empty(),
+        "activation must publish committed state"
+    );
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert!(
+        fixture
+            .issuer
+            .active_token_is_current(&fixture.token, &fixture.binding),
+        "daemon fanout must activate the exact prepared capability"
+    );
+}
+
+#[test]
+fn fresh_execution_session_start_requires_gwt_session_identity_before_nonce_validation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-foreign-gwt-session");
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", "foreign-gwt-session");
+    session_start.agent_session_id = Some(fixture.candidate_session_id.clone());
+    session_start.continuation_readiness_nonce = Some(readiness_nonce);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert!(
+        fixture
+            .issuer
+            .prepared_token_is_current(&fixture.token, &fixture.binding),
+        "foreign gwt identity must neither activate nor abort the candidate"
+    );
+    assert!(
+        events.iter().all(|outbound| !matches!(
+            &outbound.event,
+            BackendEvent::TerminalStatus { id, .. } if id == &fixture.window_id
+        )),
+        "foreign gwt identity must not emit candidate status events: {events:#?}"
+    );
+}
+
+#[test]
 fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
         .lock()
@@ -29563,6 +29694,32 @@ fn app_runtime_runtime_state_hooks_use_status_events_without_browser_hook_event(
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+}
+
+#[test]
+fn app_runtime_non_session_start_hook_keeps_agent_session_id_fallback() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let mut event = runtime_hook_state("Waiting", "foreign-gwt-session");
+    event.agent_session_id = Some("session-1".to_string());
+
+    let events = runtime.handle_runtime_hook_event(event);
+
+    assert!(events.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::WindowState { window_id: id, .. } if id == &window_id
+    )));
 }
 
 #[test]
