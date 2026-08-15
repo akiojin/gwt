@@ -3425,6 +3425,7 @@ impl AppRuntime {
             self.window_pty_statuses
                 .insert(id.to_string(), WindowProcessStatus::Running);
             self.window_hook_states.remove(id);
+            self.clear_runtime_approval_latch_without_status(id, true);
             self.set_window_status(
                 &address.tab_id,
                 &address.raw_id,
