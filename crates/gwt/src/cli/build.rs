@@ -143,6 +143,13 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
                 return Ok(());
             }
         }
+        let terminal_refusal = |refusal: String| {
+            if matches!(close_kind, WorkTerminalKind::Discarded) {
+                crate::cli::execution_state::terminal_recovery_refusal(repo, &session_id, &refusal)
+            } else {
+                refusal
+            }
+        };
         let compatibility_authority =
             crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
                 repo,
@@ -152,15 +159,17 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
                     WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
                 },
             )
-            .map_err(|error| error.to_string())?
+            .map_err(|error| terminal_refusal(error.to_string()))?
             .ok_or_else(|| {
-                "managed build terminalization requires an exact durable Host Work authority"
-                    .to_string()
+                terminal_refusal(
+                    "managed build terminalization requires an exact durable Host Work authority"
+                        .to_string(),
+                )
             })?;
         let observation = crate::observe_agent_runtime(repo).map_err(|error| error.to_string())?;
         let request = crate::AgentWorkTerminalizationRequest {
             schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
-            claimed_session_id: session_id,
+            claimed_session_id: session_id.clone(),
             observation,
             terminal_kind: match close_kind {
                 WorkTerminalKind::Done => crate::AgentWorkTerminalKind::Done,
@@ -169,7 +178,7 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         };
         let blocked_build_abort = compatibility_authority
             .requires_blocked_build_abort_bridge()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| terminal_refusal(error.to_string()))?;
         let receipt = if blocked_build_abort {
             let reason = abort_reason
                 .filter(|reason| !reason.trim().is_empty())
@@ -2181,6 +2190,148 @@ mod tests {
             std::fs::read(&works_path).expect("read canonical WorkItems"),
             before
         );
+        assert_build_still_active(&fixture.git);
+        server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_duplicate_session_authority_guides_status_recovery_without_ensure_loop()
+    {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let mut current =
+            gwt_core::workspace_projection::load_workspace_projection(&fixture.git.repo)
+                .expect("load canonical current")
+                .expect("canonical current");
+        let duplicate = current
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == fixture.session.id)
+            .expect("canonical Session assignment")
+            .clone();
+        current.agents.push(duplicate);
+        gwt_core::workspace_projection::save_workspace_projection(&fixture.git.repo, &current)
+            .expect("seed duplicate Session assignment");
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+        );
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("recover the stranded lifecycle".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run blocked build.abort with ambiguous Work authority");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("execution.status"), "{output}");
+        assert!(output.contains("recovery_probes"), "{output}");
+        assert!(output.contains("verify.plan"), "{output}");
+        assert!(
+            !output.contains("run workspace.ensure"),
+            "the refusal must not restart the build.abort/workspace.ensure loop: {output}"
+        );
+        let diagnosis =
+            crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+        assert!(
+            !diagnosis
+                .available_recoveries
+                .contains(&"build.abort".to_string()),
+            "an operation rejected by the exact Work preflight must not be advertised: {diagnosis:?}"
+        );
+        let abort_probe = diagnosis
+            .recovery_probes
+            .iter()
+            .find(|probe| probe.operation == "build.abort")
+            .expect("build.abort operation-local recovery probe");
+        assert_eq!(
+            abort_probe.state,
+            crate::cli::governance::RecoveryProbeState::Unavailable
+        );
+        assert_eq!(
+            abort_probe.governance.cause,
+            Some(crate::cli::governance::GovernanceCause::Authority)
+        );
+        assert_eq!(abort_probe.governance.retryable, Some(false));
+        assert!(
+            abort_probe
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("ambiguous")),
+            "{abort_probe:?}"
+        );
+        assert_build_still_active(&fixture.git);
+        server.assert_no_request();
+    }
+
+    #[test]
+    fn blocked_build_abort_without_host_authority_guides_status_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.settle_execution_blocked();
+        let mut docker = fixture.session.clone();
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        docker
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save Docker Session");
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+        );
+        let repo = fixture.git.repo.clone();
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(repo);
+            let mut output = String::new();
+            let code = run(
+                &mut env,
+                SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("recover without Host authority".to_string()),
+                },
+                &mut output,
+            )
+            .expect("run blocked build.abort without Host authority");
+            (code, output)
+        });
+
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("execution.status"), "{output}");
+        assert!(output.contains("available_recoveries"), "{output}");
+        assert!(output.contains("verify.plan"), "{output}");
+        let diagnosis =
+            crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+        let abort_probe = diagnosis
+            .recovery_probes
+            .iter()
+            .find(|probe| probe.operation == "build.abort")
+            .expect("build.abort operation-local recovery probe");
+        assert_eq!(
+            abort_probe.governance.cause,
+            Some(crate::cli::governance::GovernanceCause::Authority)
+        );
+        assert_eq!(abort_probe.governance.retryable, Some(false));
         assert_build_still_active(&fixture.git);
         server.assert_no_request();
     }
