@@ -48172,6 +48172,242 @@ fn scheduled_tick_is_single_flight_per_canonical_project_scope() {
 }
 
 #[test]
+fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overlap() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let foreign_repo = temp.path().join("foreign-repo");
+    fs::create_dir_all(&foreign_repo).expect("foreign repo");
+    init_repo_with_initial_commit(&foreign_repo);
+    let foreign_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&foreign_repo);
+    gwt::save_issue_monitor_prefs(
+        &foreign_prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed foreign monitor prefs");
+    runtime.tabs.insert(
+        0,
+        sample_project_tab(
+            "tab-foreign",
+            "Foreign",
+            foreign_repo.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let principal =
+        AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("registered PM principal");
+
+    let mismatched = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&foreign_repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(mismatched.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "project_scope_mismatch"
+    )));
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a mismatched requested scope must be rejected before enqueue"
+    );
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(accepted.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: true,
+            reason: None,
+        }
+    )));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "one exact project worker is queued"
+    );
+    assert_eq!(
+        runtime.issue_monitor_scheduled_scans_in_flight,
+        HashSet::from([prefs_path])
+    );
+    assert!(!runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&foreign_prefs_path));
+
+    let overlapping = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(overlapping.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "scan_already_in_flight"
+    )));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "overlap never creates a second worker"
+    );
+}
+
+#[test]
+fn authenticated_scan_now_rejects_non_pm_and_disabled_monitor_without_enqueuing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let ordinary =
+        AgentSessionPrincipal::for_test(&repo, "other-session").expect("ordinary principal");
+    let denied = runtime.handle_agent_frontend_event(
+        "agent-client".to_string(),
+        ordinary,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(denied.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "caller_not_registered_pm"
+    )));
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            ..gwt::load_issue_monitor_prefs(&prefs_path).expect("monitor prefs")
+        },
+    )
+    .expect("disable monitor");
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+    let disabled = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(disabled.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "monitor_disabled"
+    )));
+
+    runtime.tabs.clear();
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+    let missing_project = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(missing_project.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "project_not_open"
+    )));
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "rejected requests enqueue no worker"
+    );
+}
+
+#[test]
+fn authenticated_scan_now_reports_worker_failure_and_releases_single_flight() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("injected spawn failure");
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "scan_worker_unavailable"
+    )));
+    assert!(runtime.issue_monitor_scheduled_scans_in_flight.is_empty());
+}
+
+#[test]
 fn scheduled_tick_spawn_failure_is_observable_and_releases_single_flight() {
     let _env_lock = env_test_lock()
         .lock()
