@@ -6567,18 +6567,29 @@ impl AppRuntime {
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
+        let window_for_session_id = |session_id: &str| {
+            self.active_agent_sessions
+                .iter()
+                .find(|(_, session)| session.session_id == session_id)
+                .map(|(window_id, _)| window_id.clone())
+        };
+        // SessionStart is the readiness receipt that can finalize or abort a
+        // Prepared execution. Its Host-issued gwt identity is authoritative;
+        // provider conversation ids remain a compatibility fallback only for
+        // non-readiness runtime events.
+        if event.source_event.as_deref() == Some("SessionStart") {
+            return event
+                .gwt_session_id
+                .as_deref()
+                .and_then(window_for_session_id);
+        }
         [
             event.gwt_session_id.as_deref(),
             event.agent_session_id.as_deref(),
         ]
         .into_iter()
         .flatten()
-        .find_map(|session_id| {
-            self.active_agent_sessions
-                .iter()
-                .find(|(_, session)| session.session_id == session_id)
-                .map(|(window_id, _)| window_id.clone())
-        })
+        .find_map(window_for_session_id)
     }
 
     fn recompute_window_state(&mut self, window_id: &str) -> Option<WindowProcessStatus> {
