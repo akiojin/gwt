@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.79.1] - 2026-08-15
+
+### Bug Fixes
+
+- **test:** Stabilize issue monitor daemon synchronization
+- **test:** Observe issue monitor scan ownership directly
+- **execution:** Recover blocked build aborts
+- **execution:** Harden blocked abort reconciliation
+- **execution:** Bound blocked abort diagnostics
+
+### Miscellaneous Tasks
+
+- Refresh lockfile for v9.79.0
+- Record issue monitor verification
+- Record issue monitor PR handoff
+- Settle issue monitor work handoff
+- **work:** Record issue monitor PR handoff receipt
+
 
 ## [9.79.0] - 2026-08-14
 
