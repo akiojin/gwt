@@ -1517,9 +1517,14 @@ pub(super) fn ensure_workspace_for_agent(
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
     let probe = probe_workspace_ensure(repo_path, &input);
     if !probe.executable() {
+        let reason = probe.reason.as_deref().unwrap_or("unavailable");
+        let refusal = crate::cli::execution_state::terminal_recovery_refusal(
+            repo_path,
+            &input.agent_session,
+            reason,
+        );
         return Err(core_error(GwtError::Other(format!(
-            "workspace.ensure prerequisite probe refused: {}",
-            probe.reason.as_deref().unwrap_or("unavailable")
+            "workspace.ensure prerequisite probe refused: {refusal}",
         ))));
     }
     let recovery = crate::agent_project_state::validated_workspace_recovery_session(
@@ -7336,6 +7341,117 @@ pub(crate) mod tests {
 
         assert!(error.to_string().contains("terminal"), "{error}");
         assert_eq!(workspace_recovery_state_bytes(&paths), before);
+    }
+
+    #[test]
+    fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3587");
+        let session_id = "session-terminal-binding-guidance";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3587);
+        gwt_core::skill_state::save(
+            &worktree,
+            crate::cli::build::SKILL_NAME,
+            &gwt_core::skill_state::SkillState {
+                active: true,
+                owner_spec: Some(3587),
+                started_at: Utc::now(),
+                phase: Some("verify".to_string()),
+                session_id: session_id.to_string(),
+            },
+        )
+        .expect("save stranded build lifecycle");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &worktree,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle execution Blocked"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let paths = workspace_recovery_state_paths(&project_root, &worktree);
+        let before = workspace_recovery_state_bytes(&paths);
+
+        let ensure_input = WorkspaceEnsureInput {
+            agent_session: session_id.to_string(),
+            title_summary: "Recover terminal binding".to_string(),
+            current_focus: None,
+            spec: None,
+            issue: Some(3587),
+            topic: None,
+            boundary: None,
+        };
+        let error = ensure_workspace_for_agent(&worktree, ensure_input.clone())
+            .expect_err("terminal execution binding must refuse workspace.ensure");
+        let message = error.to_string();
+
+        assert!(message.contains("terminal"), "{message}");
+        assert!(message.contains("execution.status"), "{message}");
+        assert!(message.contains("recovery_probes"), "{message}");
+        assert!(message.contains("verify.plan"), "{message}");
+        assert!(
+            !message.contains("`build.abort`"),
+            "workspace.ensure must not unconditionally restart the build.abort loop: {message}"
+        );
+        assert_eq!(workspace_recovery_state_bytes(&paths), before);
+
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (plan_code, plan_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                commands: Vec::new(),
+                derive: true,
+            }),
+        )
+        .expect("derive the status-advertised verification plan");
+        assert_eq!(plan_code, 0, "{plan_out}");
+        let plan = crate::cli::verification_record::load_plan(&worktree)
+            .expect("load derived plan")
+            .expect("derived plan");
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (run_code, run_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands: plan.commands,
+            }),
+        )
+        .expect("run the status-advertised verification plan");
+        assert_eq!(run_code, 0, "{run_out}");
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (reopen_code, reopen_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Reopen {
+                    reason: "status-derived verification is fresh".to_string(),
+                },
+            ),
+        )
+        .expect("run the status-advertised execution.reopen");
+        assert_eq!(reopen_code, 0, "{reopen_out}");
+
+        ensure_workspace_for_agent(&worktree, ensure_input)
+            .expect("workspace.ensure must become reachable after verified reopen");
+        let recovered = crate::cli::execution_state::diagnose(&worktree, Some(session_id));
+        assert_eq!(
+            recovered.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Bound
+        );
+        assert!(
+            recovered
+                .available_recoveries
+                .contains(&"workspace.update".to_string()),
+            "the finite recovery chain must reach the normal workspace path: {recovered:?}"
+        );
     }
 
     #[test]
