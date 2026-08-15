@@ -2808,6 +2808,7 @@ pub(crate) fn snapshot_pr_mutation_execution_binding(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CurrentExecutionBindingAuthority {
     ActiveMutation,
+    BlockedBuildAbort,
     PrMutation,
 }
 
@@ -2815,6 +2816,7 @@ impl CurrentExecutionBindingAuthority {
     fn allows(self, status: ExecutionControlStatus) -> bool {
         match self {
             Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::BlockedBuildAbort => status == ExecutionControlStatus::Blocked,
             Self::PrMutation => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Completed
@@ -2859,6 +2861,46 @@ fn current_active_execution_binding_matches_context(
         expected_session_id,
         expected_identity,
         CurrentExecutionBindingAuthority::ActiveMutation,
+    )
+}
+
+pub(crate) fn blocked_build_abort_execution_binding_matches(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let context = match GenerationTransactionContext::resolve(worktree, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    blocked_build_abort_execution_binding_matches_context(
+        &context,
+        expected_session_id,
+        expected_identity,
+    )
+}
+
+fn blocked_build_abort_execution_binding_matches_context(
+    context: &GenerationTransactionContext,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    if !current_execution_binding_matches_context(
+        context,
+        expected_session_id,
+        expected_identity,
+        CurrentExecutionBindingAuthority::BlockedBuildAbort,
+    )? {
+        return Ok(false);
+    }
+    Ok(
+        gwt_core::skill_state::load(&context.worktree, "build-spec")?.is_some_and(|state| {
+            state.active
+                && state.owner_spec == Some(context.owner.number)
+                && state.session_id == expected_session_id
+        }),
     )
 }
 
@@ -3562,6 +3604,33 @@ pub fn with_current_active_session_execution_identity_global_lease<T>(
     expected: &gwt_agent::SessionExecutionIdentity,
     operation: impl FnOnce(&Path) -> T,
 ) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_global_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+pub(crate) fn with_blocked_build_abort_session_execution_identity_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_global_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::BlockedBuildAbort,
+        operation,
+    )
+}
+
+fn with_current_session_execution_identity_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    authority: CurrentExecutionBindingAuthority,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
     if gwt_agent::current_thread_holds_session_lease() {
         return Err(io::Error::new(
             ErrorKind::WouldBlock,
@@ -3615,17 +3684,30 @@ pub fn with_current_active_session_execution_identity_global_lease<T>(
                         Ok(path) => path,
                         Err(_) => return Ok(None),
                     };
+                    let execution_binding_matches = match authority {
+                        CurrentExecutionBindingAuthority::ActiveMutation => {
+                            current_active_execution_binding_matches_context(
+                                context,
+                                &expected.session_id,
+                                &binding.identity,
+                            )?
+                        }
+                        CurrentExecutionBindingAuthority::BlockedBuildAbort => {
+                            blocked_build_abort_execution_binding_matches_context(
+                                context,
+                                &expected.session_id,
+                                &binding.identity,
+                            )?
+                        }
+                        CurrentExecutionBindingAuthority::PrMutation => false,
+                    };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
                         .ok()
                         .flatten()
                         .as_ref()
                         != Some(expected)
                         || canonical_worktree != context.worktree
-                        || !current_active_execution_binding_matches_context(
-                            context,
-                            &expected.session_id,
-                            &binding.identity,
-                        )?
+                        || !execution_binding_matches
                     {
                         return Ok(None);
                     }
@@ -8476,6 +8558,33 @@ fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus)
     }
 }
 
+fn blocked_build_abort_recovery_available(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    session_id: Option<&str>,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+) -> bool {
+    let (Some(session_id), Some(Ok(recovery_context))) = (session_id, recovery_context) else {
+        return false;
+    };
+    let Some(binding) = recovery_context.session().execution_binding.as_ref() else {
+        return false;
+    };
+    if recovery_context.worktree() != worktree
+        || binding.schema_version != gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+        || binding.session_id != session_id
+        || binding.owner_kind != owner.kind.as_str()
+        || binding.owner_number != owner.number
+        || binding.capability_generation == 0
+    {
+        return false;
+    }
+    blocked_build_abort_execution_binding_matches(worktree, owner, session_id, &binding.identity)
+        .unwrap_or(false)
+}
+
 fn generation_writer(ledger: &ExecutionGenerationLedger, generation_id: &str) -> Option<String> {
     let generation = ledger
         .generations
@@ -9048,6 +9157,16 @@ fn diagnose_with_mode(
             "relaunch"
         };
         execution_recoveries.push(recovery.to_string());
+    }
+    if snapshot.ecr_status == ExecutionDiagnosisState::Blocked
+        && blocked_build_abort_recovery_available(
+            worktree,
+            owner,
+            session_id,
+            recovery_context.as_ref(),
+        )
+    {
+        execution_recoveries.push("build.abort".to_string());
     }
     execution_recoveries.sort();
     execution_recoveries.dedup();
@@ -10704,6 +10823,14 @@ fn run_repair(
     }
 }
 
+fn blocked_build_abort_guidance(record: &ExecutionControlRecord) -> String {
+    format!(
+        "execution: active build lifecycle remains for {kind} #{number}; run JSON operation `build.abort` with the same owner and a non-empty `params.reason` to close it\n",
+        kind = record.owner_kind.as_str(),
+        number = record.owner_number,
+    )
+}
+
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
 /// settlement binds to the session that owns the record.
 pub(super) fn run<E: CliEnv>(
@@ -10945,6 +11072,14 @@ pub(super) fn run<E: CliEnv>(
                 number = record.owner_number,
                 session = record.primary_session_id,
             ));
+            if record.status == ExecutionControlStatus::Blocked
+                && diagnose(&invocation_scope, Some(&session_id))
+                    .available_recoveries
+                    .iter()
+                    .any(|recovery| recovery == "build.abort")
+            {
+                out.push_str(&blocked_build_abort_guidance(&record));
+            }
             Ok(0)
         }
         SettleResult::NoRecord => {
@@ -10980,6 +11115,14 @@ pub(super) fn run<E: CliEnv>(
                 kind = record.owner_kind.as_str(),
                 number = record.owner_number,
             ));
+            if record.status == ExecutionControlStatus::Blocked
+                && diagnose(&invocation_scope, Some(&session_id))
+                    .available_recoveries
+                    .iter()
+                    .any(|recovery| recovery == "build.abort")
+            {
+                out.push_str(&blocked_build_abort_guidance(&record));
+            }
             Ok(0)
         }
         SettleResult::SessionMismatch { record_session_id } => {
@@ -16624,6 +16767,80 @@ mod tests {
             record
         }
 
+        fn save_build_state(repo: &Path, session_id: &str, owner_spec: Option<u64>, active: bool) {
+            gwt_core::skill_state::save(
+                repo,
+                crate::cli::build::SKILL_NAME,
+                &gwt_core::skill_state::SkillState {
+                    active,
+                    owner_spec,
+                    started_at: Utc::now(),
+                    phase: Some("verify".to_string()),
+                    session_id: session_id.to_string(),
+                },
+            )
+            .expect("save build lifecycle fixture");
+        }
+
+        fn prepare_generation_bound_execution(
+            repo: &Path,
+            session_id: &str,
+            owner_number: u64,
+            status: ExecutionControlStatus,
+        ) -> ExecutionOwnerKey {
+            prepare_generation_bound_execution_for_owner(
+                repo,
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: owner_number,
+                },
+                status,
+            )
+        }
+
+        fn prepare_generation_bound_execution_for_owner(
+            repo: &Path,
+            session_id: &str,
+            owner: ExecutionOwnerKey,
+            status: ExecutionControlStatus,
+        ) -> ExecutionOwnerKey {
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            let mut active = active_record(session_id);
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(repo, &active).expect("save active execution fixture");
+            ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live)
+                .expect("materialize generation ledger fixture");
+            let active_binding = current_execution_binding(repo, owner)
+                .expect("load active execution binding")
+                .expect("active execution binding");
+            persist_generation_session_binding(repo, owner, session_id, active_binding);
+            if status != ExecutionControlStatus::Active {
+                let settlement = match status {
+                    ExecutionControlStatus::Blocked => ExecutionSettlement::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                    ExecutionControlStatus::Completed => ExecutionSettlement::Completed,
+                    ExecutionControlStatus::Active => unreachable!(),
+                };
+                assert!(matches!(
+                    settle(repo, session_id, settlement).expect("settle execution fixture"),
+                    SettleResult::Settled(_)
+                ));
+            }
+            owner
+        }
+
+        fn status_snapshot(repo: &Path, session_id: &str) -> serde_json::Value {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let (code, out) =
+                run_cmd(repo, ExecutionCommand::Status).expect("run execution.status");
+            assert_eq!(code, 0, "{out}");
+            serde_json::from_str(out.trim()).expect("parse execution.status output")
+        }
+
         fn write_failing_git_recorder(bin_dir: &Path) -> PathBuf {
             fs::create_dir_all(bin_dir).expect("create fake git directory");
             #[cfg(windows)]
@@ -16698,6 +16915,224 @@ exit 1
                 probe["state"] == "unavailable"
                     && probe["reason"] == "execution_recovery_scope_invalid"
             }));
+        }
+
+        #[test]
+        fn blocked_output_guides_build_abort_when_matching_build_lifecycle_remains() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-blocked-output";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            prepare_generation_bound_execution(
+                repo.path(),
+                session_id,
+                3248,
+                ExecutionControlStatus::Active,
+            );
+            save_build_state(repo.path(), session_id, Some(3248), true);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle execution as blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("build.abort"), "{out}");
+            assert!(
+                out.contains("active build lifecycle remains for spec #3248;"),
+                "{out}"
+            );
+            assert!(
+                gwt_core::skill_state::load(repo.path(), crate::cli::build::SKILL_NAME)
+                    .expect("load build lifecycle after blocked settlement")
+                    .expect("build lifecycle after blocked settlement")
+                    .active,
+                "execution.blocked must guide cleanup without auto-aborting the build lifecycle"
+            );
+        }
+
+        #[test]
+        fn blocked_output_uses_issue_owner_label_in_build_abort_guidance() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-blocked-issue-output";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            prepare_generation_bound_execution_for_owner(
+                repo.path(),
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 3580,
+                },
+                ExecutionControlStatus::Active,
+            );
+            save_build_state(repo.path(), session_id, Some(3580), true);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle Issue execution as blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                out.contains("active build lifecycle remains for issue #3580;"),
+                "{out}"
+            );
+        }
+
+        #[test]
+        fn status_advertises_build_abort_only_for_matching_blocked_build_lifecycle() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+            let matching = tempfile::tempdir().expect("matching fixture");
+            let matching_session = "session-status-matching";
+            prepare_generation_bound_execution(
+                matching.path(),
+                matching_session,
+                3248,
+                ExecutionControlStatus::Blocked,
+            );
+            save_build_state(matching.path(), matching_session, Some(3248), true);
+            let matching_status = status_snapshot(matching.path(), matching_session);
+            assert!(
+                matching_status["available_recoveries"]
+                    .as_array()
+                    .expect("matching available_recoveries")
+                    .iter()
+                    .any(|recovery| recovery == "build.abort"),
+                "matching Blocked execution and active build lifecycle must advertise build.abort: {matching_status:?}"
+            );
+
+            let no_build = tempfile::tempdir().expect("no-build fixture");
+            let no_build_session = "session-status-no-build";
+            prepare_generation_bound_execution(
+                no_build.path(),
+                no_build_session,
+                3249,
+                ExecutionControlStatus::Blocked,
+            );
+
+            let mismatched_owner = tempfile::tempdir().expect("owner-mismatch fixture");
+            let mismatched_owner_session = "session-status-owner-mismatch";
+            prepare_generation_bound_execution(
+                mismatched_owner.path(),
+                mismatched_owner_session,
+                3250,
+                ExecutionControlStatus::Blocked,
+            );
+            save_build_state(
+                mismatched_owner.path(),
+                mismatched_owner_session,
+                Some(9999),
+                true,
+            );
+
+            let foreign = tempfile::tempdir().expect("foreign-session fixture");
+            let foreign_session = "session-status-foreign";
+            prepare_generation_bound_execution(
+                foreign.path(),
+                foreign_session,
+                3251,
+                ExecutionControlStatus::Blocked,
+            );
+            save_build_state(foreign.path(), "session-other", Some(3251), true);
+
+            let completed = tempfile::tempdir().expect("completed fixture");
+            let completed_session = "session-status-completed";
+            prepare_generation_bound_execution(
+                completed.path(),
+                completed_session,
+                3252,
+                ExecutionControlStatus::Completed,
+            );
+            save_build_state(completed.path(), completed_session, Some(3252), true);
+
+            let corrupt_build = tempfile::tempdir().expect("corrupt-build fixture");
+            let corrupt_build_session = "session-status-corrupt-build";
+            prepare_generation_bound_execution(
+                corrupt_build.path(),
+                corrupt_build_session,
+                3253,
+                ExecutionControlStatus::Blocked,
+            );
+            let corrupt_build_path = gwt_core::skill_state::state_path(
+                corrupt_build.path(),
+                crate::cli::build::SKILL_NAME,
+            );
+            fs::create_dir_all(corrupt_build_path.parent().expect("build state parent"))
+                .expect("create corrupt build state parent");
+            fs::write(corrupt_build_path, b"{corrupt").expect("write corrupt build state");
+
+            let corrupt_execution = tempfile::tempdir().expect("corrupt-execution fixture");
+            let corrupt_execution_session = "session-status-corrupt-execution";
+            prepare_generation_bound_execution(
+                corrupt_execution.path(),
+                corrupt_execution_session,
+                3254,
+                ExecutionControlStatus::Blocked,
+            );
+            save_build_state(
+                corrupt_execution.path(),
+                corrupt_execution_session,
+                Some(3254),
+                true,
+            );
+            let corrupt_execution_path =
+                crate::cli::trusted_store::trusted_dir_for_worktree(corrupt_execution.path())
+                    .expect("trusted execution directory")
+                    .join("execution-control.json");
+            fs::write(corrupt_execution_path, b"{corrupt")
+                .expect("write corrupt execution control");
+
+            for (reason, repo, session_id) in [
+                ("no build", no_build.path(), no_build_session),
+                (
+                    "owner mismatch",
+                    mismatched_owner.path(),
+                    mismatched_owner_session,
+                ),
+                ("foreign session", foreign.path(), foreign_session),
+                ("completed", completed.path(), completed_session),
+                ("corrupt build", corrupt_build.path(), corrupt_build_session),
+                (
+                    "corrupt execution",
+                    corrupt_execution.path(),
+                    corrupt_execution_session,
+                ),
+            ] {
+                let snapshot = status_snapshot(repo, session_id);
+                assert!(
+                    !snapshot["available_recoveries"]
+                        .as_array()
+                        .expect("available_recoveries")
+                        .iter()
+                        .any(|recovery| recovery == "build.abort"),
+                    "{reason} must not advertise build.abort: {snapshot:?}"
+                );
+            }
         }
 
         fn assert_all_operation_local_recovery_probes(snapshot: &ExecutionDiagnosisSnapshot) {
