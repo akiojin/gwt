@@ -372,6 +372,14 @@ pub enum FrontendEvent {
         window_id: String,
         text: String,
     },
+    /// SPEC-3431 FR-124: narrow request accepted only on the authenticated
+    /// agent listener. Project identity is supplied by the server-side
+    /// capability principal, never by this payload.
+    AgentIssueMonitorScanNow {
+        /// Non-secret guard that binds the caller's persisted prefs target to
+        /// the server-derived capability scope. It is never routing authority.
+        expected_project_scope: String,
+    },
     PasteImage {
         id: String,
         data_base64: String,
@@ -1660,6 +1668,13 @@ pub enum BackendEvent {
         window_id: Option<String>,
         reason: Option<String>,
     },
+    /// Origin-client-only acknowledgement for one authenticated Monitor scan
+    /// request. `accepted` means one new project worker was enqueued; it does
+    /// not claim that a candidate was found or launched.
+    IssueMonitorScanRequestResult {
+        accepted: bool,
+        reason: Option<String>,
+    },
     /// Direct, origin-connection-only acceptance for an authenticated
     /// self-close. The internal close ticket never crosses the wire.
     PaneCloseAccepted {
@@ -2421,6 +2436,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_scan_request_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
@@ -2864,6 +2884,9 @@ impl BackendEvent {
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
+            BackendEvent::IssueMonitorScanRequestResult { .. } => {
+                "issue_monitor_scan_request_result"
+            }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",

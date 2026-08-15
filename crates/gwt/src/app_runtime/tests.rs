@@ -17024,6 +17024,137 @@ fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_bloc
 }
 
 #[test]
+fn fresh_execution_missing_session_start_nonce_aborts_candidate_and_preserves_blocked_predecessor()
+{
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-missing-nonce");
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                if detail.contains("readiness nonce did not match")
+        )),
+        "missing nonce must produce a fail-closed diagnostic: {events:#?}"
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_session_start_via_daemon_fanout_preserves_readiness_nonce() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-daemon-fanout");
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.continuation_readiness_nonce = Some(readiness_nonce);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let current_pid = std::process::id();
+    let source_pid = current_pid.wrapping_add(1);
+    let payload = gwt::runtime_daemon_events::runtime_hook_payload(&session_start, source_pid);
+    let gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } =
+        gwt::runtime_daemon_events::decode_runtime_daemon_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            payload,
+            current_pid,
+        )
+        .expect("decode foreign daemon fanout")
+    else {
+        panic!("expected runtime hook fanout");
+    };
+
+    let events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+
+    assert!(
+        !events.is_empty(),
+        "activation must publish committed state"
+    );
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert!(
+        fixture
+            .issuer
+            .active_token_is_current(&fixture.token, &fixture.binding),
+        "daemon fanout must activate the exact prepared capability"
+    );
+}
+
+#[test]
+fn fresh_execution_session_start_requires_gwt_session_identity_before_nonce_validation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-foreign-gwt-session");
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", "foreign-gwt-session");
+    session_start.agent_session_id = Some(fixture.candidate_session_id.clone());
+    session_start.continuation_readiness_nonce = Some(readiness_nonce);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert!(
+        fixture
+            .issuer
+            .prepared_token_is_current(&fixture.token, &fixture.binding),
+        "foreign gwt identity must neither activate nor abort the candidate"
+    );
+    assert!(
+        events.iter().all(|outbound| !matches!(
+            &outbound.event,
+            BackendEvent::TerminalStatus { id, .. } if id == &fixture.window_id
+        )),
+        "foreign gwt identity must not emit candidate status events: {events:#?}"
+    );
+}
+
+#[test]
 fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
         .lock()
@@ -29561,6 +29692,32 @@ fn app_runtime_runtime_state_hooks_use_status_events_without_browser_hook_event(
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+}
+
+#[test]
+fn app_runtime_non_session_start_hook_keeps_agent_session_id_fallback() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let mut event = runtime_hook_state("Waiting", "foreign-gwt-session");
+    event.agent_session_id = Some("session-1".to_string());
+
+    let events = runtime.handle_runtime_hook_event(event);
+
+    assert!(events.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::WindowState { window_id: id, .. } if id == &window_id
+    )));
 }
 
 #[test]
@@ -48169,6 +48326,242 @@ fn scheduled_tick_is_single_flight_per_canonical_project_scope() {
         "duplicate tabs and duplicate ticks enqueue one worker"
     );
     assert_eq!(runtime.issue_monitor_scheduled_scans_in_flight.len(), 1);
+}
+
+#[test]
+fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overlap() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let foreign_repo = temp.path().join("foreign-repo");
+    fs::create_dir_all(&foreign_repo).expect("foreign repo");
+    init_repo_with_initial_commit(&foreign_repo);
+    let foreign_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&foreign_repo);
+    gwt::save_issue_monitor_prefs(
+        &foreign_prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed foreign monitor prefs");
+    runtime.tabs.insert(
+        0,
+        sample_project_tab(
+            "tab-foreign",
+            "Foreign",
+            foreign_repo.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let principal =
+        AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("registered PM principal");
+
+    let mismatched = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&foreign_repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(mismatched.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "project_scope_mismatch"
+    )));
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a mismatched requested scope must be rejected before enqueue"
+    );
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(accepted.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: true,
+            reason: None,
+        }
+    )));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "one exact project worker is queued"
+    );
+    assert_eq!(
+        runtime.issue_monitor_scheduled_scans_in_flight,
+        HashSet::from([prefs_path])
+    );
+    assert!(!runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&foreign_prefs_path));
+
+    let overlapping = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(overlapping.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "scan_already_in_flight"
+    )));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "overlap never creates a second worker"
+    );
+}
+
+#[test]
+fn authenticated_scan_now_rejects_non_pm_and_disabled_monitor_without_enqueuing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let ordinary =
+        AgentSessionPrincipal::for_test(&repo, "other-session").expect("ordinary principal");
+    let denied = runtime.handle_agent_frontend_event(
+        "agent-client".to_string(),
+        ordinary,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(denied.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "caller_not_registered_pm"
+    )));
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            ..gwt::load_issue_monitor_prefs(&prefs_path).expect("monitor prefs")
+        },
+    )
+    .expect("disable monitor");
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+    let disabled = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(disabled.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "monitor_disabled"
+    )));
+
+    runtime.tabs.clear();
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+    let missing_project = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(missing_project.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "project_not_open"
+    )));
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "rejected requests enqueue no worker"
+    );
+}
+
+#[test]
+fn authenticated_scan_now_reports_worker_failure_and_releases_single_flight() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("injected spawn failure");
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "scan_worker_unavailable"
+    )));
+    assert!(runtime.issue_monitor_scheduled_scans_in_flight.is_empty());
 }
 
 #[test]

@@ -45,6 +45,7 @@ mod title_summary_guard;
 pub mod tray;
 pub mod trusted_store;
 pub mod update;
+pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
@@ -179,6 +180,8 @@ pub enum CliCommand {
     Update(UpdateCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
+    /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
+    VerifyLease(verification_lease::VerificationLeaseCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
@@ -635,6 +638,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
+        CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

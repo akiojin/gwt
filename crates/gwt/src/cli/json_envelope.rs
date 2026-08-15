@@ -11,7 +11,7 @@ use super::{
     IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
     SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
-use super::{BoardCommand, BoardPostCommand};
+use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
 #[derive(Debug, Deserialize)]
 struct Envelope {
@@ -392,6 +392,35 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 )
             }
         }
+        // SPEC #3576: host-wide verification lease.
+        "verify.lease.status" | "verify.lease-status" => {
+            CliCommand::VerifyLease(VerificationLeaseCommand::Status)
+        }
+        "verify.lease.acquire" | "verify.lease-acquire" => {
+            CliCommand::VerifyLease(VerificationLeaseCommand::Acquire {
+                ttl_minutes: optional_u64(params, "ttl_minutes")?
+                    .unwrap_or(crate::cli::verification_lease::DEFAULT_TTL_MINUTES),
+                reason: optional_string(params, "reason")?,
+            })
+        }
+        "verify.lease.release" | "verify.lease-release" => {
+            CliCommand::VerifyLease(VerificationLeaseCommand::Release {
+                lease_id: required_string(params, "lease_id")?,
+                reason: optional_string(params, "reason")?,
+            })
+        }
+        "verify.lease.extend" | "verify.lease-extend" => {
+            CliCommand::VerifyLease(VerificationLeaseCommand::Extend {
+                lease_id: required_string(params, "lease_id")?,
+                ttl_minutes: optional_u64(params, "ttl_minutes")?
+                    .unwrap_or(crate::cli::verification_lease::DEFAULT_TTL_MINUTES),
+            })
+        }
+        "verify.lease.hold" => CliCommand::VerifyLease(VerificationLeaseCommand::Hold {
+            ttl_minutes: required_u64(params, "ttl_minutes")?,
+            control: std::path::PathBuf::from(required_string(params, "control")?),
+            reason: optional_string(params, "reason")?,
+        }),
         "execution.status" => {
             if !params.is_empty() {
                 return Err(CliParseError::InvalidJson(
@@ -1322,6 +1351,7 @@ mod tests {
         IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
         WorkflowCommand, WorkspaceCommand,
     };
+    use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
@@ -2406,6 +2436,47 @@ mod tests {
                     ..
                 }
             ) if generated_outputs == vec!["artifacts/report.json"]
+        ));
+    }
+
+    // SPEC #3576 T-007: verification lease operation parsing.
+    #[test]
+    fn verification_lease_operations_are_typed() {
+        assert!(matches!(
+            ok("verify.lease.status", json!({})),
+            CliCommand::VerifyLease(VerificationLeaseCommand::Status)
+        ));
+        assert!(matches!(
+            ok("verify.lease.acquire", json!({})),
+            CliCommand::VerifyLease(VerificationLeaseCommand::Acquire { ttl_minutes, reason })
+                if ttl_minutes == crate::cli::verification_lease::DEFAULT_TTL_MINUTES
+                    && reason.is_none()
+        ));
+        assert!(matches!(
+            ok("verify.lease.acquire", json!({"ttl_minutes": 20, "reason": "coverage run"})),
+            CliCommand::VerifyLease(VerificationLeaseCommand::Acquire { ttl_minutes, reason })
+                if ttl_minutes == 20 && reason.as_deref() == Some("coverage run")
+        ));
+        assert!(matches!(
+            ok("verify.lease.extend", json!({"lease_id": "lease-1"})),
+            CliCommand::VerifyLease(VerificationLeaseCommand::Extend { lease_id, ttl_minutes })
+                if lease_id == "lease-1"
+                    && ttl_minutes == crate::cli::verification_lease::DEFAULT_TTL_MINUTES
+        ));
+        assert!(matches!(
+            ok("verify.lease.release", json!({"lease_id": "lease-1", "reason": "done"})),
+            CliCommand::VerifyLease(VerificationLeaseCommand::Release { lease_id, reason })
+                if lease_id == "lease-1" && reason.as_deref() == Some("done")
+        ));
+        for operation in ["verify.lease.release", "verify.lease.extend"] {
+            assert!(matches!(
+                err(operation, json!({})),
+                CliParseError::MissingFlag("lease_id")
+            ));
+        }
+        assert!(matches!(
+            err("verify.lease.hold", json!({"control": "/tmp/control"})),
+            CliParseError::MissingFlag("ttl_minutes")
         ));
     }
 
