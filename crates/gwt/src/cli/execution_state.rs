@@ -8558,19 +8558,64 @@ fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus)
     }
 }
 
-fn blocked_build_abort_recovery_available(
+fn probe_blocked_build_abort_recovery(
     worktree: &Path,
-    owner: ExecutionOwnerKey,
+    snapshot: &ExecutionDiagnosisSnapshot,
     session_id: Option<&str>,
     recovery_context: Option<
         &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
     >,
-) -> bool {
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+
+    let governance = GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        retryable: Some(true),
+        target_state: Some("discarded".to_string()),
+        execution_generation: snapshot.generation_id.clone(),
+        ..GovernanceMetadata::default()
+    };
+    let unavailable = |cause, reason: &str| {
+        RecoveryProbe::unavailable(
+            "build.abort",
+            GovernanceMetadata {
+                cause: Some(cause),
+                retryable: Some(false),
+                ..governance.clone()
+            },
+            reason,
+        )
+    };
+    if snapshot.ecr_status != ExecutionDiagnosisState::Blocked {
+        return unavailable(
+            GovernanceCause::DomainInvalid,
+            "build_abort_requires_blocked_execution",
+        );
+    }
+    let (Some(owner_kind), Some(owner_number)) = (snapshot.owner_kind, snapshot.owner_number)
+    else {
+        return unavailable(
+            GovernanceCause::Integrity,
+            "build_abort_execution_owner_unavailable",
+        );
+    };
+    let owner = ExecutionOwnerKey {
+        kind: owner_kind,
+        number: owner_number,
+    };
     let (Some(session_id), Some(Ok(recovery_context))) = (session_id, recovery_context) else {
-        return false;
+        return unavailable(
+            GovernanceCause::ManagedIdentity,
+            "execution_recovery_scope_invalid",
+        );
     };
     let Some(binding) = recovery_context.session().execution_binding.as_ref() else {
-        return false;
+        return unavailable(
+            GovernanceCause::Authority,
+            "build_abort_execution_binding_unavailable",
+        );
     };
     if recovery_context.worktree() != worktree
         || binding.schema_version != gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
@@ -8579,10 +8624,45 @@ fn blocked_build_abort_recovery_available(
         || binding.owner_number != owner.number
         || binding.capability_generation == 0
     {
-        return false;
+        return unavailable(
+            GovernanceCause::Authority,
+            "build_abort_execution_binding_mismatch",
+        );
     }
-    blocked_build_abort_execution_binding_matches(worktree, owner, session_id, &binding.identity)
-        .unwrap_or(false)
+    match blocked_build_abort_execution_binding_matches(
+        worktree,
+        owner,
+        session_id,
+        &binding.identity,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return unavailable(
+                GovernanceCause::NotReady,
+                "build_abort_lifecycle_authority_unavailable",
+            )
+        }
+        Err(error) => return unavailable(GovernanceCause::Integrity, &error.to_string()),
+    }
+    match crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
+        worktree,
+        session_id,
+        crate::AgentWorkTerminalKind::Discarded,
+    ) {
+        Ok(Some(authority)) => match authority.requires_blocked_build_abort_bridge() {
+            Ok(true) => RecoveryProbe::available("build.abort", governance),
+            Ok(false) => unavailable(
+                GovernanceCause::Authority,
+                "build_abort_terminal_authority_unavailable",
+            ),
+            Err(error) => unavailable(GovernanceCause::Integrity, &error.to_string()),
+        },
+        Ok(None) => unavailable(
+            GovernanceCause::Authority,
+            "build_abort_requires_exact_host_work_authority",
+        ),
+        Err(error) => unavailable(GovernanceCause::Authority, &error.to_string()),
+    }
 }
 
 fn generation_writer(ledger: &ExecutionGenerationLedger, generation_id: &str) -> Option<String> {
@@ -8602,7 +8682,8 @@ enum ExecutionDiagnosisMode {
     Projection,
 }
 
-const PROTECTED_RECOVERY_OPERATIONS: [&str; 6] = [
+const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
+    "build.abort",
     "execution.continue",
     "execution.repair",
     "execution.adopt",
@@ -9158,16 +9239,6 @@ fn diagnose_with_mode(
         };
         execution_recoveries.push(recovery.to_string());
     }
-    if snapshot.ecr_status == ExecutionDiagnosisState::Blocked
-        && blocked_build_abort_recovery_available(
-            worktree,
-            owner,
-            session_id,
-            recovery_context.as_ref(),
-        )
-    {
-        execution_recoveries.push("build.abort".to_string());
-    }
     execution_recoveries.sort();
     execution_recoveries.dedup();
     snapshot.available_recoveries = execution_recoveries;
@@ -9224,6 +9295,7 @@ fn finalize_recovery_probes(
         .map_or(worktree, |context| context.project_state_root());
     let probes = if recovery_context.is_some_and(Result::is_ok) {
         vec![
+            probe_blocked_build_abort_recovery(worktree, &snapshot, session_id, recovery_context),
             probe_execution_continuation_for_recovery(continuation_root, caller, recovery_context),
             probe_execution_repair_for_recovery(worktree, session_id, recovery_context),
             probe_execution_adopt_for_recovery(worktree, caller, recovery_context),
@@ -9233,6 +9305,7 @@ fn finalize_recovery_probes(
         ]
     } else {
         [
+            "build.abort",
             "execution.continue",
             "execution.repair",
             "execution.adopt",
@@ -9256,6 +9329,44 @@ fn finalize_recovery_probes(
     snapshot.available_recoveries.dedup();
     snapshot.recovery_probes = probes;
     snapshot
+}
+
+/// Replace an operation-specific terminal refusal with guidance derived from
+/// the same operation-local diagnosis exposed by `execution.status`.
+pub(crate) fn terminal_recovery_refusal(
+    invocation_scope: &Path,
+    session_id: &str,
+    refusal: &str,
+) -> String {
+    let diagnosis = diagnose(invocation_scope, Some(session_id));
+    if diagnosis.binding_state != ExecutionBindingState::Terminal {
+        return refusal.to_string();
+    }
+    let refusal = refusal
+        .split_once("; run workspace.ensure for this Session before retrying workspace.update")
+        .map_or(refusal, |(reason, _)| reason);
+    let available = if diagnosis.available_recoveries.is_empty() {
+        "none".to_string()
+    } else {
+        diagnosis.available_recoveries.join(", ")
+    };
+    let reopen = diagnosis
+        .recovery_probes
+        .iter()
+        .find(|probe| probe.operation == "execution.reopen")
+        .and_then(|probe| probe.reason.as_deref())
+        .map(|reason| format!("; recovery_probes[execution.reopen]={reason}"))
+        .unwrap_or_default();
+    format!(
+        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}",
+        ecr_status = match diagnosis.ecr_status {
+            ExecutionDiagnosisState::Active => "active",
+            ExecutionDiagnosisState::Completed => "completed",
+            ExecutionDiagnosisState::Blocked => "blocked",
+            ExecutionDiagnosisState::Missing => "missing",
+            ExecutionDiagnosisState::Corrupt => "corrupt",
+        },
+    )
 }
 
 fn probe_execution_continuation_for_recovery(
@@ -16782,6 +16893,77 @@ mod tests {
             .expect("save build lifecycle fixture");
         }
 
+        fn seed_build_abort_work_authority(
+            repo: &Path,
+            session_id: &str,
+            owner: ExecutionOwnerKey,
+        ) {
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .expect("load bound Session fixture");
+            let worktree = dunce::canonicalize(repo).expect("canonical fixture worktree");
+            let work_id = format!("work-build-abort-{}-{}", owner.kind.as_str(), owner.number);
+            let now = Utc::now();
+            let mut projection =
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+            projection
+                .agents
+                .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                    session_id: session_id.to_string(),
+                    window_id: Some(format!("project::{session_id}")),
+                    agent_id: session.agent_id.command().to_string(),
+                    display_name: session.agent_id.display_name().to_string(),
+                    status_category:
+                        gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                    current_focus: None,
+                    title_summary: None,
+                    worktree_path: Some(worktree.clone()),
+                    branch: Some(session.branch.clone()),
+                    last_board_entry_id: None,
+                    last_board_entry_kind: None,
+                    coordination_scope: None,
+                    affiliation_status:
+                        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                    workspace_id: Some(work_id.clone()),
+                    updated_at: now,
+                });
+            gwt_core::workspace_projection::save_workspace_projection(repo, &projection)
+                .expect("save exact build.abort Session assignment");
+
+            let mut start = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                &work_id,
+                now,
+            );
+            start.owner = Some(match owner.kind {
+                ExecutionOwnerKind::Spec => format!("SPEC-{}", owner.number),
+                ExecutionOwnerKind::Issue => format!("Issue #{}", owner.number),
+            });
+            start.status_category =
+                Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+            start.agent_session_id = Some(session_id.to_string());
+            start.agent_id = Some(session.agent_id.command().to_string());
+            start.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(session.branch),
+                    worktree_path: Some(worktree),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+            work_items.apply_event(start);
+            let work_items_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+            gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                &work_items_path,
+                &work_items,
+            )
+            .expect("save exact build.abort Work authority");
+        }
+
         fn prepare_generation_bound_execution(
             repo: &Path,
             session_id: &str,
@@ -16910,7 +17092,7 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 6);
+            assert_eq!(probes.len(), 7);
             assert!(probes.iter().all(|probe| {
                 probe["state"] == "unavailable"
                     && probe["reason"] == "execution_recovery_scope_invalid"
@@ -16935,6 +17117,14 @@ exit 1
                 ExecutionControlStatus::Active,
             );
             save_build_state(repo.path(), session_id, Some(3248), true);
+            seed_build_abort_work_authority(
+                repo.path(),
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+            );
 
             let (code, out) = run_cmd(
                 repo.path(),
@@ -16981,6 +17171,14 @@ exit 1
                 ExecutionControlStatus::Active,
             );
             save_build_state(repo.path(), session_id, Some(3580), true);
+            seed_build_abort_work_authority(
+                repo.path(),
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 3580,
+                },
+            );
 
             let (code, out) = run_cmd(
                 repo.path(),
@@ -17016,6 +17214,14 @@ exit 1
                 ExecutionControlStatus::Blocked,
             );
             save_build_state(matching.path(), matching_session, Some(3248), true);
+            seed_build_abort_work_authority(
+                matching.path(),
+                matching_session,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+            );
             let matching_status = status_snapshot(matching.path(), matching_session);
             assert!(
                 matching_status["available_recoveries"]
@@ -17135,6 +17341,55 @@ exit 1
             }
         }
 
+        #[test]
+        fn status_does_not_advertise_build_abort_when_exact_work_preflight_is_unavailable() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().expect("projectionless blocked fixture");
+            let session_id = "session-status-build-abort-without-work-authority";
+            prepare_generation_bound_execution(
+                repo.path(),
+                session_id,
+                3587,
+                ExecutionControlStatus::Blocked,
+            );
+            save_build_state(repo.path(), session_id, Some(3587), true);
+
+            let diagnosis = diagnose(repo.path(), Some(session_id));
+
+            assert!(
+                !diagnosis
+                    .available_recoveries
+                    .contains(&"build.abort".to_string()),
+                "an unavailable exact Work preflight must remove build.abort: {diagnosis:?}"
+            );
+            let probe = diagnosis
+                .recovery_probes
+                .iter()
+                .find(|probe| probe.operation == "build.abort")
+                .expect("build.abort operation-local recovery probe");
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            assert_eq!(
+                probe.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::Authority)
+            );
+            assert_eq!(probe.governance.retryable, Some(false));
+            assert!(
+                probe
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("Session assignment")),
+                "{probe:?}"
+            );
+        }
+
         fn assert_all_operation_local_recovery_probes(snapshot: &ExecutionDiagnosisSnapshot) {
             let mut operations = snapshot
                 .recovery_probes
@@ -17145,6 +17400,7 @@ exit 1
             assert_eq!(
                 operations,
                 vec![
+                    "build.abort",
                     "execution.adopt",
                     "execution.continue",
                     "execution.reopen",
@@ -17991,7 +18247,7 @@ exit 1
         }
 
         #[test]
-        fn status_always_reports_all_six_operation_local_probes() {
+        fn status_always_reports_all_seven_operation_local_probes() {
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
