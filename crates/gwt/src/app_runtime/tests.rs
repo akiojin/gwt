@@ -60,7 +60,7 @@ use super::{
     save_start_work_workspace_projection, save_workspace_launch_projection,
     set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
     AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AgentLaunchRuntimeContext,
-    AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
+    AppEventProxy, AppRuntime, ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner,
     CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
     IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
     KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
@@ -1708,6 +1708,19 @@ fn save_assigned_workspace_projection_for_test(
     )
 }
 
+fn materialized_project_state_sots(name: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path().join("project-state").join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    paths
+}
+
 #[test]
 fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     let _env_guard = env_test_lock()
@@ -1770,11 +1783,15 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         .iter()
         .any(|agent| agent.session_id == session.session_id));
     assert!(gwt_core::paths::gwt_repo_local_work_events_path(&worktree).exists());
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&worktree)
-            .expect("load worktree WorkItems shadow")
-            .is_none(),
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "launch must not create a topology-dependent worktree WorkItems SOT"
+    );
+    assert_eq!(
+        materialized_project_state_sots("current.json"),
+        vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
+        "launch must not create a topology-dependent worktree Project State SOT"
     );
 
     let tab = sample_project_tab(
@@ -1819,10 +1836,9 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
             .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pause),
         "stop must append Pause to the same Session-bound Work"
     );
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&worktree)
-            .expect("load stopped worktree WorkItems shadow")
-            .is_none(),
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "stop must not create a worktree-specific WorkItems SOT"
     );
     let mut saved = gwt_core::workspace_projection::load_workspace_projection(&project_root)
@@ -3352,6 +3368,8 @@ fn sample_runtime_with_events(
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
         window_hook_states: HashMap::new(),
+        window_approval_waiting: HashMap::new(),
+        approval_settle_epoch: 0,
         recoverable_agent_error_windows: HashSet::new(),
         last_agent_activity: HashMap::new(),
         agent_capability_issuer: None,
@@ -10161,10 +10179,10 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
         .expect("repo-global WorkItems");
     assert_eq!(work_items.work_items.len(), 1);
     assert!(work_items.work_items[0].discarded);
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&worktree)
-            .expect("read worktree-local WorkItems shadow")
-            .is_none()
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
+        "terminalization must leave exactly one repository WorkItems SOT"
     );
     assert!(
         std::fs::read_to_string(gwt_core::paths::gwt_repo_local_work_events_path(&worktree))
@@ -11875,6 +11893,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3456,
@@ -16820,6 +16839,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         fixture.owner.number,
@@ -20467,10 +20487,9 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         .agents
         .iter()
         .any(|agent| agent.session_id == candidate_session_id));
-    assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&repo)
-            .expect("load worktree WorkItems shadow")
-            .is_none(),
+    assert_eq!(
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "Continue Work must not create a worktree-local WorkItems shadow"
     );
 
@@ -29834,6 +29853,854 @@ fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
 }
 
 #[test]
+fn app_runtime_approval_wait_overlay_enters_once_and_restores_hook_state() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let entered = runtime.handle_runtime_approval_wait_state(&window_id, true);
+    let duplicate = runtime.handle_runtime_approval_wait_state(&window_id, true);
+    let cleared = runtime.handle_runtime_approval_wait_state(&window_id, false);
+
+    assert!(entered.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Waiting,
+            ..
+        }
+    )));
+    assert!(
+        duplicate.is_empty(),
+        "a prompt redraw must not re-emit waiting"
+    );
+    assert!(cleared.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+}
+
+#[test]
+fn app_runtime_remote_approval_overlay_enters_clears_and_reenters() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let entered = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
+    let raw_output = runtime.handle_daemon_runtime_output(window_id.clone(), b"partial".to_vec());
+    let duplicate = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
+    let cleared = runtime.handle_daemon_runtime_approval_wait_state(&window_id, false);
+    let reentered = runtime.handle_daemon_runtime_approval_wait_state(&window_id, true);
+
+    assert!(entered.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Waiting,
+            ..
+        }
+    )));
+    assert!(duplicate.is_empty());
+    assert!(raw_output.iter().all(|event| !matches!(
+        event.event,
+        BackendEvent::WindowState { .. } | BackendEvent::TerminalStatus { .. }
+    )));
+    assert!(cleared.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert!(reentered.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Waiting,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn app_runtime_approval_overlay_dedupes_when_hook_state_is_already_waiting() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Waiting);
+    runtime.recompute_window_state(&window_id);
+
+    let entered = runtime.handle_runtime_approval_wait_state(&window_id, true);
+    let cleared = runtime.handle_runtime_approval_wait_state(&window_id, false);
+
+    assert!(entered.is_empty());
+    assert!(cleared.is_empty());
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Waiting)
+    );
+}
+
+#[test]
+fn app_runtime_persistence_excludes_only_the_approval_overlay_state() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime.handle_runtime_approval_wait_state(&window_id, true);
+
+    let live = runtime.tabs[0]
+        .workspace
+        .window("agent-1")
+        .expect("live window")
+        .status;
+    let persisted = runtime.persistable_workspace_state(&runtime.tabs[0]);
+    let saved = persisted
+        .windows
+        .iter()
+        .find(|window| window.id == "agent-1")
+        .expect("persisted window");
+    let serialized = serde_json::to_string(&persisted).expect("serialize persisted workspace");
+
+    assert_eq!(live, WindowProcessStatus::Waiting);
+    assert_eq!(saved.status, WindowProcessStatus::Running);
+    assert!(!serialized.contains("fingerprint"));
+    assert!(!serialized.contains("approval"));
+
+    let restored = WindowCanvasState::from_persisted(persisted);
+    assert_eq!(
+        restored.window("agent-1").expect("restored window").status,
+        WindowProcessStatus::Running
+    );
+}
+
+#[test]
+fn app_runtime_persistence_keeps_hook_native_waiting_without_approval_overlay() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Waiting);
+    runtime.recompute_window_state(&window_id);
+
+    let persisted = runtime.persistable_workspace_state(&runtime.tabs[0]);
+
+    assert_eq!(
+        persisted
+            .windows
+            .iter()
+            .find(|window| window.id == "agent-1")
+            .expect("persisted window")
+            .status,
+        WindowProcessStatus::Waiting
+    );
+}
+
+#[test]
+fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let prompt = b"Would you like to run the following command?\r\n\r\n\
+        cargo test -p gwt window_state\r\n\r\n\
+        > 1. Yes, proceed\r\n\
+          2. No, and tell Codex what to do differently\r\n\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+
+    let events = runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Waiting,
+            ..
+        }
+    )));
+    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt() {
+    let temp = tempdir().expect("tempdir");
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_agent_id("agent-1", "claude"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let prompt = b"Bash command\r\n\r\n  cargo test -p gwt\r\n\r\n\
+        Do you want to proceed?\r\n\
+        > 1. Yes\r\n\
+          2. No, and tell Claude what to do differently\r\n\r\n\
+        Enter to confirm \xc2\xb7 Esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+
+    let events = runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Waiting,
+            ..
+        }
+    )));
+    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let prompt = b"Would you like to run the following command?\r\n\r\n\
+        cargo test -p gwt\r\n\r\n\
+        > 1. Yes, proceed\r\n\
+          2. No, and tell Codex what to do differently\r\n\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+    runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+
+    assert!(runtime
+        .terminal_input_events(&window_id, "\u{1b}[A")
+        .is_empty());
+    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+    let partial_redraw = runtime.observe_runtime_approval_prompt(&window_id, None);
+    assert!(partial_redraw.is_empty());
+    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+
+    let submitted = runtime.terminal_input_events(&window_id, "1\r");
+
+    assert!(submitted.is_empty());
+    let latch = runtime
+        .window_approval_waiting
+        .get(&window_id)
+        .expect("approval remains latched until rendered output changes");
+    assert_eq!(latch.resolving_fingerprint, latch.active_fingerprint);
+
+    let pending = runtime.observe_runtime_approval_prompt(&window_id, None);
+    assert!(pending.is_empty());
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"\x1b[2J\x1b[HWorking\r\n");
+    let cleared = runtime.handle_runtime_approval_settle(&window_id, token);
+    assert!(cleared.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+fn approval_settle_runtime() -> (tempfile::TempDir, AppRuntime, String, Vec<u8>) {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let prompt = b"Would you like to run the following command?\r\n command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n"
+        .to_vec();
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(&prompt);
+    runtime.handle_runtime_output(window_id.clone(), prompt.clone());
+    runtime.terminal_input_events(&window_id, "1\r");
+    (temp, runtime, window_id, prompt)
+}
+
+#[test]
+fn app_runtime_approval_settle_same_prompt_cancels_resolution_without_frames() {
+    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    assert!(runtime
+        .observe_runtime_approval_prompt(&window_id, None)
+        .is_empty());
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+    let fingerprint = runtime.window_approval_waiting[&window_id]
+        .active_fingerprint
+        .expect("active fingerprint");
+
+    let redraw = runtime.observe_runtime_approval_prompt(&window_id, Some(fingerprint));
+    assert!(redraw.is_empty());
+
+    let events = runtime.handle_runtime_approval_settle(&window_id, token);
+
+    assert!(events.is_empty());
+    let latch = &runtime.window_approval_waiting[&window_id];
+    assert!(!latch.resolution_started);
+    assert!(latch.pending_settle_token.is_none());
+}
+
+#[test]
+fn app_runtime_approval_settle_stable_progress_clears_waiting() {
+    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    runtime.observe_runtime_approval_prompt(&window_id, None);
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"\x1b[2J\x1b[HWorking\r\n");
+
+    let events = runtime.handle_runtime_approval_settle(&window_id, token);
+
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_approval_settle_partial_provider_evidence_keeps_waiting() {
+    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    runtime.observe_runtime_approval_prompt(&window_id, None);
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"\x1b[2J\x1b[HWould you like to run the following command?\r\n");
+
+    let events = runtime.handle_runtime_approval_settle(&window_id, token);
+
+    assert!(events.is_empty());
+    let latch = &runtime.window_approval_waiting[&window_id];
+    assert!(latch.resolution_started);
+    assert!(latch.pending_settle_token.is_none());
+}
+
+#[test]
+fn app_runtime_approval_settle_ignores_complete_prompt_in_scrollback_above_progress() {
+    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    runtime.observe_runtime_approval_prompt(&window_id, None);
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"\r\nRunning tests...\r\n");
+
+    let events = runtime.handle_runtime_approval_settle(&window_id, token);
+
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_approval_settle_stale_token_is_noop() {
+    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    runtime.observe_runtime_approval_prompt(&window_id, None);
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+
+    let events = runtime.handle_runtime_approval_settle(&window_id, token.wrapping_add(1));
+
+    assert!(events.is_empty());
+    assert_eq!(
+        runtime.window_approval_waiting[&window_id].pending_settle_token,
+        Some(token)
+    );
+}
+
+#[test]
+fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
+    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    let proxy_events = match &runtime.proxy {
+        AppEventProxy::Stub(events) => events.clone(),
+        AppEventProxy::Real(_) => panic!("sample runtime must use stub proxy"),
+    };
+    runtime.observe_runtime_approval_prompt(&window_id, None);
+    let token = runtime.window_approval_waiting[&window_id]
+        .pending_settle_token
+        .expect("settle token");
+
+    thread::sleep(Duration::from_millis(180));
+
+    let events = proxy_events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        UserEvent::RuntimeApprovalSettle { id, token: queued }
+            if id == &window_id && *queued == token
+    )));
+}
+
+#[test]
+fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let first = b"Would you like to run the following command?\r\n first-command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(first);
+    runtime.handle_runtime_output(window_id.clone(), first.to_vec());
+    runtime.terminal_input_events(&window_id, "1\r");
+
+    let second =
+        b"\x1b[2J\x1b[HWould you like to run the following command?\r\n second-command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(second);
+    let events = runtime.handle_runtime_output(window_id.clone(), second.to_vec());
+    let states = events
+        .iter()
+        .filter_map(|event| match event.event {
+            BackendEvent::WindowState { state, .. } => Some(state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        states,
+        vec![WindowProcessStatus::Running, WindowProcessStatus::Waiting]
+    );
+}
+
+#[test]
+fn app_runtime_pane_send_marks_resolution_before_delayed_submit() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime.window_approval_waiting.insert(
+        window_id.clone(),
+        ApprovalPromptLatch {
+            active_fingerprint: Some(7),
+            resolving_fingerprint: None,
+            resolution_started: false,
+            pending_settle_token: None,
+        },
+    );
+
+    let events =
+        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: true, .. })));
+    assert_eq!(
+        runtime
+            .window_approval_waiting
+            .get(&window_id)
+            .and_then(|latch| latch.resolving_fingerprint),
+        Some(7)
+    );
+}
+
+#[test]
+fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.window_approval_waiting.insert(
+        window_id.clone(),
+        ApprovalPromptLatch {
+            active_fingerprint: Some(11),
+            resolving_fingerprint: None,
+            resolution_started: false,
+            pending_settle_token: None,
+        },
+    );
+
+    let terminal_events = runtime.terminal_input_events(&window_id, "1\r");
+    let pane_events =
+        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+
+    assert!(terminal_events.is_empty());
+    assert!(pane_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: false, .. })));
+    let latch = runtime
+        .window_approval_waiting
+        .get(&window_id)
+        .expect("latch");
+    assert!(!latch.resolution_started);
+    assert!(latch.resolving_fingerprint.is_none());
+}
+
+#[test]
+fn app_runtime_custom_agent_name_containing_codex_is_not_classified_as_codex() {
+    let temp = tempdir().expect("tempdir");
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_agent_id("agent-1", "company-codex-wrapper"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let prompt = b"Would you like to run the following command?\r\n secret\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+
+    let events = runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Waiting,
+            ..
+        }
+    )));
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_approval_error_beats_live_hook_and_redacts_prompt_tail_everywhere() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime.handle_runtime_approval_wait_state(&window_id, true);
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"SECRET_TOKEN=/private/path command --token sentinel\r\n");
+
+    let events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("failed SECRET_TOKEN=/private/path".to_string()),
+    );
+    let serialized = format!("{events:?}");
+
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert!(!serialized.contains("SECRET_TOKEN"));
+    assert!(!serialized.contains("/private/path"));
+    assert!(!serialized.contains("--token"));
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("Agent approval prompt ended unexpectedly")
+    );
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_approval_error_redacts_screen_before_output_event_sets_latch() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let prompt = b"Would you like to run the following command?\r\n\
+        SECRET_TOKEN=/private/path command --token sentinel\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(prompt);
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+
+    let events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("failed SECRET_TOKEN=/private/path".to_string()),
+    );
+    let serialized = format!("{events:?}");
+
+    assert!(!serialized.contains("SECRET_TOKEN"));
+    assert!(!serialized.contains("/private/path"));
+    assert!(!serialized.contains("--token"));
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("Agent approval prompt ended unexpectedly")
+    );
+}
+
+#[test]
+fn app_runtime_progress_hook_clears_approval_wait_even_when_hook_state_is_unchanged() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime.handle_runtime_approval_wait_state(&window_id, true);
+
+    let cleared = runtime.handle_runtime_hook_event(runtime_hook_state("Running", "session-1"));
+
+    assert!(cleared.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_terminal_state_clears_approval_wait_tracking() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    runtime.handle_runtime_approval_wait_state(&window_id, true);
+
+    let events =
+        runtime.handle_runtime_status(window_id.clone(), WindowProcessStatus::Stopped, None);
+
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Stopped,
+            ..
+        }
+    )));
+    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+}
+
+#[test]
 fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() {
     let temp = tempdir().expect("tempdir");
     let tab = sample_project_tab_with_window(
@@ -30300,6 +31167,46 @@ fn restart_window_events_relaunches_stopped_process_window_in_place() {
             if id == &window_id && *state == WindowProcessStatus::Running
     )));
 
+    runtime.stop_window_runtime(&window_id);
+}
+
+#[test]
+fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    runtime.register_window("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    runtime.handle_runtime_status(window_id.clone(), WindowProcessStatus::Stopped, None);
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped),
+        "natural teardown must leave the stored terminal status readable"
+    );
+
+    let events = runtime.restart_window_events(&window_id);
+
+    assert!(
+        !events.is_empty(),
+        "the restart guard must admit natural exits"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
     runtime.stop_window_runtime(&window_id);
 }
 
@@ -35133,6 +36040,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
@@ -35390,6 +36298,7 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     };
     monitor.record_candidate(issue.clone());
     let key = monitor
@@ -35546,6 +36455,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         42,
@@ -37002,6 +37912,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37094,6 +38005,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37209,6 +38121,7 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37303,6 +38216,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37869,6 +38783,7 @@ fn monitor_relaunch_fixture(
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::Ready,
+            updated_at: None,
         });
         assert!(monitor.apply_confirmed_claim(
             3165,
@@ -47535,6 +48450,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         },
         state,
         claim_id: None,

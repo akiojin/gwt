@@ -3449,10 +3449,15 @@ fn scan_issue_monitor_once_blocking(
                 &now,
                 active_cap,
                 |issue_number| {
+                    let Some(issue) = loaded
+                        .issues
+                        .iter()
+                        .find(|issue| issue.number == issue_number)
+                    else {
+                        return Ok(false);
+                    };
                     crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
-                        &owner,
-                        &repo,
-                        issue_number,
+                        &owner, &repo, issue,
                     )
                 },
             )?;
@@ -4061,10 +4066,14 @@ if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
-  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
-printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+if [ "$GWT_FAKE_GH_MODE" = "completion_recovery" ]; then
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
+  exit 0
+fi
+printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
 exit 0
 "###,
         )
@@ -4621,6 +4630,7 @@ exit 0
             body: None,
             url: None,
             readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-15T00:00:00Z".to_string()),
         }
     }
 
@@ -5525,6 +5535,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -5569,6 +5580,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -5613,6 +5625,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -6146,6 +6159,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -6205,6 +6219,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -6774,6 +6789,118 @@ exit 0
                     .starts_with(&scratch_prefix)),
             "the atomic save must leave no scratch file"
         );
+    }
+
+    #[test]
+    fn scan_now_driver_persists_legacy_completion_recovery_for_launch_now() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "completion_recovery");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let legacy: crate::IssueMonitorPrefs = serde_json::from_str(
+            r#"{"enabled":true,"max_active_agents":1,"priority_order":[43],"merged_issues":[43]}"#,
+        )
+        .expect("legacy completion prefs");
+        crate::save_issue_monitor_prefs(&prefs_path, &legacy).expect("seed legacy completion");
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
+
+        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("ScanNow live revalidation succeeds");
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Queued)
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted recovery");
+        assert!(
+            persisted.merged_issues.is_empty(),
+            "legacy completion must not revive during persist rebase: {persisted:?}"
+        );
+        assert!(persisted.completion_records.iter().any(|record| {
+            record.issue_number == 43
+                && record.state == crate::issue_monitor::IssueCompletionState::Reopened
+        }));
+    }
+
+    #[test]
+    fn scan_now_driver_preserves_current_completion_as_launch_now_negative_control() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "completion_recovery");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            priority_order: vec![43],
+            merged_issues: vec![43],
+            issue_completion_migration_version:
+                crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+            completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                issue_number: 43,
+                generation: 1,
+                state: crate::issue_monitor::IssueCompletionState::Completed,
+                issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed completion");
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+
+        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("ScanNow negative control succeeds");
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged)
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted completion");
+        assert_eq!(persisted.merged_issues, vec![43]);
+        assert_eq!(persisted.completion_records[0].generation, 1);
     }
 
     /// Wait until `path` accumulates at least `expected` newline-terminated
@@ -10720,6 +10847,7 @@ exit 1
         let prefs_path = temp.path().join("issue-monitor-prefs.json");
 
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42); // a scan-driven transition that must survive restart
         assert!(!prefs_path.exists(), "prefs not written before the scan");
 
@@ -10755,6 +10883,7 @@ exit 1
         );
         assert_eq!(monitor.status_view().active_count, 1);
 
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42);
         assert_eq!(monitor.status_view().active_count, 0);
 
@@ -10788,6 +10917,7 @@ exit 1
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42);
 
         let out = super::scan_join_failure_fallback(
@@ -10850,6 +10980,7 @@ exit 1
         // The daemon's in-memory monitor has NO launch_profile (stale startup)
         // but has a daemon-owned merge completion to persist.
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42);
         assert!(
             monitor.prefs().launch_profile.is_none(),
@@ -12309,6 +12440,7 @@ exit 1
                 ..crate::IssueMonitorPrefs::default()
             },
         );
+        daemon.record_candidate(sample_issue_monitor_issue(42));
         daemon.record_merged(42);
 
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);

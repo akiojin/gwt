@@ -485,6 +485,7 @@ mod tests {
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             }],
             "2026-08-10T00:00:00Z",
         );
