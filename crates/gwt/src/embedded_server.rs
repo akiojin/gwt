@@ -27,8 +27,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+    AgentBuildAbortTerminalizationRequest, AgentWorkTerminalizationRequest,
+    AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest,
+    BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
@@ -2510,6 +2511,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             "/internal/work-terminalization",
             post(work_terminalization_handler),
         )
+        .route(
+            "/internal/build-abort-terminalization",
+            post(build_abort_terminalization_handler),
+        )
         .with_state(state)
         .layer(middleware::from_fn_with_state(
             AccessLogPolicy::agent(access_log),
@@ -3022,6 +3027,61 @@ async fn work_terminalization_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::Internal,
                 message: "Host Work terminalization task failed before a response was produced"
+                    .to_string(),
+            },
+        ),
+    }
+}
+
+async fn build_abort_terminalization_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentBuildAbortTerminalizationRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "build_abort_terminalization_requires_bound_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::apply_bound_authenticated_blocked_build_abort_terminalization(
+            &mutation_project_root,
+            &session_id,
+            &execution_binding,
+            request,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::Internal,
+                message: "Host build abort mutation task failed before a response was produced"
                     .to_string(),
             },
         ),
@@ -7029,6 +7089,300 @@ mod tests {
     }
 
     #[test]
+    fn blocked_build_abort_route_is_dedicated_and_authenticates_before_mutation() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let target = server
+            .agent_capability_issuer()
+            .issue(project.path(), "session-1")
+            .expect("build abort target");
+        let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+        url.set_path("/internal/build-abort-terminalization");
+        let request = serde_json::json!({
+            "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+            "claimed_session_id": "session-1",
+            "owner_number": 3580,
+            "reason": "canonical verification cannot proceed",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let browser_response = client
+            .post(format!(
+                "{}internal/build-abort-terminalization",
+                server.url()
+            ))
+            .json(&request)
+            .send()
+            .expect("browser build abort request");
+        assert_eq!(browser_response.status(), HttpStatusCode::NOT_FOUND);
+
+        let unauthorized = client
+            .post(url.clone())
+            .json(&request)
+            .send()
+            .expect("unauthorized build abort request");
+        assert_eq!(unauthorized.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let authenticated = client
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&request)
+            .send()
+            .expect("authenticated build abort request");
+        assert_eq!(authenticated.status(), HttpStatusCode::CONFLICT);
+        let error: serde_json::Value = authenticated.json().expect("build abort error body");
+        assert_eq!(error["code"], "execution_binding_mismatch");
+        assert!(events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn blocked_build_abort_route_discards_exact_bound_work_under_terminal_execution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repository");
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/blocked-build-abort"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/blocked-build-abort.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output =
+                gwt_core::process::run_git_logged(&args, Some(&repo)).expect("run fixture git");
+            assert!(output.status.success(), "git {args:?} failed");
+        }
+        let repo = dunce::canonicalize(repo).expect("canonical repository");
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3580,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/blocked-build-abort", gwt_agent::AgentId::Codex);
+        session.id = "session-blocked-build-abort-http".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save unbound Session");
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize execution control");
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize generation ledger");
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().expect("repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .expect("read active binding")
+                .expect("active binding"),
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Session");
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save bound Session");
+
+        let work_id = "work-blocked-build-abort-http";
+        let now = chrono::Utc::now();
+        let mut current =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        current
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: session.id.clone(),
+                window_id: Some("project::blocked-build-abort-http".to_string()),
+                agent_id: session.agent_id.command().to_string(),
+                display_name: session.agent_id.display_name().to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: None,
+                title_summary: None,
+                worktree_path: Some(repo.clone()),
+                branch: Some(session.branch.clone()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: Some(work_id.to_string()),
+                updated_at: now,
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &current)
+            .expect("save current projection");
+        gwt_core::workspace_projection::update_workspace_projection_with_journal_for_work_event_root(
+            &repo,
+            &repo,
+            gwt_core::workspace_projection::WorkspaceProjectionUpdate {
+                title: Some("Blocked build abort".to_string()),
+                status_category: Some(
+                    gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                ),
+                status_text: None,
+                owner: Some(format!("Issue #{}", owner.number)),
+                next_action: None,
+                summary: Some("active build".to_string()),
+                progress_summary: None,
+                agent_session_id: Some(session.id.clone()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+            gwt_core::workspace_projection::TrackedWorkEventPolicy::Persist,
+        )
+        .expect("seed Work event surfaces");
+        let mut works = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            now,
+        );
+        start.title = Some("Blocked build abort".to_string());
+        start.owner = Some(format!("Issue #{}", owner.number));
+        start.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        start.agent_session_id = Some(session.id.clone());
+        start.agent_id = Some(session.agent_id.command().to_string());
+        start.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(session.branch.clone()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        works.apply_event(start);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            &works,
+        )
+        .expect("save WorkItems");
+        gwt_core::skill_state::save(
+            &repo,
+            "build-spec",
+            &gwt_core::skill_state::SkillState {
+                active: true,
+                owner_spec: Some(owner.number),
+                started_at: now,
+                phase: Some("verify".to_string()),
+                session_id: session.id.clone(),
+            },
+        )
+        .expect("save active build lifecycle");
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let target = server
+            .agent_capability_issuer()
+            .issue_bound(&repo, &session.id, binding)
+            .expect("issue active Host capability");
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &repo,
+                &session.id,
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle execution"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+        url.set_path("/internal/build-abort-terminalization");
+        let response = reqwest::blocking::Client::new()
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&serde_json::json!({
+                "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+                "claimed_session_id": session.id,
+                "owner_number": owner.number,
+                "reason": "canonical verification cannot proceed",
+                "observation": gwt::observe_agent_runtime(&repo).expect("observe runtime")
+            }))
+            .send()
+            .expect("send dedicated build abort");
+
+        assert_eq!(response.status(), HttpStatusCode::OK);
+        let receipt: gwt::AgentWorkTerminalizationReceipt =
+            response.json().expect("build abort receipt");
+        assert_eq!(
+            receipt.outcome,
+            gwt::AgentWorkTerminalizationOutcome::Emitted
+        );
+        let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load WorkItems")
+            .expect("WorkItems")
+            .work_items
+            .into_iter()
+            .find(|work| work.id == work_id)
+            .expect("terminal Work");
+        assert!(work.is_terminal());
+        assert!(work.discarded);
+        assert_eq!(
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+        server.shutdown();
+    }
+
+    #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
         let (state, events) = sample_server_state();
 
@@ -8180,6 +8534,8 @@ mod tests {
         workspace_update_url.set_path("/internal/workspace-update");
         let mut work_terminalization_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         work_terminalization_url.set_path("/internal/work-terminalization");
+        let mut build_abort_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        build_abort_url.set_path("/internal/build-abort-terminalization");
         let mut execution_binding_probe_url =
             reqwest::Url::parse(&hook.url).expect("agent hook URL");
         execution_binding_probe_url.set_path("/internal/execution-binding-probe");
@@ -8210,6 +8566,18 @@ mod tests {
             "operation_id": "operation-access-log",
             "nonce": "nonce-access-log"
         });
+        let build_abort_request = serde_json::json!({
+            "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+            "claimed_session_id": "session-1",
+            "owner_number": 3580,
+            "reason": "blocked",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            }
+        });
         let client = reqwest::blocking::Client::new();
 
         let hook_response = client
@@ -8239,6 +8607,14 @@ mod tests {
             HttpStatusCode::UNAUTHORIZED
         );
 
+        let build_abort_response = client
+            .post(build_abort_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&build_abort_request)
+            .send()
+            .expect("unauthorized build abort request");
+        assert_eq!(build_abort_response.status(), HttpStatusCode::UNAUTHORIZED);
+
         let binding_probe_response = client
             .post(execution_binding_probe_url)
             .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
@@ -8256,6 +8632,7 @@ mod tests {
             "/internal/execution-binding-probe",
             "/internal/workspace-update",
             "/internal/work-terminalization",
+            "/internal/build-abort-terminalization",
         ] {
             let record = records
                 .iter()
