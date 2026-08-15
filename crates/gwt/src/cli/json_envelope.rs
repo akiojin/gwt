@@ -100,14 +100,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
-        "workspace.store_consolidate" | "workspace.store-consolidate" => {
-            CliCommand::Workspace(WorkspaceCommand::StoreConsolidate {
-                // Consolidation moves durable state, so it dry-runs unless the
-                // caller explicitly opts out (#3466 AC-8).
-                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
-                manifest_hash: optional_string(params, "manifest_hash")?,
-            })
-        }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
         "board.config.show" | "board.config-show" => {

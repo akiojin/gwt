@@ -879,7 +879,7 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
 
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let legacy_works = legacy_workspace_work_items_path_for_repo_path(&project_state_root);
-    let topology_dependent_shadow = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    let linked_worktree_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let mut work_items = WorkItemsProjection::empty(now);
     let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-split", now);
     start.id = "event-legacy-split".to_string();
@@ -893,7 +893,7 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
         .expect("single-root event log");
     let split_root_events = gwt_repo_local_work_events_path(&work_event_root);
     assert_eq!(
-        repo_global_works, topology_dependent_shadow,
+        repo_global_works, linked_worktree_works,
         "#3466: a layout root and its linked worktree resolve to one project store"
     );
     assert_ne!(single_root_events, split_root_events);
@@ -960,7 +960,7 @@ fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
 
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let legacy_worktree_works = legacy_workspace_work_items_path_for_repo_path(&work_event_root);
-    let topology_dependent_shadow = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    let linked_worktree_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let mut work_items = WorkItemsProjection::empty(now);
     let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-worktree", now);
     start.id = "event-legacy-worktree".to_string();
@@ -971,7 +971,7 @@ fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
     let legacy_bytes = std::fs::read(&legacy_worktree_works).expect("legacy exact-worktree bytes");
 
     assert!(!repo_global_works.exists());
-    assert!(!topology_dependent_shadow.exists());
+    assert!(!linked_worktree_works.exists());
     transact_workspace_state_for_work_event_root(
         &project_state_root,
         &work_event_root,

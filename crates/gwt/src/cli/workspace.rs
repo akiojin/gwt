@@ -1219,76 +1219,7 @@ pub(super) fn run<E: CliEnv>(
                 out,
             )
         }
-        WorkspaceCommand::StoreConsolidate {
-            dry_run,
-            manifest_hash,
-        } => run_store_consolidate(env.repo_path(), dry_run, manifest_hash.as_deref(), out),
     }
-}
-
-/// Issue #3466 (AC-4, AC-7, AC-8): report or apply project store consolidation.
-///
-/// The dry run is the review step — it prints the orphaned stores and the
-/// `manifest_hash` that pins them. Applying requires that hash back, so a plan
-/// approved against one state can never be applied to another.
-fn run_store_consolidate(
-    repo_path: &Path,
-    dry_run: bool,
-    manifest_hash: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    use gwt_core::workspace_projection::store_migration::{
-        apply_store_consolidation, plan_store_consolidation, StoreConsolidationOutcome,
-    };
-
-    let plan =
-        plan_store_consolidation(repo_path).map_err(|error| string_error(error.to_string()))?;
-    if dry_run {
-        let payload = serde_json::json!({
-            "dry_run": true,
-            "project_root": plan.project_root,
-            "canonical_hash": plan.canonical_hash.as_str(),
-            "canonical_store": plan.canonical_store,
-            "manifest_hash": plan.manifest_hash,
-            "orphans": plan.orphans,
-        });
-        out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
-            string_error(format!("could not encode the consolidation plan: {error}"))
-        })?);
-        out.push('\n');
-        return Ok(0);
-    }
-
-    let Some(expected) = manifest_hash else {
-        return Err(string_error(format!(
-            "workspace.store_consolidate requires the manifest_hash from a dry run (current: {})",
-            plan.manifest_hash
-        )));
-    };
-    let outcome = apply_store_consolidation(repo_path, expected)
-        .map_err(|error| string_error(error.to_string()))?;
-    let payload = match &outcome {
-        StoreConsolidationOutcome::NothingToDo => serde_json::json!({
-            "dry_run": false,
-            "outcome": "nothing_to_do",
-        }),
-        StoreConsolidationOutcome::Consolidated {
-            quarantined,
-            work_item_count,
-        } => serde_json::json!({
-            "dry_run": false,
-            "outcome": "consolidated",
-            "quarantined": quarantined,
-            "work_item_count": work_item_count,
-        }),
-    };
-    out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
-        string_error(format!(
-            "could not encode the consolidation outcome: {error}"
-        ))
-    })?);
-    out.push('\n');
-    Ok(0)
 }
 
 /// SPEC-2359 US-41 (FR-153): implement `workspace.projection_list` over a

@@ -1555,11 +1555,22 @@ fn save_assigned_workspace_projection_for_test(
     )
 }
 
+fn materialized_project_state_sots(name: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path().join("project-state").join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    paths
+}
+
 #[test]
 fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1617,12 +1628,15 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         .iter()
         .any(|agent| agent.session_id == session.session_id));
     assert!(gwt_core::paths::gwt_repo_local_work_events_path(&worktree).exists());
-    // #3466: the worktree resolves to the repository's single project store,
-    // so a topology-dependent SOT can only appear as a *second* works.json.
     assert_eq!(
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&worktree),
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "launch must not create a topology-dependent worktree WorkItems SOT"
+    );
+    assert_eq!(
+        materialized_project_state_sots("current.json"),
+        vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
+        "launch must not create a topology-dependent worktree Project State SOT"
     );
 
     let tab = sample_project_tab(
@@ -1667,11 +1681,9 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
             .any(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pause),
         "stop must append Pause to the same Session-bound Work"
     );
-    // #3466: see the launch assertion above — one store, reached identically
-    // from the worktree and from the project root.
     assert_eq!(
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&worktree),
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "stop must not create a worktree-specific WorkItems SOT"
     );
     let mut saved = gwt_core::workspace_projection::load_workspace_projection(&project_root)
@@ -1726,9 +1738,7 @@ fn workspace_agent_summary_for_test(
 // identity may belong to a different Work.
 #[test]
 fn workspace_resume_context_prefers_work_item_over_shared_projection() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1798,9 +1808,7 @@ fn workspace_resume_context_prefers_work_item_over_shared_projection() {
 // projection so dead entries stop accumulating ("765 active agents").
 #[test]
 fn save_workspace_launch_projection_retains_only_live_agents() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1868,9 +1876,7 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
 // branch.
 #[test]
 fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -8021,11 +8027,10 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
         .expect("repo-global WorkItems");
     assert_eq!(work_items.work_items.len(), 1);
     assert!(work_items.work_items[0].discarded);
-    // #3466: the worktree shares the repository's project store, so "no
-    // worktree-local shadow" means both roots address the same works.json.
     assert_eq!(
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&worktree),
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
+        "terminalization must leave exactly one repository WorkItems SOT"
     );
     assert!(
         std::fs::read_to_string(gwt_core::paths::gwt_repo_local_work_events_path(&worktree))
@@ -17570,11 +17575,9 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         .agents
         .iter()
         .any(|agent| agent.session_id == candidate_session_id));
-    // #3466: a worktree resolves to its repository's single project store, so
-    // a worktree-local shadow can only appear as a *second* works.json.
     assert_eq!(
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        materialized_project_state_sots("works.json"),
+        vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "Continue Work must not create a worktree-local WorkItems shadow"
     );
 
@@ -18551,9 +18554,7 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
 
 #[test]
 fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -18643,9 +18644,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
 
 #[test]
 fn app_runtime_non_work_launch_registers_unassigned_agent() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -18714,9 +18713,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
 
 #[test]
 fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let project_root = temp.path().join("workspace-home");
@@ -18845,9 +18842,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
 
 #[test]
 fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -18940,9 +18935,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
 
 #[test]
 fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -19028,9 +19021,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
 
 #[test]
 fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authentication() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -19165,9 +19156,7 @@ fn app_runtime_issue_launch_wizard_seeds_issue_workspace_context() {
 
 #[test]
 fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -19256,9 +19245,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
 
 #[test]
 fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -19572,9 +19559,7 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
 
 #[test]
 fn startup_self_heals_managed_hooks_in_every_known_worktree() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let root = tempfile::tempdir().expect("root");
     let first = root.path().join("first");
     let second = root.path().join("second");
@@ -19623,9 +19608,7 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
 
 #[test]
 fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let missing_pin = root.path().join("missing/gwtd");
@@ -19652,9 +19635,7 @@ fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
 
 #[test]
 fn startup_self_heal_does_not_rewrite_canonical_config_for_missing_explicit_pin() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let missing_pin = root.path().join("missing/gwtd");
@@ -19671,9 +19652,7 @@ fn startup_self_heal_does_not_rewrite_canonical_config_for_missing_explicit_pin(
 
 #[test]
 fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let stable = root.path().join("stable/gwtd");
@@ -19694,9 +19673,7 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 
 #[test]
 fn startup_self_heal_does_not_loop_on_missing_current_literal_fallback() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     {
@@ -21508,9 +21485,7 @@ fn app_runtime_paused_work_dedups_by_session_when_live_row_has_no_git_identity()
 
 #[test]
 fn app_runtime_active_work_projection_resolves_branch_known_unassigned_agents_as_work() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -21611,9 +21586,7 @@ fn app_runtime_live_work_agent_lookup_ignores_stopped_or_error_windows() {
 
 #[test]
 fn app_runtime_active_work_projection_promotes_branch_known_unassigned_agents_to_active_work() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -36976,9 +36949,7 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
     // and must stay structural. Workspace history/work items are carried by
     // active_work_projection so every window/status update does not serialize
     // the full work item event log.
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());

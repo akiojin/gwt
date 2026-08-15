@@ -144,6 +144,8 @@ fn make_layout_root(root: &Path, origin: &str) -> (PathBuf, PathBuf) {
             "user.name=gwt-test",
             "-c",
             "user.email=gwt-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "--allow-empty",
             "-m",
@@ -287,17 +289,37 @@ fn nested_bare_lookup_does_not_descend_past_direct_children() {
     );
 }
 
-/// AC-9 negative: two different origins never collapse into one store, and a
-/// layout root holding several bare repositories resolves deterministically.
+/// AC-9: multiple bare repositories for the same origin still describe one
+/// repository identity.
 #[test]
-fn multiple_child_bare_repositories_resolve_deterministically() {
+fn multiple_same_origin_child_bare_repositories_share_identity() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("workbench");
     let (_bare, _worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
 
-    // A second bare repository sorting *after* `gwt.git` must not change the
-    // already-established identity of the layout root.
-    let second = root.join("zz-other.git");
+    let second = root.join("zz-same-origin.git");
+    run_git(&root, &["init", "--bare", second.to_str().expect("second")]);
+    run_git(
+        &second,
+        &["remote", "add", "origin", "git@github.com:example/gwt.git"],
+    );
+
+    assert_eq!(
+        project_scope_hash(&root).as_str(),
+        compute_repo_hash(LAYOUT_ORIGIN).as_str(),
+        "duplicate bare repositories for one origin must share its identity"
+    );
+}
+
+/// AC-9 negative: distinct origins under one layout root are ambiguous. The
+/// resolver must not choose a repository based on candidate path ordering.
+#[test]
+fn multiple_distinct_origin_child_bare_repositories_fail_closed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workbench");
+    let (_bare, _worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
+
+    let second = root.join("aa-other.git");
     run_git(&root, &["init", "--bare", second.to_str().expect("second")]);
     run_git(
         &second,
@@ -309,21 +331,81 @@ fn multiple_child_bare_repositories_resolve_deterministically() {
         ],
     );
 
-    let first_pass = project_scope_hash(&root);
-    let second_pass = project_scope_hash(&root);
+    let scope = resolve_project_scope(&root);
     assert_eq!(
-        first_pass.as_str(),
-        second_pass.as_str(),
-        "resolution must be deterministic across calls"
+        scope.hash.as_str(),
+        compute_path_hash(&root).as_str(),
+        "an ambiguous layout root must not join either repository store"
     );
+    match scope.source {
+        ProjectScopeSource::AmbiguousNestedBareRepositories(candidates) => {
+            assert_eq!(candidates.len(), 2, "both candidates must be diagnosed");
+            let origins: Vec<_> = candidates
+                .iter()
+                .map(|candidate| candidate.normalized_origin.as_str())
+                .collect();
+            assert_eq!(
+                origins,
+                vec!["github.com/example/other", "github.com/example/gwt"],
+                "diagnostics must identify every distinct candidate origin"
+            );
+            assert!(
+                candidates[0].path.ends_with("aa-other.git")
+                    && candidates[1].path.ends_with("gwt.git"),
+                "diagnostics must identify every candidate path: {candidates:?}"
+            );
+        }
+        other => panic!("distinct origins must be reported as ambiguous, got {other:?}"),
+    }
+
+    let renamed = root.join("zz-other.git");
+    std::fs::rename(&second, &renamed).expect("rename second bare repository");
+    let renamed_scope = resolve_project_scope(&root);
     assert_eq!(
-        first_pass.as_str(),
+        renamed_scope.hash.as_str(),
+        compute_path_hash(&root).as_str(),
+        "renaming a candidate must not make an ambiguous layout select a repository"
+    );
+    match renamed_scope.source {
+        ProjectScopeSource::AmbiguousNestedBareRepositories(candidates) => {
+            let mut origins: Vec<_> = candidates
+                .iter()
+                .map(|candidate| candidate.normalized_origin.as_str())
+                .collect();
+            origins.sort_unstable();
+            assert_eq!(
+                origins,
+                vec!["github.com/example/gwt", "github.com/example/other"],
+                "renaming only changes discovery order, not ambiguity"
+            );
+        }
+        other => panic!("renamed distinct origins must remain ambiguous, got {other:?}"),
+    }
+}
+
+/// A direct child with a missing or empty origin cannot make a unique valid
+/// repository identity ambiguous.
+#[test]
+fn malformed_or_origin_missing_child_bare_repository_is_ignored() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workbench");
+    let (_bare, _worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
+
+    let missing = root.join("aa-missing-origin.git");
+    run_git(
+        &root,
+        &["init", "--bare", missing.to_str().expect("missing origin")],
+    );
+    let malformed = root.join("zz-empty-origin.git");
+    run_git(
+        &root,
+        &["init", "--bare", malformed.to_str().expect("empty origin")],
+    );
+    run_git(&malformed, &["config", "remote.origin.url", "   "]);
+
+    assert_eq!(
+        project_scope_hash(&root).as_str(),
         compute_repo_hash(LAYOUT_ORIGIN).as_str(),
-        "the lexicographically first bare repository wins, so the store is stable"
-    );
-    assert_ne!(
-        first_pass.as_str(),
-        compute_repo_hash("https://github.com/example/other.git").as_str(),
-        "distinct origins must never share a project store"
+        "a candidate without origin must not hide the unique valid identity"
     );
 }

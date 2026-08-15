@@ -254,15 +254,6 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
-    /// Issue #3466: `workspace.store_consolidate` — fold project stores that a
-    /// pre-#3466 build split apart back into the repository's canonical store.
-    ///
-    /// The dry run reports the plan and its `manifest_hash`; applying requires
-    /// that hash back, so a store that changed in between is refused.
-    StoreConsolidate {
-        dry_run: bool,
-        manifest_hash: Option<String>,
-    },
 }
 
 /// SPEC-1942 command model for `actions.*` JSON operations.
