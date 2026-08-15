@@ -136,7 +136,12 @@ fn handoffs_are_not_applied_when_autonomous_mode_is_off() {
 
     assert!(monitor.apply_pending_autonomous_handoffs(NOW).is_empty());
     assert_eq!(monitor.active_count(), 1, "human-gated slot untouched");
-    assert!(monitor.autonomous_record(42).is_none());
+    // SPEC-3431 FR-068 starts the activity clock for every launch, so a bare
+    // record (heartbeat only) may exist; what must not happen is the handoff
+    // application itself — no park, no NeedsHuman phase.
+    assert!(monitor
+        .autonomous_record(42)
+        .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman));
 }
 
 /// AC-5: registering an answer clears NeedsHuman and re-arms the SAME session

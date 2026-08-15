@@ -519,6 +519,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "hook.health"
             | "pane.list"
             | "pane.read"
+            | "pm.status"
             | "search"
     )
 }
@@ -1165,6 +1166,13 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            // SPEC-3431 FR-006: launch_now mutates priority order, so it is
+            // not read-only — but it must stay ownerless-safe like its siblings.
+            "issue.monitor.launch_now",
+            // SPEC-3431 FR-033: stop revokes a launch's authority and slot.
+            "issue.monitor.stop",
+            // SPEC-3431 FR-029〜031: failover revokes it and requeues.
+            "issue.monitor.failover",
         ] {
             assert!(!is_read_only_json_envelope_operation(operation));
         }
@@ -1176,6 +1184,9 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            "issue.monitor.launch_now",
+            "issue.monitor.stop",
+            "issue.monitor.failover",
         ] {
             let command = format!(
                 "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
@@ -1338,6 +1349,25 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_pm_status_before_identity_is_set() {
+        // SPEC-3431: pm.status is read-only diagnostics and must work before
+        // the session identity or an owner is established.
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
             cwd: None,

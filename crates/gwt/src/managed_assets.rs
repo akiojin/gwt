@@ -6,6 +6,7 @@ use std::{
 use crate::cli::gwtd_resolver::default_installed_candidates;
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_agent::AgentId;
+use gwt_skills::pm_guidance::{generate_pm_guidance_for_claude, generate_pm_guidance_for_codex};
 use gwt_skills::{
     distribute_to_worktree_for_targets_with_policy, generate_codex_hooks_for_mode,
     generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
@@ -14,13 +15,32 @@ use gwt_skills::{
     CodexHookDiscoveryMode, ManagedAssetTarget,
 };
 
+/// Which `.codex/hooks.json` copies a non-launch (re-)materialization owns.
+///
+/// #3474: the self-heal writer ran with [`CodexHookDiscoveryMode::WorkspaceHome`],
+/// which for a linked worktree resolves to the repo-root copy, while the health
+/// auditor only ever read the worktree-local copy. A stale worktree-local file
+/// was therefore reported forever and rewritten never. Outside a launch, gwt
+/// does not know which Codex version will open the worktree, so it owns BOTH
+/// discovery locations — the auditor reads the same set (see
+/// [`managed_codex_hook_paths`]). Only the launch path narrows this, from the
+/// Codex version it is actually about to run.
+pub const MANAGED_CODEX_HOOK_DISCOVERY_MODE: CodexHookDiscoveryMode = CodexHookDiscoveryMode::Both;
+
+/// Every `.codex/hooks.json` gwt owns for `worktree`: the worktree-local copy
+/// (read by Codex before 0.131.0-alpha.21) and the workspace-home copy (read by
+/// newer Codex). Deduplicated when both resolve to the same file.
+pub fn managed_codex_hook_paths(worktree: &Path) -> Vec<PathBuf> {
+    gwt_skills::codex_hooks_paths_for_codex_discovery(worktree, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
+}
+
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
     crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
     crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
     materialize_managed_gwt_assets_for_targets(
         worktree,
         &ManagedAssetTarget::ALL,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )?;
     update_git_exclude(worktree).map_err(|error| {
@@ -33,7 +53,7 @@ pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId)
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         worktree,
         agent_id,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )
 }
@@ -65,7 +85,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
     materialize_managed_gwt_assets_for_targets(
         worktree,
         &targets,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )?;
     update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
@@ -82,7 +102,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
 /// worktrees keep the embedded-bundle override (#3374). (The launch path does
 /// NOT use this: it passes `config.is_ephemeral` directly.)
 fn worktree_is_ephemeral(worktree: &Path) -> bool {
-    crate::worktree_form::is_ephemeral_intake_worktree(worktree)
+    crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
 fn materialize_managed_gwt_assets_for_targets(
@@ -121,6 +141,13 @@ fn materialize_managed_gwt_assets_for_targets(
     if targets.is_empty() {
         return Ok(());
     }
+    // SPEC-3431 T-052: gwt-pm is generated, not bundled, so the prune above
+    // deletes it like any other unknown `gwt-*` skill. Regenerating here — the
+    // one funnel every launch, resume, and refresh passes through — is what
+    // makes the `$gwt-pm` bootstrap prompt resolvable at all. The predicate is
+    // structural (canonical PM worktree path), so no other worktree can be
+    // handed the PM contract by an ambient value.
+    let is_pm = crate::pm_registry::is_pm_worktree(worktree);
     regenerate_managed_hook_configs_for_targets(worktree, targets, codex_hook_discovery_mode)?;
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         generate_coordination_guidance_for_claude(worktree).map_err(|error| {
@@ -128,6 +155,11 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to generate Claude coordination skill: {error}"
             ))
         })?;
+        if is_pm {
+            generate_pm_guidance_for_claude(worktree).map_err(|error| {
+                io::Error::other(format!("failed to generate Claude PM skill: {error}"))
+            })?;
+        }
     }
     if targets.contains(&ManagedAssetTarget::Codex) {
         generate_coordination_guidance_for_codex(worktree).map_err(|error| {
@@ -135,6 +167,11 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to generate Codex coordination skill: {error}"
             ))
         })?;
+        if is_pm {
+            generate_pm_guidance_for_codex(worktree).map_err(|error| {
+                io::Error::other(format!("failed to generate Codex PM skill: {error}"))
+            })?;
+        }
     }
     Ok(())
 }
@@ -144,7 +181,7 @@ pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<(
     regenerate_managed_hook_configs_for_targets(
         worktree,
         &targets,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
     )
 }
 

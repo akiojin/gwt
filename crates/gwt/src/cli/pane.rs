@@ -12,7 +12,8 @@ use tokio_tungstenite::{
     tungstenite::{
         client::IntoClientRequest,
         http::{header::AUTHORIZATION, HeaderValue},
-        Message,
+        protocol::frame::coding::CloseCode,
+        Error as WebSocketError, Message,
     },
 };
 
@@ -22,17 +23,134 @@ use crate::{
 };
 
 #[cfg(test)]
-use crate::persistence::WindowLaneKind;
-#[cfg(test)]
 use crate::persistence::WindowPlacement;
+#[cfg(test)]
+use crate::persistence::WindowWorktreeForm;
 
 use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
+const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
+const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
+const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
+const PM_TARGET_REFUSAL: &str =
+    "pm.message.send refused: target is not an authorized live agent pane";
 
 type PaneWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// SPEC-3431 FR-124: ask the authenticated GUI authority for one project
+/// Monitor scan. The request intentionally carries no project path; the
+/// agent WebSocket principal is the sole scope authority.
+#[cfg_attr(unix, allow(dead_code))]
+pub(super) fn request_issue_monitor_scan_now(project_root: &Path) -> Result<(), String> {
+    let ws_url = pane_websocket_url_from_env().map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor GUI command endpoint is unavailable");
+        "gui_command_unavailable".to_string()
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to create Issue Monitor GUI command runtime");
+            "gui_command_unavailable".to_string()
+        })?;
+    let expected_project_scope = gwt_core::paths::project_scope_hash(project_root);
+    runtime.block_on(request_issue_monitor_scan_now_async(
+        &ws_url,
+        expected_project_scope.as_str(),
+    ))
+}
+
+async fn request_issue_monitor_scan_now_async(
+    ws_url: &str,
+    expected_project_scope: &str,
+) -> Result<(), String> {
+    let request = pane_websocket_request(ws_url).map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor GUI command request is unavailable");
+        "gui_command_unavailable".to_string()
+    })?;
+    let mut socket = connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(|error| {
+            let code = issue_monitor_scan_connect_error(&error);
+            tracing::warn!(%error, code, "Issue Monitor GUI command connection failed");
+            code.to_string()
+        })?;
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "agent_issue_monitor_scan_now",
+            "expected_project_scope": expected_project_scope,
+        }),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor GUI scan request failed");
+        "scan_delivery_unknown".to_string()
+    })?;
+    tokio::time::timeout(ISSUE_MONITOR_SCAN_RESULT_DEADLINE, async {
+        loop {
+            let value = next_issue_monitor_scan_json(&mut socket).await?;
+            let Some(reply) = parse_issue_monitor_scan_result(&value).map_err(|error| {
+                tracing::warn!(%error, "Issue Monitor GUI scan response was invalid");
+                "scan_delivery_unknown".to_string()
+            })?
+            else {
+                continue;
+            };
+            return if reply.accepted {
+                Ok(())
+            } else {
+                Err(reply
+                    .reason
+                    .unwrap_or_else(|| "scan_request_rejected".to_string()))
+            };
+        }
+    })
+    .await
+    .map_err(|_| "scan_delivery_unknown".to_string())?
+}
+
+fn issue_monitor_scan_connect_error(error: &WebSocketError) -> &'static str {
+    match error {
+        WebSocketError::Http(response) if matches!(response.status().as_u16(), 401 | 403 | 409) => {
+            "gui_capability_rejected"
+        }
+        WebSocketError::Http(response) if response.status().as_u16() == 503 => {
+            "gui_execution_authority_unavailable"
+        }
+        _ => "gui_command_unavailable",
+    }
+}
+
+async fn next_issue_monitor_scan_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
+    let message = socket
+        .next()
+        .await
+        .ok_or_else(|| "scan_delivery_unknown".to_string())?
+        .map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor GUI scan response failed");
+            "scan_delivery_unknown".to_string()
+        })?;
+    match message {
+        Message::Text(text) => serde_json::from_str(text.as_ref()).map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor GUI scan response was invalid JSON");
+            "scan_delivery_unknown".to_string()
+        }),
+        Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor GUI scan response was invalid JSON");
+            "scan_delivery_unknown".to_string()
+        }),
+        Message::Close(Some(frame)) if frame.code == CloseCode::Policy => {
+            Err("gui_capability_rejected".to_string())
+        }
+        Message::Close(_) => Err("scan_delivery_unknown".to_string()),
+        _ => Err("scan_delivery_unknown".to_string()),
+    }
+}
 
 pub fn parse(args: &[String]) -> Result<PaneCommand, CliParseError> {
     let Some((head, rest)) = args.split_first() else {
@@ -103,7 +221,114 @@ async fn run_async(
         PaneCommand::Send { id, text } => {
             send_pane_input(ws_url, project_root, id.as_deref(), &text).await
         }
+        PaneCommand::PmSend {
+            project_root: explicit_project_root,
+            id,
+            text,
+        } => send_pm_pane_input(ws_url, explicit_project_root.as_deref(), &id, &text).await,
     }
+}
+
+/// SPEC-3431 FR-111 (T-206): PM-privileged delivery into another agent pane
+/// of the same project. Not a loosened `pane.send`: the SPEC-3050 self-only
+/// contract stays intact for every ordinary agent, and this path exists only
+/// for the live registered PM. The authenticated WebSocket principal is the
+/// sole caller identity; all registration and target authority checks remain
+/// server-side and the terminal result returns on this same connection.
+async fn send_pm_pane_input(
+    ws_url: &str,
+    project_root: Option<&str>,
+    requested_id: &str,
+    text: &str,
+) -> Result<String, String> {
+    let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
+        let mut expected_window_id = None::<String>;
+        let mut response_loss = None::<String>;
+        for attempt in 0..2 {
+            let mut socket = connect_pane_websocket(ws_url).await?;
+            send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
+            let windows = next_pm_workspace_windows(&mut socket, project_root).await?;
+            let window_id = if let Some(expected) = expected_window_id.as_deref() {
+                expected.to_string()
+            } else {
+                resolve_pm_send_target(&windows, requested_id)?.id.clone()
+            };
+            if expected_window_id
+                .as_deref()
+                .is_some_and(|expected| expected != window_id)
+            {
+                return Err(
+                    "pm.message.send target changed before same-operation replay".to_string(),
+                );
+            }
+            expected_window_id.get_or_insert_with(|| window_id.clone());
+            if let Err(error) = send_frontend_event(
+                &mut socket,
+                json!({
+                    "kind": "pm_pane_send_input",
+                    "operation_id": operation_id,
+                    "window_id": window_id,
+                    "text": ensure_trailing_submit(text),
+                }),
+            )
+            .await
+            {
+                if attempt == 0 {
+                    response_loss = Some(error);
+                    continue;
+                }
+                return Err(format!(
+                    "pm.message.send request transmission was lost after same-operation replay: {error}"
+                ));
+            }
+
+            let reply = match wait_for_pm_message_send_result(
+                &mut socket,
+                &operation_id,
+                &window_id,
+                PM_MESSAGE_RESULT_DEADLINE,
+            )
+            .await
+            {
+                Ok(reply) => Some(reply),
+                Err(error) if attempt == 0 => {
+                    response_loss = Some(error);
+                    None
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "pm.message.send response was lost after same-operation replay: {error}"
+                    ))
+                }
+            };
+            let Some(reply) = reply else {
+                continue;
+            };
+            return match reply.status.as_str() {
+                "delivered" => Ok(format!("pm message delivered to {window_id}\n")),
+                "queued" => Ok(format!("pm message queued for {window_id}\n")),
+                "failed" => Err(format!(
+                    "pm message failed: {}",
+                    reply.reason.unwrap_or_else(|| "unknown reason".to_string())
+                )),
+                status => Err(format!(
+                    "pm_message_send_result has invalid status {status}"
+                )),
+            };
+        }
+        Err(format!(
+            "pm.message.send response was lost: {}",
+            response_loss.unwrap_or_else(|| "unknown transport error".to_string())
+        ))
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "pm.message.send timed out after {} seconds",
+            PM_MESSAGE_SEND_DEADLINE.as_secs()
+        )
+    })?
 }
 
 /// SPEC-3050 FR-001/FR-002: queue one line into the calling agent's own pane.
@@ -314,9 +539,15 @@ async fn send_frontend_event(socket: &mut PaneWebSocket, payload: Value) -> Resu
 }
 
 async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
-    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+    tokio::time::timeout(Duration::from_secs(2), next_backend_json_unbounded(socket))
         .await
         .map_err(|_| "pane websocket timed out waiting for backend response".to_string())?
+}
+
+async fn next_backend_json_unbounded(socket: &mut PaneWebSocket) -> Result<Value, String> {
+    let message = socket
+        .next()
+        .await
         .ok_or_else(|| "pane websocket closed before backend response".to_string())?
         .map_err(|err| format!("pane websocket receive failed: {err}"))?;
 
@@ -331,6 +562,26 @@ async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> 
     }
 }
 
+async fn wait_for_pm_message_send_result(
+    socket: &mut PaneWebSocket,
+    expected_operation_id: &str,
+    expected_window_id: &str,
+    deadline_after: Duration,
+) -> Result<PmMessageSendReply, String> {
+    tokio::time::timeout(deadline_after, async {
+        loop {
+            let value = next_backend_json_unbounded(socket).await?;
+            if let Some(reply) =
+                parse_pm_message_send_result(&value, expected_operation_id, expected_window_id)?
+            {
+                return Ok::<PmMessageSendReply, String>(reply);
+            }
+        }
+    })
+    .await
+    .map_err(|_| "pm.message.send timed out waiting for its terminal result".to_string())?
+}
+
 async fn next_workspace_windows(
     socket: &mut PaneWebSocket,
     project_root: &str,
@@ -343,6 +594,62 @@ async fn next_workspace_windows(
         }
     }
     Err(format!("{context}: backend did not return workspace_state"))
+}
+
+/// Read the project projection from the same authenticated connection used
+/// for the PM mutation. When no explicit root is supplied, the server-side
+/// capability projection is authoritative and no ambient cwd/env path is
+/// consulted.
+async fn next_pm_workspace_windows(
+    socket: &mut PaneWebSocket,
+    project_root: Option<&str>,
+) -> Result<Vec<PersistedWindowState>, String> {
+    for _ in 0..32 {
+        let value = next_backend_json(socket).await?;
+        if value.get("kind").and_then(Value::as_str) != Some("workspace_state") {
+            continue;
+        }
+        let tabs = value
+            .get("workspace")
+            .and_then(|workspace| workspace.get("tabs"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| "pm.message.send: workspace_state missing tabs".to_string())?;
+        let scope_key = |root: &str| {
+            gwt_core::paths::project_scope_hash(Path::new(root))
+                .as_str()
+                .to_string()
+        };
+        let mut matched = project_root.is_none();
+        let mut windows = Vec::new();
+        for tab in tabs {
+            let tab_root = tab.get("project_root").and_then(Value::as_str);
+            let authorized = match (project_root, tab_root) {
+                (None, _) => true,
+                (Some(requested), Some(root)) => tab_owns_caller(root, requested, &scope_key),
+                (Some(_), None) => false,
+            };
+            if !authorized {
+                continue;
+            }
+            matched = true;
+            let Some(tab_windows) = tab
+                .get("workspace")
+                .and_then(|workspace| workspace.get("windows"))
+            else {
+                continue;
+            };
+            let mut parsed = serde_json::from_value::<Vec<PersistedWindowState>>(
+                tab_windows.clone(),
+            )
+            .map_err(|error| format!("pm.message.send: invalid workspace projection: {error}"))?;
+            windows.append(&mut parsed);
+        }
+        if !matched {
+            return Err("pm.message.send failed: explicit project_root is outside the authenticated project scope".to_string());
+        }
+        return Ok(windows);
+    }
+    Err("pm.message.send: backend did not return workspace_state".to_string())
 }
 
 fn parse_send_args(args: &[String]) -> Result<(Option<String>, String), CliParseError> {
@@ -388,6 +695,18 @@ struct PaneSendReply {
     ok: bool,
     window_id: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PmMessageSendReply {
+    status: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IssueMonitorScanReply {
+    accepted: bool,
+    reason: Option<String>,
 }
 
 fn parse_pane_close_acceptance(
@@ -450,6 +769,46 @@ fn parse_pane_send_result(value: &Value) -> Result<Option<PaneSendReply>, String
     }))
 }
 
+fn parse_pm_message_send_result(
+    value: &Value,
+    expected_operation_id: &str,
+    expected_window_id: &str,
+) -> Result<Option<PmMessageSendReply>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("pm_message_send_result") {
+        return Ok(None);
+    }
+    if value.get("operation_id").and_then(Value::as_str) != Some(expected_operation_id)
+        || value.get("window_id").and_then(Value::as_str) != Some(expected_window_id)
+    {
+        return Ok(None);
+    }
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pm_message_send_result missing status".to_string())?
+        .to_string();
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some(PmMessageSendReply { status, reason }))
+}
+
+fn parse_issue_monitor_scan_result(value: &Value) -> Result<Option<IssueMonitorScanReply>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("issue_monitor_scan_request_result") {
+        return Ok(None);
+    }
+    let accepted = value
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "issue_monitor_scan_request_result missing accepted".to_string())?;
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some(IssueMonitorScanReply { accepted, reason }))
+}
+
 /// The injected text must end with a submit key so the runtime actually
 /// queues the line instead of leaving it in the composer.
 fn ensure_trailing_submit(text: &str) -> String {
@@ -500,6 +859,48 @@ fn project_root_for_pane(default: &Path) -> String {
 }
 
 fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<PersistedWindowState>> {
+    parse_workspace_windows_scoped(value, project_root, |root| {
+        gwt_core::paths::project_scope_hash(Path::new(root))
+            .as_str()
+            .to_string()
+    })
+}
+
+/// Whether `tab_root` is the project that owns the caller sitting at
+/// `caller_root`.
+///
+/// Every launch sets `GWT_PROJECT_ROOT` to the agent's working dir, so a
+/// caller's root is always a worktree and never equals a tab's project root.
+/// Path equality alone therefore never matched for anyone, and the no-match
+/// fallback in [`parse_workspace_windows_scoped`] handed back every window
+/// from every open project.
+///
+/// Ownership has three shapes because gwt materializes worktrees in three
+/// places: inside the project container (`work/`, `.intake*`), outside it
+/// under `~/.gwt/projects/` (the resident PM), and — when the project root is
+/// itself a git repo — anywhere that shares its repo identity.
+fn tab_owns_caller(tab_root: &str, caller_root: &str, scope_key: &impl Fn(&str) -> String) -> bool {
+    if tab_root == caller_root {
+        return true;
+    }
+    let tab_path = Path::new(tab_root);
+    if Path::new(caller_root).starts_with(tab_path) {
+        return true;
+    }
+    if crate::pm_registry::pm_worktree_path_for_repo_path(tab_path) == Path::new(caller_root) {
+        return true;
+    }
+    scope_key(tab_root) == scope_key(caller_root)
+}
+
+/// Select the windows the caller is allowed to see, scoped to the project that
+/// owns it. `scope_key` maps a path to its repo identity; it is injected so the
+/// selection stays testable without real repositories.
+fn parse_workspace_windows_scoped(
+    value: &Value,
+    project_root: &str,
+    scope_key: impl Fn(&str) -> String,
+) -> Option<Vec<PersistedWindowState>> {
     if value.get("kind")?.as_str()? != "workspace_state" {
         return None;
     }
@@ -517,7 +918,11 @@ fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<Pers
         if let Ok(mut parsed) =
             serde_json::from_value::<Vec<PersistedWindowState>>(tab_windows.clone())
         {
-            if tab.get("project_root").and_then(Value::as_str) == Some(project_root) {
+            let owns_caller = tab
+                .get("project_root")
+                .and_then(Value::as_str)
+                .is_some_and(|root| tab_owns_caller(root, project_root, &scope_key));
+            if owns_caller {
                 matched_project = true;
                 matching_windows.append(&mut parsed);
             } else {
@@ -610,6 +1015,44 @@ fn resolve_window_id<'a>(
         .map(|window| window.id.as_str())
 }
 
+fn resolve_pm_send_target<'a>(
+    windows: &'a [PersistedWindowState],
+    requested_id: &str,
+) -> Result<&'a PersistedWindowState, String> {
+    let window = if let Some(exact) = windows.iter().find(|window| window.id == requested_id) {
+        exact
+    } else {
+        let mut suffix_matches = windows
+            .iter()
+            .filter(|window| window.id.ends_with(&format!("::{requested_id}")));
+        let Some(candidate) = suffix_matches.next() else {
+            return Err(PM_TARGET_REFUSAL.to_string());
+        };
+        if suffix_matches.next().is_some() {
+            return Err(PM_TARGET_REFUSAL.to_string());
+        }
+        candidate
+    };
+    let supported_preset = pm_window_has_exact_prompt_ack(window);
+    let live_status = matches!(
+        window.status,
+        WindowState::Running | WindowState::Idle | WindowState::Waiting
+    );
+    let valid_session = window.session_id.as_deref().is_some_and(|session_id| {
+        gwt_agent::validate_session_id_path_component(session_id).is_ok()
+    });
+    if !supported_preset || !live_status || !valid_session {
+        return Err(PM_TARGET_REFUSAL.to_string());
+    }
+    Ok(window)
+}
+
+fn pm_window_has_exact_prompt_ack(window: &PersistedWindowState) -> bool {
+    matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
+        || (window.preset == WindowPreset::Agent
+            && matches!(window.agent_id.as_deref(), Some("claude" | "codex")))
+}
+
 fn status_label(status: WindowState) -> &'static str {
     match status {
         WindowState::Running => "running",
@@ -666,10 +1109,11 @@ mod tests {
             persist: true,
             agent_id: agent_id.map(str::to_string),
             agent_color: None,
-            lane_kind: WindowLaneKind::Unknown,
+            worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         }
     }
 
@@ -781,6 +1225,68 @@ mod tests {
 
         let unrelated = serde_json::json!({ "kind": "workspace_state" });
         assert_eq!(parse_pane_send_result(&unrelated).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_issue_monitor_scan_result_distinguishes_acceptance_from_unavailable() {
+        let accepted = serde_json::json!({
+            "kind": "issue_monitor_scan_request_result",
+            "accepted": true,
+            "reason": null,
+        });
+        assert_eq!(
+            parse_issue_monitor_scan_result(&accepted).unwrap(),
+            Some(IssueMonitorScanReply {
+                accepted: true,
+                reason: None,
+            })
+        );
+
+        let unavailable = serde_json::json!({
+            "kind": "issue_monitor_scan_request_result",
+            "accepted": false,
+            "reason": "monitor_disabled",
+        });
+        assert_eq!(
+            parse_issue_monitor_scan_result(&unavailable).unwrap(),
+            Some(IssueMonitorScanReply {
+                accepted: false,
+                reason: Some("monitor_disabled".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_issue_monitor_scan_result(&serde_json::json!({"kind": "workspace_state"}))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_monitor_scan_connect_error_preserves_capability_and_authority_diagnostics() {
+        let http_error = |status| {
+            WebSocketError::Http(Box::new(
+                tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(status)
+                    .body(None)
+                    .expect("HTTP response"),
+            ))
+        };
+        assert_eq!(
+            issue_monitor_scan_connect_error(&http_error(401)),
+            "gui_capability_rejected"
+        );
+        assert_eq!(
+            issue_monitor_scan_connect_error(&http_error(409)),
+            "gui_capability_rejected"
+        );
+        assert_eq!(
+            issue_monitor_scan_connect_error(&http_error(503)),
+            "gui_execution_authority_unavailable"
+        );
+        assert_eq!(
+            issue_monitor_scan_connect_error(&WebSocketError::ConnectionClosed),
+            "gui_command_unavailable"
+        );
     }
 
     #[test]
@@ -942,6 +1448,80 @@ mod tests {
         assert!(windows.is_empty());
     }
 
+    /// Every agent's `GWT_PROJECT_ROOT` is its own worktree, never the tab's
+    /// project root, so exact-path matching never matched for anyone and the
+    /// no-match fallback handed back every window from every open project.
+    /// Verified live: this session's `GWT_PROJECT_ROOT` is a worktree that
+    /// matches none of the three open tabs.
+    ///
+    /// Scoping by project ownership is what makes `pane.list` / `pane.read`
+    /// safe to hand to an agent — a worktree resolves to the project that
+    /// owns it, and unrelated projects stay invisible.
+    #[test]
+    fn workspace_windows_from_a_worktree_resolve_to_the_owning_project() {
+        // Distinct identities: ownership must come from the path shapes below,
+        // never from an accidental hash collision.
+        let scope_key = |root: &str| format!("hash-of-{root}");
+        let value = two_project_workspace_state();
+
+        // gwt materializes work/intake worktrees inside the project container.
+        let windows =
+            parse_workspace_windows_scoped(&value, "/repo/two/work/issue-1", scope_key).unwrap();
+        assert_eq!(windows.len(), 1, "only the owning project's windows");
+        assert_eq!(windows[0].id, "two::agent-1");
+
+        // The resident PM's worktree lives outside the checkout entirely.
+        let pm_worktree =
+            crate::pm_registry::pm_worktree_path_for_repo_path(Path::new("/repo/two"));
+        let windows =
+            parse_workspace_windows_scoped(&value, &pm_worktree.to_string_lossy(), scope_key)
+                .unwrap();
+        assert_eq!(windows.len(), 1, "the PM sees only its own project");
+        assert_eq!(windows[0].id, "two::agent-1");
+    }
+
+    /// When the project root is itself a git repo, a worktree elsewhere on
+    /// disk is still the same project.
+    #[test]
+    fn workspace_windows_match_a_worktree_sharing_the_project_repo_identity() {
+        let scope_key = |root: &str| match root {
+            "/repo/two" | "/elsewhere/wt" => "same-repo".to_string(),
+            other => format!("hash-of-{other}"),
+        };
+
+        let windows = parse_workspace_windows_scoped(
+            &two_project_workspace_state(),
+            "/elsewhere/wt",
+            scope_key,
+        )
+        .unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, "two::agent-1");
+    }
+
+    fn two_project_workspace_state() -> Value {
+        json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "tabs": [
+                    {
+                        "project_root": "/repo/one",
+                        "workspace": {
+                            "windows": [window("one::agent-1", WindowPreset::Agent, Some("one"))],
+                        },
+                    },
+                    {
+                        "project_root": "/repo/two",
+                        "workspace": {
+                            "windows": [window("two::agent-1", WindowPreset::Agent, Some("two"))],
+                        },
+                    },
+                ],
+            },
+        })
+    }
+
     #[test]
     fn render_snapshot_lines_keeps_requested_tail() {
         assert_eq!(render_snapshot_lines("a\nb\nc\n", 2), "b\nc\n");
@@ -981,6 +1561,124 @@ mod tests {
             .as_str()
             .expect("frontend frame kind")
             .to_string()
+    }
+
+    #[test]
+    fn issue_monitor_scan_client_sends_pathless_request_and_honors_ack() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "agent-capability-secret-sentinel",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build scan client test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scan client mock");
+            let address = listener.local_addr().expect("scan client mock address");
+            let server = tokio::spawn(async move {
+                for (accepted, reason) in [(true, None), (false, Some("scan_already_in_flight"))] {
+                    let (stream, _) = listener.accept().await.expect("accept scan client");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept scan client websocket");
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(
+                        request,
+                        json!({
+                            "kind": "agent_issue_monitor_scan_now",
+                            "expected_project_scope": "scope-123",
+                        })
+                    );
+                    assert!(
+                        request.get("project_root").is_none(),
+                        "the client must not claim project scope"
+                    );
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "issue_monitor_scan_request_result",
+                                "accepted": accepted,
+                                "reason": reason,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("send scan request result");
+                }
+            });
+            let ws_url = format!("ws://{address}/internal/pane-ws");
+
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Ok(())
+            );
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Err("scan_already_in_flight".to_string())
+            );
+            server.await.expect("scan client mock task");
+        });
+    }
+
+    #[test]
+    fn issue_monitor_scan_client_marks_post_send_response_loss_as_unknown() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "agent-capability-secret-sentinel",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build scan client test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scan client mock");
+            let address = listener.local_addr().expect("scan client mock address");
+            let server = tokio::spawn(async move {
+                for close in [
+                    None,
+                    Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: CloseCode::Policy,
+                        reason: "stale capability".into(),
+                    }),
+                ] {
+                    let (stream, _) = listener.accept().await.expect("accept scan client");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept scan client websocket");
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(request["expected_project_scope"], "scope-123");
+                    socket
+                        .close(close)
+                        .await
+                        .expect("close after accepting request without a result");
+                }
+            });
+            let ws_url = format!("ws://{address}/internal/pane-ws");
+
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Err("scan_delivery_unknown".to_string())
+            );
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Err("gui_capability_rejected".to_string())
+            );
+            server.await.expect("scan client mock task");
+        });
     }
 
     #[derive(Clone, Copy)]
@@ -1210,6 +1908,135 @@ mod tests {
             drop(socket);
             server.abort();
             let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn pm_message_result_wait_covers_the_server_acceptance_window() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind delayed PM result mock");
+            let address = listener.local_addr().expect("PM result mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept PM result connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept PM result websocket");
+                tokio::time::sleep(Duration::from_millis(2_100)).await;
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "kind": "pm_message_send_result",
+                            "operation_id": "00000000-0000-4000-8000-000000000001",
+                            "status": "delivered",
+                            "window_id": "tab::agent",
+                            "reason": null,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send delayed PM result");
+            });
+            let (mut socket, _) = connect_async(format!("ws://{address}/internal/pane-ws"))
+                .await
+                .expect("connect delayed PM result websocket");
+
+            let reply = wait_for_pm_message_send_result(
+                &mut socket,
+                "00000000-0000-4000-8000-000000000001",
+                "tab::agent",
+                Duration::from_millis(2_500),
+            )
+            .await
+            .expect("server result inside its acceptance window");
+
+            assert_eq!(reply.status, "delivered");
+            server.await.expect("PM result mock task");
+        });
+    }
+
+    #[test]
+    fn pm_message_transport_replay_reuses_exact_operation_and_target() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind PM replay mock");
+            let address = listener.local_addr().expect("PM replay mock address");
+            let mut target = window("tab::codex-1", WindowPreset::Codex, Some("codex"));
+            target.session_id = Some("codex-session".to_string());
+            let workspace = workspace_state_for_test("/repo/pm", vec![target]);
+            let server = tokio::spawn(async move {
+                let mut mutations = Vec::new();
+                for attempt in 0..2 {
+                    let (stream, _) = listener.accept().await.expect("accept PM connection");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept PM websocket");
+                    assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                    socket
+                        .send(Message::Text(workspace.to_string().into()))
+                        .await
+                        .expect("send workspace state");
+                    let mutation = next_frontend_json(&mut socket).await;
+                    mutations.push(mutation.clone());
+                    if attempt == 0 {
+                        socket.close(None).await.expect("drop first response");
+                    } else {
+                        socket
+                            .send(Message::Text(
+                                json!({
+                                    "kind": "pm_message_send_result",
+                                    "operation_id": mutation["operation_id"],
+                                    "status": "delivered",
+                                    "window_id": mutation["window_id"],
+                                    "reason": null,
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .expect("send replay result");
+                    }
+                }
+                mutations
+            });
+            let result = send_pm_pane_input(
+                &format!("ws://{address}/internal/pane-ws"),
+                None,
+                "codex-1",
+                "same operation body",
+            )
+            .await;
+            let mutations = server.await.expect("PM replay mock task");
+
+            assert_eq!(
+                result,
+                Ok("pm message delivered to tab::codex-1\n".to_string())
+            );
+            assert_eq!(mutations.len(), 2);
+            assert_eq!(mutations[0]["kind"], "pm_pane_send_input");
+            assert_eq!(mutations[0]["operation_id"], mutations[1]["operation_id"]);
+            assert_eq!(mutations[0]["window_id"], mutations[1]["window_id"]);
+            assert_eq!(mutations[0]["text"], mutations[1]["text"]);
         });
     }
 

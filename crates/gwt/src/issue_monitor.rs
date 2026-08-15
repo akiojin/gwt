@@ -486,6 +486,12 @@ pub struct IssueMonitorPrefs {
     /// returns the matching delivery id in a Launched/LaunchFailed ACK.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_launch_deliveries: Vec<PendingIssueMonitorLaunchDelivery>,
+    /// SPEC #3165 FR-100/FR-101: one-shot strategy for an issue's next launch.
+    /// The marker is removed only after it has been copied into a durable
+    /// delivery (or the legacy direct request path), making failover/retry
+    /// intent survive reload without leaking into later launches.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -537,6 +543,7 @@ impl Default for IssueMonitorPrefs {
             launched_issues: Vec::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
+            queued_launch_session_strategies: BTreeMap::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
             autonomous_mode: false,
@@ -598,6 +605,8 @@ impl IssueMonitorPrefs {
             .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
         self.pending_launch_deliveries
             .retain(|delivery| !adopted_failure_numbers.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue_number, _| !adopted_failure_numbers.contains(issue_number));
         true
     }
 
@@ -664,6 +673,36 @@ pub struct IssueMonitorLaunchingIssue {
     pub claimed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorLaunchSessionStrategy {
+    #[default]
+    ResumeIfSafe,
+    FreshRequired,
+}
+
+/// Typed failure metadata carried across the AppRuntime/daemon/Monitor
+/// boundary. Message-only legacy failures omit this value and retain their
+/// existing retry/terminal behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorFailure {
+    ResumeWriterConflict {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_window_id: Option<String>,
+    },
+}
+
+/// Result of applying a typed late-resume writer-conflict recovery. The
+/// authority-exhausted case is distinct from a stale source so callers can
+/// fail closed instead of acknowledging a transition that never committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorResumeWriterConflictOutcome {
+    Requeued,
+    Rejected,
+    AuthorityExhausted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingIssueMonitorLaunchDelivery {
     pub delivery_id: String,
@@ -683,6 +722,8 @@ pub struct PendingIssueMonitorLaunchDelivery {
     pub materialized_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_durable_window_id: Option<String>,
+    #[serde(default)]
+    pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
     pub created_at: String,
 }
 
@@ -953,6 +994,69 @@ pub struct IssueMonitorInboxItem {
     pub exclusion_reason: Option<String>,
 }
 
+/// SPEC-3431 FR-033: the exact identity a PM-requested stop must match.
+///
+/// Naming an issue is not enough. A stale notification, a concurrent scan, or
+/// a PM working from an old snapshot all name a real issue number; what tells
+/// them apart is whether they also name the claim, delivery, and window that
+/// are live *right now*. Every component is compared, including its absence —
+/// omitting the window id of a launched agent is a mismatch, not a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueMonitorStopTarget {
+    pub issue_number: u64,
+    pub claim_id: Option<String>,
+    pub delivery_id: Option<String>,
+    pub window_id: Option<String>,
+}
+
+/// SPEC-3431 FR-033: why a stop request was refused. Every variant leaves the
+/// monitor untouched, so the caller can surface the reason without having to
+/// undo anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorStopMismatch {
+    /// No inbox row for that issue in this project.
+    UnknownIssue,
+    /// The issue is queued, blocked, skipped, or already terminal — there is
+    /// no live launch to revoke.
+    NotRunning,
+    ClaimMismatch,
+    DeliveryMismatch,
+    WindowMismatch,
+}
+
+/// SPEC-3431 FR-033: the result of a stop_only request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorStopOutcome {
+    /// Authority and slot revoked. `window_id` is the pane the caller must now
+    /// reap through the Monitor-owned lifecycle path.
+    Stopped {
+        window_id: String,
+    },
+    /// This exact launch was already stopped. No second revocation.
+    AlreadyStopped,
+    Mismatch(IssueMonitorStopMismatch),
+}
+
+/// SPEC-3431 FR-029〜031: the result of a failover_restart request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorFailoverOutcome {
+    /// The launch was revoked and the issue is queued at the head for the
+    /// currently saved profile. `stopped_window_id` is the pane the caller must
+    /// still reap; it is `None` when the launch had not materialized one yet.
+    Restarting {
+        stopped_window_id: Option<String>,
+    },
+    /// The exact source was current, but the durable effect authority could
+    /// not advance. No field was mutated and automation must remain denied.
+    AuthorityExhausted,
+    Mismatch(IssueMonitorStopMismatch),
+}
+
+/// SPEC-3431 FR-033: marks an inbox error as a deliberate stop rather than a
+/// failure, so FR-031 diagnostics can tell "the PM stopped this" apart from
+/// "this ran out of retries".
+const STOP_ONLY_REASON_PREFIX: &str = "stopped: ";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorLaunchRequest {
     pub issue_number: u64,
@@ -960,6 +1064,8 @@ pub struct IssueMonitorLaunchRequest {
     pub linked_issue_kind: LinkedIssueKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    #[serde(default)]
+    pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1002,6 +1108,85 @@ pub struct IssueMonitorAgentStatus {
     pub enabled: bool,
     pub autonomous_mode: bool,
     pub has_launch_profile: bool,
+    /// SPEC-3431 FR-024: issues handed back to a human. Previously reachable
+    /// only through the daemon's lossy broadcast ring, which made a missed
+    /// escalation unrecoverable for an unattended reader.
+    #[serde(default)]
+    pub needs_human: Vec<u64>,
+    /// Per-issue lifecycle rows, so a caller can tell "not launched yet" from
+    /// "claimed by someone else" from "failed", and can map an issue to the
+    /// pane that is working on it.
+    #[serde(default)]
+    pub inbox: Vec<IssueMonitorInboxSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_at: Option<String>,
+}
+
+/// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
+/// the instant it recovers.
+///
+/// `None` when that provider has quota left, is unknown to the usage poller,
+/// or reports no reset instant. Scoped to the agent's own provider on purpose:
+/// one exhausted account must not stall launches running on a different one.
+///
+/// Pure so the decision can be tested without a usage poller, and so the
+/// caller (which has the launch profile) supplies the agent rather than this
+/// module guessing it.
+pub fn rate_limit_reset_for_agent(
+    agent_id: &str,
+    accounts: &[gwt_core::usage::ProviderUsage],
+) -> Option<String> {
+    use gwt_core::usage::UsageProvider;
+
+    let provider = match agent_id.trim().to_ascii_lowercase().as_str() {
+        "codex" => UsageProvider::Codex,
+        "claude" | "claude-code" => UsageProvider::ClaudeCode,
+        _ => return None,
+    };
+    accounts
+        .iter()
+        .find(|account| account.provider == provider && account.limit_reached)?
+        .windows
+        .iter()
+        .filter_map(|window| window.resets_at)
+        .min()
+        .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// One inbox row, reduced to the facts an agent acts on. The full
+/// [`IssueMonitorInboxItem`] carries the whole GitHub issue payload, which
+/// would dwarf the rest of the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorInboxSummary {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// SPEC-3431 FR-068: when this launch last showed signs of life (RFC3339).
+    ///
+    /// Seeded at launch and advanced by hook arrivals, which is the only clock
+    /// that tracks real progress: a live agent blocked on an approval prompt,
+    /// a provider rate limit, or a genuine hang produces no PTY status change
+    /// at all, so without this the four cases are indistinguishable from
+    /// healthy work. Reported rather than judged — the reader decides what
+    /// "too old" means for the work at hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// SPEC-3431 FR-024/FR-033: the claim and delivery backing this launch.
+    ///
+    /// `stop_only` requires an exact identity match, so the PM has to be able
+    /// to read the identity it is asked to send. Without these two the
+    /// requirement is unsatisfiable from the snapshot alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -1068,6 +1253,9 @@ pub struct IssueMonitorState {
     /// Durable ACK-driven deliveries. Unlike `pending_launches`, this queue is
     /// projected non-destructively and mirrored in prefs across restart.
     pending_launch_deliveries: VecDeque<PendingIssueMonitorLaunchDelivery>,
+    /// Durable one-shot policy for an issue's next launch. Once materialized,
+    /// the delivery/request carries the policy and this marker is consumed.
+    queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
@@ -1718,6 +1906,63 @@ pub fn establish_issue_monitor_authority_fence(
     })
 }
 
+/// Acquire short-lived Issue Monitor effect authority for the GUI fallback.
+///
+/// The local driver deliberately does not publish a durable daemon fence: it
+/// owns only one bounded scan/effect pass. Holding the same lifetime lock as a
+/// daemon closes the gap between the fence pre-check and remote submission,
+/// while the prefs lock preserves the daemon's `prefs.lock -> authority.lock`
+/// ordering. A free lifetime lock proves a v2 fence is stale, so the fallback
+/// revokes its epoch and removes it before proceeding. Legacy fences remain
+/// fail-closed because they did not carry lifetime-lock liveness.
+pub fn try_acquire_issue_monitor_local_fallback_lease(
+    prefs_path: &Path,
+) -> io::Result<IssueMonitorAuthorityLease> {
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        let authority_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(issue_monitor_authority_lock_path(prefs_path))?;
+        if let Err(error) = FileExt::try_lock_exclusive(&authority_lock) {
+            if gwt_core::operation_deadline::is_lock_contended(&error) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor daemon authority lease is already held",
+                ));
+            }
+            return Err(error);
+        }
+        let lease = IssueMonitorAuthorityLease {
+            lock: authority_lock,
+        };
+        match load_issue_monitor_authority_fence(prefs_path)? {
+            IssueMonitorAuthorityFenceState::Missing => Ok(lease),
+            IssueMonitorAuthorityFenceState::Active(existing)
+                if existing.version == ISSUE_MONITOR_AUTHORITY_FENCE_VERSION =>
+            {
+                let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
+                prefs.advance_effect_authority_epoch().ok_or_else(|| {
+                    io::Error::other(
+                        "Issue Monitor authority epoch exhausted during local fence recovery",
+                    )
+                })?;
+                save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+                let fence_path = issue_monitor_authority_fence_path(prefs_path);
+                fs::remove_file(&fence_path)?;
+                sync_parent_directory(&fence_path)?;
+                Ok(lease)
+            }
+            IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
+            | IssueMonitorAuthorityFenceState::Active(_) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Issue Monitor daemon authority fence excludes the local fallback",
+            )),
+        }
+    })
+}
+
 pub fn clear_issue_monitor_authority_fence(
     prefs_path: &Path,
     expected: &IssueMonitorAuthorityFence,
@@ -1754,6 +1999,14 @@ fn with_issue_monitor_prefs_lock<T>(
     path: &Path,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
+    with_issue_monitor_prefs_lock_observed(path, || {}, operation)
+}
+
+fn with_issue_monitor_prefs_lock_observed<T>(
+    path: &Path,
+    on_first_contention: impl FnMut(),
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -1769,7 +2022,7 @@ fn with_issue_monitor_prefs_lock<T>(
         .write(true)
         .truncate(false)
         .open(path.with_extension("lock"))?;
-    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    gwt_core::operation_deadline::lock_exclusive_with_observer(&lock, on_first_contention)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock);
     match (result, unlock_result) {
@@ -1865,7 +2118,16 @@ pub fn mutate_issue_monitor_prefs_recovering<T>(
     recovery_baseline: &IssueMonitorPrefs,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
-    with_issue_monitor_prefs_lock(path, || {
+    mutate_issue_monitor_prefs_recovering_observed(path, recovery_baseline, || {}, mutation)
+}
+
+pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
+    path: &Path,
+    recovery_baseline: &IssueMonitorPrefs,
+    on_first_contention: impl FnMut(),
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock_observed(path, on_first_contention, || {
         let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
             Ok(prefs) => (prefs, None),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -2013,6 +2275,7 @@ impl IssueMonitorState {
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_launch_deliveries: VecDeque::new(),
+            queued_launch_session_strategies: BTreeMap::new(),
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
@@ -2028,6 +2291,7 @@ impl IssueMonitorState {
             prefs.legacy_git_launch_failure_migration_version;
         state.priority_order = prefs.priority_order;
         state.launch_profile = prefs.launch_profile;
+        state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
                 continue;
@@ -2083,6 +2347,12 @@ impl IssueMonitorState {
         }
         state.autonomous_handoffs = prefs.autonomous_handoffs;
         state
+            .queued_launch_session_strategies
+            .retain(|issue_number, _| {
+                !state.failed_issues.contains_key(issue_number)
+                    && !state.merged_issues.contains(issue_number)
+            });
+        state
     }
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
@@ -2111,6 +2381,7 @@ impl IssueMonitorState {
                 })
                 .collect(),
             pending_launch_deliveries: self.pending_launch_deliveries.iter().cloned().collect(),
+            queued_launch_session_strategies: self.queued_launch_session_strategies.clone(),
             failed_issues: self
                 .failed_issues
                 .iter()
@@ -2232,6 +2503,7 @@ impl IssueMonitorState {
                 format!("Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"),
             );
             self.clear_active_tracking(issue_number);
+            self.require_fresh_launch_session(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
             self.autonomous_record_mut(issue_number).retry_not_before =
@@ -2615,6 +2887,7 @@ impl IssueMonitorState {
         if !enabled {
             self.active_launches.clear();
             self.pending_launches.clear();
+            self.queued_launch_session_strategies.clear();
         }
     }
 
@@ -2661,6 +2934,7 @@ impl IssueMonitorState {
             self.active_launches.clear();
             self.pending_launches.clear();
             self.pending_launch_deliveries.clear();
+            self.queued_launch_session_strategies.clear();
         }
         Some(next_epoch)
     }
@@ -2733,6 +3007,7 @@ impl IssueMonitorState {
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
+        self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
         // Issue #3478: the hook (and the answer operation) write handoffs from
@@ -2828,6 +3103,7 @@ impl IssueMonitorState {
             .merged_issues
             .iter()
             .copied()
+            .chain(self.failed_issues.keys().copied())
             .chain(
                 self.inbox
                     .iter()
@@ -2837,6 +3113,55 @@ impl IssueMonitorState {
             .collect::<BTreeSet<_>>();
         self.pending_launch_deliveries
             .retain(|delivery| !terminal_issue_numbers.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue_number, _| !terminal_issue_numbers.contains(issue_number));
+
+        // SPEC-3431 FR-033: a stop another process committed is terminal for
+        // this one too. Applied last, after the in-flight launch merge above,
+        // which otherwise restores the very launch the stop revoked — leaving
+        // the daemon convinced the agent is still running, holding its slot,
+        // and writing that view back over the stop on its next commit.
+        let stopped = disk
+            .failed_issues
+            .iter()
+            .filter_map(|failed| {
+                failed
+                    .message
+                    .strip_prefix(STOP_ONLY_REASON_PREFIX)
+                    .map(|reason| (failed.issue_number, reason.to_string()))
+            })
+            .collect::<Vec<_>>();
+        for (issue_number, reason) in stopped {
+            self.adopt_stopped_terminal_state(issue_number, &reason);
+        }
+    }
+
+    /// SPEC-3431 FR-033: converge on a stop committed elsewhere.
+    ///
+    /// Mirrors what [`Self::stop_only`] did in the committing process, minus
+    /// the authority epoch bump (that already happened once, and repeating it
+    /// on every rebase would revoke effects this stop has nothing to do with)
+    /// and minus the operator notice (the stop was already reported).
+    fn adopt_stopped_terminal_state(&mut self, issue_number: u64, reason: &str) {
+        // A local merge outranks a stop: the work finished before it landed.
+        if self.merged_issues.contains(&issue_number) {
+            return;
+        }
+        let message = format!("{STOP_ONLY_REASON_PREFIX}{reason}");
+        self.clear_active_tracking(issue_number);
+        self.queue.retain(|queued| *queued != issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
+        self.set_active_launch_id(issue_number, None);
+        self.failed_issues.insert(issue_number, message.clone());
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::NeedsHuman;
+            item.launched_window_id = None;
+            item.error_message = Some(message);
+        }
     }
 
     /// A terminal record paired with a rejected disk failure is part of the
@@ -2976,6 +3301,7 @@ impl IssueMonitorState {
                 .retain(|pending| pending.issue_number != issue_number);
             self.pending_launch_deliveries
                 .retain(|delivery| delivery.issue_number != issue_number);
+            self.queued_launch_session_strategies.remove(&issue_number);
             if !self.launched_windows.contains_key(&issue_number) {
                 self.active_launches
                     .retain(|active| *active != issue_number);
@@ -3075,6 +3401,7 @@ impl IssueMonitorState {
                 .retain(|pending| pending.issue_number != issue_number);
             self.pending_launch_deliveries
                 .retain(|delivery| delivery.issue_number != issue_number);
+            self.queued_launch_session_strategies.remove(&issue_number);
             if let Some(item) = self
                 .inbox
                 .iter_mut()
@@ -3337,6 +3664,7 @@ impl IssueMonitorState {
     }
 
     pub fn agent_status(&self) -> IssueMonitorAgentStatus {
+        let status = self.status_view();
         IssueMonitorAgentStatus {
             queue: self.queued_issue_numbers(),
             active_launches: self.active_issue_numbers(),
@@ -3344,6 +3672,38 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             autonomous_mode: self.autonomous_mode,
             has_launch_profile: self.has_launch_profile(),
+            needs_human: status
+                .autonomous_issues
+                .iter()
+                .filter(|summary| summary.needs_human)
+                .map(|summary| summary.issue_number)
+                .collect(),
+            inbox: self
+                .inbox
+                .iter()
+                .map(|item| IssueMonitorInboxSummary {
+                    issue_number: item.issue.number,
+                    state: item.state,
+                    blocked_by_owner: item.blocked_by_owner.clone(),
+                    launched_window_id: item.launched_window_id.clone(),
+                    error_message: item.error_message.clone(),
+                    // SPEC-3431 FR-068: the autonomous record already carries
+                    // the heartbeat that hook arrivals refresh. Surfacing it here
+                    // rather than adding a parallel field keeps one clock, so
+                    // a reader and the stuck detector can never disagree.
+                    last_activity_at: self
+                        .autonomous_records
+                        .get(&item.issue.number)
+                        .and_then(|record| record.last_heartbeat.clone()),
+                    // SPEC-3431 FR-024/FR-033: the identity `stop_only` demands
+                    // has to be readable from the same snapshot, or the exact
+                    // match it enforces is unsatisfiable from the PM's side.
+                    claim_id: self.live_claim_id(item.issue.number),
+                    delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                })
+                .collect(),
+            last_error: status.last_error,
+            last_scan_at: status.last_scan_at,
         }
     }
 
@@ -3967,6 +4327,53 @@ impl IssueMonitorState {
         });
     }
 
+    fn require_fresh_launch_session(&mut self, issue_number: u64) {
+        self.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    }
+
+    fn take_launch_session_strategy(
+        &mut self,
+        issue_number: u64,
+    ) -> IssueMonitorLaunchSessionStrategy {
+        self.queued_launch_session_strategies
+            .remove(&issue_number)
+            .unwrap_or_default()
+    }
+
+    /// Restore one-shot launch policy produced by a scan clone after the
+    /// daemon rebases that clone on the latest disk-owned preferences.
+    ///
+    /// The rebase intentionally replaces the persisted policy map wholesale.
+    /// A transient autonomous failure discovered by the scan is newer than
+    /// that snapshot, however, so its `FreshRequired` decision must survive.
+    /// Newer terminal/disabled disk state remains authoritative and prevents a
+    /// stale scan from reviving the marker.
+    #[cfg(unix)]
+    pub(crate) fn restore_scanned_launch_session_strategies(
+        &mut self,
+        proposed: &BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
+    ) {
+        if !self.config.enabled || !self.autonomous_mode {
+            return;
+        }
+        for (&issue_number, &strategy) in proposed {
+            if strategy != IssueMonitorLaunchSessionStrategy::FreshRequired
+                || self.merged_issues.contains(&issue_number)
+                || self.failed_issues.contains_key(&issue_number)
+                || self
+                    .inbox_item(issue_number)
+                    .is_some_and(|item| item.state.is_terminal())
+                || !self.queue.contains(&issue_number)
+            {
+                continue;
+            }
+            self.require_fresh_launch_session(issue_number);
+        }
+    }
+
     pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected || self.active_launches.len() >= max_active {
@@ -3995,6 +4402,7 @@ impl IssueMonitorState {
             branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
             linked_issue_kind,
             delivery_id: None,
+            launch_session_strategy: self.take_launch_session_strategy(issue_number),
         })
     }
 
@@ -4030,6 +4438,41 @@ impl IssueMonitorState {
         }
     }
 
+    /// The claim slots still open, paired with the ordered queue entries a
+    /// proposal may consult to fill them.
+    ///
+    /// Issue #3528: a completion probe costs one `gh` process per issue, so a
+    /// scan that probes every open issue burns its whole deadline before it can
+    /// commit anything. The planner below only ever walks this list, so a scan
+    /// only ever needs to probe this list.
+    pub fn claim_probe_plan(&self, active_cap: usize) -> (usize, Vec<u64>) {
+        let max_active = self.config.max_active.max(1).min(active_cap);
+        if !self.config.enabled || max_active == 0 {
+            return (0, Vec::new());
+        }
+        let pending_claims = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let available = max_active
+            .saturating_sub(self.active_launches.len())
+            .saturating_sub(pending_claims.len());
+        if available == 0 {
+            return (0, Vec::new());
+        }
+        let candidates = self
+            .queue
+            .iter()
+            .copied()
+            .filter(|issue_number| !pending_claims.contains(issue_number))
+            .collect();
+        (available, candidates)
+    }
+
     /// Fallible proposal planner for deadline-integral scan transactions. A
     /// probe error is returned to the scan owner instead of being collapsed to
     /// `false`; callers discard the cloned proposal state on error.
@@ -4040,32 +4483,18 @@ impl IssueMonitorState {
         active_cap: usize,
         mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
     ) -> Result<usize, E> {
-        let max_active = self.config.max_active.max(1).min(active_cap);
-        if !self.config.enabled || !self.gui_connected || max_active == 0 {
+        if !self.gui_connected {
             return Ok(0);
         }
-        let pending_claims = self
-            .pending_effects
-            .iter()
-            .filter_map(|effect| match effect.payload {
-                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut available = max_active
-            .saturating_sub(self.active_launches.len())
-            .saturating_sub(pending_claims.len());
+        let (mut available, candidates) = self.claim_probe_plan(active_cap);
         if available == 0 {
             return Ok(0);
         }
 
         let mut prepared = 0;
-        for issue_number in self.queue.iter().copied().collect::<Vec<_>>() {
+        for issue_number in candidates {
             if available == 0 {
                 break;
-            }
-            if pending_claims.contains(&issue_number) {
-                continue;
             }
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
                 continue;
@@ -4184,6 +4613,7 @@ impl IssueMonitorState {
                                 branch_name: delivery.branch_name.clone(),
                                 linked_issue_kind: delivery.linked_issue_kind,
                                 delivery_id: Some(delivery.delivery_id.clone()),
+                                launch_session_strategy: delivery.launch_session_strategy,
                             })
                         {
                             launches.push(request);
@@ -4226,6 +4656,7 @@ impl IssueMonitorState {
                 branch_name: delivery.branch_name.clone(),
                 linked_issue_kind: delivery.linked_issue_kind,
                 delivery_id: Some(delivery.delivery_id.clone()),
+                launch_session_strategy: delivery.launch_session_strategy,
             }
         }));
         requests
@@ -4383,6 +4814,7 @@ impl IssueMonitorState {
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
+        let launch_session_strategy = self.take_launch_session_strategy(issue_number);
         self.record_claimed(issue, claim_id.clone());
         self.queue.retain(|queued| *queued != issue_number);
         if !self.active_launches.contains(&issue_number) {
@@ -4409,6 +4841,7 @@ impl IssueMonitorState {
                     materializer_window_id: None,
                     materialized_window_id: None,
                     workspace_durable_window_id: None,
+                    launch_session_strategy,
                     created_at: now.to_string(),
                 });
         }
@@ -4560,6 +4993,12 @@ impl IssueMonitorState {
             item.launched_window_id = Some(window_id);
             item.error_message = None;
         }
+        // SPEC-3431 FR-068: start the activity clock here rather than only on
+        // the autonomous path. Every launch needs it — an agent that stalls
+        // without autonomous mode stalls just as silently — and this is the
+        // one place every launch is confirmed.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_autonomous_heartbeat(issue_number, &now);
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
@@ -4668,6 +5107,7 @@ impl IssueMonitorState {
             .retain(|pending| pending.issue_number != issue_number);
         self.pending_launch_deliveries
             .retain(|pending| pending.issue_number != issue_number);
+        self.queued_launch_session_strategies.remove(&issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
     }
@@ -4832,7 +5272,27 @@ impl IssueMonitorState {
     /// "done" state. Terminal states (Merged/Released/failed) are preserved.
     /// Returns the affected Issue number when the window mapped to an active
     /// launch that was re-queued.
-    pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
+    /// SPEC-3431 FR-069: free the slot held by a launch whose provider hit its
+    /// usage limit, and hold the issue until `resets_at`.
+    ///
+    /// Deliberately unlike [`Self::requeue_window_at`]: no attempt is consumed
+    /// and the backoff is the provider's own reset instant rather than the
+    /// retry ladder. Nothing is wrong with the work or the agent — the account
+    /// simply ran out — so charging it against the issue's retry budget would
+    /// eventually escalate healthy work to `needs_human` for someone else's
+    /// billing cycle.
+    ///
+    /// This is the single stall the mechanism resolves on its own, because it
+    /// is the single stall whose cause the provider states outright. Every
+    /// other stall is reported and left to the PM (SPEC-3431 FR-069), since an approval
+    /// prompt, a rate limit, and a hang are indistinguishable from elapsed
+    /// time alone.
+    pub fn release_rate_limited_launch(
+        &mut self,
+        window_id: &str,
+        resets_at: &str,
+        now: &str,
+    ) -> Option<u64> {
         let issue_number = self.launched_window_issue(window_id)?;
         if self.merged_issues.contains(&issue_number) {
             return None;
@@ -4844,6 +5304,448 @@ impl IssueMonitorState {
             return None;
         }
         self.clear_active_tracking(issue_number);
+        // An unparseable or already-past reset leaves no floor rather than
+        // blocking forever: the next scan then decides on fresh usage data.
+        let floor = chrono::DateTime::parse_from_rfc3339(resets_at)
+            .ok()
+            .filter(|reset| chrono::DateTime::parse_from_rfc3339(now).is_ok_and(|now| *reset > now))
+            .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        self.autonomous_record_mut(issue_number).retry_not_before = floor;
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
+        Some(issue_number)
+    }
+
+    /// SPEC-3431 FR-033: the window currently bound to `issue_number`.
+    pub fn launched_window_id(&self, issue_number: u64) -> Option<String> {
+        self.launched_windows
+            .get(&issue_number)
+            .cloned()
+            .or_else(|| {
+                self.inbox_item(issue_number)
+                    .and_then(|item| item.launched_window_id.clone())
+            })
+    }
+
+    /// SPEC-3431 FR-033: the delivery still awaiting an ACK for `issue_number`.
+    ///
+    /// `None` once the GUI has ACKed the launch, because
+    /// [`Self::complete_active_launch_delivery`] consumes the delivery at that
+    /// point — a running agent is identified by its window, a materializing one
+    /// by its delivery.
+    pub fn pending_launch_delivery_id(&self, issue_number: u64) -> Option<String> {
+        self.pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number)
+            .map(|delivery| delivery.delivery_id.clone())
+    }
+
+    /// SPEC-3431 FR-033: stop one launch and hold its issue, without requeueing.
+    ///
+    /// This is the "stop" half of the Monitor-owned lifecycle, and it is
+    /// deliberately not [`Self::requeue_window_at`]. A close says "this attempt
+    /// failed, try again" and spends a retry; a stop says "do not run this
+    /// now", so it consumes no attempt and puts nothing back in the queue.
+    /// FR-029〜031's `failover_restart` is the other half and composes this
+    /// stop with a requeue and a saved-profile launch; it is a separate
+    /// operation precisely so the two results cannot be confused.
+    ///
+    /// `target` must reproduce the live identity exactly. Anything else — an
+    /// old window id, a foreign claim, a delivery that was already ACKed — is
+    /// refused with the monitor untouched, because the failure mode being
+    /// prevented is killing the *wrong* agent, which no later compensation can
+    /// undo.
+    pub fn stop_only(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorStopOutcome {
+        let issue_number = target.issue_number;
+
+        // An issue already stopped by this operation answers the same request
+        // idempotently. Checked before liveness, because the stop already
+        // released the slot.
+        if self.stop_only_reason(issue_number).is_some() {
+            return IssueMonitorStopOutcome::AlreadyStopped;
+        }
+
+        let live_window = match self.resolve_exact_launch(target) {
+            Ok(window_id) => window_id,
+            Err(mismatch) => return self.refuse_stop(issue_number, mismatch),
+        };
+
+        // Revoke first: an effect that lands after the stop must not be able to
+        // claim authority it no longer has.
+        self.advance_effect_authority_epoch();
+        self.record_autonomous_heartbeat(issue_number, now);
+        self.escalate_to_needs_human(issue_number, format!("{STOP_ONLY_REASON_PREFIX}{reason}"));
+
+        IssueMonitorStopOutcome::Stopped {
+            window_id: live_window.unwrap_or_default(),
+        }
+    }
+
+    /// SPEC-3431 FR-033: the reason this issue was stopped, if it was.
+    ///
+    /// Read from `failed_issues`, which is persisted, so the hold survives the
+    /// prefs roundtrip that happens between every `gwtd` invocation. The inbox
+    /// error message says the same thing but only in a process that scanned.
+    pub fn stop_only_reason(&self, issue_number: u64) -> Option<String> {
+        self.failed_issues
+            .get(&issue_number)
+            .and_then(|message| message.strip_prefix(STOP_ONLY_REASON_PREFIX))
+            .map(str::to_string)
+    }
+
+    /// SPEC-3431 FR-033: the claim backing the live launch for `issue_number`.
+    ///
+    /// The pending delivery carries it durably while the agent materializes;
+    /// once the GUI ACKs, the delivery is consumed and only a scanned inbox
+    /// row still knows it. Both are consulted so the answer is the same in the
+    /// daemon and in a bare `gwtd` process.
+    pub fn live_claim_id(&self, issue_number: u64) -> Option<String> {
+        self.pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number)
+            .map(|delivery| delivery.claim_id.clone())
+            .or_else(|| {
+                self.inbox_item(issue_number)
+                    .and_then(|item| item.claim_id.clone())
+            })
+    }
+
+    /// SPEC-3431 FR-030/FR-033: resolve `target` against the one live launch it
+    /// claims to name, or say which component disagreed.
+    ///
+    /// Shared by `stop_only` and `failover_restart` so the two can never drift
+    /// into different notions of "the same agent" — the whole point of the
+    /// exact match is that both operations refuse the same stale requests.
+    ///
+    /// Liveness comes from the durable launch accounting, not the inbox.
+    /// [`Self::with_prefs`] restores `active_launches` but performs no
+    /// candidate scan, so a short-lived process (every `gwtd` invocation) has
+    /// an empty inbox for a running agent; reading liveness off the inbox would
+    /// answer `UnknownIssue` in exactly the process the PM calls from.
+    fn resolve_exact_launch(
+        &self,
+        target: &IssueMonitorStopTarget,
+    ) -> Result<Option<String>, IssueMonitorStopMismatch> {
+        let issue_number = target.issue_number;
+        let inbox_state = self.inbox_item(issue_number).map(|item| item.state);
+        if !self.active_launches.contains(&issue_number) {
+            // Distinguish "never heard of it" from "not currently running", so
+            // the PM can tell a typo apart from a race it lost.
+            let known = inbox_state.is_some()
+                || self.failed_issues.contains_key(&issue_number)
+                || self.merged_issues.contains(&issue_number);
+            return Err(if known {
+                IssueMonitorStopMismatch::NotRunning
+            } else {
+                IssueMonitorStopMismatch::UnknownIssue
+            });
+        }
+        // A terminal row still holding a slot is being reconciled elsewhere;
+        // relabelling it would overwrite that outcome.
+        if inbox_state.is_some_and(|state| state.is_terminal())
+            || self.merged_issues.contains(&issue_number)
+        {
+            return Err(IssueMonitorStopMismatch::NotRunning);
+        }
+
+        if target.claim_id != self.live_claim_id(issue_number) {
+            return Err(IssueMonitorStopMismatch::ClaimMismatch);
+        }
+        if target.delivery_id != self.pending_launch_delivery_id(issue_number) {
+            return Err(IssueMonitorStopMismatch::DeliveryMismatch);
+        }
+        let live_window = self.launched_window_id(issue_number);
+        match (target.window_id.as_deref(), live_window.as_deref()) {
+            (Some(requested), Some(live)) if issue_monitor_window_ids_match(live, requested) => {}
+            // A `Launching` issue has no window yet, so both sides must agree
+            // that there is none.
+            (None, None) => {}
+            _ => return Err(IssueMonitorStopMismatch::WindowMismatch),
+        }
+        Ok(live_window)
+    }
+
+    /// SPEC-3431 FR-029〜031: stop one launch and put its issue back in line for
+    /// the currently saved launch profile.
+    ///
+    /// The other half of the Monitor-owned lifecycle. Where `stop_only` holds
+    /// the issue, this one releases it back to the queue head so the ordinary
+    /// claim/slot path relaunches it — which is what makes it a *provider
+    /// failover*: the profile the next launch reads is whatever is saved now,
+    /// so switching provider is a profile edit followed by this call.
+    ///
+    /// It consumes no retry attempt, deliberately. The work did not fail; an
+    /// operator (or a rate limit) decided a different provider should run it,
+    /// and charging that to the issue's budget would escalate healthy work to
+    /// `needs_human` for reasons that have nothing to do with the work.
+    ///
+    /// The old session is not reused: the launch identity is cleared, so the
+    /// relaunch materializes a fresh conversation rather than resuming the
+    /// provider that was just abandoned.
+    pub fn failover_restart(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorFailoverOutcome {
+        let issue_number = target.issue_number;
+        let live_window = match self.resolve_exact_launch(target) {
+            Ok(window_id) => window_id,
+            Err(mismatch) => {
+                self.refuse_stop(issue_number, mismatch);
+                return IssueMonitorFailoverOutcome::Mismatch(mismatch);
+            }
+        };
+
+        // Revoke before requeueing: an effect still in flight for the old
+        // provider must not be able to act once the issue belongs to the next
+        // launch.
+        if self.advance_effect_authority_epoch().is_none() {
+            return IssueMonitorFailoverOutcome::AuthorityExhausted;
+        }
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        self.set_active_launch_id(issue_number, None);
+        self.record_autonomous_heartbeat(issue_number, now);
+        // A failover is not a failure, so any earlier failure marker for this
+        // issue must not survive to hold it out of the queue.
+        self.failed_issues.remove(&issue_number);
+        self.failed_windows.remove(&issue_number);
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = None;
+            item.claim_id = None;
+            item.error_message = None;
+        }
+        // Head of the queue: the operator asked for this issue to run next, not
+        // eventually.
+        self.priority_order
+            .retain(|existing| *existing != issue_number);
+        self.priority_order.insert(0, issue_number);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+        }
+        self.apply_priority_order_to_queue();
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} failover: {reason}"),
+        );
+
+        IssueMonitorFailoverOutcome::Restarting {
+            stopped_window_id: live_window,
+        }
+    }
+
+    /// Recover an AgentFailed writer conflict only when the reporting window
+    /// is still the exact launched window for the hinted issue.
+    pub fn requeue_agent_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> bool {
+        self.try_requeue_agent_resume_writer_conflict(
+            issue_number,
+            source_window_id,
+            message,
+            holder_window_id,
+        ) == IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    pub fn try_requeue_agent_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        if !self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|stored_window_id| {
+                issue_monitor_window_ids_match(stored_window_id, source_window_id)
+            })
+        {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+        self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
+    }
+
+    /// Recover a LaunchFailed writer conflict only when the reporting
+    /// materializer still owns the exact pending delivery for this issue.
+    pub fn requeue_launch_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_delivery_id: &str,
+        source_materializer_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> bool {
+        self.try_requeue_launch_resume_writer_conflict(
+            issue_number,
+            source_delivery_id,
+            source_materializer_id,
+            message,
+            holder_window_id,
+        ) == IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    pub fn try_requeue_launch_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_delivery_id: &str,
+        source_materializer_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        let source_matches = self.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == issue_number
+                && delivery.delivery_id == source_delivery_id
+                && delivery.materializer_id.as_deref() == Some(source_materializer_id)
+        });
+        if !source_matches {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+        self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
+    }
+
+    /// Apply the shared mutation only after a public entry point validates the
+    /// exact source identity. Keeping this private prevents an issue hint alone
+    /// from revoking a newer successor launch.
+    fn requeue_resume_writer_conflict_core(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        let inbox_state = self.inbox_item(issue_number).map(|item| item.state);
+        if self.merged_issues.contains(&issue_number)
+            || self.failed_issues.contains_key(&issue_number)
+            || inbox_state.is_some_and(MonitorInboxState::is_terminal)
+        {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+
+        // Revoke before dropping the old delivery/tracking. If the epoch
+        // cannot advance, leave the complete transition unapplied.
+        if self.advance_effect_authority_epoch().is_none() {
+            return IssueMonitorResumeWriterConflictOutcome::AuthorityExhausted;
+        }
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.phase = AutonomousPhase::Idle;
+            record.active_launch_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        self.queue.push_back(issue_number);
+        self.apply_priority_order_to_queue();
+
+        let message = message.into();
+        let diagnostic = holder_window_id
+            .map(str::trim)
+            .filter(|holder| !holder.is_empty())
+            .map(|holder| format!("{message} (writer held by window {holder})"))
+            .unwrap_or(message);
+        self.last_error = Some(format!("issue #{issue_number}: {diagnostic}"));
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Queued;
+            item.claim_id = None;
+            item.blocked_by_owner = None;
+            item.claim_expires_at = None;
+            item.launched_window_id = None;
+            item.error_message = Some(diagnostic);
+            item.exclusion_reason = None;
+        }
+        IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    /// SPEC-3431 FR-033: refuse a stop without mutating any launch state.
+    ///
+    /// The reason is recorded as a diagnostic (FR-031) only; nothing is closed,
+    /// requeued, or relabelled.
+    fn refuse_stop(
+        &mut self,
+        issue_number: u64,
+        mismatch: IssueMonitorStopMismatch,
+    ) -> IssueMonitorStopOutcome {
+        self.last_error = Some(format!(
+            "issue #{issue_number}: stop refused ({mismatch:?}) — identity did not match the live launch"
+        ));
+        IssueMonitorStopOutcome::Mismatch(mismatch)
+    }
+
+    pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
+        self.requeue_window_at(
+            window_id,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+    }
+
+    /// [`Self::requeue_window`] with an injected clock for the backoff floor.
+    ///
+    /// SPEC-3431 FR-066: a close is a bounded retry, not a free one. It used to
+    /// consume no attempt and set no backoff, so under autonomous mode the
+    /// closed issue went straight back to the queue head and the next scan
+    /// relaunched it immediately — closing a pane restarted it instead of
+    /// stopping it.
+    ///
+    /// The PM's contract worked around that by forbidding pane closes, but the
+    /// constraint protected nobody: the only callers are the `WindowClosed`
+    /// control, so a person closing a window by hand hit the same loop. Bound
+    /// it here, where the loop is, and the capability is safe for everyone.
+    ///
+    /// The attempt ladder, backoff, and `NeedsHuman` escalation already exist
+    /// for autonomous failures; a close is a failed attempt by the same
+    /// definition ("closed without the work completing"), so it shares that
+    /// budget rather than introducing a second one that could disagree.
+    pub fn requeue_window_at(&mut self, window_id: &str, now: &str) -> Option<u64> {
+        let issue_number = self.launched_window_issue(window_id)?;
+        if self.merged_issues.contains(&issue_number) {
+            return None;
+        }
+        if self
+            .inbox_item(issue_number)
+            .is_some_and(|item| item.state.is_terminal())
+        {
+            return None;
+        }
+        let attempt = self.record_attempt(issue_number);
+        let max = self.autonomous_tuning.max_attempts;
+        if attempt >= max {
+            self.clear_active_tracking(issue_number);
+            self.escalate_to_needs_human(
+                issue_number,
+                format!("closed without completing ({attempt}/{max} attempts used)"),
+            );
+            return Some(issue_number);
+        }
+        let backoff = autonomous_retry_backoff_secs(
+            attempt,
+            self.autonomous_tuning.retry_backoff_base_secs,
+            self.autonomous_tuning.retry_backoff_cap_secs,
+        );
+        self.clear_active_tracking(issue_number);
+        self.autonomous_record_mut(issue_number).retry_not_before = rfc3339_plus_secs(now, backoff);
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
@@ -4889,6 +5791,7 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
+        self.queued_launch_session_strategies.remove(&issue_number);
         self.launch_auth_required = false;
         self.last_error = Some(format!("issue #{issue_number}: {message}"));
         if let Some(item) = self
@@ -5107,8 +6010,72 @@ mod tests {
                 enabled: true,
                 autonomous_mode: false,
                 has_launch_profile: false,
+                needs_human: Vec::new(),
+                inbox: vec![IssueMonitorInboxSummary {
+                    issue_number: 42,
+                    state: MonitorInboxState::BlockedByClaim,
+                    blocked_by_owner: Some("other-agent".to_string()),
+                    launched_window_id: None,
+                    error_message: None,
+                    // Never launched, so no activity clock was ever started
+                    // and there is no launch identity to stop.
+                    last_activity_at: None,
+                    claim_id: None,
+                    delivery_id: None,
+                }],
+                last_error: None,
+                last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
             }
         );
+    }
+
+    /// SPEC-3431 FR-024: everything the PM's reconcile loop acts on must be in
+    /// one snapshot. `needs_human`, the inbox rows, and `last_error` used to
+    /// exist only on the daemon's capacity-64 broadcast ring, so an escalation
+    /// a lagging subscriber missed was unrecoverable — and the PM contract
+    /// told the PM to read an `inbox` operation that does not exist.
+    #[test]
+    fn agent_status_snapshot_carries_needs_human_and_inbox() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        let mut escalated = issue(7);
+        escalated.labels.push("auto-improve".to_string());
+        let mut blocked = issue(8);
+        blocked.labels.push("auto-improve".to_string());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[escalated.clone(), blocked.clone()],
+            "2026-08-05T00:00:00Z",
+        );
+        monitor.escalate_to_needs_human(7, "review exhausted its retries");
+        monitor.record_blocked_by_claim(blocked, "other-agent", "2026-08-05T00:05:00Z");
+
+        let status = monitor.agent_status();
+
+        assert_eq!(
+            status.needs_human,
+            vec![7],
+            "an escalated issue must be visible without subscribing"
+        );
+        let escalated_row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 7)
+            .expect("escalated issue has an inbox row");
+        assert_eq!(escalated_row.state, MonitorInboxState::NeedsHuman);
+        assert_eq!(
+            escalated_row.error_message.as_deref(),
+            Some("review exhausted its retries")
+        );
+        let blocked_row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 8)
+            .expect("blocked issue has an inbox row");
+        assert_eq!(blocked_row.blocked_by_owner.as_deref(), Some("other-agent"));
     }
 
     #[test]
@@ -5287,6 +6254,61 @@ mod tests {
                 "fresh manual relaunch failure is persisted"
             );
         }
+    }
+
+    // SPEC-3431 T-023 (AS2 / FR-006): the PM's launch_now writes the target to
+    // the head of priority_order and asks for a scan. This pins the two
+    // properties that make it safe: the reordered issue is the one the very
+    // next scan claims, and re-scanning (which an immediate ScanNow racing the
+    // interval tick can cause) never yields a second launch for it.
+    #[test]
+    fn launch_now_priority_head_claims_the_target_once_across_rescans() {
+        let prefs = IssueMonitorPrefs {
+            // exactly what run_monitor_launch_now writes for issue 7
+            priority_order: vec![7],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(7), issue(9)],
+            "2026-08-04T00:00:00Z",
+        );
+
+        assert_eq!(
+            monitor.queued_issue_numbers().first().copied(),
+            Some(7),
+            "launch_now's priority head must be first in the scan queue"
+        );
+
+        let request = monitor
+            .next_launch_request("2026-08-04T00:00:00Z")
+            .expect("the head issue is claimed");
+        assert_eq!(request.issue_number, 7);
+
+        // A second scan (immediate ScanNow landing next to the interval tick)
+        // must not re-queue the in-flight issue, and no further launch for it
+        // may be claimed.
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(7), issue(9)],
+            "2026-08-04T00:00:05Z",
+        );
+        assert!(
+            !monitor.queued_issue_numbers().contains(&7),
+            "an in-flight launch must not be re-queued by a rescan"
+        );
+
+        let mut claimed = vec![request.issue_number];
+        while let Some(next) = monitor.next_launch_request("2026-08-04T00:00:05Z") {
+            claimed.push(next.issue_number);
+        }
+        assert_eq!(
+            claimed.iter().filter(|number| **number == 7).count(),
+            1,
+            "issue 7 must be claimed exactly once: {claimed:?}"
+        );
     }
 
     #[test]
@@ -6120,6 +7142,1226 @@ mod tests {
         assert_eq!(monitor.queue_len(), 1);
     }
 
+    /// SPEC-3431 FR-069: the reset instant to hold a launch until, when the
+    /// agent's own provider is out of quota.
+    #[test]
+    fn rate_limit_reset_is_resolved_from_the_agents_own_provider() {
+        use gwt_core::usage::{ProviderUsage, UsageProvider, UsageState, UsageWindow, WindowKind};
+
+        let exhausted = ProviderUsage {
+            provider: UsageProvider::Codex,
+            account_label: None,
+            plan: None,
+            windows: vec![UsageWindow::new(
+                WindowKind::Weekly,
+                100.0,
+                Some("2026-08-10T14:26:00Z".parse().expect("reset")),
+            )],
+            limit_reached: true,
+            state: UsageState::Ok,
+            fetched_at: None,
+        };
+        let healthy = ProviderUsage {
+            provider: UsageProvider::ClaudeCode,
+            limit_reached: false,
+            ..exhausted.clone()
+        };
+        let accounts = vec![exhausted, healthy];
+
+        assert_eq!(
+            rate_limit_reset_for_agent("codex", &accounts).as_deref(),
+            Some("2026-08-10T14:26:00Z"),
+            "the exhausted provider's reset must be used as the floor"
+        );
+        // An agent on a different provider is unaffected — one account running
+        // out must not stall the whole fleet.
+        assert_eq!(rate_limit_reset_for_agent("claude", &accounts), None);
+        assert_eq!(rate_limit_reset_for_agent("gemini", &accounts), None);
+    }
+
+    /// SPEC-3431 FR-069: a rate-limited launch releases its slot.
+    ///
+    /// This is the one stall whose cause is known for certain — the provider
+    /// itself reports `limit_reached` with a reset instant — so it is the one
+    /// stall the mechanism resolves instead of merely reporting. Waiting is
+    /// pointless when the reset is days away (observed live: "try again at Aug
+    /// 10th", four days out) and the held slot stops the whole queue at the
+    /// default `max_active = 1`.
+    ///
+    /// The issue returns to the queue rather than failing: nothing is wrong
+    /// with the work. The reset instant becomes the backoff floor so the next
+    /// scan cannot immediately relaunch into the same wall.
+    #[test]
+    fn rate_limited_launch_releases_its_slot_until_the_reset() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        assert_eq!(monitor.active_count(), 1, "precondition: holding a slot");
+
+        let released = monitor.release_rate_limited_launch(
+            "tab-1::agent-1",
+            "2026-08-10T14:26:00Z",
+            "2026-08-07T00:00:00Z",
+        );
+
+        assert_eq!(released, Some(42));
+        assert_eq!(monitor.active_count(), 0, "the slot must be freed");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the work is fine; only the provider was unavailable"
+        );
+        assert!(
+            !monitor.retry_ready(42, "2026-08-09T00:00:00Z"),
+            "must not relaunch into the same wall before the reset"
+        );
+        assert!(
+            monitor.retry_ready(42, "2026-08-10T15:00:00Z"),
+            "must be relaunchable once the provider recovers"
+        );
+    }
+
+    /// SPEC-3431 FR-069: a stall whose cause is *not* known keeps its slot.
+    ///
+    /// Approval prompts, rate limits, and genuine hangs are indistinguishable
+    /// from the snapshot, so reclaiming a slot on elapsed time alone would kill
+    /// agents that are simply thinking for a long time. The mechanism reports;
+    /// the PM decides.
+    #[test]
+    fn an_unexplained_stall_keeps_its_slot() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_autonomous_heartbeat(42, "2026-08-01T00:00:00Z");
+
+        let status = monitor.agent_status();
+
+        assert_eq!(
+            status.active_launches,
+            vec![42],
+            "an unexplained stall must not be auto-reclaimed"
+        );
+        assert_eq!(
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .and_then(|row| row.last_activity_at.clone()),
+            Some("2026-08-01T00:00:00Z".to_string()),
+            "but it must be visible so the PM can act on it"
+        );
+    }
+
+    /// SPEC-3431 FR-068: a launched issue reports when its agent last showed
+    /// signs of life, so "running but not progressing" is observable at all.
+    ///
+    /// Everything a live agent can get stuck on — waiting for approval, a
+    /// provider rate limit, a genuine hang — leaves `WindowProcessStatus`
+    /// untouched, because gwt receives no event at all. The composed state
+    /// collapses to `window_hook_states`' two values (`Idle` / `Running`),
+    /// which only say whether the last hook was tool-ish or a Stop. Without a
+    /// timestamp those four situations are indistinguishable from healthy
+    /// work, which is why a rate-limited agent showed `● Running` for days.
+    ///
+    /// Hook arrivals are the right clock: `PreToolUse` / `PostToolUse` /
+    /// `UserPromptSubmit` each mean one unit of work actually happened. PTY
+    /// status cannot serve — its watcher thread `continue`s while the process
+    /// runs and only speaks when it exits, so `last_heartbeat` never advanced
+    /// past the value seeded at launch.
+    #[test]
+    fn launched_issue_reports_its_last_activity() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let launched_at = monitor
+            .agent_status()
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .and_then(|row| row.last_activity_at.clone())
+            .expect("a launched issue starts its activity clock");
+
+        monitor.record_autonomous_heartbeat(42, "2026-08-07T09:00:00Z");
+
+        let after = monitor
+            .agent_status()
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .and_then(|row| row.last_activity_at.clone())
+            .expect("still reported");
+        assert_ne!(
+            after, launched_at,
+            "a hook arrival must advance the activity clock"
+        );
+        assert_eq!(after, "2026-08-07T09:00:00Z");
+    }
+
+    /// SPEC-3431 FR-066: closing a launched window is a bounded retry.
+    ///
+    /// Requeueing consumed no attempt and set no backoff, so with autonomous
+    /// mode on, closing a pane put the issue straight back at the head of the
+    /// queue and the next scan relaunched it — an unbounded loop. That is why
+    /// the PM was told not to close panes, but the constraint protected
+    /// nobody: the only callers are the `WindowClosed` control, so **a person
+    /// closing a window by hand hits exactly the same loop**.
+    ///
+    /// Bound it where the loop is instead. The attempt ladder, backoff, and
+    /// `NeedsHuman` escalation already exist for autonomous failures; a close
+    /// is a failed attempt by the same definition ("closed without the work
+    /// completing"), so it uses the same budget.
+    #[test]
+    fn requeue_window_consumes_an_attempt_and_stops_at_the_budget() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let max = monitor.autonomous_tuning.max_attempts;
+        assert!(max >= 2, "precondition: a real budget");
+
+        // The first close still returns the issue to the queue, but now with a
+        // backoff floor so the next scan cannot relaunch it instantly.
+        assert_eq!(monitor.requeue_window("tab-1::agent-1"), Some(42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(
+            !monitor.retry_ready(42, "2026-08-07T00:00:00Z"),
+            "an immediate relaunch is what made this a loop"
+        );
+
+        // Exhausting the budget hands the issue to a human instead of looping.
+        for _ in 1..max {
+            monitor.complete_active_launch(42, "tab-1::agent-1");
+            monitor.requeue_window("tab-1::agent-1");
+        }
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "after {max} closes the issue must stop being relaunched"
+        );
+    }
+
+    /// SPEC-3431 FR-033 / T-086: the exact identity a stop_only request must
+    /// carry for a launched issue in [`launched_monitor`].
+    fn stop_target(monitor: &IssueMonitorState, issue_number: u64) -> IssueMonitorStopTarget {
+        IssueMonitorStopTarget {
+            issue_number,
+            claim_id: monitor
+                .inbox_item(issue_number)
+                .and_then(|item| item.claim_id.clone()),
+            delivery_id: monitor.pending_launch_delivery_id(issue_number),
+            window_id: monitor.launched_window_id(issue_number),
+        }
+    }
+
+    /// SPEC-3431 FR-033: a stop_only request revokes exactly one launch.
+    ///
+    /// Unlike [`IssueMonitorState::requeue_window_at`] (FR-066), this is not a
+    /// retry: it consumes no attempt, does not requeue, and does not relaunch.
+    /// It is the operation the PM uses when it means "stop", as opposed to
+    /// closing a pane, which means "this attempt failed, try again".
+    #[test]
+    fn stop_only_revokes_the_slot_and_holds_the_issue() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = stop_target(&monitor, 42);
+        let epoch_before = monitor.effect_authority_epoch();
+        let attempts_before = monitor.attempt_count(42);
+
+        assert_eq!(
+            monitor.stop_only(&target, "rate limit", "2026-08-07T00:00:00Z"),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-1".to_string()
+            }
+        );
+
+        assert_eq!(monitor.active_count(), 0, "the slot must be released");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "a stop is terminal/held, not a queued retry"
+        );
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "stop_only must not requeue"
+        );
+        assert!(
+            monitor.effect_authority_epoch() > epoch_before,
+            "effect authority must be revoked so in-flight effects cannot land"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            attempts_before,
+            "a deliberate stop is not a failed attempt and must not spend the retry budget"
+        );
+        assert!(
+            monitor
+                .inbox_item(42)
+                .and_then(|item| item.error_message.clone())
+                .is_some_and(|message| message.contains("rate limit")),
+            "FR-031: the reason must be diagnosable from the snapshot"
+        );
+    }
+
+    /// SPEC-3431 FR-033: every identity component must match exactly, and a
+    /// mismatch closes nothing. A stale notification or a concurrent scan is
+    /// exactly how the wrong agent gets killed.
+    #[test]
+    fn stop_only_fails_closed_on_any_identity_mismatch() {
+        let base = launched_monitor(42, "tab-1::agent-1");
+        let good = stop_target(&base, 42);
+
+        let mismatches: Vec<(IssueMonitorStopTarget, IssueMonitorStopMismatch)> = vec![
+            (
+                IssueMonitorStopTarget {
+                    issue_number: 99,
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::UnknownIssue,
+            ),
+            (
+                IssueMonitorStopTarget {
+                    window_id: Some("tab-1::agent-2".to_string()),
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::WindowMismatch,
+            ),
+            (
+                IssueMonitorStopTarget {
+                    window_id: None,
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::WindowMismatch,
+            ),
+            (
+                IssueMonitorStopTarget {
+                    claim_id: Some("foreign-claim".to_string()),
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::ClaimMismatch,
+            ),
+            (
+                IssueMonitorStopTarget {
+                    delivery_id: Some("stale-delivery".to_string()),
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::DeliveryMismatch,
+            ),
+        ];
+
+        for (target, expected) in mismatches {
+            let mut monitor = base.clone();
+            assert_eq!(
+                monitor.stop_only(&target, "switch provider", "2026-08-07T00:00:00Z"),
+                IssueMonitorStopOutcome::Mismatch(expected),
+                "target {target:?} must fail closed"
+            );
+            assert_eq!(
+                monitor.active_count(),
+                1,
+                "a rejected stop must not release the slot"
+            );
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::Launched),
+                "a rejected stop must leave the launch running"
+            );
+            assert_eq!(
+                monitor.launched_window_id(42).as_deref(),
+                Some("tab-1::agent-1"),
+                "a rejected stop must not detach the window"
+            );
+        }
+    }
+
+    /// SPEC-3431 FR-033: only a running or ready-to-run launch can be stopped.
+    #[test]
+    fn stop_only_rejects_issues_that_are_not_running() {
+        let mut queued = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut queued, &[issue(42)], "2026-06-26T00:00:00Z");
+        assert_eq!(
+            queued.stop_only(
+                &IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                "stop",
+                "2026-08-07T00:00:00Z"
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::NotRunning)
+        );
+
+        let mut merged = launched_monitor(42, "tab-1::agent-1");
+        let target = stop_target(&merged, 42);
+        merged.record_merged(42);
+        assert_eq!(
+            merged.stop_only(&target, "stop", "2026-08-07T00:00:00Z"),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::NotRunning),
+            "merged work is already terminal and must not be reopened as stopped"
+        );
+        assert_eq!(
+            merged.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+    }
+
+    /// SPEC-3431 FR-033: repeating the request is idempotent — it neither
+    /// errors nor revokes authority a second time.
+    #[test]
+    fn stop_only_is_idempotent_when_repeated() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.stop_only(&target, "stop", "2026-08-07T00:00:00Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+        let epoch_after_first = monitor.effect_authority_epoch();
+
+        assert_eq!(
+            monitor.stop_only(&target, "stop", "2026-08-07T00:01:00Z"),
+            IssueMonitorStopOutcome::AlreadyStopped
+        );
+        assert_eq!(
+            monitor.effect_authority_epoch(),
+            epoch_after_first,
+            "a repeat must not burn another authority epoch"
+        );
+        assert_eq!(monitor.active_count(), 0);
+    }
+
+    /// SPEC-3431 FR-033: the `window_closed` that arrives after the stop must
+    /// not requeue or relaunch the issue. This is the race the PM hits every
+    /// time it stops an agent: the GUI reaps the pane a moment later.
+    #[test]
+    fn stop_only_makes_a_delayed_window_closed_inert() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = stop_target(&monitor, 42);
+        monitor.stop_only(&target, "stop", "2026-08-07T00:00:00Z");
+
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-1", "2026-08-07T00:00:05Z"),
+            None,
+            "the delayed close must not resurrect a stopped issue"
+        );
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    /// SPEC-3431 FR-033 / T-087b: stop_only must work in the process that
+    /// actually runs it.
+    ///
+    /// `gwtd` is short-lived: it loads prefs and has no inbox, because
+    /// [`IssueMonitorState::with_prefs`] restores the durable launch
+    /// accounting but not the scanned candidate rows. An implementation that
+    /// reads liveness off the inbox therefore answers `UnknownIssue` for every
+    /// running agent when the PM calls it — the unit matrix passes and the
+    /// operation is dead on arrival.
+    ///
+    /// The identity that survives the process boundary is the durable one:
+    /// active launches, launched windows, pending deliveries, failed issues.
+    #[test]
+    fn stop_only_works_from_prefs_without_a_scanned_inbox() {
+        let launched = launched_monitor(42, "tab-1::agent-1");
+        // Exactly what gwtd sees: prefs on disk, no candidate scan.
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
+        assert!(
+            monitor.inbox_item(42).is_none(),
+            "precondition: with_prefs restores no inbox"
+        );
+        assert_eq!(monitor.active_count(), 1, "precondition: the slot is held");
+
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        assert_eq!(
+            monitor.stop_only(&target, "rate limit", "2026-08-07T00:00:00Z"),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-1".to_string()
+            }
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot must be released");
+
+        // The hold has to survive the next prefs roundtrip, or the following
+        // scan relaunches the issue the PM just stopped.
+        let reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(reloaded.active_count(), 0);
+        assert_eq!(
+            reloaded.stop_only_reason(42).as_deref(),
+            Some("rate limit"),
+            "the stop must be durable and diagnosable after a reload"
+        );
+
+        // And a mismatch must still fail closed with no inbox to lean on.
+        let mut fresh =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
+        assert_eq!(
+            fresh.stop_only(
+                &IssueMonitorStopTarget {
+                    window_id: Some("tab-1::agent-2".to_string()),
+                    ..target.clone()
+                },
+                "rate limit",
+                "2026-08-07T00:00:00Z"
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        assert_eq!(fresh.active_count(), 1);
+    }
+
+    /// SPEC-3431 FR-033 / T-087c: the running daemon must converge on a stop
+    /// that another process committed.
+    ///
+    /// `gwtd` writes the stop to prefs, but the daemon is already holding the
+    /// same launch in memory and rebases its state onto disk before each scan.
+    /// If that rebase keeps the local record, the daemon still believes the
+    /// agent is running, keeps the slot, and writes its own view back over the
+    /// stop on the next commit — the PM's stop silently un-does itself.
+    #[test]
+    fn a_stop_committed_by_another_process_survives_the_daemon_rebase() {
+        // The daemon: an autonomous launch in flight.
+        let mut daemon = launched_monitor(42, "tab-1::agent-1");
+        daemon.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        daemon.record_autonomous_heartbeat(42, "2026-08-07T00:00:00Z");
+        assert_eq!(daemon.active_count(), 1);
+
+        // The PM's gwtd process: same prefs, no inbox, commits the stop.
+        let mut cli = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: cli.live_claim_id(42),
+            delivery_id: cli.pending_launch_delivery_id(42),
+            window_id: cli.launched_window_id(42),
+        };
+        assert!(matches!(
+            cli.stop_only(&target, "provider rate limit", "2026-08-07T00:00:10Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+        let disk = cli.prefs();
+
+        // The daemon's next scan rebases onto that disk state.
+        daemon.rebase_daemon_driver_prefs(&disk);
+
+        assert_eq!(
+            daemon.active_count(),
+            0,
+            "the daemon must release the slot the stop freed"
+        );
+        assert_eq!(
+            daemon.stop_only_reason(42).as_deref(),
+            Some("provider rate limit"),
+            "the daemon must adopt the stop, not just the slot release"
+        );
+        assert_eq!(
+            daemon.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "a daemon still in Implementing will relaunch or wait for a verdict \
+             that is never coming"
+        );
+        assert!(
+            !daemon.queued_issue_numbers().contains(&42),
+            "a stopped issue must not be requeued by the rebase"
+        );
+        assert_eq!(
+            daemon.launched_window_id(42),
+            None,
+            "the window binding must be gone, or a delayed close requeues it"
+        );
+
+        // And the daemon's own commit must not write the stop back out.
+        let committed = daemon.prefs();
+        assert!(
+            committed.launched_issues.is_empty(),
+            "the daemon must not restore the launch it just adopted as stopped"
+        );
+        assert_eq!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), committed)
+                .stop_only_reason(42)
+                .as_deref(),
+            Some("provider rate limit"),
+            "the stop must survive the daemon's next prefs commit"
+        );
+    }
+
+    /// SPEC-3431 FR-033 / T-087c: a launch ACK that lands after the stop must
+    /// not resurrect the launch.
+    ///
+    /// The GUI ACKs a materialization it started before the PM stopped the
+    /// issue. Accepting it would re-bind a window and re-take the slot for
+    /// work that is already held, which is the same "stop becomes a restart"
+    /// failure the delayed close causes, arriving from the other direction.
+    #[test]
+    fn a_launch_ack_after_a_stop_does_not_resurrect_the_issue() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-1",
+            "owner-1",
+            "effect-1",
+            "2026-08-07T00:00:00Z",
+        ));
+
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        assert!(
+            target.delivery_id.is_some() && target.window_id.is_none(),
+            "precondition: a materializing launch is identified by its delivery"
+        );
+        assert!(matches!(
+            monitor.stop_only(&target, "switch provider", "2026-08-07T00:00:10Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+
+        assert!(
+            !monitor.complete_active_launch_delivery(42, "tab-1::agent-1", Some("launch:effect-1")),
+            "the in-flight delivery was revoked; its ACK must be refused"
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot must stay released");
+        assert_eq!(
+            monitor.launched_window_id(42),
+            None,
+            "no window may be bound to a stopped issue"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    /// SPEC-3431 FR-033 / T-087c: a scan running against the stopped issue
+    /// must not re-queue or re-launch it.
+    ///
+    /// This is the race that matters most in practice: `launch_now` and the
+    /// interval tick both scan, and a stop that a scan can undo is not a stop.
+    #[test]
+    fn a_scan_after_a_stop_does_not_relaunch_the_issue() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        assert!(matches!(
+            monitor.stop_only(&target, "switch provider", "2026-08-07T00:00:10Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+
+        // The issue is still open on GitHub, so every later scan sees it as a
+        // candidate. It must stay held rather than returning to the queue.
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-07T00:01:00Z");
+
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "a scan must not re-queue a stopped issue"
+        );
+        assert_eq!(monitor.active_count(), 0, "and must not re-take its slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "the hold must survive the rescan"
+        );
+        assert_eq!(
+            monitor.stop_only_reason(42).as_deref(),
+            Some("switch provider")
+        );
+    }
+
+    /// SPEC-3431 FR-029/FR-030 / T-080: a failover puts the issue back in line
+    /// for the profile that is saved now.
+    ///
+    /// This is the operation the PM needs when a provider runs out of quota:
+    /// the work is fine, the account is not. So unlike a close it spends no
+    /// retry attempt, and unlike a stop it does not hold the issue.
+    #[test]
+    fn failover_restart_requeues_at_the_head_without_spending_an_attempt() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-08-07T00:00:00Z",
+        );
+        let attempts_before = monitor.attempt_count(42);
+        let epoch_before = monitor.effect_authority_epoch();
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+
+        assert_eq!(
+            monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z"),
+            IssueMonitorFailoverOutcome::Restarting {
+                stopped_window_id: Some("tab-1::agent-1".to_string())
+            }
+        );
+
+        assert_eq!(monitor.active_count(), 0, "the old launch must be revoked");
+        assert!(
+            monitor.effect_authority_epoch() > epoch_before,
+            "an effect still in flight for the old provider must lose authority"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            attempts_before,
+            "the account ran out, not the work — the retry budget is not the \
+             place to charge someone else's billing cycle"
+        );
+        assert_eq!(
+            monitor.queued_issue_numbers().first().copied(),
+            Some(42),
+            "the operator asked for this issue to run next, not eventually"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert_eq!(
+            monitor.launched_window_id(42),
+            None,
+            "the old provider's session must not be reused"
+        );
+        assert!(
+            monitor.stop_only_reason(42).is_none(),
+            "a failover is not a hold; nothing may keep it out of the queue"
+        );
+        assert!(
+            monitor.retry_ready(42, "2026-08-07T00:00:11Z"),
+            "no backoff floor: the whole point is to run it now on the new profile"
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: an explicit failover must carry its
+    /// fresh-session origin through the queued state, a prefs reload, the
+    /// durable delivery, and every replay of the launch request.
+    #[test]
+    fn failover_launch_strategy_survives_reload_and_delivery_replay() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let attempts_before = monitor.attempt_count(42);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+
+        assert!(matches!(
+            monitor.failover_restart(&target, "switch provider", "2026-08-13T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(monitor.attempt_count(42), attempts_before);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_deref()),
+            None,
+            "provider failover must not schedule autonomous retry backoff"
+        );
+        assert_ne!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "provider failover must not spend the NeedsHuman budget"
+        );
+
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-08-13T00:00:01Z");
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-42-retry",
+            "host/session",
+            "effect-42-retry",
+            "2026-08-13T00:00:02Z",
+        ));
+
+        let durable = restored.prefs();
+        assert_eq!(
+            durable.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+            "the durable delivery must retain the failover origin"
+        );
+        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let first = replayed.take_pending_launch_requests();
+        let second = replayed.take_pending_launch_requests();
+        assert_eq!(first, second, "an unacked delivery remains replayable");
+        assert_eq!(
+            first[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+            "delivery replay must never downgrade failover to ResumeIfSafe"
+        );
+    }
+
+    #[test]
+    fn agent_writer_conflict_accepts_legacy_bare_and_qualified_window_ids() {
+        let mut legacy_stored = launched_monitor(42, "agent-old");
+        assert_eq!(
+            legacy_stored.try_requeue_agent_resume_writer_conflict(
+                42,
+                "tab-1::agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Requeued,
+            "a qualified runtime event must match a legacy bare persisted id"
+        );
+
+        let mut qualified_stored = launched_monitor(42, "tab-1::agent-old");
+        assert_eq!(
+            qualified_stored.try_requeue_agent_resume_writer_conflict(
+                42,
+                "agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Requeued,
+            "a legacy bare runtime event must match a qualified persisted id"
+        );
+
+        let mut foreign_tab = launched_monitor(42, "tab-1::agent-old");
+        let original = foreign_tab.prefs();
+        assert_eq!(
+            foreign_tab.try_requeue_agent_resume_writer_conflict(
+                42,
+                "tab-2::agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Rejected,
+            "two qualified ids from different project tabs must remain distinct"
+        );
+        assert_eq!(foreign_tab.prefs(), original, "foreign source is inert");
+    }
+
+    #[test]
+    fn agent_writer_conflict_requires_exact_launched_window_and_cannot_revoke_successor() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let original = monitor.prefs();
+
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            43,
+            "tab-1::agent-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-foreign",
+            "resume writer conflict",
+            None,
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-old",
+            "resume writer conflict",
+            Some("tab-1::agent-holder"),
+        ));
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor
+            .status_view()
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("tab-1::agent-holder")));
+
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-successor",
+            "host/session",
+            "effect-successor",
+            "2026-08-13T00:00:01Z",
+        ));
+        let successor = monitor.prefs();
+        assert_eq!(
+            successor.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-old",
+            "late duplicate",
+            Some("tab-1::agent-holder"),
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale source window cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn launch_writer_conflict_requires_exact_delivery_materializer_identity() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            101,
+            "tab-1::agent-old",
+            |_| false,
+        ));
+        let original = monitor.prefs();
+
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:foreign",
+            "gui-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-foreign",
+            "resume writer conflict",
+            None,
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-successor",
+            "host/session",
+            "effect-successor",
+            "2026-08-13T00:00:01Z",
+        ));
+        let successor = monitor.prefs();
+
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            "late duplicate",
+            None,
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale delivery/materializer cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn terminal_failures_clear_queued_fresh_launch_strategy_locally_and_from_disk() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.failover_restart(&target, "switch", "2026-08-13T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(
+            monitor.prefs().queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+
+        monitor.record_agent_issue_failed(42, "terminal agent failure");
+
+        assert!(monitor.prefs().queued_launch_session_strategies.is_empty());
+
+        let disk = IssueMonitorPrefs {
+            queued_launch_session_strategies: BTreeMap::from([(
+                42,
+                IssueMonitorLaunchSessionStrategy::FreshRequired,
+            )]),
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "terminal disk failure".to_string(),
+                window_id: None,
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        assert!(restored.prefs().queued_launch_session_strategies.is_empty());
+
+        let mut rebased = IssueMonitorState::new(IssueMonitorConfig::default());
+        rebased.record_candidate(issue(42));
+        rebased.rebase_gui_observer_prefs(&disk);
+        assert!(rebased.prefs().queued_launch_session_strategies.is_empty());
+    }
+
+    /// SPEC-3431 FR-030 / T-080: the failover shares `stop_only`'s exact
+    /// identity gate, so a stale request restarts nothing.
+    #[test]
+    fn failover_restart_fails_closed_on_a_stale_identity() {
+        let base = launched_monitor(42, "tab-1::agent-1");
+        let good = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: base.live_claim_id(42),
+            delivery_id: base.pending_launch_delivery_id(42),
+            window_id: base.launched_window_id(42),
+        };
+
+        for (target, expected) in [
+            (
+                IssueMonitorStopTarget {
+                    window_id: Some("tab-1::agent-2".to_string()),
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::WindowMismatch,
+            ),
+            (
+                IssueMonitorStopTarget {
+                    claim_id: Some("foreign".to_string()),
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::ClaimMismatch,
+            ),
+            (
+                IssueMonitorStopTarget {
+                    issue_number: 99,
+                    ..good.clone()
+                },
+                IssueMonitorStopMismatch::UnknownIssue,
+            ),
+        ] {
+            let mut monitor = base.clone();
+            assert_eq!(
+                monitor.failover_restart(&target, "switch", "2026-08-07T00:00:10Z"),
+                IssueMonitorFailoverOutcome::Mismatch(expected)
+            );
+            assert_eq!(
+                monitor.active_count(),
+                1,
+                "a refused failover must leave the launch running"
+            );
+            assert!(
+                !monitor.queued_issue_numbers().contains(&42),
+                "a refused failover must not queue anything"
+            );
+        }
+    }
+
+    /// SPEC-3431 FR-030 / T-080: after a failover the issue has exactly one
+    /// active pane, and the delayed close of the abandoned one does not add a
+    /// second.
+    #[test]
+    fn failover_restart_leaves_one_active_pane_after_the_old_one_closes() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        // The new provider's launch lands.
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+        assert_eq!(monitor.active_count(), 1);
+
+        // The abandoned pane is reaped a moment later. It is no longer bound to
+        // the issue, so it must not touch the launch that replaced it.
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-1", "2026-08-07T00:00:20Z"),
+            None,
+            "the old window must not requeue the issue its replacement now owns"
+        );
+        assert_eq!(monitor.active_count(), 1, "still exactly one active pane");
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::agent-2")
+        );
+    }
+
+    /// SPEC-3431 FR-030 / T-080: the old pane's delayed close can also land
+    /// *before* the replacement launch. The requeued issue must ride it out
+    /// untouched — still queued exactly once, still clean of failure markers.
+    #[test]
+    fn failover_requeue_survives_a_late_close_before_the_new_launch() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-1", "2026-08-07T00:00:12Z"),
+            None,
+            "the revoked window must not double-queue the issue it lost"
+        );
+        assert_eq!(
+            monitor
+                .queued_issue_numbers()
+                .iter()
+                .filter(|number| **number == 42)
+                .count(),
+            1,
+            "exactly one queue entry survives the late close"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "no failure marker may leak from the reaped pane"
+        );
+    }
+
+    /// SPEC-3431 FR-030 / T-080: a scan racing the failover (the ScanNow the
+    /// failover itself requests) must not double-queue the issue or launch it
+    /// twice.
+    #[test]
+    fn failover_then_scan_keeps_a_single_queue_entry_and_a_single_launch() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        // The immediate scan the failover requested re-observes the same
+        // candidate list.
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-07T00:00:11Z");
+        assert_eq!(
+            monitor
+                .queued_issue_numbers()
+                .iter()
+                .filter(|number| **number == 42)
+                .count(),
+            1,
+            "the concurrent scan must not add a second queue entry"
+        );
+
+        // The requeued launch lands once; a second scan afterwards must not
+        // spawn a sibling.
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-07T00:00:20Z");
+        assert_eq!(monitor.active_count(), 1, "exactly one launch, ever");
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "a running launch must not be queued again by the next scan"
+        );
+    }
+
+    /// SPEC-3431 FR-031 / T-081: when the restarted launch itself fails, the
+    /// failure must converge to a visible inbox error with the slot released —
+    /// not a silent loss, and not a phantom active slot.
+    #[test]
+    fn failed_restart_after_failover_converges_to_a_visible_failure() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        monitor.record_launch_failed(42, "saved profile binary missing");
+
+        assert_eq!(monitor.active_count(), 0, "no phantom active slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "the restart failure must be visible, not silently swallowed"
+        );
+        assert_eq!(
+            monitor
+                .inbox_item(42)
+                .and_then(|item| item.error_message.clone())
+                .as_deref(),
+            Some("saved profile binary missing"),
+            "the diagnosis must carry the reason the PM needs"
+        );
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "a failed launch must not silently spin in the queue"
+        );
+    }
+
+    /// SPEC-3431 FR-024 / FR-033: the PM has to be able to *read* the identity
+    /// it is required to send. `claim_id` was missing from the snapshot, so an
+    /// exact-claim requirement was unsatisfiable from the PM's side.
+    #[test]
+    fn agent_status_exposes_the_claim_id_stop_only_requires() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-1",
+            "owner-1",
+            "effect-1",
+            "2026-08-07T00:00:00Z",
+        ));
+
+        let status = monitor.agent_status();
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .expect("inbox row for the launching issue");
+        assert_eq!(
+            row.claim_id.as_deref(),
+            Some("claim-1"),
+            "FR-024: reconcile facts must come from the one snapshot"
+        );
+        assert_eq!(
+            row.delivery_id.as_deref(),
+            Some("launch:effect-1"),
+            "the PM cannot send a delivery id it cannot read"
+        );
+    }
+
+    /// SPEC-3431 FR-033: no collateral. Stopping one issue leaves every other
+    /// launch, slot, and window exactly as it was.
+    #[test]
+    fn stop_only_touches_no_other_issue() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_max_active_agents(2);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-06-26T00:00:00Z",
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        monitor.complete_active_launch(43, "tab-1::agent-2");
+        assert_eq!(monitor.active_count(), 2);
+
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.stop_only(&target, "stop", "2026-08-07T00:00:00Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+
+        assert_eq!(monitor.active_count(), 1, "the other launch keeps its slot");
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Launched)
+        );
+        assert_eq!(
+            monitor.launched_window_id(43).as_deref(),
+            Some("tab-1::agent-2"),
+            "the other window must stay bound"
+        );
+    }
+
     #[test]
     fn requeue_window_does_not_revert_merged() {
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
@@ -6576,6 +8818,63 @@ mod tests {
         );
     }
 
+    /// SPEC #3165 FR-100 / T-224: pre-policy persisted delivery/request shapes
+    /// remain compatible and preserve the ordinary re-engage behavior.
+    #[test]
+    fn legacy_launch_session_strategy_defaults_to_resume_if_safe() {
+        let delivery: PendingIssueMonitorLaunchDelivery =
+            serde_json::from_value(serde_json::json!({
+                "delivery_id": "launch:legacy-effect",
+                "issue_number": 42,
+                "branch_name": "work/issue-42",
+                "linked_issue_kind": "issue",
+                "claim_id": "claim-42",
+                "claim_owner": "host/session",
+                "created_at": "2026-08-13T00:00:00Z"
+            }))
+            .expect("legacy delivery without launch_session_strategy");
+        assert_eq!(
+            delivery.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+
+        let request: IssueMonitorLaunchRequest = serde_json::from_value(serde_json::json!({
+            "issue_number": 42,
+            "branch_name": "work/issue-42",
+            "linked_issue_kind": "issue",
+            "delivery_id": "launch:legacy-effect"
+        }))
+        .expect("legacy request without launch_session_strategy");
+        assert_eq!(
+            request.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: a normal first delivery has no
+    /// failover/failure origin and therefore retains exact-resume continuity.
+    #[test]
+    fn ordinary_confirmed_claim_uses_resume_if_safe() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+        assert_eq!(
+            monitor.take_pending_launch_requests()[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+    }
+
     #[test]
     fn deduped_confirmed_claim_returns_its_exact_delivery_not_the_queue_tail() {
         use gwt_github::{
@@ -6950,6 +9249,100 @@ mod tests {
         assert!(
             monitor.prefs().pending_launch_deliveries.is_empty(),
             "a retryable issue cannot also replay its previous durable delivery"
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: a generic AgentFailed autonomous
+    /// retry still uses the existing attempt/backoff ladder, but its successor
+    /// delivery must be fresh and must retain that strategy across restart and
+    /// ACK-driven delivery replay.
+    #[test]
+    fn autonomous_agent_failed_retry_keeps_fresh_strategy_across_reload() {
+        let candidate = auto_issue(
+            42,
+            "## Acceptance Criteria\n- [ ] AC-1: replacement agent completes the work\n",
+        );
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(candidate.clone());
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+
+        monitor.record_agent_issue_failed(42, "agent process exited");
+
+        assert_eq!(
+            monitor.attempt_count(42),
+            1,
+            "generic AgentFailed keeps the existing autonomous retry budget contract"
+        );
+        assert!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_ref())
+                .is_some(),
+            "generic AgentFailed keeps the existing bounded backoff contract"
+        );
+        assert_ne!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "one retry below the cap remains retryable"
+        );
+
+        let retry_at = chrono::DateTime::parse_from_rfc3339(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_deref())
+                .expect("AgentFailed retry has a durable backoff floor"),
+        )
+        .expect("retry_not_before is RFC3339")
+            + chrono::Duration::seconds(1);
+        let retry_at = retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, std::slice::from_ref(&candidate), &retry_at);
+        let branch_protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &branch_protection, &retry_at),
+            EligibilityDecision::Eligible
+        );
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-42-retry",
+            "host/session",
+            "effect-42-retry",
+            &retry_at,
+        ));
+
+        let durable = restored.prefs();
+        assert_eq!(durable.autonomous_records[0].attempts, 1);
+        assert_eq!(
+            durable.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let first = replayed.take_pending_launch_requests();
+        let second = replayed.take_pending_launch_requests();
+        assert_eq!(
+            first, second,
+            "an unacked AgentFailed retry remains replayable"
+        );
+        assert_eq!(
+            first[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
         );
     }
 
@@ -7566,6 +9959,79 @@ mod tests {
                 .expect("dropping the lease makes the persisted current fence recoverable");
         assert_eq!(recovered.effect_authority_epoch, 1);
         drop(second_lease);
+    }
+
+    #[test]
+    fn local_fallback_lease_rejects_live_daemon_authority() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let daemon = IssueMonitorAuthorityFence::current_process();
+        let (_, daemon_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+                .expect("daemon authority");
+
+        let error = try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect_err("live daemon authority must exclude the GUI fallback");
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(daemon_lease);
+    }
+
+    #[test]
+    fn local_fallback_lease_recovers_an_unlocked_v2_fence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 11,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence::current_process(),
+        )
+        .expect("seed stale v2 fence without its lifetime lock");
+
+        let lease = try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("a free lifetime lock makes the v2 fence recoverable");
+
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("load recovered prefs")
+                .effect_authority_epoch,
+            12,
+            "stale daemon effects must be revoked before GUI fallback execution"
+        );
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load recovered fence"),
+            IssueMonitorAuthorityFenceState::Missing,
+            "the bounded GUI lease must not leave a durable daemon fence"
+        );
+        drop(lease);
+    }
+
+    #[test]
+    fn local_fallback_lease_blocks_daemon_start_until_drop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let local_lease = try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("GUI fallback authority");
+        let daemon = IssueMonitorAuthorityFence::current_process();
+
+        let blocked = establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+            .expect_err("daemon startup must not overlap a local remote effect");
+        assert_eq!(blocked.kind(), io::ErrorKind::WouldBlock);
+
+        drop(local_lease);
+        let (_, daemon_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+                .expect("daemon starts after the local effect boundary closes");
+        drop(daemon_lease);
     }
 
     #[test]
@@ -9116,6 +11582,30 @@ mod tests {
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman),
             "adopting a newer marker must not downgrade a terminal inbox row"
+        );
+    }
+
+    #[test]
+    fn failover_restart_at_authority_epoch_max_is_an_atomic_noop() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-max");
+        monitor.effect_authority_epoch = u64::MAX;
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        let before = monitor.clone();
+
+        let outcome = monitor.failover_restart(&target, "switch provider", "2026-08-13T00:00:00Z");
+
+        assert!(
+            !matches!(outcome, IssueMonitorFailoverOutcome::Restarting { .. }),
+            "an exact source cannot report successful failover when its authority epoch cannot advance"
+        );
+        assert_eq!(
+            monitor, before,
+            "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
         );
     }
 }

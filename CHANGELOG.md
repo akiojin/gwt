@@ -1,6 +1,299 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.79.1] - 2026-08-15
+
+### Bug Fixes
+
+- **test:** Stabilize issue monitor daemon synchronization
+- **test:** Observe issue monitor scan ownership directly
+- **execution:** Recover blocked build aborts
+- **execution:** Harden blocked abort reconciliation
+- **execution:** Bound blocked abort diagnostics
+
+### Miscellaneous Tasks
+
+- Refresh lockfile for v9.79.0
+- Record issue monitor verification
+- Record issue monitor PR handoff
+- Settle issue monitor work handoff
+- **work:** Record issue monitor PR handoff receipt
+
+
+## [9.79.0] - 2026-08-14
+
+### Bug Fixes
+
+- Recover manual launches from terminal generations
+- **launch:** Stabilize segmented wizard commits
+- **test:** Stabilize Windows agent launch E2E
+- **test:** Warm Windows metadata probe in E2E
+- **test:** Isolate manual launch authority fixtures
+
+### Features
+
+- **launch:** Harden manual successor handoff
+
+### Miscellaneous Tasks
+
+- Record issue 3547 verification status
+
+### Testing
+
+- **launch:** Fence live wizard state cleanup
+- **playwright:** Isolate logs preset from launch wizard
+
+## [9.78.3] - 2026-08-14
+
+### Bug Fixes
+
+- **pm:** Guarantee verified pane message delivery
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger release checks for v9.78.2
+- **work:** Record issue 3550 completion
+- **ci:** Retrigger checks for PR #3565
+
+
+## [9.78.2] - 2026-08-14
+
+### Bug Fixes
+
+- **daemon:** Resolve same-repo subscribe endpoints
+- **issue-monitor:** Prevent unsafe durable session resume
+- **issue-monitor:** Preserve late resume conflict recovery
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3492 completion
+- **work:** Record work event
+
+## [9.78.1] - 2026-08-12
+
+### Bug Fixes
+
+- **hooks:** Codex hooks の監査対象と自己修復対象のパス集合を一致させる
+- **launch:** Provenance 未解決時は legacy Session 移行を skip して launch を継続する
+- **issue-monitor:** Scan の probe を claim 候補に限定し commit を独立 budget で実行する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3474 の作業状態を記録
+- **work:** Issue #3474 の視覚検証完了を記録
+- **work:** Issue #3474 の完了状態を記録
+- **work:** Develop worktree の Work event を記録する
+
+
+## [9.78.0] - 2026-08-12
+
+### Bug Fixes
+
+- Harden Windows official provider launches
+- **workspace:** Rebind continued sessions to canonical work
+- **agent:** Keep launch status config cross-platform
+- **agent:** Address Windows launch review findings
+- Stabilize browser check hook fallback
+- Converge browser check hook authority
+- **hooks:** 並行する Codex hook 再生成を安定化する
+- **workspace:** 子 Work が projection の owner/agents を継承表示する不具合を修正 (#3455)
+- **launch:** Resume / Continue 起動で Skip Permissions を新規起動と同じ設定源から引き継ぐ (#3462)
+- **monitor:** GUI scheduled scan から自律起動を駆動する
+- **monitor:** Authority leaseの回収と競合を直列化する
+- **monitor:** Corrective駆動のレビュー指摘を解消する
+- **monitor:** Fallback期限を外側へ継承する
+- **monitor:** GUI fallbackのロック待機を制限する
+- **hooks:** Hook-authority スクリプトの rg 依存を除去し rg 不在環境での fail-open を防ぐ (#3398)
+
+### Features
+
+- **workspace:** Closed owner の滞留 Work を整理する work_prune を追加 (#3448)
+- **workspace:** 孤児化した worktree placeholder の整理と対象プロジェクト指定を work_prune に追加 (#3448)
+- **gui:** Issues ビューと Issue Monitor を単一 Issue サーフェスへ統合する (#3461)
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 3398 continuation events
+- **work:** Record Issue 3398 resume
+- **work:** #3455 検証中の Work event bookkeeping
+- **work:** #3455/#3448 作業中の Work event bookkeeping
+- **work:** Issue #3505 の実行前調査を記録する
+- **work:** Issue #3505 の検証完了を記録する
+- **work:** Issue #3505 のterminal receiptを記録する
+- **ci:** Retrigger checks for PR #3520 after ETXTBSY test flake
+- **work:** Issue 3461 の blocker を記録する
+- **work:** Issue #3461 の Work event を記録する
+- **work:** Issue #3461 の配信状態を記録する
+
+### Testing
+
+- Stabilize workspace proxy loss coverage
+- **core:** Gate Windows registry path regression
+- **hooks:** Managed assets の hook audit テストから host rg 依存を除去する (#3398)
+
+
+## [9.77.0] - 2026-08-11
+
+### Bug Fixes
+
+- **pm:** Wake prompt と PM 送達の CR を独立した書き込みにして submit を成立させる (SPEC #3431 FR-108c / T-218)
+
+### Documentation
+
+- **agents:** GUI/フロントエンド変更で Headed ブラウザ E2E テストを必須化する
+- **pm:** FR-108(a) の harness スケジューラ契約を PM guidance へ追補する (SPEC #3431 T-202)
+
+### Features
+
+- **pm:** FR-111 PM 特権の pane メッセージ送達 pm.message.send を実装する (SPEC #3431 T-206)
+
+
+## [9.76.0] - 2026-08-10
+
+### Bug Fixes
+
+- Enforce worktree marker and badge boundaries
+- Account for minimap cell border
+- **gui:** Scheduled tick の挿入で cfg(unix) 属性が board registry から外れたのを修正する
+
+### Features
+
+- **pm:** 常駐ループの穴 3 件を塞ぎ GUI に scheduled scan tick を実装する (SPEC #3431 FR-108〜110 / #3505)
+
+### Miscellaneous Tasks
+
+- **work:** Record develop pane work events
+- **work:** Record verification progress
+- **work:** Record issue 3384 completion
+- **work:** SPEC #3431 常駐ループ修正 slice の terminal Work event を記録する
+- **work:** SPEC #3431 常駐ループ修正 slice の terminal Work event を記録する
+
+### Refactor
+
+- Adopt Rust worktree-form vocabulary
+- Adopt frontend worktree-form vocabulary
+
+### Testing
+
+- Enforce worktree badge overflow coverage
+- Align minimap tooltip worktree form coverage
+- **gwt:** Git 依存の wizard branch 解決テストに env lock を追加して並走 flake を止める
+
+## [9.75.1] - 2026-08-09
+
+### Bug Fixes
+
+- **pm:** Bare リポジトリ層構成で PM worktree 作成が失敗し PM が無言不起動になるのを修正する (#3497)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3431 M-A slice の terminal Work event を記録する
+- **work:** Issue #3497 修正 slice の Work event を記録する
+
+### Testing
+
+- **pm:** Stop/failover の IPC 層 failure injection と残 matrix を固定する (SPEC #3431 T-087d/T-080/T-081)
+- **index:** Deadline-reap fake runner の cold-start 競合 flake を根治する
+- **gwt:** HOME 依存の issue monitor テストに env lock を追加して並走 flake を止める
+
+## [9.75.0] - 2026-08-09
+
+### Bug Fixes
+
+- **pm:** PM ウィンドウが PM だと名乗るようにする (SPEC #3431 FR-020)
+- **pm:** Gwt-pm ガイダンスを配布後の choke point で生成する (SPEC #3431 T-052)
+- **pm:** PM 契約を FR-015/016/017 に整合させる (SPEC #3431)
+- **pane:** Pane.* を所有プロジェクトにスコープする (SPEC #3431 前提)
+- **camera:** ウィンドウのフレーミングをローカル経路に統一する (SPEC #3431 FR-019)
+- **pm:** PM を実装エージェント向け hook の対象から外す (SPEC #3431 FR-029)
+- **pm:** テスト属性の重複を解消する (SPEC #3431)
+- **issue-monitor:** 死んだエージェントのスロットを必ず解放する (SPEC #3431 FR-030)
+- **issue-monitor:** ウィンドウを閉じる操作を有界なリトライにする (SPEC #3431 FR-031)
+- **issue-monitor:** 正常終了したエージェントのスロットも解放する (SPEC #3431 FR-032)
+- **workspace:** SPEC 起点で起動したエージェントの Work owner 表記を揃える (SPEC #3431 FR-070)
+- **pm:** レビュー検出 3 件を修正する (SPEC #3431 FR-021/FR-012)
+- **daemon:** Windows の subscribe stub を timeout_seconds 追加後の呼び出しに一致させる (SPEC #3431 FR-025)
+
+### Documentation
+
+- **pm:** PM エージェントの利用者向け説明と launch_now の agent 導線を追加 (SPEC #3431)
+- **pm:** モジュール doc を起動プロファイル導入後の実装に合わせる (SPEC #3431)
+- **pm:** 2026-08-07 の信頼性要件を FR-064〜069 へ採番し直す (SPEC #3431 T-085)
+
+### Features
+
+- **pm:** PM 登録レジストリと pm.status 診断 op を追加 (SPEC #3431)
+- **pm:** Gwt-pm guidance skill の canonical source を追加 (SPEC #3431)
+- **pm:** Pm.status に FR-014 の会計可視化を追加 (SPEC #3431)
+- **pm:** PM ペインのシングルトン spawn gate と自動起動を実装 (SPEC #3431)
+- **pm:** Close/crash 弁別と backoff 付き自動復旧を実装 (SPEC #3431)
+- **pm:** PM worktree のライフサイクル管理を追加 (SPEC #3431)
+- **pm:** Launch_now op と ScanNow control を追加 (SPEC #3431 Phase 3)
+- **pm:** PM 特権による Issue Monitor 非対称境界の適用除外 (SPEC #3431 Phase 4)
+- **pm:** PM ウィンドウの識別子と PM 起動イベントを追加 (SPEC #3431 FR-018〜020 backend)
+- **pm:** PM ランチャーと PM ウィンドウ識別の UI を追加 (SPEC #3431 FR-018〜022)
+- **pm:** PM に他エージェントの読み取り専用観測を与える (SPEC #3431 FR-023〜025)
+- **pm:** PM の起動プロファイルをプロジェクト単位で保持する (SPEC #3431 FR-026)
+- **pm:** PM 設定パネルとエージェント選択 UI を追加 (SPEC #3431 FR-026)
+- **pm:** PM を常に skip-permissions で起動する (SPEC #3431 FR-028)
+- **pm:** Issue の更新・整理とエージェント常時監視を契約に加える (SPEC #3431)
+- **pm:** PM に pane.close を解禁する (SPEC #3431 FR-031)
+- **issue-monitor:** 停滞を観測可能にする活動時刻を追加する (SPEC #3431 FR-033)
+- **issue-monitor:** レートリミットのスロットを解放し PM 契約に停滞対処を書く (SPEC #3431 FR-034)
+- **issue-monitor:** 実装エージェントを identity 一致で停止する操作を追加する (SPEC #3431 FR-033)
+- **issue-monitor:** PM から呼べる停止操作 issue.monitor.stop を公開する (SPEC #3431 FR-033)
+- **issue-monitor:** 起動中エージェントの failover 再起動を PM に公開する (SPEC #3431 FR-029〜031)
+- **pm:** 常駐ループを Stop hook で駆動する (SPEC #3431 FR-012/FR-035)
+- **pm:** Park した PM を Monitor イベントで起こす daemon wake 経路 (SPEC #3431 T-093/FR-012)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3431 の work イベントを記録
+- **work:** Develop 取り込み後の Work 権限補正イベントを記録
+- **work:** SPEC #3431 配信 slice の terminal Work event を記録する
+
+### Testing
+
+- **pm:** NeedsHuman の GUI 非依存な projection 可視性を固定 (SPEC #3431)
+
+## [9.74.0] - 2026-08-07
+
+### Bug Fixes
+
+- **issue-monitor:** Claim 再照合と refresh 上限を修正
+- **autonomous:** 確認待ちを NeedsHuman へ即時 handoff して active slot を解放する
+- **issue-monitor:** Needs_human / not_ready / hold_excluded の行バッジが Queued と表示される
+- **launch:** SessionStart readiness を進捗ベースの上限付き期限に変更
+
+### Documentation
+
+- **skills:** Parked question handoff の JSON operations を gwt-agent skill に追記
+
+### Features
+
+- **issue-monitor:** Readiness と hold 除外を実装
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3460 の完了状態を記録
+- **work:** Issue #3478 の作業イベントを記録
+- **work:** Issue #3478 の完了状態を記録
+- **work:** Issue #3478 の完了 Work event を記録
+- **work:** Issue #3475 の完了状態を記録
+
+### Refactor
+
+- **issue-monitor:** 共有実行状態の型契約を追加
+
+### Styling
+
+- **autonomous:** Restart 復元テストの整形を rustfmt に合わせる
+
+### Testing
+
+- **action-obligation:** Revival記録テストを隔離
+- **autonomous:** 停止中の質問表示を実ブラウザ E2E で固定する
+
 ## [9.73.1] - 2026-08-05
 
 ### Bug Fixes
@@ -320,9 +613,6 @@ All notable changes to this project will be documented in this file.
 - **gwt:** Bookkeeping パス判定テストの OS 前提を修正する
 - **lane:** Pin intake lane-file preservation for env-less rematerialization
 
-# Changelog
-
-All notable changes to this project will be documented in this file.
 ## [9.69.1] - 2026-07-27
 
 ### Bug Fixes

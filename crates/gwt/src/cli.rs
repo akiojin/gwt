@@ -34,6 +34,7 @@ pub(crate) mod memory;
 pub mod open;
 mod pane;
 mod plan;
+mod pm;
 mod pr;
 pub(crate) mod register;
 pub(crate) mod search;
@@ -44,6 +45,7 @@ mod title_summary_guard;
 pub mod tray;
 pub mod trusted_store;
 pub mod update;
+pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
@@ -178,10 +180,14 @@ pub enum CliCommand {
     Update(UpdateCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
+    /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
+    VerifyLease(verification_lease::VerificationLeaseCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    /// SPEC-3431: `pm.*` PM agent diagnostics.
+    Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
@@ -199,7 +205,12 @@ pub enum DaemonCommand {
     /// subscribe to one or more broadcast channels, and print received events
     /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
     /// fan-out pipeline.
-    Subscribe { channels: Vec<String> },
+    Subscribe {
+        channels: Vec<String>,
+        /// SPEC-3431 FR-025: bound the read so an unattended caller can run
+        /// subscribe → reconcile in a loop without an external supervisor.
+        timeout_seconds: Option<u64>,
+    },
 }
 
 /// SPEC-2359 command model for `workspace.*` JSON operations.
@@ -254,6 +265,16 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Issue #3448: settle incomplete Works whose owner Issue is already
+    /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
+    /// reports the plan without emitting close events. `project_root` targets
+    /// a project other than the current one (the GUI opens the layout root,
+    /// which resolves to a different store than a linked worktree — #3466).
+    WorkPrune {
+        dry_run: bool,
+        ids: Vec<String>,
+        project_root: Option<String>,
+    },
 }
 
 /// SPEC-1942 command model for `actions.*` JSON operations.
@@ -331,6 +352,15 @@ pub enum PaneCommand {
     /// `pane.send` (SPEC-3050: self-only injection
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
+    /// `pm.message.send` (SPEC-3431 FR-111 / T-206): PM-privileged delivery
+    /// into another agent pane of the same project. The authenticated server
+    /// principal is the sole caller authority; `project_root` only selects an
+    /// explicit project view with the same semantics as `pm.status`.
+    PmSend {
+        project_root: Option<String>,
+        id: String,
+        text: String,
+    },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,6 +638,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
+        CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
@@ -705,6 +736,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };

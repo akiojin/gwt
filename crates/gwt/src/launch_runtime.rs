@@ -189,7 +189,7 @@ pub fn resolve_ephemeral_launch_worktree(
     let worktrees = manager.list().map_err(|err| err.to_string())?;
 
     let layout_root = main_repo_path.parent().unwrap_or(main_repo_path.as_path());
-    let preferred_path = layout_root.join(INTAKE_WORKTREE_PREFIX);
+    let preferred_path = layout_root.join(EPHEMERAL_WORKTREE_PREFIX);
     let worktree_path = first_available_worktree_path(&preferred_path, &worktrees)
         .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
 
@@ -279,9 +279,7 @@ pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntak
     };
     let worktree_paths = worktrees
         .into_iter()
-        .filter(|worktree| {
-            is_ephemeral_intake_worktree(&worktree.path) && worktree.branch.is_none()
-        })
+        .filter(|worktree| is_ephemeral_worktree_path(&worktree.path) && worktree.branch.is_none())
         .map(|worktree| worktree.path)
         .collect();
     Some(OrphanIntakePrunePlan {
@@ -427,6 +425,7 @@ pub fn build_shell_process_launch(
             env,
             remove_env,
             cwd: Some(worktree),
+            pending_tool_runtime_migration: None,
         });
     }
 
@@ -460,6 +459,7 @@ pub fn build_shell_process_launch(
         env,
         remove_env: Vec::new(),
         cwd: Some(worktree),
+        pending_tool_runtime_migration: None,
     })
 }
 
@@ -779,7 +779,7 @@ pub fn probe_host_package_runner_with_timeout(
     poll_interval: Duration,
 ) -> bool {
     gwt_agent::prepare::probe_host_runner_with_timeout(
-        gwt_agent::HostRunnerProbeKind::Package,
+        gwt_agent::HostRunnerProbeKind::Runner,
         command,
         args,
         env_vars,
@@ -929,6 +929,17 @@ mod tests {
         config
     }
 
+    #[cfg(windows)]
+    fn sample_exact_windows_npx_launch_config() -> gwt_agent::LaunchConfig {
+        let mut config = sample_versioned_launch_config();
+        config.tool_version = Some("2.1.210".to_string());
+        config.args = vec![
+            "@anthropic-ai/claude-code@2.1.210".to_string(),
+            "--print".to_string(),
+        ];
+        config
+    }
+
     #[cfg(not(windows))]
     fn sample_direct_codex_launch_config(bin_dir: &Path) -> gwt_agent::LaunchConfig {
         write_executable(&bin_dir.join("bunx"));
@@ -948,6 +959,7 @@ mod tests {
         config
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn probe_success() -> gwt_agent::HostRunnerProbeOutcome {
         gwt_agent::HostRunnerProbeOutcome {
             success: true,
@@ -1090,6 +1102,7 @@ mod tests {
         assert!(error.contains("npx unavailable"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn checked_host_runner_uses_descriptor_version_argv_for_copilot() {
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Copilot).build();
@@ -1633,6 +1646,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_repairs_corrupt_npx_cache_once_before_switching() {
         let temp = tempdir().expect("tempdir");
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
         let bin_dir = npx_root
@@ -1647,20 +1661,19 @@ mod tests {
             "'\"{}\"' is not recognized as an internal or external command",
             bin_dir.join("claude.exe").display()
         );
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_exact_windows_npx_launch_config();
         let mut probe_calls = Vec::new();
         let mut repair_calls = Vec::new();
 
         let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base.clone()),
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probe_calls.push((command.to_string(), args.clone()));
+            |kind, command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((kind, command.to_string(), args.clone()));
                 match probe_calls.len() {
-                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
-                    2 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr),
-                    3 => gwt_agent::HostRunnerProbeOutcome::success(),
+                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr),
+                    2 => gwt_agent::HostRunnerProbeOutcome::success(),
                     _ => panic!("unexpected extra probe call: {probe_calls:?}"),
                 }
             },
@@ -1675,15 +1688,25 @@ mod tests {
         assert!(report.switched_to_fallback);
         assert!(report.repaired_npx_cache);
         assert_eq!(repair_calls, vec![npx_root]);
-        assert_eq!(probe_calls.len(), 3);
-        assert_eq!(probe_calls[1].0, "npx");
-        assert_eq!(probe_calls[1].1, vec!["--version".to_string()]);
-        assert_eq!(config.command, "npx");
+        assert_eq!(probe_calls.len(), 2);
+        for (kind, command, args) in &probe_calls {
+            assert_eq!(*kind, gwt_agent::HostRunnerProbeKind::Package);
+            assert_eq!(command, &npx.display().to_string());
+            assert_eq!(
+                args,
+                &vec![
+                    "--yes".to_string(),
+                    "@anthropic-ai/claude-code@2.1.210".to_string(),
+                    "--version".to_string(),
+                ]
+            );
+        }
+        assert_eq!(config.command, npx.display().to_string());
         assert_eq!(
             config.args,
             vec![
                 "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
+                "@anthropic-ai/claude-code@2.1.210".to_string(),
                 "--print".to_string(),
             ],
         );
@@ -1693,6 +1716,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_fails_before_spawn_when_npx_repair_fails() {
         let temp = tempdir().expect("tempdir");
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
         let bin_dir = npx_root
@@ -1707,20 +1731,19 @@ mod tests {
             "'\"{}\"' is not recognized as an internal or external command",
             bin_dir.join("claude.exe").display()
         );
-        let mut config = sample_versioned_launch_config();
-        let original_command = config.command.clone();
+        let mut config = sample_exact_windows_npx_launch_config();
+        let original = format!("{config:?}");
         let mut repair_calls = 0;
 
         let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base),
-            |_kind, command, _args, _env, _remove_env, _cwd| {
-                if command.eq_ignore_ascii_case("bunx") {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
-                } else {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr)
-                }
+            |kind, command, args, _env, _remove_env, _cwd| {
+                assert_eq!(kind, gwt_agent::HostRunnerProbeKind::Package);
+                assert_eq!(command, npx.display().to_string());
+                assert_eq!(args.last().map(String::as_str), Some("--version"));
+                gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr)
             },
             |_candidate| {
                 repair_calls += 1;
@@ -1730,7 +1753,7 @@ mod tests {
         .expect_err("repair failure should stop before agent spawn");
 
         assert_eq!(repair_calls, 1);
-        assert_eq!(config.command, original_command);
+        assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("Failed to repair npm npx cache"));
         assert!(error.contains("access denied"));
         assert!(error.contains(&npx_root.display().to_string()));
@@ -1740,20 +1763,21 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_does_not_repair_unrelated_npx_failure() {
         let temp = tempdir().expect("tempdir");
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_exact_windows_npx_launch_config();
+        let original = format!("{config:?}");
         let mut repair_calls = 0;
 
         let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base),
-            |_kind, command, _args, _env, _remove_env, _cwd| {
-                if command.eq_ignore_ascii_case("bunx") {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
-                } else {
-                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
-                }
+            |kind, command, args, _env, _remove_env, _cwd| {
+                assert_eq!(kind, gwt_agent::HostRunnerProbeKind::Package);
+                assert_eq!(command, npx.display().to_string());
+                assert_eq!(args.last().map(String::as_str), Some("--version"));
+                gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
             },
             |_candidate| {
                 repair_calls += 1;
@@ -1763,7 +1787,8 @@ mod tests {
         .expect_err("unrelated npx failure should fail before agent spawn");
 
         assert_eq!(repair_calls, 0);
-        assert!(error.contains("npx package-runner probe failed"));
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("exact npx package probe failed"));
         assert!(error.contains("registry timeout"));
     }
 
@@ -1771,8 +1796,9 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_rejects_npx_timeout_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_exact_windows_npx_launch_config();
         config
             .env_vars
             .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
@@ -1783,15 +1809,11 @@ mod tests {
 
         let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
-            "npx".to_string(),
+            npx.display().to_string(),
             Some(npx_base),
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probe_calls.push((command.to_string(), args.clone()));
-                match probe_calls.len() {
-                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
-                    2 => gwt_agent::HostRunnerProbeOutcome::timeout(),
-                    _ => panic!("unexpected extra probe call: {probe_calls:?}"),
-                }
+            |kind, command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((kind, command.to_string(), args.clone()));
+                gwt_agent::HostRunnerProbeOutcome::timeout()
             },
             |_candidate| {
                 repair_calls += 1;
@@ -1801,10 +1823,12 @@ mod tests {
         .expect_err("npx probe timeout must stop before PTY spawn");
 
         assert_eq!(repair_calls, 0);
-        assert_eq!(probe_calls.len(), 2);
+        assert_eq!(probe_calls.len(), 1);
+        assert_eq!(probe_calls[0].0, gwt_agent::HostRunnerProbeKind::Package);
+        assert_eq!(probe_calls[0].1, npx.display().to_string());
         assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("npx"));
-        assert!(error.contains("@anthropic-ai/claude-code@latest"));
+        assert!(error.contains("@anthropic-ai/claude-code@2.1.210"));
         assert!(error.contains("probe timed out"));
         assert!(!error.contains("must-not-leak"));
     }
@@ -1870,6 +1894,7 @@ mod tests {
     // prepend dirname(GWT_BIN_PATH) to env_vars["PATH"] with dedup + empty
     // guard. Mirrors crates/gwt-agent/src/prepare.rs::tests::install_launch_gwt_bin_env_*.
 
+    #[cfg(not(windows))]
     #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
         let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
