@@ -183,7 +183,6 @@ fn format_issue_help() -> String {
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
-        "  max_active                            Positive concurrent-agent limit",
         "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",

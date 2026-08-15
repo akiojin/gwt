@@ -1888,14 +1888,6 @@ fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str
         && stored_number == durable_number
 }
 
-fn workspace_ensure_shadow_is_historical(item: &WorkItem, current_session: &str) -> bool {
-    !item
-        .agents
-        .iter()
-        .any(|agent| agent.session_id == current_session)
-        && (item.is_terminal() || item.status_category == WorkspaceStatusCategory::Idle)
-}
-
 fn validate_workspace_ensure_recovery_state(
     recovery: &crate::agent_project_state::ValidatedWorkspaceRecoverySession,
     input: &WorkspaceEnsureInput,
@@ -2002,16 +1994,6 @@ fn validate_workspace_ensure_recovery_state(
         )));
     }
     let Some(item) = canonical_items.first().copied() else {
-        if existing.work_items.iter().any(|item| {
-            item.execution_containers.iter().any(|container| {
-                workspace_execution_container_matches_recovery(container, recovery)
-            })
-        }) {
-            return Err(GwtError::Other(format!(
-                "canonical execution container for Session {} is attached to another Work",
-                input.agent_session
-            )));
-        }
         if policy == WorkspaceEnsurePolicy::DockerExistingOnly {
             return Err(GwtError::Other(format!(
                 "Docker workspace.ensure for Session {} cannot recover a missing Work; the originating launch must remain failed",
@@ -2067,25 +2049,6 @@ fn validate_workspace_ensure_recovery_state(
     if matching_containers != 1 {
         return Err(GwtError::Other(format!(
             "canonical Work {canonical_id} has ambiguous exact execution containers"
-        )));
-    }
-    let conflicting_work_ids = existing
-        .work_items
-        .iter()
-        .filter(|other| {
-            other.id != canonical_id
-                && !workspace_ensure_shadow_is_historical(other, &input.agent_session)
-                && other.execution_containers.iter().any(|container| {
-                    workspace_execution_container_matches_recovery(container, recovery)
-                })
-        })
-        .map(|other| other.id.as_str())
-        .collect::<Vec<_>>();
-    if !conflicting_work_ids.is_empty() {
-        return Err(GwtError::Other(format!(
-            "canonical execution container for Session {} is ambiguous across Works: {}",
-            input.agent_session,
-            conflicting_work_ids.join(", ")
         )));
     }
     if policy == WorkspaceEnsurePolicy::DockerExistingOnly {
@@ -7462,6 +7425,63 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workspace_ensure_accepts_older_active_session_exact_binding() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let session_id = "session-older-active";
+        let owner = write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let older_binding = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .expect("load older Session")
+        .execution_binding
+        .expect("older Session binding");
+        let request = crate::cli::execution_state::SuccessorRequest {
+            operation_id: "fresh-independent-session".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: crate::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "binding-independent-session".to_string(),
+            initial_session_id: "session-newer-active".to_string(),
+            entrypoint: "$gwt-execute #3412".to_string(),
+            requested_at: Utc::now(),
+        };
+        crate::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            &worktree, owner, &request,
+        )
+        .expect("prepare independent newer generation");
+        crate::cli::execution_state::activate_successor(&worktree, owner, &request)
+            .expect("activate independent newer generation");
+        assert_ne!(
+            crate::cli::execution_state::current_execution_binding(&worktree, owner)
+                .expect("read latest binding")
+                .expect("latest binding")
+                .generation_id,
+            older_binding.identity.generation_id
+        );
+
+        let result = ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Recover the older independent Session".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("an older Active generation remains exact authority for its own Session");
+
+        assert_eq!(result.disposition, WorkspaceEnsureDisposition::Created);
+    }
+
+    #[test]
     fn workspace_ensure_rejects_terminal_noncanonical_work_attachment() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
@@ -7515,7 +7535,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_terminal_foreign_container_shadow_without_mutation() {
+    fn workspace_ensure_bootstraps_canonical_work_despite_foreign_live_container() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -7523,14 +7543,14 @@ pub(crate) mod tests {
         let project_root = temp.path().join("workspace-home");
         let worktree = project_root.join("work").join("issue-3412");
         write_bound_projectionless_session(
-            "session-terminal-container-shadow",
+            "session-canonical-bootstrap",
             &worktree,
             &project_root,
             3412,
         );
         let mut start = WorkEvent::new(
             WorkEventKind::Start,
-            "work-terminal-container-shadow",
+            "work-foreign-live-container",
             Utc::now(),
         );
         start.agent_session_id = Some("foreign-session".to_string());
@@ -7544,21 +7564,12 @@ pub(crate) mod tests {
             pr_state: None,
         });
         record_recovery_work_event(&project_root, &worktree, start);
-        let mut done = WorkEvent::new(
-            WorkEventKind::Done,
-            "work-terminal-container-shadow",
-            Utc::now(),
-        );
-        done.status_category = Some(WorkspaceStatusCategory::Done);
-        record_recovery_work_event(&project_root, &worktree, done);
-        let paths = workspace_recovery_state_paths(&project_root, &worktree);
-        let before = workspace_recovery_state_bytes(&paths);
 
-        let error = ensure_workspace_for_agent(
+        let result = ensure_workspace_for_agent(
             &worktree,
             WorkspaceEnsureInput {
-                agent_session: "session-terminal-container-shadow".to_string(),
-                title_summary: "Reject terminal container shadow".to_string(),
+                agent_session: "session-canonical-bootstrap".to_string(),
+                title_summary: "Bootstrap independent canonical Work".to_string(),
                 current_focus: None,
                 spec: None,
                 issue: None,
@@ -7566,10 +7577,20 @@ pub(crate) mod tests {
                 boundary: None,
             },
         )
-        .expect_err("terminal container shadow must remain authoritative");
+        .expect("a foreign live container must not block canonical Work bootstrap");
 
-        assert!(error.to_string().contains("container"), "{error}");
-        assert_eq!(workspace_recovery_state_bytes(&paths), before);
+        assert_eq!(result.disposition, WorkspaceEnsureDisposition::Created);
+        let items = load_workspace_work_items(&project_root)
+            .expect("load WorkItems")
+            .expect("WorkItems");
+        assert!(items
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-foreign-live-container"));
+        assert!(items
+            .work_items
+            .iter()
+            .any(|item| item.id == result.workspace_id));
     }
 
     #[test]
@@ -7738,131 +7759,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_live_or_current_session_shadow_when_canonical_work_exists() {
+    fn workspace_ensure_ignores_foreign_live_authorities_when_canonical_work_exists() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
 
-        for (label, session_id, shadow_session, terminal, owner_number) in [
-            (
-                "live-foreign",
-                "session-live-foreign",
-                "historical-session",
-                false,
-                3412,
-            ),
-            (
-                "terminal-current",
-                "session-terminal-current",
-                "session-terminal-current",
-                true,
-                3413,
-            ),
+        for (label, status, owner_number) in [
+            ("active", WorkspaceStatusCategory::Active, 3412),
+            ("blocked", WorkspaceStatusCategory::Blocked, 3413),
+            ("unknown", WorkspaceStatusCategory::Unknown, 3414),
         ] {
             let project_root = temp.path().join(label).join("workspace-home");
             let worktree = project_root
                 .join("work")
                 .join(format!("issue-{owner_number}"));
-            write_bound_projectionless_session_for_owner(
-                session_id,
-                &worktree,
-                &project_root,
-                crate::cli::execution_state::ExecutionOwnerKind::Spec,
-                owner_number,
-            );
-            seed_exact_workspace_work(
-                &project_root,
-                &worktree,
-                session_id,
-                Some(&format!("Issue #{owner_number}")),
-                "codex",
-            );
-            let mut shadow = WorkEvent::new(
-                WorkEventKind::Start,
-                format!("work-{label}-shadow"),
-                Utc::now(),
-            );
-            shadow.agent_session_id = Some(shadow_session.to_string());
-            shadow.agent_id = Some("codex".to_string());
-            shadow.owner = Some("Issue #9999".to_string());
-            shadow.execution_container = Some(WorkspaceExecutionContainerRef {
-                branch: Some("work/20260601-0934".to_string()),
-                worktree_path: Some(
-                    dunce::canonicalize(&worktree).expect("canonical shadow worktree"),
-                ),
-                pr_number: None,
-                pr_url: None,
-                pr_state: None,
-            });
-            let shadow_id = shadow.work_item_id.clone();
-            record_recovery_work_event(&project_root, &worktree, shadow);
-            if terminal {
-                let mut done = WorkEvent::new(WorkEventKind::Done, shadow_id, Utc::now());
-                done.status_category = Some(WorkspaceStatusCategory::Done);
-                record_recovery_work_event(&project_root, &worktree, done);
-            }
-            let paths = workspace_recovery_state_paths(&project_root, &worktree);
-            let before = workspace_recovery_state_bytes(&paths);
-
-            let error = ensure_workspace_for_agent(
-                &worktree,
-                WorkspaceEnsureInput {
-                    agent_session: session_id.to_string(),
-                    title_summary: "Reject ambiguous Work shadow".to_string(),
-                    current_focus: None,
-                    spec: None,
-                    issue: None,
-                    topic: None,
-                    boundary: None,
-                },
-            )
-            .expect_err("live or current-Session shadow must remain fail-closed");
-
-            let message = error.to_string();
-            assert!(
-                message.contains("ambiguous") || message.contains("noncanonical Work"),
-                "{label}: {error}"
-            );
-            assert!(
-                message.contains(&format!("work-{label}-shadow")),
-                "{label}: refusal must identify the conflicting Work: {error}"
-            );
-            assert_eq!(
-                workspace_recovery_state_bytes(&paths),
-                before,
-                "{label} refusal must be zero-mutation"
-            );
-        }
-    }
-
-    #[test]
-    fn workspace_ensure_rejects_blocked_unknown_or_current_paused_shadow() {
-        let _guard = env_guard();
-        let gwt_home = tempfile::tempdir().expect("gwt home");
-        let _home = ScopedHome::set(gwt_home.path());
-        let temp = tempfile::tempdir().expect("tempdir");
-
-        for (label, status, shadow_is_current, owner_number) in [
-            (
-                "blocked-foreign",
-                WorkspaceStatusCategory::Blocked,
-                false,
-                3412,
-            ),
-            (
-                "unknown-foreign",
-                WorkspaceStatusCategory::Unknown,
-                false,
-                3413,
-            ),
-            ("paused-current", WorkspaceStatusCategory::Idle, true, 3414),
-        ] {
-            let project_root = temp.path().join(label).join("workspace-home");
-            let worktree = project_root
-                .join("work")
-                .join(format!("issue-{owner_number}"));
-            let session_id = format!("session-{label}");
+            let session_id = format!("session-{label}-canonical");
             write_bound_projectionless_session_for_owner(
                 &session_id,
                 &worktree,
@@ -7870,33 +7782,27 @@ pub(crate) mod tests {
                 crate::cli::execution_state::ExecutionOwnerKind::Spec,
                 owner_number,
             );
-            seed_exact_workspace_work(
+            let canonical_id = seed_exact_workspace_work(
                 &project_root,
                 &worktree,
                 &session_id,
                 Some(&format!("Issue #{owner_number}")),
                 "codex",
             );
-            let shadow_session = if shadow_is_current {
-                session_id.as_str()
-            } else {
-                "historical-session"
-            };
+            let shadow_id = format!("work-{label}-foreign-shadow");
             seed_workspace_container_shadow(
                 &project_root,
                 &worktree,
-                &format!("work-{label}-shadow"),
-                shadow_session,
+                &shadow_id,
+                "foreign-session",
                 status,
             );
-            let paths = workspace_recovery_state_paths(&project_root, &worktree);
-            let before = workspace_recovery_state_bytes(&paths);
 
-            let error = ensure_workspace_for_agent(
+            let result = ensure_workspace_for_agent(
                 &worktree,
                 WorkspaceEnsureInput {
                     agent_session: session_id,
-                    title_summary: "Reject unsafe Work shadow".to_string(),
+                    title_summary: "Keep independent Session authority".to_string(),
                     current_focus: None,
                     spec: None,
                     issue: None,
@@ -7904,16 +7810,26 @@ pub(crate) mod tests {
                     boundary: None,
                 },
             )
-            .expect_err("nonhistorical or current-Session shadow must fail closed");
+            .expect("a foreign authority on the same branch/worktree must not block ensure");
 
-            assert!(
-                error.to_string().contains(&format!("work-{label}-shadow")),
-                "{label}: {error}"
-            );
             assert_eq!(
-                workspace_recovery_state_bytes(&paths),
-                before,
-                "{label}: refusal must be zero-mutation"
+                result.disposition,
+                WorkspaceEnsureDisposition::AlreadyAssigned,
+                "{label}"
+            );
+            assert_eq!(result.workspace_id, canonical_id, "{label}");
+            let items = load_workspace_work_items(&project_root)
+                .expect("load WorkItems")
+                .expect("WorkItems");
+            assert_eq!(
+                items
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == shadow_id)
+                    .expect("foreign authority remains independently recorded")
+                    .status_category,
+                status,
+                "{label}"
             );
         }
     }
@@ -8181,15 +8097,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_docker_rejects_nonhistorical_or_current_paused_shadow() {
+    fn workspace_ensure_docker_ignores_foreign_live_authorities() {
         let _guard = env_guard();
         let temp = tempfile::tempdir().expect("tempdir");
 
-        for (label, status, shadow_is_current, owner_number) in [
-            ("active", WorkspaceStatusCategory::Active, false, 3412),
-            ("blocked", WorkspaceStatusCategory::Blocked, false, 3412),
-            ("unknown", WorkspaceStatusCategory::Unknown, false, 3412),
-            ("paused-current", WorkspaceStatusCategory::Idle, true, 3412),
+        for (label, status, owner_number) in [
+            ("active", WorkspaceStatusCategory::Active, 3412),
+            ("blocked", WorkspaceStatusCategory::Blocked, 3412),
+            ("unknown", WorkspaceStatusCategory::Unknown, 3412),
         ] {
             let gwt_home = tempfile::tempdir().expect("gwt home");
             let _home = ScopedHome::set(gwt_home.path());
@@ -8215,20 +8130,13 @@ pub(crate) mod tests {
             projection.agents.push(agent);
             save_workspace_projection(&repo, &projection).expect("save Docker assignment");
             let shadow_id = format!("work-docker-{label}-shadow");
-            let shadow_session = if shadow_is_current {
-                session_id.as_str()
-            } else {
-                "historical-session"
-            };
-            seed_workspace_container_shadow(&repo, &repo, &shadow_id, shadow_session, status);
-            let paths = workspace_recovery_state_paths(&repo, &repo);
-            let before = workspace_recovery_state_bytes(&paths);
+            seed_workspace_container_shadow(&repo, &repo, &shadow_id, "foreign-session", status);
 
-            let error = ensure_workspace_for_agent(
+            let result = ensure_workspace_for_agent(
                 &repo,
                 WorkspaceEnsureInput {
                     agent_session: session_id,
-                    title_summary: "Reject unsafe Docker shadow".to_string(),
+                    title_summary: "Keep independent Docker Session authority".to_string(),
                     current_focus: None,
                     spec: None,
                     issue: None,
@@ -8236,13 +8144,12 @@ pub(crate) mod tests {
                     boundary: None,
                 },
             )
-            .expect_err("unsafe Docker shadow must fail closed");
+            .expect("a foreign Docker authority must not block exact assignment");
 
-            assert!(error.to_string().contains(&shadow_id), "{label}: {error}");
             assert_eq!(
-                workspace_recovery_state_bytes(&paths),
-                before,
-                "{label}: Docker refusal must be zero-mutation"
+                result.disposition,
+                WorkspaceEnsureDisposition::AlreadyAssigned,
+                "{label}"
             );
         }
     }

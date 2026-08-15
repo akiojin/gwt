@@ -1281,11 +1281,7 @@ fn prepare_local_issue_monitor_claim_proposals(
     {
         return;
     }
-    let active_cap = monitor.config.max_active.max(1);
-    if monitor.active_count() >= active_cap {
-        return;
-    }
-    monitor.prepare_claim_effects_with_probe(monitor_owner, now, active_cap, |issue_number| {
+    monitor.prepare_claim_effects_with_probe(monitor_owner, now, |issue_number| {
         completed_issues.contains(&issue_number)
     });
 }
@@ -1671,25 +1667,16 @@ fn constant_time_issue_monitor_scope_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
-/// Issue #3528: probe merged-PR completion only as far as the claim planner
-/// will walk. Each probe spawns `gh`, so the scan pays for the slots it can
-/// actually fill instead of for every open issue. A completed candidate frees
-/// no slot, so the walk continues past it exactly like the planner does.
+/// Probe merged-PR completion for every ready candidate the launch planner
+/// will inspect. Launch capacity is intentionally not an eligibility gate.
 fn completed_claim_candidates(
-    available: usize,
     candidates: Vec<u64>,
     mut completed_probe: impl FnMut(u64) -> bool,
 ) -> std::collections::BTreeSet<u64> {
     let mut completed = std::collections::BTreeSet::new();
-    let mut remaining = available;
     for issue_number in candidates {
-        if remaining == 0 {
-            break;
-        }
         if completed_probe(issue_number) {
             completed.insert(issue_number);
-        } else {
-            remaining -= 1;
         }
     }
     completed
@@ -1794,10 +1781,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                             format!("issue monitor merge reconciliation failed: {error}")
                         });
                     if loaded.authorizes_remote_effects() {
-                        let (available, candidates) =
-                            monitor.claim_probe_plan(monitor.config.max_active.max(1));
+                        let candidates = monitor.claim_probe_plan();
                         let completed_issues =
-                            completed_claim_candidates(available, candidates, |issue_number| {
+                            completed_claim_candidates(candidates, |issue_number| {
                                 gwt::issue_monitor_worker::issue_completed_by_merged_pr(
                                     &owner,
                                     &repo,
@@ -5374,19 +5360,6 @@ impl AppRuntime {
                             .set_autonomous_mode_with_effect_revocation(enabled)
                             .ok_or_else(|| "authority epoch exhausted".to_string())?;
                         Ok(())
-                    },
-                )
-            }
-            FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
-                let publication = self.publish_active_issue_monitor_control(
-                    serde_json::json!({ "max_active_agents": max_active_agents }),
-                );
-                self.issue_monitor_control_result_events(
-                    &client_id,
-                    publication,
-                    "max-active",
-                    |monitor| {
-                        monitor.set_max_active_agents(max_active_agents);
                     },
                 )
             }

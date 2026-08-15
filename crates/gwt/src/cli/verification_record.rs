@@ -207,7 +207,7 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
 pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let mut plan = plan.clone();
-        let (_, execution_binding) = current_execution_context(worktree)?;
+        let (_, execution_binding) = execution_context_for_session(worktree, &plan.session_id)?;
         plan.execution_binding = execution_binding;
         plan.generated_outputs = validate_generated_outputs(worktree, &plan.generated_outputs)?;
         if plan.worktree_fingerprint.is_empty() {
@@ -1150,6 +1150,58 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
     }
 }
 
+/// Return an actionable refusal unless the current HEAD is durably contained
+/// by the configured upstream. This is deliberately independent from the
+/// generation-scoped Work-event receipt: PR delivery cares that the branch is
+/// pushed, not which bookkeeping event established that fact.
+#[must_use]
+pub fn branch_push_refusal(worktree: &Path) -> Option<String> {
+    let head_commit = match git_stdout(worktree, &["rev-parse", "HEAD"]) {
+        Ok(commit) if !commit.is_empty() => commit,
+        _ => {
+            return Some(
+                "Branch push refused: Git could not resolve the current HEAD. Commit the intended changes, push HEAD to its configured upstream, and retry."
+                    .to_string(),
+            )
+        }
+    };
+    let (remote, merge_ref, _) = match configured_upstream(worktree) {
+        Ok(upstream) => upstream,
+        Err(UpstreamFailure::Missing) => {
+            return Some(
+                "Branch push refused: the current branch has no usable configured upstream. Push HEAD with an upstream and retry."
+                    .to_string(),
+            )
+        }
+        Err(UpstreamFailure::Git) => {
+            return Some(
+                "Branch push refused: Git could not inspect the configured upstream. Repair the branch configuration, push HEAD, and retry."
+                    .to_string(),
+            )
+        }
+    };
+    let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
+        Ok(remote_tip) => remote_tip,
+        Err(()) => {
+            return Some(
+                "Branch push refused: the configured upstream could not be fetched and read back. Restore remote access, push HEAD, and retry."
+                    .to_string(),
+            )
+        }
+    };
+    match git_is_ancestor(worktree, &head_commit, &remote_tip) {
+        Ok(true) => None,
+        Ok(false) => Some(
+            "Branch push refused: the current HEAD is not contained by its configured upstream. Push HEAD and retry."
+                .to_string(),
+        ),
+        Err(()) => Some(
+            "Branch push refused: Git could not prove that the current HEAD is contained by its configured upstream. Push HEAD and retry."
+                .to_string(),
+        ),
+    }
+}
+
 /// Authenticate a Work settlement receipt against the authoritative current
 /// generation. A receipt may name the exact current binding or an authentic
 /// same-Session lifecycle prefix (for example, the Active head immediately
@@ -1572,7 +1624,7 @@ where
             let (owner_number, execution_binding) = if let Some(authority) = authority {
                 (authority.owner_number, authority.execution_binding.clone())
             } else {
-                current_execution_context(worktree)?
+                execution_context_for_session(worktree, session_id)?
             };
             let plan = load_plan(worktree)?;
             let generated_outputs = plan
@@ -1666,7 +1718,11 @@ where
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
         }
-        let (current_owner, current_binding) = current_execution_context(worktree)?;
+        let (current_owner, current_binding) = if let Some(authority) = authority {
+            (authority.owner_number, authority.execution_binding.clone())
+        } else {
+            execution_context_for_session(worktree, session_id)?
+        };
         let current_plan = load_plan(worktree)?;
         let fingerprint_after = worktree_fingerprint_excluding(
             worktree,
@@ -1834,11 +1890,22 @@ pub fn evaluate_evidence_snapshot(
             return EvidenceStatus::WrongOwner;
         }
     }
-    let current_binding = match current_execution_context(worktree) {
-        Ok((_, binding)) => binding,
-        Err(_) => return EvidenceStatus::Unreadable,
-    };
-    if record.execution_binding != current_binding {
+    let authoritative_binding =
+        match execution_state::exact_execution_projection_for_session(worktree, session_id) {
+            Ok(Some((execution, binding, _))) => {
+                if expected_owner_number.is_some_and(|expected| execution.owner_number != expected)
+                {
+                    return EvidenceStatus::WrongOwner;
+                }
+                Some(binding)
+            }
+            Ok(None) => match current_execution_context(worktree) {
+                Ok((_, binding)) => binding,
+                Err(_) => return EvidenceStatus::Unreadable,
+            },
+            Err(_) => return EvidenceStatus::Unreadable,
+        };
+    if record.execution_binding != authoritative_binding {
         return EvidenceStatus::WrongGeneration;
     }
     let generated_outputs = plan
@@ -1905,6 +1972,26 @@ fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
 ) -> io::Result<VerificationCallerAuthority> {
+    if let Some((execution, execution_binding, session_binding)) =
+        execution_state::exact_execution_projection_for_session(worktree, session_id)
+            .map_err(|_| verification_caller_authority_error())?
+    {
+        if !matches!(
+            execution.status,
+            execution_state::ExecutionControlStatus::Active
+                | execution_state::ExecutionControlStatus::Blocked
+        ) {
+            return Err(verification_caller_authority_error());
+        }
+        return Ok(VerificationCallerAuthority {
+            owner_number: Some(execution.owner_number),
+            execution_binding: Some(execution_binding),
+            session_binding: Some(session_binding),
+        });
+    }
+
+    // Legacy unmanaged/ledgerless executions retain the flat compatibility
+    // path for one release cycle.
     let Some(execution) =
         execution_state::load(worktree).map_err(|_| verification_caller_authority_error())?
     else {
@@ -2040,6 +2127,16 @@ pub(crate) fn snapshot_current_generation_caller_binding(
     worktree: &Path,
     session_id: Option<&str>,
 ) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if execution_state::exact_execution_projection_for_session(worktree, session_id)
+            .map_err(|_| verification_caller_authority_error())?
+            .is_some()
+        {
+            return snapshot_verification_caller_authority(worktree, session_id)
+                .map(|authority| authority.session_binding);
+        }
+    }
+
     let (_, current_binding) =
         current_execution_context(worktree).map_err(|_| verification_caller_authority_error())?;
     if current_binding.is_none() {
@@ -2049,11 +2146,8 @@ pub(crate) fn snapshot_current_generation_caller_binding(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(verification_caller_authority_error)?;
-    let authority = snapshot_verification_caller_authority(worktree, session_id)?;
-    if authority.execution_binding != current_binding {
-        return Err(verification_caller_authority_error());
-    }
-    Ok(authority.session_binding)
+    snapshot_verification_caller_authority(worktree, session_id)
+        .map(|authority| authority.session_binding)
 }
 
 /// Resolve the current linked owner and its exact generation identity from
@@ -2071,6 +2165,16 @@ fn current_execution_context(
     };
     let binding = execution_state::current_execution_binding(worktree, owner)?;
     Ok((Some(execution.owner_number), binding))
+}
+
+fn execution_context_for_session(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<(Option<u64>, Option<ExecutionBindingIdentity>)> {
+    match execution_state::exact_execution_projection_for_session(worktree, session_id)? {
+        Some((execution, binding, _)) => Ok((Some(execution.owner_number), Some(binding))),
+        None => current_execution_context(worktree),
+    }
 }
 
 /// Evaluate the latest record against the current session, the Execution

@@ -214,15 +214,7 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             enabled,
             autonomous_mode,
-            max_active,
-        } => run_monitor_config_set(
-            env,
-            project_root.as_deref(),
-            enabled,
-            autonomous_mode,
-            max_active,
-            out,
-        )?,
+        } => run_monitor_config_set(env, project_root.as_deref(), enabled, autonomous_mode, out)?,
         _ => unreachable!("issue::run called with non-issue command"),
     };
     Ok(code)
@@ -547,8 +539,8 @@ fn run_monitor_stop<E: CliEnv>(
 ///
 /// Switching provider is therefore two steps the PM already owns: edit the
 /// launch profile, then call this. The relaunch itself still goes through the
-/// ordinary claim/slot path — this operation never spawns an agent directly,
-/// so `max_active` and the claim gate keep meaning what they meant.
+/// ordinary durable delivery path — this operation never spawns an agent
+/// directly, so repeated requests still reuse one in-flight delivery.
 ///
 /// An immediate scan is requested afterwards so the requeue takes effect now
 /// rather than at the next interval tick; that is the whole point of asking for
@@ -696,7 +688,6 @@ fn issue_monitor_stop_mismatch_label(mismatch: crate::IssueMonitorStopMismatch) 
         crate::IssueMonitorStopMismatch::NotRunning => "not_running",
         crate::IssueMonitorStopMismatch::ClaimMismatch => "claim_mismatch",
         crate::IssueMonitorStopMismatch::DeliveryMismatch => "delivery_mismatch",
-        crate::IssueMonitorStopMismatch::WindowMismatch => "window_mismatch",
     }
 }
 
@@ -704,10 +695,9 @@ fn apply_monitor_config_set(
     prefs: &mut crate::IssueMonitorPrefs,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
-    max_active: Option<usize>,
     pm_privileged: bool,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)?;
+    validate_monitor_config_set(enabled, autonomous_mode, pm_privileged)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -720,9 +710,6 @@ fn apply_monitor_config_set(
             .set_autonomous_mode_with_effect_revocation(autonomous_mode)
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
-    if let Some(max_active) = max_active {
-        candidate.set_max_active_agents(max_active);
-    }
     *prefs = candidate.prefs();
     Ok(())
 }
@@ -730,10 +717,9 @@ fn apply_monitor_config_set(
 fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
-    max_active: Option<usize>,
     pm_privileged: bool,
 ) -> io::Result<()> {
-    if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+    if enabled.is_none() && autonomous_mode.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "at least one Issue Monitor config field is required",
@@ -745,12 +731,6 @@ fn validate_monitor_config_set(
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "enabling Issue Monitor or autonomous mode requires an explicit GUI action              (only the project's registered PM agent may raise it from the CLI;              run `pm.status` to see the current PM)",
-        ));
-    }
-    if max_active == Some(0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "max_active must be greater than zero",
         ));
     }
     Ok(())
@@ -778,12 +758,11 @@ fn run_monitor_config_set<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
-    max_active: Option<usize>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let pm_privileged = caller_is_registered_pm(&project_root);
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)
+    validate_monitor_config_set(enabled, autonomous_mode, pm_privileged)
         .map_err(io_as_api_error)?;
 
     // SPEC-3431 FR-008: a PM raising a switch writes the prefs SOT directly
@@ -794,7 +773,7 @@ fn run_monitor_config_set<E: CliEnv>(
     if pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, true)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, true)
         })
         .map_err(io_as_api_error)?;
         let scan_now = crate::runtime_daemon_events::issue_monitor_payload(
@@ -808,7 +787,6 @@ fn run_monitor_config_set<E: CliEnv>(
             &serde_json::json!({
                 "enabled": prefs.enabled,
                 "autonomous_mode": prefs.autonomous_mode,
-                "max_active": prefs.max_active_agents.max(1),
                 "applied_by": "pm",
             })
             .to_string(),
@@ -823,7 +801,6 @@ fn run_monitor_config_set<E: CliEnv>(
             "config_set": {
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
-                "max_active_agents": max_active,
             }
         }),
         std::process::id(),
@@ -835,7 +812,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, pm_privileged)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, pm_privileged)
         })
         .map_err(io_as_api_error)?;
     }
@@ -847,7 +824,6 @@ fn run_monitor_config_set<E: CliEnv>(
         &serde_json::json!({
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
-            "max_active": prefs.max_active_agents.max(1),
         })
         .to_string(),
     );
@@ -1806,7 +1782,6 @@ mod tests {
             &prefs_path,
             &crate::IssueMonitorPrefs {
                 enabled: true,
-                max_active_agents: 3,
                 priority_order: vec![2, 1],
                 launching_issues: vec![crate::IssueMonitorLaunchingIssue {
                     issue_number: 9,
@@ -1853,7 +1828,6 @@ mod tests {
             serde_json::json!({
                 "queue": [2, 1],
                 "active_launches": [9],
-                "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
@@ -1971,7 +1945,6 @@ mod tests {
                         "issue_monitor": {
                             "queue": [],
                             "active_launches": [],
-                            "max_active": 1,
                             "enabled": false,
                             "autonomous_mode": false,
                             "has_launch_profile": false
@@ -2180,7 +2153,6 @@ mod tests {
                 project_root: Some(repo),
                 enabled: Some(false),
                 autonomous_mode: Some(false),
-                max_active: Some(3),
             },
             &mut out,
         )
@@ -2190,7 +2162,6 @@ mod tests {
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         assert!(!prefs.enabled);
         assert!(!prefs.autonomous_mode);
-        assert_eq!(prefs.max_active_agents, 3);
         assert_eq!(prefs.effect_authority_epoch, 2);
 
         let before = std::fs::read(&prefs_path).expect("prefs bytes");
@@ -2201,7 +2172,6 @@ mod tests {
                 project_root: None,
                 enabled: Some(true),
                 autonomous_mode: None,
-                max_active: None,
             },
             &mut out,
         )
@@ -2216,7 +2186,7 @@ mod tests {
     /// `IssueMonitorState` cannot catch a handler that writes prefs on a
     /// refusal or reports success it did not achieve.
     #[test]
-    fn monitor_stop_revokes_the_launch_and_refuses_a_stale_identity() {
+    fn monitor_stop_revokes_the_launch_when_the_window_identity_is_stale() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -2236,8 +2206,6 @@ mod tests {
         .expect("save prefs");
         let mut env = crate::cli::TestEnv::new(repo.clone());
 
-        // A stale window id must change nothing on disk.
-        let before = std::fs::read(&prefs_path).expect("prefs bytes");
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -2248,30 +2216,6 @@ mod tests {
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-9".to_string()),
-            },
-            &mut out,
-        )
-        .expect("stop runs");
-        assert_eq!(code, 1, "a refused stop is not a success");
-        assert!(out.contains("\"status\":\"refused\""), "{out}");
-        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
-        assert_eq!(
-            std::fs::read(&prefs_path).expect("prefs bytes"),
-            before,
-            "a refused stop must be zero-mutation"
-        );
-
-        // The exact identity releases the slot and holds the issue durably.
-        out.clear();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorStop {
-                project_root: Some(repo.clone()),
-                number: 42,
-                reason: "provider rate limit".to_string(),
-                claim_id: None,
-                delivery_id: None,
-                window_id: Some("tab-1::agent-1".to_string()),
             },
             &mut out,
         )
@@ -2319,7 +2263,7 @@ mod tests {
     /// SPEC-3431 FR-029〜031 / T-081: the failover the PM calls when a provider
     /// runs out of quota.
     #[test]
-    fn monitor_failover_requeues_at_the_head_and_refuses_a_stale_identity() {
+    fn monitor_failover_requeues_at_the_head_when_the_window_identity_is_stale() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -2340,7 +2284,6 @@ mod tests {
         .expect("save prefs");
         let mut env = crate::cli::TestEnv::new(repo.clone());
 
-        let before = std::fs::read(&prefs_path).expect("prefs bytes");
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -2351,28 +2294,6 @@ mod tests {
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-9".to_string()),
-            },
-            &mut out,
-        )
-        .expect("failover runs");
-        assert_eq!(code, 1);
-        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
-        assert_eq!(
-            std::fs::read(&prefs_path).expect("prefs bytes"),
-            before,
-            "a refused failover must be zero-mutation"
-        );
-
-        out.clear();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorFailover {
-                project_root: Some(repo),
-                number: 42,
-                reason: "codex rate limit".to_string(),
-                claim_id: None,
-                delivery_id: None,
-                window_id: Some("tab-1::agent-1".to_string()),
             },
             &mut out,
         )

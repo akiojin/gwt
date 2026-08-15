@@ -701,9 +701,6 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    SetIssueMonitorMaxActiveAgents {
-        max_active_agents: usize,
-    },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },

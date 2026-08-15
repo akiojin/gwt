@@ -484,9 +484,6 @@ impl AppRuntime {
         }
 
         let project_root = tab.project_root.clone();
-        if let Some(window_id) = self.live_agent_window_for_work(&tab_id, Some(branch_name), None) {
-            return self.focus_existing_live_work_agent_events(&window_id, None);
-        }
         match self.open_launch_wizard_for_branch(
             &tab_id,
             &project_root,
@@ -2800,6 +2797,12 @@ impl AppRuntime {
         let status = ledger.current_effective_status().ok_or_else(|| {
             "The current execution generation has no effective status".to_string()
         })?;
+        if status == gwt::cli::execution_state::ExecutionControlStatus::Active {
+            // A live holder is observational context, not launch authority.
+            // The ordinary automatic launch path appends an independent fresh
+            // generation and leaves the existing Session/window untouched.
+            return Ok(super::ManualLaunchGenerationDisposition::NotApplicable);
+        }
         let current = gwt::cli::execution_state::current_execution_binding(worktree, owner)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {

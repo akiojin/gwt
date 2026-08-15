@@ -74,14 +74,14 @@ pub fn handle_with_input(
         .map(|kind| kind.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    HookOutput::stop_block(format!(
-        "Producing obligations from this session's prompts are still open: [{kinds}] (prompt-to-action gate, SPEC-3248 P11).\n\
+    HookOutput::system_message(format!(
+        "Warning: producing obligations from this session's prompts are still open: [{kinds}] (prompt-to-action bookkeeping, SPEC-3248 P11).\n\
          Settle them with the canonical operations before stopping:\n\
          - issue_update: JSON operations `issue.comment` / `issue.spec.edit`\n\
          - implementation / verification: an all-passing JSON operation `verify.run` (register the matrix with `verify.plan` first)\n\
          - pr: JSON operations `pr.create` / `pr.edit` / `pr.ready`\n\
          Blocked instead? Run JSON operation `execution.blocked` with a non-empty `params.reason` — it defers the open obligations with the blocker on record.\n\
-         Prose, Board posts, and PR body text do not settle obligations."
+         Prose, Board posts, and PR body text do not settle obligations. Stop is not blocked by this bookkeeping state."
     ))
 }
 
@@ -95,16 +95,14 @@ mod tests {
         dir
     }
 
-    // T-242 core: open producing obligations block Stop; settlement passes;
-    // the block routes to canonical operations and the deferral path.
     #[test]
-    fn open_obligations_block_until_settled() {
+    fn open_obligations_warn_until_settled() {
         let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
 
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected StopBlock, got {output:?}");
+        let HookOutput::SystemMessage(reason) = output else {
+            panic!("expected SystemMessage, got {output:?}");
         };
         assert!(reason.contains("implementation"), "{reason}");
         assert!(reason.contains("verify.run"), "{reason}");
@@ -185,9 +183,9 @@ mod tests {
         assert!(
             matches!(
                 handle_with_input(dir.path(), "{}", Some("sess-ordinary")),
-                HookOutput::StopBlock { .. }
+                HookOutput::SystemMessage(_)
             ),
-            "non-PM sessions must keep the prompt-to-action gate"
+            "non-PM sessions must keep prompt-to-action bookkeeping without blocking Stop"
         );
     }
 
@@ -244,15 +242,15 @@ mod tests {
         );
 
         // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
-        // armed obligation blocks Stop in every worktree the same way.
+        // armed obligation warns in every worktree the same way.
         let former_intake = mk_worktree();
         action_obligation::mark_from_prompt(former_intake.path(), "sess-1", "実装して").unwrap();
         assert!(
             matches!(
                 handle_with_input(former_intake.path(), "{}", Some("sess-1")),
-                HookOutput::StopBlock { .. }
+                HookOutput::SystemMessage(_)
             ),
-            "obligations gate uniformly after the lane removal"
+            "obligations must warn without blocking Stop"
         );
     }
 }

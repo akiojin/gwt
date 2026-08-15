@@ -280,7 +280,7 @@ Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
 Add Window から `Issue` を開くと、キャッシュ済み GitHub Issue の閲覧と Issue
 Monitor の操作を単一サーフェスで行えます。各行には実行状態、キュー位置、除外理由が
-表示され、ツールバーから同時実行数、monitor の起動状態、Autonomous モード、Quick
+表示され、ツールバーから monitor の起動状態、Autonomous モード、Quick
 issue 登録を操作できます。従来の `issue_monitor` preset もこの正本 Issue
 サーフェスを開きます。
 
@@ -292,8 +292,8 @@ Monitor はプロジェクトの open な GitHub Issue を監視し、エージ�
 
 Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`、
 `issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
-キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
-モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
+キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止と Autonomous
+モード無効化に対応します。安全のため `enabled=true` と
 `autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で

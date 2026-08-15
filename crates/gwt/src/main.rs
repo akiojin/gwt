@@ -1510,7 +1510,6 @@ mod tests {
             state: "idle".to_string(),
             queue_len: 1,
             active_count: 0,
-            max_active_agents: 1,
             total_candidates: 1,
             active_issue_number: None,
             last_scan_at: Some("2026-06-23T10:00:00Z".to_string()),

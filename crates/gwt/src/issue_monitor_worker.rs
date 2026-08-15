@@ -1584,7 +1584,6 @@ mod tests {
         // Merged (persisted) and the slot goes to the next queued candidate.
         let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
-            max_active: 1,
             ..crate::IssueMonitorConfig::default()
         });
         monitor.set_gui_connected(true);
@@ -1602,7 +1601,6 @@ mod tests {
             &client,
             "host:1",
             "2026-07-02T00:00:10Z",
-            1,
             |issue_number| issue_number == 42,
         );
 
@@ -1763,14 +1761,13 @@ mod tests {
     }
 
     #[test]
-    fn payloads_emit_all_pending_launch_requests_when_parallel_capacity_allows() {
+    fn payloads_emit_all_pending_launch_requests() {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
         client.seed(github_issue(43));
         client.seed(github_issue(44));
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
-            max_active: 3,
             ..IssueMonitorConfig::default()
         });
         monitor.set_gui_connected(true);

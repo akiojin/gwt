@@ -59,7 +59,6 @@ fn launched_monitor() -> IssueMonitorState {
     let mut monitor = IssueMonitorState::with_prefs(
         IssueMonitorConfig {
             enabled: true,
-            max_active: 2,
             ..IssueMonitorConfig::default()
         },
         IssueMonitorPrefs {

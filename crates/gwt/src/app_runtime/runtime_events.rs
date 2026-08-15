@@ -482,7 +482,7 @@ impl AppRuntime {
         // satisfied the guard, so `agent_failed` was never published and the
         // row stayed `launched` forever. `recoverable_agent_error_windows` is
         // only cleared by a later hook event, and a dead process sends none.
-        // With the default `max_active = 1` that stops the whole queue.
+        // That leaves the issue's own durable launch accounting stale.
         //
         // SPEC-3431 FR-067: `Stopped` (a clean `exit 0`) leaks the same way.
         // It never reached `agent_failed`, and the auto-close gate below

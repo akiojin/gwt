@@ -248,9 +248,8 @@ fn handle_stop(
                 )
             }),
         ),
-        // SPEC-3248 P8a (T-108): launch-written Execution Control Record
-        // keeps the execution session working until it settles via
-        // execution.complete / execution.blocked / build.complete.
+        // SPEC #3590: launch-written Execution Control Record is observable
+        // bookkeeping. It warns without preventing Stop.
         (
             "execution-control-stop-check",
             Box::new(|| {
@@ -261,9 +260,8 @@ fn handle_stop(
                 )
             }),
         ),
-        // SPEC-3248 P11 (T-242 core): open producing obligations from this
-        // session's prompts block Stop until settled by canonical
-        // operations or deferred via execution.blocked.
+        // SPEC #3590: open producing obligations remain visible diagnostics,
+        // but no longer prevent Stop.
         (
             "action-obligation-stop-check",
             Box::new(|| {
@@ -275,20 +273,57 @@ fn handle_stop(
             }),
         ),
     ];
+    let mut warnings = Vec::new();
     for (handler, check) in stop_checks {
         let output = run_value(event, handler, check);
-        if matches!(output, HookOutput::StopBlock { .. }) {
-            run_step(event, "blocked-stop-runtime-state", || {
-                crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
-            })?;
-            return Ok(output);
+        match output {
+            HookOutput::StopBlock { .. } => {
+                run_step(event, "blocked-stop-runtime-state", || {
+                    crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
+                })?;
+                return Ok(output);
+            }
+            HookOutput::SystemMessage(message) => warnings.push(message),
+            HookOutput::Silent => {}
+            other => {
+                debug_assert!(
+                    matches!(other, HookOutput::Silent),
+                    "Stop checks must return Silent, SystemMessage, or StopBlock"
+                );
+            }
         }
     }
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()
     })?;
 
-    Ok(reminder)
+    Ok(merge_stop_warnings_with_reminder(warnings, reminder))
+}
+
+fn merge_stop_warnings_with_reminder(
+    mut warnings: Vec<String>,
+    reminder: HookOutput,
+) -> HookOutput {
+    match reminder {
+        HookOutput::SystemMessage(message) => warnings.push(message),
+        HookOutput::HookSpecificAdditionalContext {
+            event: IntentBoundaryEvent::Stop,
+            text,
+        } => warnings.push(text),
+        HookOutput::Silent => {}
+        other if warnings.is_empty() => return other,
+        other => {
+            debug_assert!(
+                matches!(other, HookOutput::Silent),
+                "Stop reminder must return Silent or a Stop system message"
+            );
+        }
+    }
+    if warnings.is_empty() {
+        HookOutput::Silent
+    } else {
+        HookOutput::system_message(warnings.join("\n\n"))
+    }
 }
 
 fn run_step<T>(
@@ -823,9 +858,9 @@ mod tests {
     }
 
     // SPEC-3248 P8a (T-108/T-116 subset): a launch-written Execution Control
-    // Record blocks Stop until the session settles it, then passes.
+    // Record is bookkeeping and never blocks Stop.
     #[test]
-    fn execution_control_lifecycle_blocks_until_settled() {
+    fn execution_control_lifecycle_does_not_block_stop() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -863,11 +898,11 @@ mod tests {
         .to_string();
         let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
             .expect("stop hook output");
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected execution control StopBlock, got {output:?}");
+        let HookOutput::SystemMessage(message) = output else {
+            panic!("active execution bookkeeping warning must reach Stop output: {output:?}");
         };
-        assert!(reason.contains("issue #42"), "{reason}");
-        assert!(reason.contains("execution.complete"), "{reason}");
+        assert!(message.contains("execution for issue #42"), "{message}");
+        assert!(message.contains("Stop is not blocked"), "{message}");
 
         // Settlement passes Stop.
         crate::cli::execution_state::settle(
@@ -882,6 +917,55 @@ mod tests {
             !matches!(output, HookOutput::StopBlock { .. }),
             "settled execution must pass Stop, got {output:?}"
         );
+    }
+
+    #[test]
+    fn later_register_stop_block_wins_over_earlier_build_warning() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let sessions_dir = worktree.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "work/spec-3590", AgentId::Codex);
+        session.agent_session_id = Some("agent-stop-priority".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        for skill in ["build-spec", "register-spec"] {
+            gwt_core::skill_state::save(
+                worktree.path(),
+                skill,
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(3590),
+                    started_at: chrono::Utc::now(),
+                    phase: Some("active fixture".to_string()),
+                    session_id: session_id.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let stop_input = serde_json::json!({
+            "session_id": "agent-stop-priority",
+            "stop_hook_active": false,
+        })
+        .to_string();
+
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("Stop output");
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("the genuine register gate must win over bookkeeping warnings: {output:?}");
+        };
+        assert!(reason.contains("gwt-register-spec"), "{reason}");
+        assert!(!reason.contains("build lifecycle state"), "{reason}");
     }
 
     #[test]

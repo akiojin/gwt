@@ -78,16 +78,10 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } if issue_numbers == vec![44, 42, 43]
     ));
 
-    let event: FrontendEvent = serde_json::from_str(
+    assert!(serde_json::from_str::<FrontendEvent>(
         r#"{"kind":"set_issue_monitor_max_active_agents","max_active_agents":3}"#,
     )
-    .expect("max active event");
-    assert!(matches!(
-        event,
-        FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: 3
-        }
-    ));
+    .is_err());
 
     let event: FrontendEvent = serde_json::from_str(
         r#"{"kind":"agent_issue_monitor_scan_now","expected_project_scope":"scope-123"}"#,
@@ -152,7 +146,6 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             state: "scanning".to_string(),
             queue_len: 2,
             active_count: 1,
-            max_active_agents: 3,
             total_candidates: 8,
             active_issue_number: Some(42),
             last_scan_at: Some("2026-06-23T10:00:00Z".to_string()),
@@ -170,7 +163,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);
-    assert_eq!(value["status"]["max_active_agents"], 3);
+    assert!(value["status"].get("max_active_agents").is_none());
     assert_eq!(value["status"]["total_candidates"], 8);
     assert_eq!(value["status"]["active_issue_number"], 42);
     assert_eq!(value["status"]["launch_profile_source"], "last_settings");

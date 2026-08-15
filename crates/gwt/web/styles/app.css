@@ -3112,7 +3112,6 @@ body {
 
 .knowledge-monitor-summary,
 .knowledge-monitor-settings-copy,
-.knowledge-monitor-max-active,
 .knowledge-monitor-error {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
@@ -3139,24 +3138,6 @@ body {
 .knowledge-monitor-quick .wizard-button {
   min-height: 30px;
   padding-block: 4px;
-}
-
-.knowledge-monitor-max-active {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-text-muted);
-}
-
-.knowledge-monitor-max-active input {
-  width: 56px;
-  min-height: 30px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text-strong);
-  font: inherit;
-  text-align: center;
 }
 
 .knowledge-monitor-quick {

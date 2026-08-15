@@ -159,9 +159,7 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             return Ok(2);
         }
-        if let Some(refusal) =
-            crate::cli::verification_record::work_event_settlement_refusal(&worktree)
-        {
+        if let Some(refusal) = crate::cli::verification_record::branch_push_refusal(&worktree) {
             out.push_str(&refusal);
             out.push('\n');
             return Ok(2);
@@ -185,7 +183,11 @@ pub(super) fn run<E: CliEnv>(
             }
         }
     }
-    let cmd_settles_pr_obligation = is_pr_mutation;
+    let cmd_settles_pr_obligation = is_pr_mutation
+        || matches!(
+            cmd,
+            PrCommand::Comment { .. } | PrCommand::CommentBody { .. }
+        );
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -1192,7 +1194,148 @@ mod tests {
     }
 
     #[test]
-    fn pr_mutation_rejects_missing_unsettled_or_unauthorized_receipt_before_dispatch() {
+    fn pushed_branch_pr_operations_do_not_require_a_work_event_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "session-receiptless-pr";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+
+        crate::cli::verification_record::save_plan(
+            &fixture.repo,
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: session_id.to_string(),
+                owner_number: Some(42),
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save verification plan");
+        crate::cli::verification_record::run_verification(
+            &fixture.repo,
+            session_id,
+            &["git --version".to_string()],
+        )
+        .expect("record fresh verification");
+
+        assert!(
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .expect("load absent receipt")
+                .is_none(),
+            "the fixture must prove receiptless PR delivery"
+        );
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_created_pr(seeded_pr());
+        env.seed_pr(7, seeded_pr());
+
+        for command in [
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("receiptless create"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("receiptless edit")),
+                body: None,
+                add_labels: vec![],
+            },
+            PrCommand::Ready { number: 7 },
+        ] {
+            let mut out = String::new();
+            let code = run(&mut env, command, &mut out).expect("run receiptless PR operation");
+            assert_eq!(code, 0, "{out}");
+        }
+
+        crate::cli::action_obligation::mark_from_prompt(
+            &fixture.repo,
+            session_id,
+            "PR #7 にコメントを追加して",
+        )
+        .expect("arm PR comment obligation");
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(&fixture.repo, session_id),
+            vec![crate::cli::action_obligation::ObligationKind::Pr]
+        );
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CommentBody {
+                number: 7,
+                body: s("receiptless comment"),
+            },
+            &mut out,
+        )
+        .expect("run receiptless PR comment");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            crate::cli::action_obligation::open_kinds(&fixture.repo, session_id).is_empty(),
+            "a successful pr.comment must settle the PR obligation"
+        );
+
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert_eq!(env.pr_edit_call_log.len(), 1);
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+        assert_eq!(env.pr_comments.len(), 1);
+    }
+
+    #[test]
+    fn receiptless_pr_mutation_still_requires_head_on_the_configured_upstream() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "session-unpushed-pr";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        fixture.append_event("receiptless-unpushed-head");
+        fixture.stage_events();
+        fixture.commit("chore(work): leave HEAD ahead of upstream");
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_pr(7, seeded_pr());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("must remain pushed")),
+                body: None,
+                add_labels: vec![],
+            },
+            &mut out,
+        )
+        .expect("run unpushed PR mutation");
+
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("current HEAD is not contained"), "{out}");
+        assert!(env.pr_edit_call_log.is_empty());
+    }
+
+    #[test]
+    fn pr_mutation_ignores_missing_unsettled_or_unauthorized_receipt() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1208,7 +1351,8 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
         env.seed_created_pr(seeded_pr());
 
-        let assert_refused_before_dispatch = |env: &mut crate::cli::TestEnv, case: &str| {
+        let assert_dispatched_without_receipt_gate = |env: &mut crate::cli::TestEnv, case: &str| {
+            let previous_dispatches = env.pr_create_call_log.len();
             let mut out = String::new();
             let code = run(
                 env,
@@ -1222,11 +1366,12 @@ mod tests {
                 },
                 &mut out,
             )
-            .expect("run receipt pretransport gate");
-            assert_eq!(code, 2, "{case}: {out}");
-            assert!(
-                env.pr_create_call_log.is_empty(),
-                "{case}: rejected receipt reached external PR dispatch",
+            .expect("run receipt-independent PR mutation");
+            assert_eq!(code, 0, "{case}: {out}");
+            assert_eq!(
+                env.pr_create_call_log.len(),
+                previous_dispatches + 1,
+                "{case}: receipt state must not gate external PR dispatch",
             );
         };
 
@@ -1240,7 +1385,7 @@ mod tests {
             crate::cli::verification_record::work_event_settlement_refusal(&fixture.repo).is_some(),
             "the mutation gate must refuse a missing receipt when the Work log exists",
         );
-        assert_refused_before_dispatch(&mut env, "missing");
+        assert_dispatched_without_receipt_gate(&mut env, "missing");
 
         let valid = crate::cli::verification_record::save_work_event_settlement_record(
             &fixture.repo,
@@ -1281,7 +1426,7 @@ mod tests {
                 &receipt,
             )
             .expect("persist unauthorized receipt fixture");
-            assert_refused_before_dispatch(&mut env, case);
+            assert_dispatched_without_receipt_gate(&mut env, case);
         }
 
         crate::cli::verification_record::persist_work_event_settlement_record(
@@ -1305,18 +1450,21 @@ mod tests {
             "the unsettled case must start from an authentic Completed lifecycle prefix",
         );
         fixture.append_event("terminal-update-not-delivered");
-        assert_refused_before_dispatch(&mut env, "unsettled");
+        assert_dispatched_without_receipt_gate(&mut env, "unsettled");
         let unsettled_diagnosis = crate::cli::execution_state::diagnose(&fixture.repo, None);
         assert_eq!(
             unsettled_diagnosis.work_event_receipt_matches_current_generation,
             Some(true),
-            "status must preserve authentic lifecycle-prefix authority while settlement is blocked",
+            "status must preserve the authentic lifecycle-prefix receipt as audit state",
         );
-        assert_eq!(unsettled_diagnosis.settlement_severity, "blocked");
+        assert_eq!(
+            unsettled_diagnosis.settlement_severity, "clear",
+            "receipt-independent PR dispatch must not refresh or mutate Work bookkeeping",
+        );
     }
 
     #[test]
-    fn pr_mutation_rejects_predecessor_receipt_before_dispatch() {
+    fn pr_mutation_ignores_predecessor_receipt() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1388,13 +1536,143 @@ mod tests {
                 },
                 &mut out,
             )
-            .expect("run predecessor receipt gate"),
-            2,
+            .expect("run receipt-independent PR mutation"),
+            0,
             "{out}",
         );
         assert!(
-            env.pr_create_call_log.is_empty(),
-            "a predecessor receipt must be rejected before external dispatch",
+            !env.pr_create_call_log.is_empty(),
+            "a predecessor receipt must not block external PR dispatch",
+        );
+    }
+
+    #[test]
+    fn older_active_generation_can_verify_and_mutate_pr_through_its_durable_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let older_session = "session-older-active-pr";
+        let older_identity = initialize_pr_generation_authority(&fixture.repo, older_session);
+        persist_pr_generation_session(&fixture.repo, older_session, older_identity);
+
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let successor_session = "session-newer-active-pr";
+        let request = crate::cli::execution_state::SuccessorRequest {
+            operation_id: "operation-newer-active-pr".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: crate::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "binding-newer-active-pr".to_string(),
+            initial_session_id: successor_session.to_string(),
+            entrypoint: "launch".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        crate::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            &fixture.repo,
+            owner,
+            &request,
+        )
+        .expect("prepare newer independent generation");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate newer independent generation");
+        let successor_identity =
+            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+                .expect("read newer generation binding")
+                .expect("newer generation binding exists");
+        persist_pr_generation_session(&fixture.repo, successor_session, successor_identity);
+
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, older_session);
+        let mut verify_env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut verify_out = String::new();
+        assert_eq!(
+            crate::cli::verification_record::run(
+                &mut verify_env,
+                crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: vec!["git --version".to_string()],
+                    derive: false,
+                },
+                &mut verify_out,
+            )
+            .expect("register older-generation verification plan"),
+            0,
+            "{verify_out}",
+        );
+        verify_out.clear();
+        assert_eq!(
+            crate::cli::verification_record::run(
+                &mut verify_env,
+                crate::cli::verification_record::VerifyCommand::Run {
+                    commands: vec!["git --version".to_string()],
+                },
+                &mut verify_out,
+            )
+            .expect("run older-generation verification"),
+            0,
+            "{verify_out}",
+        );
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_created_pr(seeded_pr());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("older active generation"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut out,
+            )
+            .expect("run older active generation PR handoff"),
+            0,
+            "{out}",
+        );
+        assert_eq!(env.pr_create_call_log.len(), 1);
+
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                older_session,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "older generation blocker".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .expect("settle the exact older generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let mut blocked_out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::EditBody {
+                    number: 7,
+                    title: Some(s("must not dispatch")),
+                    body: None,
+                    add_labels: vec![],
+                },
+                &mut blocked_out,
+            )
+            .expect("evaluate older blocked generation PR policy"),
+            2,
+            "{blocked_out}",
+        );
+        assert!(blocked_out.contains("terminally blocked"), "{blocked_out}");
+        assert!(
+            env.pr_edit_call_log.is_empty(),
+            "the exact older Blocked generation must refuse before dispatch",
         );
     }
 

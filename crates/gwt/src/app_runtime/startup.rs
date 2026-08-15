@@ -330,7 +330,6 @@ impl AppRuntime {
         });
 
         let now = chrono::Utc::now();
-        let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
             // The startup prune plan is the authoritative fixed snapshot of
             // detached intake paths that are about to be removed. Exclude
@@ -377,10 +376,7 @@ impl AppRuntime {
                     continue;
                 }
             }
-            let Some(native_session_id) = session.exact_resume_session_id() else {
-                continue;
-            };
-            if !resumed_native_sessions.insert(native_session_id.to_string()) {
+            if session.exact_resume_session_id().is_none() {
                 continue;
             }
             if self

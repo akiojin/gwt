@@ -81,8 +81,8 @@ pub fn handle_with_input(
             "Work event settlement refused: the trusted obligation is still open. Refresh the settlement state and retry Stop.".to_string()
         }
     };
-    HookOutput::stop_block(format!(
-        "A terminal Work update is still awaiting delivery. {reason} gwt will not commit or push automatically."
+    HookOutput::system_message(format!(
+        "Warning: a terminal Work update is still awaiting delivery. {reason} gwt will not commit or push automatically, and Stop is not blocked by this bookkeeping state."
     ))
 }
 
@@ -101,7 +101,7 @@ mod tests {
     };
 
     #[test]
-    fn pending_mutation_blocks_stop_before_the_tracked_event_exists() {
+    fn pending_mutation_warns_before_the_tracked_event_exists() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -135,20 +135,20 @@ mod tests {
         )
         .expect("prepare settlement receipt");
 
-        let blocked = handle_with_input(
+        let warning = handle_with_input(
             &fixture.repo,
             r#"{"stop_hook_active":false}"#,
             Some("session-pending-stop"),
         );
-        let HookOutput::StopBlock { reason } = blocked else {
-            panic!("a pending terminal mutation must block Stop: {blocked:?}");
+        let HookOutput::SystemMessage(reason) = warning else {
+            panic!("a pending terminal mutation must warn without blocking Stop: {warning:?}");
         };
         assert!(reason.contains("has not been persisted"), "{reason}");
         assert!(reason.contains(&event.id), "{reason}");
     }
 
     #[test]
-    fn open_obligation_blocks_until_commit_and_push_readback() {
+    fn open_obligation_warns_until_commit_and_push_readback() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -161,13 +161,13 @@ mod tests {
             .expect("open settlement obligation");
         assert!(opened.obligation_open);
 
-        let blocked = handle_with_input(
+        let warning = handle_with_input(
             &fixture.repo,
             r#"{"stop_hook_active":false}"#,
             Some("session-a"),
         );
-        let HookOutput::StopBlock { reason } = blocked else {
-            panic!("open Work settlement obligation must block Stop: {blocked:?}");
+        let HookOutput::SystemMessage(reason) = warning else {
+            panic!("open Work settlement obligation must warn without blocking Stop: {warning:?}");
         };
         assert!(reason.contains(".gwt/work/events.jsonl"), "{reason}");
         assert!(reason.contains("commit"), "{reason}");

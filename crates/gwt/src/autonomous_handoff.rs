@@ -2,9 +2,9 @@
 //! autonomous agent's confirmation question into a structured NeedsHuman
 //! handoff.
 //!
-//! An unattended agent that opens a question UI blocks on human input. Under
-//! `max_active` that stalls the whole autonomous pipeline until the
-//! `stuck_timeout_secs` (default 1800s) reclaim fires. The contract here is
+//! An unattended agent that opens a question UI blocks on human input and can
+//! leave its own work stranded until the `stuck_timeout_secs` (default 1800s)
+//! reclaim fires. The contract here is
 //! deliberately fail-closed and deterministic: a monitor-launched autonomous
 //! session may never *wait* on a question. Every question tool call is denied
 //! **before** the provider's UI starts waiting and is converted into a durable

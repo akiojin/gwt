@@ -32,13 +32,18 @@ pub fn handle_with_input(
     input: &str,
     current_session_id: Option<&str>,
 ) -> HookOutput {
-    super::state_file_stop_check::decide(
+    match super::state_file_stop_check::decide(
         worktree,
         input,
         current_session_id,
         SKILL_NAME,
         SKILL_DISPLAY,
-    )
+    ) {
+        HookOutput::StopBlock { reason } => HookOutput::system_message(format!(
+            "Warning: {reason} Stop is not blocked; build lifecycle state is bookkeeping only."
+        )),
+        output => output,
+    }
 }
 
 #[cfg(test)]
@@ -57,9 +62,9 @@ mod tests {
         }
     }
 
-    fn assert_block_with(output: HookOutput, contains: &[&str]) {
+    fn assert_warning_with(output: HookOutput, contains: &[&str]) {
         match output {
-            HookOutput::StopBlock { reason } => {
+            HookOutput::SystemMessage(reason) => {
                 for needle in contains {
                     assert!(
                         reason.contains(needle),
@@ -67,12 +72,12 @@ mod tests {
                     );
                 }
             }
-            other => panic!("expected StopBlock, got {other:?}"),
+            other => panic!("expected SystemMessage, got {other:?}"),
         }
     }
 
     #[test]
-    fn blocks_when_build_state_active_and_includes_phase_in_reason() {
+    fn warns_when_build_state_active_and_includes_phase_in_reason() {
         let dir = tempfile::tempdir().unwrap();
         save(
             dir.path(),
@@ -81,7 +86,7 @@ mod tests {
         )
         .unwrap();
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
-        assert_block_with(
+        assert_warning_with(
             output,
             &[
                 "gwt-build-spec for SPEC-1935",
@@ -126,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn active_build_state_gates_uniformly_after_lane_removal() {
+    fn active_build_state_warns_uniformly_after_lane_removal() {
         // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
         // active build-spec state blocks Stop in every worktree the same way.
         let dir = tempfile::tempdir().unwrap();
@@ -135,9 +140,9 @@ mod tests {
         assert!(
             matches!(
                 handle_with_input(dir.path(), "{}", Some("sess-1")),
-                HookOutput::StopBlock { .. }
+                HookOutput::SystemMessage(_)
             ),
-            "the build-spec gate fires uniformly after the lane removal"
+            "active build bookkeeping must warn without blocking Stop"
         );
     }
 }

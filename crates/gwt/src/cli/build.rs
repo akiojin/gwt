@@ -17,18 +17,10 @@ pub(super) fn run<E: CliEnv>(
     action: SkillStateAction,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    if matches!(&action, SkillStateAction::Complete { .. }) {
-        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-        if let Some(refusal) =
-            crate::cli::verification_record::work_event_settlement_refusal(&worktree)
-        {
-            out.push_str(&format!("{VERB}: completion refused — {refusal}\n"));
-            return Ok(2);
-        }
-    }
     if let Err(error) = record_current_work_terminal_before_finalize(env, &action) {
-        out.push_str(&format!("{VERB}: Work lifecycle update failed: {error}\n"));
-        return Ok(1);
+        out.push_str(&format!(
+            "{VERB}: Work lifecycle bookkeeping warning: {error}\n"
+        ));
     }
     // SPEC-3248 P8a: a successful build completion also settles the launch's
     // Execution Control Record (best-effort — the build-spec skill flow must
@@ -59,38 +51,11 @@ pub(super) fn run<E: CliEnv>(
                 .filter(|value| !value.is_empty())
             {
                 let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-                // SPEC-3248 P8b (T-111): the execution settlement piggybacked
-                // on build.complete also requires fresh verification
-                // evidence; a build completion without it finalizes the
-                // skill state but leaves the execution active so the Stop
-                // gate keeps the session working toward real evidence.
-                let has_matching_active_record = crate::cli::execution_state::load(&worktree)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|record| {
-                        record.status == crate::cli::execution_state::ExecutionControlStatus::Active
-                            && record.primary_session_id == session_id
-                            && record.owner_number == spec
-                    });
-                if has_matching_active_record {
-                    let status = crate::cli::verification_record::evaluate_evidence(
-                        &worktree,
-                        &session_id,
-                        Some(spec),
-                    );
-                    if status == crate::cli::verification_record::EvidenceStatus::Fresh {
-                        crate::cli::execution_state::settle_completed_best_effort(
-                            &worktree,
-                            &session_id,
-                            spec,
-                        );
-                    } else {
-                        out.push_str(&format!(
-                            "{VERB}: execution control not settled — {}\n",
-                            status.describe()
-                        ));
-                    }
-                }
+                crate::cli::execution_state::settle_completed_best_effort(
+                    &worktree,
+                    &session_id,
+                    spec,
+                );
             }
         }
     }
@@ -131,12 +96,12 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         // SPEC-3431 (#3425 family): a session that was never bound by a launch
         // has no bound Work for the managed bridge to terminalize, so
         // demanding exact durable Host Work authority is unsatisfiable and
-        // left the skill state permanently open (complete needs a receipt,
-        // abort needed this authority — both require the missing binding).
+        // left the skill state permanently open (both terminal operations
+        // tried to make missing Work authority a lifecycle prerequisite).
         // Skipping only the managed-bridge terminalization is truthful: there
         // is no bound Work to mark. The legacy no-bridge path below still runs
-        // for legacy Work state, and the Done path keeps its own receipt gate
-        // in `build.complete`, which an unbound session still cannot pass.
+        // for legacy Work state; Work bookkeeping is diagnostic and never
+        // prevents either terminal lifecycle operation from converging.
         let session_toml = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
         if let Ok(session) = gwt_agent::Session::load(&session_toml) {
             if session.execution_binding.is_none() {
@@ -273,7 +238,7 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         gwt_core::workspace_projection::WorkspaceTerminalEventOutcome::AssignedWorkMissing(
             work_id,
         ) => Err(format!(
-            "assigned Work {work_id} is not materialized; retry workspace.ensure before finalizing the build"
+            "assigned Work {work_id} is not materialized; terminal lifecycle will continue without updating Work bookkeeping"
         )),
         gwt_core::workspace_projection::WorkspaceTerminalEventOutcome::WrongTerminal => Err(
             format!(
@@ -296,7 +261,7 @@ fn map_agent_terminal_outcome(
         | crate::AgentWorkTerminalizationOutcome::AlreadyMatching
         | crate::AgentWorkTerminalizationOutcome::NoTarget => Ok(()),
         crate::AgentWorkTerminalizationOutcome::AssignedWorkMissing => Err(
-            "assigned Work is not materialized; retry workspace.ensure before finalizing the build"
+            "assigned Work is not materialized; terminal lifecycle will continue without updating Work bookkeeping"
                 .to_string(),
         ),
         crate::AgentWorkTerminalizationOutcome::WrongTerminal => Err(format!(
@@ -695,6 +660,18 @@ mod tests {
                 .expect("build state")
                 .active,
             "failed Host terminalization must not finalize build state"
+        );
+    }
+
+    fn assert_build_terminal(
+        fixture: &crate::cli::verification_record::tests::WorkEventGitFixture,
+    ) {
+        assert!(
+            !gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+                .expect("load build state")
+                .expect("build state")
+                .active,
+            "Work bookkeeping failure must not gate build finalization"
         );
     }
 
@@ -1276,14 +1253,13 @@ mod tests {
     /// resumed successor session has none. Such a session also has no bound
     /// Work to terminalize — yet the abort path demanded exact durable Host
     /// Work authority and failed with "durable Session ... has no execution
-    /// binding". Combined with `build.complete` requiring a Work event
-    /// receipt (which likewise needs the binding), a skill state opened by an
-    /// unbound session could be neither settled nor abandoned, so the Stop
-    /// hook blocked that session forever. Observed live on work/issue-3431.
+    /// binding". A skill state opened by an unbound session could therefore
+    /// be neither settled nor abandoned, so the Stop hook blocked that session
+    /// forever. Observed live on work/issue-3431.
     ///
-    /// Fail-open is safe here: skipping means "no bound Work exists, so there
-    /// is nothing to mark", and the Done path keeps its own receipt gate in
-    /// `build.complete`, which an unbound session still cannot pass.
+    /// Skipping is truthful here: no bound Work exists to mark. Work
+    /// bookkeeping warnings remain visible, but cannot gate lifecycle
+    /// terminalization or Stop settlement.
     #[test]
     fn unbound_session_abort_skips_the_terminal_work_update() {
         let _env_lock = crate::env_test_lock()
@@ -1382,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_execution_allows_build_abort_but_rejects_build_complete() {
+    fn blocked_execution_allows_both_build_terminal_operations() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1502,8 +1478,8 @@ mod tests {
                 (code, output)
             });
 
-        assert_ne!(complete_code, 0, "{complete_output}");
-        assert_build_still_active(&complete_fixture.git);
+        assert_eq!(complete_code, 0, "{complete_output}");
+        assert_build_terminal(&complete_fixture.git);
         assert!(!complete_fixture.canonical_work().is_terminal());
         complete_server.assert_no_request();
     }
@@ -1548,12 +1524,12 @@ mod tests {
         )
         .expect("run build.abort with unavailable Host bridge");
 
-        assert_ne!(code, 0, "{output}");
+        assert_eq!(code, 0, "{output}");
         assert!(
             output.contains("outcome may be unknown"),
-            "transport failure must remain fail-closed: {output}"
+            "transport failure must remain visible as bookkeeping warning: {output}"
         );
-        assert_build_still_active(&fixture.git);
+        assert_build_terminal(&fixture.git);
         assert!(
             !fixture.canonical_work().is_terminal(),
             "unknown Host outcome must not trigger a local terminal write"
@@ -1588,9 +1564,9 @@ mod tests {
             (code, output)
         });
 
-        assert_ne!(code, 0, "{output}");
+        assert_eq!(code, 0, "{output}");
         assert!(output.contains("non-empty reason"), "{output}");
-        assert_build_still_active(&fixture.git);
+        assert_build_terminal(&fixture.git);
         assert!(!fixture.canonical_work().is_terminal());
         server.assert_no_abort_request();
     }
@@ -1639,9 +1615,9 @@ mod tests {
                 },
             );
 
-            assert_ne!(code, 0, "{label}: {output}");
+            assert_eq!(code, 0, "{label}: {output}");
             assert!(output.contains("transport_failure"), "{label}: {output}");
-            assert_build_still_active(&fixture.git);
+            assert_build_terminal(&fixture.git);
             assert!(
                 !fixture.canonical_work().is_terminal(),
                 "{label}: unsafe rejection body must not trigger a local terminal write"
@@ -1778,8 +1754,8 @@ mod tests {
                 (code, output)
             });
 
-            assert_ne!(code, 0, "{label}: {output}");
-            assert_build_still_active(&fixture.git);
+            assert_eq!(code, 0, "{label}: {output}");
+            assert_build_terminal(&fixture.git);
             assert!(
                 !fixture.canonical_work().is_terminal(),
                 "{label}: Host denial or unknown outcome must not trigger a local terminal write"
@@ -1816,8 +1792,8 @@ mod tests {
             (code, output)
         });
 
-        assert_ne!(code, 0, "{output}");
-        assert_build_still_active(&fixture.git);
+        assert_eq!(code, 0, "{output}");
+        assert_build_terminal(&fixture.git);
         assert!(!fixture.canonical_work().is_terminal());
         server.receive_abort();
         server.assert_no_redirect();
@@ -2236,12 +2212,12 @@ mod tests {
                 Some("terminal-secret"),
                 managed,
             );
-            assert_eq!(code, 1, "managed={managed}: {output}");
+            assert_eq!(code, 0, "managed={managed}: {output}");
             assert!(
                 output.contains("exact durable Host Work authority"),
                 "{output}"
             );
-            assert_build_still_active(&fixture);
+            assert_build_terminal(&fixture);
             server.assert_no_request();
         }
     }
@@ -2266,8 +2242,8 @@ mod tests {
         ] {
             let (code, output, fixture) =
                 run_active_action(SkillStateAction::Complete { spec: 3327 }, url, token, true);
-            assert_eq!(code, 1, "{label}: {output}");
-            assert_build_still_active(&fixture);
+            assert_eq!(code, 0, "{label}: {output}");
+            assert_build_terminal(&fixture);
         }
 
         for (label, status, body) in [

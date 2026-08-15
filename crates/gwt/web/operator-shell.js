@@ -259,7 +259,6 @@ function issueMonitorStatusStripView(status = {}) {
   const state = enabled ? rawState : "disabled";
   const queue = Math.max(0, Number(status.queue_len || 0));
   const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(1, Number(status.max_active_agents || 1));
 
   if (state === "disabled") {
     return {
@@ -275,7 +274,7 @@ function issueMonitorStatusStripView(status = {}) {
   else if (state === "auth_required") label = "Auth";
   else if (state === "launching" || state === "active") label = "Run";
 
-  const value = `${label} Q${queue} A${active}/${maxActive}`;
+  const value = `${label} Q${queue} A${active}`;
   const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
   return {
     state,

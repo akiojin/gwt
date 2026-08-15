@@ -123,12 +123,11 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
       state: "launching",
       queue_len: 3,
       active_count: 1,
-      max_active_agents: 2,
     });
 
-    assert.equal(value.textContent, "Run Q3 A1/2");
+    assert.equal(value.textContent, "Run Q3 A1");
     assert.equal(cell.dataset.state, "launching");
-    assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1/2");
+    assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1");
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
 
     applyIssueMonitorStatus(document, {
@@ -136,11 +135,10 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
       state: "error",
       queue_len: 3,
       active_count: 0,
-      max_active_agents: 2,
       last_error: "issue #3165: failed",
     });
 
-    assert.equal(value.textContent, "Error Q3 A0/2");
+    assert.equal(value.textContent, "Error Q3 A0");
     assert.equal(cell.dataset.state, "error");
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
     assert.match(cell.getAttribute("title") ?? "", /issue #3165: failed/);

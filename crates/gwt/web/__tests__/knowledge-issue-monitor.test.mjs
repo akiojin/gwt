@@ -146,7 +146,6 @@ test("Issue rows render monitor projections and send controls from the full cano
     state: "disabled",
     queue_len: 3,
     active_count: 1,
-    max_active_agents: 2,
     total_candidates: 8,
     autonomous_mode: false,
     launch_profile_source: "last_settings",
@@ -193,13 +192,7 @@ test("Issue rows render monitor projections and send controls from the full cano
     issue_numbers: [44, 42, 46],
   });
 
-  const maxActive = body.querySelector(".knowledge-monitor-max-active input");
-  maxActive.value = "4";
-  maxActive.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_max_active_agents",
-    max_active_agents: 4,
-  });
+  assert.equal(body.querySelector(".knowledge-monitor-max-active"), null);
 
   body.querySelector('[data-action="monitor-toggle"]').click();
   assert.deepEqual(sent.at(-1), {
@@ -225,7 +218,7 @@ test("Issue rows render monitor projections and send controls from the full cano
 
   assert.match(
     body.querySelector(".knowledge-monitor-summary").textContent,
-    /Stopped.*Queue 3.*Active 1\/2/,
+    /Stopped.*Queue 3.*Active 1/,
   );
   assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
   assert.equal(

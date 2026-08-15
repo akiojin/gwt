@@ -296,7 +296,7 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 Open `Issue` from Add Window to browse cached GitHub Issues and manage the Issue
 Monitor in one surface. Each row shows its execution state, queue position, and
-any exclusion reason; the toolbar controls queue concurrency, monitor state,
+any exclusion reason; the toolbar controls monitor state,
 Autonomous mode, and Quick issue registration. The legacy `issue_monitor`
 preset also opens this canonical Issue surface.
 
@@ -309,8 +309,8 @@ visible on their Issue rows with the execution state.
 Agents and automation can inspect and reprioritize the project queue through
 the `gwtd` JSON operations `issue.monitor.status`,
 `issue.monitor.priority.move`, and `issue.monitor.priority.set`. The
-`issue.monitor.config.set` operation can stop processing, disable autonomous
-mode, or set a positive `max_active` limit. For safety, it rejects
+`issue.monitor.config.set` operation can stop processing or disable autonomous
+mode. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
 an explicit action in the GUI. All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and

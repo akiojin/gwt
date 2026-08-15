@@ -115,19 +115,22 @@ Board body to convey what the Work is.
 
 ### Terminal Work delivery
 
-Make the final Work update before terminal operations, then converge in this
-exact order: `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`. After the final Work update or a
-terminal lifecycle transition, do not issue another `workspace.update`; keep
-blocker/recovery coordination on the Board or in a Draft PR comment instead.
-Set `params.status:"done"` on that explicit final update; its successful event
-append opens the machine-local delivery obligation used by Stop and final gates.
+Treat the final Work update as bookkeeping, not production authority. Make it
+when possible and set `params.status:"done"`, but Stop and terminal lifecycle
+operations never wait for its delivery receipt. `build.complete`, `build.abort`,
+`execution.complete`, and `execution.blocked` are idempotent terminal surfaces;
+the first terminal state wins and callers may settle build and execution in
+either order. After a terminal lifecycle transition, do not issue another
+`workspace.update`; keep blocker/recovery coordination on the Board or in a
+Draft PR comment instead.
 
 Include `.gwt/work/events.jsonl` in the related source commit. If no source
 change remains and the event log is the only bookkeeping change, use a scoped
 Conventional Commit whose subject starts with the exact `chore(work):` prefix.
-gwt never commits or pushes this event automatically. Completion and PR
-mutations remain blocked until the current HEAD is confirmed on the configured
-upstream, and verification must be run fresh after that commit/push.
+gwt never commits or pushes this event automatically. PR mutation independently
+requires the current HEAD to be contained by its configured upstream, and a
+Ready handoff still requires fresh verification. Work delivery receipt state
+does not authorize or refuse PR delivery.
 
 ## Git environment
 
@@ -288,21 +291,21 @@ Work detail は purpose と status を別レイヤーで表示します — purp
 
 ### Terminal Work delivery
 
-terminal operation の前に final Work update を行い、以後は exact
-`final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`
-の順で収束します。final Work update または terminal lifecycle transition
-の後は、別の `workspace.update` を実行しません。blocker / recovery coordination
-は Board または Draft PR comment に残します。
-explicit final update では `params.status:"done"` を設定します。event append
-が成功すると、Stop と final gate が使用する machine-local delivery obligation
-が開きます。
+final Work update は production authority ではなく bookkeeping として扱います。
+可能なら `params.status:"done"` を設定して実行しますが、Stop と terminal
+lifecycle operation は delivery receipt を待ちません。`build.complete`、
+`build.abort`、`execution.complete`、`execution.blocked` は idempotent terminal
+surface で、最初の terminal state が優先され、build と execution はどちらの
+順でも settle できます。terminal lifecycle transition の後は別の
+`workspace.update` を実行せず、blocker / recovery coordination は Board または
+Draft PR comment に残します。
 
 `.gwt/work/events.jsonl` は関連 source commit に含めます。source change が残らず
 event log だけが bookkeeping change の場合は、subject が exact `chore(work):`
 prefix で始まる scoped Conventional Commit を使用します。gwt は event を自動
-commit / push しません。current HEAD が configured upstream に存在することを
-確認するまで completion / PR mutation は block され、その commit / push 後に
-fresh verification を実行します。
+commit / push しません。PR mutation は独立して current HEAD が configured
+upstream に含まれることを要求し、Ready handoff には fresh verification が必要です。
+Work delivery receipt は PR delivery の許可・拒否には使用しません。
 
 ## Git environment
 
@@ -460,7 +463,9 @@ mod tests {
             "fixing bug",
             "purpose = work scope",
             "purpose and status as distinct fields",
-            "final Work update -> commit/push -> fresh verification -> PR",
+            "Treat the final Work update as bookkeeping, not production authority",
+            "the first terminal state wins",
+            "Work delivery receipt state",
             "do not issue another `workspace.update`",
             "`params.status:\"done\"`",
             "exact `chore(work):` prefix",
@@ -482,18 +487,21 @@ mod tests {
 
     #[test]
     fn terminal_delivery_guidance_keeps_english_japanese_and_generated_outputs_in_sync() {
-        for phrase in [
-            "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion",
-            "`chore(work):`",
-            ".gwt/work/events.jsonl",
-        ] {
+        for phrase in ["`chore(work):`", ".gwt/work/events.jsonl"] {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
-            assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
             assert!(
                 render_skill_md().contains(phrase),
                 "generated guidance: {phrase}"
             );
         }
+        assert!(SKILL_BODY_EN.contains("the first terminal state wins"));
+        assert!(SKILL_BODY_JA.contains("最初の terminal state が優先"));
+        assert!(SKILL_BODY_EN.contains("Work delivery receipt state"));
+        assert!(SKILL_BODY_JA.contains("Work delivery receipt"));
     }
 
     #[test]

@@ -11,9 +11,8 @@ use gwt::issue_monitor_worker::{
     scan_loaded_issue_monitor_candidates, LoadedIssueMonitorCandidates,
 };
 use gwt::LinkedIssueKind;
-use gwt_github::issue_auto_claim::{render_claim_comment, ClaimComment, ClaimStatus};
 use gwt_github::{
-    CommentId, CommentSnapshot, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+    CommentSnapshot, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
 };
 use std::{
     fs,
@@ -46,24 +45,6 @@ fn github_issue_number(number: u64, comments: Vec<CommentSnapshot>) -> IssueSnap
 
 fn github_issue(comments: Vec<CommentSnapshot>) -> IssueSnapshot {
     github_issue_number(42, comments)
-}
-
-fn claim_comment(owner: &str) -> CommentSnapshot {
-    let claim = ClaimComment {
-        comment_id: Some(CommentId(9)),
-        claim_id: "claim-other".to_string(),
-        owner: owner.to_string(),
-        issue_number: 42,
-        status: ClaimStatus::Active,
-        heartbeat_at: "2026-06-23T10:00:00Z".to_string(),
-        expires_at: "2026-06-23T10:30:00Z".to_string(),
-        launched_work_id: Some("work/issue-42".to_string()),
-    };
-    CommentSnapshot {
-        id: CommentId(9),
-        body: render_claim_comment(&claim),
-        updated_at: UpdatedAt::new("t1"),
-    }
 }
 
 fn legacy_3272_failure(project_root: &Path) -> String {
@@ -140,7 +121,6 @@ fn monitor_config_defaults_to_disabled_and_accepts_ordinary_open_issues() {
 fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contract() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
-        max_active: 1,
         ..IssueMonitorConfig::default()
     });
     monitor.set_gui_connected(true);
@@ -176,16 +156,11 @@ fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contrac
             .exclusion_reason,
         None
     );
-    assert!(restored
-        .next_launch_request("2026-08-05T00:01:00Z")
-        .is_none());
-
-    assert_eq!(restored.requeue_window("tab::agent-42"), Some(42));
-    assert_eq!(restored.active_count(), 0);
     let second = restored
-        .next_launch_request("2026-08-05T00:02:00Z")
-        .expect("next queued candidate launches after requeue frees the slot");
+        .next_launch_request("2026-08-05T00:01:00Z")
+        .expect("next queued candidate launches without a legacy capacity gate");
     assert_eq!(second.issue_number, 43);
+    assert_eq!(restored.active_count(), 2);
 }
 
 #[test]
@@ -308,7 +283,7 @@ fn claimed_issue_waits_in_queue_until_gui_is_connected() {
 }
 
 #[test]
-fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
+fn monitor_launches_each_ready_item_without_a_capacity_gate() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
@@ -327,57 +302,13 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
         "$gwt-execute #42"
     );
     assert_eq!(monitor.queue_len(), 1);
-    assert!(monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .is_none());
-
-    monitor.complete_active_launch(42, "tab::agent-42");
-    assert_eq!(monitor.active_count(), 1);
-    assert_eq!(
-        monitor.inbox_item(42).expect("inbox item").state,
-        MonitorInboxState::Launched
-    );
-    assert!(
-        monitor
-            .next_launch_request("2026-07-02T00:00:00Z")
-            .is_none(),
-        "launched work still consumes the configured active capacity"
-    );
-
-    monitor.set_max_active_agents(2);
     let second = monitor
         .next_launch_request("2026-07-02T00:00:00Z")
-        .expect("second launch");
+        .expect("second ready item launches immediately");
     assert_eq!(second.issue_number, 43);
     assert_eq!(second.branch_name, "work/issue-43");
-}
-
-#[test]
-fn monitor_allows_active_launches_up_to_configured_max() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
-        enabled: true,
-        max_active: 2,
-        ..IssueMonitorConfig::default()
-    });
-    monitor.set_gui_connected(true);
-    monitor.record_claimed(issue(42, &["bug"]), "claim-a");
-    monitor.record_claimed(issue(43, &["enhancement"]), "claim-b");
-    monitor.record_claimed(issue(44, &["question"]), "claim-c");
-
-    let first = monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .expect("first launch");
-    let second = monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .expect("second launch");
-
-    assert_eq!(first.issue_number, 42);
-    assert_eq!(second.issue_number, 43);
     assert_eq!(monitor.active_count(), 2);
-    assert_eq!(monitor.queue_len(), 1);
-    assert!(monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .is_none());
+    assert_eq!(monitor.queue_len(), 0);
 }
 
 #[test]
@@ -397,22 +328,18 @@ fn monitor_reorders_queued_issues_without_preempting_active_launches() {
 
     monitor.reorder_queued_issues(&[44, 43, 42]);
 
-    let next = monitor.next_launch_request("2026-07-02T00:00:00Z");
-    assert!(next.is_none(), "active launch should not be preempted");
+    let next = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("reordered ready item launches independently");
+    assert_eq!(next.issue_number, 44);
+    assert_eq!(active.issue_number, 42, "the existing launch is unchanged");
     monitor.complete_active_launch(42, "tab::agent-42");
-    assert!(
-        monitor
-            .next_launch_request("2026-07-02T00:00:00Z")
-            .is_none(),
-        "launched work should not free the active slot until capacity changes or the work stops"
-    );
-    monitor.set_max_active_agents(2);
     assert_eq!(
         monitor
             .next_launch_request("2026-07-02T00:00:00Z")
             .expect("next launch")
             .issue_number,
-        44
+        43
     );
 }
 
@@ -433,12 +360,11 @@ fn monitor_reorders_visible_inbox_to_match_queue_priority() {
 }
 
 #[test]
-fn monitor_prefs_persist_priority_and_max_active_agents() {
+fn monitor_prefs_persist_priority() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("issue_monitor.json");
     let prefs = IssueMonitorPrefs {
         enabled: true,
-        max_active_agents: 3,
         priority_order: vec![44, 42, 43],
         launch_profile: None,
         ..IssueMonitorPrefs::default()
@@ -544,7 +470,6 @@ fn failed_launch_marks_inbox_failed_and_clears_active_launch() {
 fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
-        max_active: 2,
         ..IssueMonitorConfig::default()
     });
     monitor.set_gui_connected(true);
@@ -606,7 +531,6 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
 fn agent_runtime_failure_matches_raw_and_combined_window_ids() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
-        max_active: 2,
         ..IssueMonitorConfig::default()
     });
     monitor.set_gui_connected(true);
@@ -628,115 +552,7 @@ fn agent_runtime_failure_matches_raw_and_combined_window_ids() {
 }
 
 #[test]
-fn max_active_increase_allows_more_queued_launches_without_rescan() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
-        enabled: true,
-        max_active: 1,
-        ..IssueMonitorConfig::default()
-    });
-    monitor.set_gui_connected(true);
-    monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
-    monitor.record_claimed(issue(43, &["auto-improve"]), "claim-b");
-    monitor.record_claimed(issue(44, &["auto-improve"]), "claim-c");
-
-    let first = monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .expect("first launch");
-    assert_eq!(first.issue_number, 42);
-    assert!(monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .is_none());
-
-    monitor.set_max_active_agents(3);
-
-    let second = monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .expect("second launch after max increase");
-    let third = monitor
-        .next_launch_request("2026-07-02T00:00:00Z")
-        .expect("third launch after max increase");
-    assert_eq!(second.issue_number, 43);
-    assert_eq!(third.issue_number, 44);
-    assert_eq!(monitor.active_count(), 3);
-    assert_eq!(monitor.queue_len(), 0);
-}
-
-#[test]
-fn claim_capacity_cap_prevents_multiple_preconfigured_launches() {
-    let client = FakeIssueClient::new();
-    client.seed(github_issue_number(42, vec![]));
-    client.seed(github_issue_number(43, vec![]));
-    client.seed(github_issue_number(44, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
-        enabled: true,
-        max_active: 3,
-        ..IssueMonitorConfig::default()
-    });
-    monitor.set_gui_connected(true);
-    scan_issue_monitor_candidates(
-        &mut monitor,
-        &[
-            issue(42, &["bug"]),
-            issue(43, &["enhancement"]),
-            issue(44, &["question"]),
-        ],
-        "2026-06-23T10:01:00Z",
-    );
-
-    let launches = monitor.claim_next_launch_requests_with_active_cap(
-        &client,
-        "host-a/session-a",
-        "2026-06-23T10:01:00Z",
-        1,
-    );
-    let repeated = monitor.claim_next_launch_requests_with_active_cap(
-        &client,
-        "host-a/session-a",
-        "2026-06-23T10:02:00Z",
-        1,
-    );
-
-    assert_eq!(launches.len(), 1);
-    assert_eq!(launches[0].issue_number, 42);
-    assert!(repeated.is_empty());
-    assert_eq!(monitor.active_count(), 1);
-    assert_eq!(monitor.queue_len(), 2);
-}
-
-#[test]
-fn claim_capacity_zero_keeps_queue_visible_without_claiming_or_launching() {
-    let client = FakeIssueClient::new();
-    client.seed(github_issue_number(42, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
-        enabled: true,
-        max_active: 5,
-        ..IssueMonitorConfig::default()
-    });
-    monitor.set_gui_connected(true);
-    scan_issue_monitor_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-06-23T10:01:00Z");
-
-    let launches = monitor.claim_next_launch_requests_with_active_cap(
-        &client,
-        "host-a/session-a",
-        "2026-06-23T10:01:00Z",
-        0,
-    );
-
-    assert!(launches.is_empty());
-    assert_eq!(monitor.active_count(), 0);
-    assert_eq!(monitor.queue_len(), 1);
-    assert_eq!(
-        monitor.inbox_item(42).expect("inbox item").state,
-        MonitorInboxState::Queued
-    );
-    assert!(
-        client.comments(IssueNumber(42)).is_empty(),
-        "capacity 0 must not create a GitHub claim"
-    );
-}
-
-#[test]
-fn blocked_claim_is_visible_in_inbox_without_queueing_launch() {
+fn observed_remote_claim_is_visible_without_blocking_launch() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
@@ -751,13 +567,20 @@ fn blocked_claim_is_visible_in_inbox_without_queueing_launch() {
     ));
 
     let item = monitor.inbox_item(42).expect("inbox item");
-    assert_eq!(item.state, MonitorInboxState::BlockedByClaim);
+    assert_eq!(item.state, MonitorInboxState::Queued);
     assert_eq!(item.blocked_by_owner.as_deref(), Some("other-host/session"));
     assert_eq!(
         item.claim_expires_at.as_deref(),
         Some("2026-06-23T10:30:00Z")
     );
-    assert_eq!(monitor.queue_len(), 0);
+    assert_eq!(monitor.queue_len(), 1);
+    monitor.set_gui_connected(true);
+    assert_eq!(
+        monitor
+            .next_launch_request("2026-06-23T10:00:00Z")
+            .map(|request| request.issue_number),
+        Some(42)
+    );
 }
 
 #[test]
@@ -977,81 +800,6 @@ fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
 }
 
 #[test]
-fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
-    for exclusion in ["not-ready", "hold"] {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
-            enabled: true,
-            ..IssueMonitorConfig::default()
-        });
-        monitor.set_gui_connected(true);
-        let mut candidate = issue(42, &["gwt-spec"]);
-        candidate.readiness = IssueMonitorReadiness::Ready;
-        scan_issue_monitor_candidates(
-            &mut monitor,
-            std::slice::from_ref(&candidate),
-            "2026-08-05T10:00:00Z",
-        );
-        assert_eq!(
-            monitor.prepare_claim_effects_with_probe(
-                "host/session",
-                "2026-08-05T10:00:01Z",
-                1,
-                |_| false,
-            ),
-            1
-        );
-        let key = monitor.pending_effects()[0].attempt_key();
-        assert!(monitor.mark_pending_effect_attempting(&key));
-        let (claim_id, owner) = match &monitor.pending_effects()[0].payload {
-            gwt::IssueMonitorEffectPayload::AcquireClaim {
-                claim_id, owner, ..
-            } => (claim_id.clone(), owner.clone()),
-            other => panic!("expected acquire claim, got {other:?}"),
-        };
-
-        if exclusion == "hold" {
-            candidate.labels.push("hold".to_string());
-        } else {
-            candidate.readiness = IssueMonitorReadiness::NotReady;
-        }
-        scan_issue_monitor_candidates(
-            &mut monitor,
-            std::slice::from_ref(&candidate),
-            "2026-08-05T10:01:00Z",
-        );
-
-        assert!(monitor.pending_effects().iter().any(|effect| {
-            effect.state == gwt::IssueMonitorEffectState::Attempting
-                && matches!(
-                    effect.payload,
-                    gwt::IssueMonitorEffectPayload::AcquireClaim {
-                        issue_number: 42,
-                        ..
-                    }
-                )
-        }));
-        assert!(monitor.pending_effects().iter().any(|effect| matches!(
-            &effect.payload,
-            gwt::IssueMonitorEffectPayload::ReleaseClaim {
-                issue_number: 42,
-                claim_id: pending_claim,
-                owner: pending_owner,
-            } if pending_claim == &claim_id && pending_owner == &owner
-        )));
-        assert!(!monitor.apply_confirmed_claim(
-            42,
-            claim_id,
-            owner,
-            &key.effect_id,
-            "2026-08-05T10:01:01Z",
-        ));
-        assert_eq!(monitor.active_count(), 0);
-        assert!(monitor.take_pending_launch_requests().is_empty());
-        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 0);
-    }
-}
-
-#[test]
 fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
     let protection = gwt_git::branch_protection::BranchProtectionStatus::Absent;
     for exclusion in ["not-ready", "hold"] {
@@ -1237,42 +985,6 @@ fn launch_auth_required_keeps_visible_queue_with_blocking_error() {
 }
 
 #[test]
-fn monitor_claims_queue_head_just_in_time_and_skips_blocked_claims() {
-    let client = FakeIssueClient::new();
-    client.seed(github_issue_number(
-        42,
-        vec![claim_comment("host-b/session-b")],
-    ));
-    client.seed(github_issue_number(43, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
-        enabled: true,
-        ..IssueMonitorConfig::default()
-    });
-    monitor.set_gui_connected(true);
-    scan_issue_monitor_candidates(
-        &mut monitor,
-        &[issue(42, &["bug"]), issue(43, &["enhancement"])],
-        "2026-06-23T10:01:00Z",
-    );
-    assert!(client.comments(IssueNumber(43)).is_empty());
-
-    let launches =
-        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-06-23T10:01:00Z");
-
-    assert_eq!(launches.len(), 1);
-    assert_eq!(launches[0].issue_number, 43);
-    assert_eq!(
-        monitor.inbox_item(42).expect("blocked item").state,
-        MonitorInboxState::BlockedByClaim
-    );
-    assert_eq!(
-        monitor.inbox_item(43).expect("launched item").state,
-        MonitorInboxState::Launching
-    );
-    assert_eq!(client.comments(IssueNumber(43)).len(), 1);
-}
-
-#[test]
 fn pre_3314_prefs_missing_marker_round_trip_without_losing_existing_state() {
     let project_root = Path::new("/tmp/gwt-pre-3314-project");
     let fixture = include_str!("fixtures/issue_monitor_prefs_pre_3314_migration.json")
@@ -1283,7 +995,6 @@ fn pre_3314_prefs_missing_marker_round_trip_without_losing_existing_state() {
 
     assert_eq!(prefs.legacy_git_launch_failure_migration_version, 0);
     assert!(prefs.enabled);
-    assert_eq!(prefs.max_active_agents, 3);
     assert_eq!(prefs.priority_order, vec![43, 42, 99]);
     assert_eq!(prefs.launch_profile.as_ref().unwrap().agent_id, "codex");
     assert_eq!(prefs.launched_issues[0].issue_number, 70);
@@ -1296,6 +1007,7 @@ fn pre_3314_prefs_missing_marker_round_trip_without_losing_existing_state() {
     assert_eq!(prefs.autonomous_records[0].attempts, 2);
 
     let serialized = serde_json::to_string(&prefs).expect("serialize migrated schema");
+    assert!(!serialized.contains("max_active_agents"));
     let round_trip: IssueMonitorPrefs =
         serde_json::from_str(&serialized).expect("round trip deserialize");
     assert_eq!(round_trip, prefs);
@@ -1479,7 +1191,6 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
     let repo = init_resolvable_git_repo();
     let target_message = legacy_3272_failure(repo.path());
     let mut prefs = legacy_failed_prefs(repo.path(), 42);
-    prefs.max_active_agents = 4;
     prefs.priority_order = vec![99, 45, 44, 43, 42];
     prefs
         .launching_issues
@@ -1552,7 +1263,6 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
     );
 
     let after = monitor.prefs();
-    assert_eq!(after.max_active_agents, 4);
     assert_eq!(after.priority_order, vec![99, 45, 44, 43, 42]);
     assert_eq!(after.launching_issues[0].issue_number, 99);
     assert_eq!(after.merged_issues, vec![88]);
@@ -1649,10 +1359,9 @@ fn legacy_failure_migration_is_one_shot_even_when_no_initial_target_exists() {
 }
 
 #[test]
-fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
+fn legacy_3272_recovery_respects_priority_and_delivery_idempotency() {
     let repo = init_resolvable_git_repo();
     let mut prefs = legacy_failed_prefs(repo.path(), 42);
-    prefs.max_active_agents = 2;
     prefs.priority_order = vec![43, 42];
     let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
     monitor.set_gui_connected(true);
@@ -1672,25 +1381,21 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     client.seed(github_issue_number(42, vec![]));
     client.seed(github_issue_number(43, vec![]));
 
-    let first = monitor.claim_next_launch_requests_with_active_cap(
-        &client,
-        "host-a/session-a",
-        "2026-07-21T00:01:00Z",
-        1,
-    );
-    let repeated = monitor.claim_next_launch_requests_with_active_cap(
-        &client,
-        "host-a/session-a",
-        "2026-07-21T00:02:00Z",
-        1,
-    );
+    let first =
+        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-07-21T00:01:00Z");
+    let repeated =
+        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-07-21T00:02:00Z");
 
-    assert_eq!(first.len(), 1);
+    assert_eq!(first.len(), 2);
     assert_eq!(first[0].issue_number, 43, "existing priority path wins");
-    assert!(repeated.is_empty(), "active cap prevents duplicate claim");
-    assert_eq!(monitor.active_count(), 1);
-    assert_eq!(monitor.queue_len(), 1);
-    assert_eq!(client.comments(IssueNumber(43)).len(), 1);
+    assert_eq!(first[1].issue_number, 42);
+    assert!(
+        repeated.is_empty(),
+        "durable delivery prevents duplicate launch"
+    );
+    assert_eq!(monitor.active_count(), 2);
+    assert_eq!(monitor.queue_len(), 0);
+    assert!(client.comments(IssueNumber(43)).is_empty());
     assert!(client.comments(IssueNumber(42)).is_empty());
 }
 
@@ -1765,7 +1470,6 @@ fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             enabled: true,
-            max_active_agents: 2,
             legacy_git_launch_failure_migration_version: 0,
             ..IssueMonitorPrefs::default()
         },
@@ -1774,12 +1478,8 @@ fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox
     scan_issue_monitor_candidates(&mut state, &[issue(99, &["bug"])], "2026-07-21T00:00:00Z");
     let client = FakeIssueClient::new();
     client.seed(github_issue_number(99, vec![]));
-    let launches = state.claim_next_launch_requests_with_active_cap(
-        &client,
-        "host-a/session-a",
-        "2026-07-21T00:00:10Z",
-        1,
-    );
+    let launches =
+        state.claim_next_launch_requests(&client, "host-a/session-a", "2026-07-21T00:00:10Z");
     assert_eq!(launches.len(), 1);
     assert_eq!(state.active_count(), 1);
 
@@ -1878,7 +1578,6 @@ fn newer_disk_failure_adoption_preserves_real_launched_window_across_roundtrip_a
 fn prefs_newer_disk_failure_adoption_preserves_real_launch_and_reconciles_unbound_launch() {
     let mut outgoing = IssueMonitorPrefs {
         enabled: true,
-        max_active_agents: 3,
         legacy_git_launch_failure_migration_version: 0,
         launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,

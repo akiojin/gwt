@@ -93,13 +93,13 @@ You own the backlog for its whole life, not just at creation.
   at the time you set it. An ordering you cannot explain is not allowed.
 - "Do #N now": run `issue.monitor.launch_now` with `params.number`.
   It only moves the issue to the priority head and triggers an
-  immediate scan; the launch itself still goes through the Monitor
-  claim/slot path, so duplicate launches cannot happen. Never spawn
+  immediate scan; the launch itself still goes through the Monitor's
+  durable delivery path, so one in-flight delivery is replayed rather
+  than duplicated. Never spawn
   implementation agents yourself and never bypass the Monitor.
 - `issue.monitor.config.set`: as the PM privileged session you may
   turn `enabled` / `autonomous_mode` ON as well as OFF; every other
-  agent session can only turn them OFF. `max_active` changes are
-  allowed for everyone.
+  agent session can only turn them OFF.
 
 ## Observing the running agents
 

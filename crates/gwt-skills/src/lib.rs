@@ -1438,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+    fn gwt_execute_assets_stay_identical_and_canonical_guidance_owns_terminal_order() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let claude =
             std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
@@ -1451,17 +1451,11 @@ mod tests {
             claude, codex,
             "Claude and Codex gwt-execute guidance must stay byte-identical"
         );
-        for (relative, guidance) in [
-            (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
-            (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
-        ] {
-            assert!(
-                guidance.contains(
-                    "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
-                ),
-                "{relative} must require scoped abort-before-blocked order"
-            );
-        }
+        assert!(
+            crate::coordination_guidance::SKILL_BODY_EN.contains("the first terminal state wins")
+        );
+        assert!(crate::coordination_guidance::SKILL_BODY_EN
+            .contains("callers may settle build and execution in\neither order"));
     }
 
     #[test]

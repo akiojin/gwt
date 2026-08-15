@@ -1397,7 +1397,6 @@ enum IssueMonitorControl {
         issue_number: u64,
         at: String,
     },
-    MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
     /// state. The PM's `launch_now` writes the new priority order to prefs
@@ -1408,7 +1407,6 @@ enum IssueMonitorControl {
     ConfigSet {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
-        max_active_agents: Option<usize>,
     },
     ClaimLaunchDelivery {
         issue_number: u64,
@@ -1733,12 +1731,10 @@ fn try_apply_issue_monitor_control(
         IssueMonitorControl::ConfigSet {
             enabled,
             autonomous_mode,
-            max_active_agents,
         } => {
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
-                || max_active_agents == Some(0)
-                || (enabled.is_none() && autonomous_mode.is_none() && max_active_agents.is_none())
+                || (enabled.is_none() && autonomous_mode.is_none())
             {
                 return None;
             }
@@ -1748,9 +1744,6 @@ fn try_apply_issue_monitor_control(
             }
             if let Some(autonomous_mode) = autonomous_mode {
                 candidate.set_autonomous_mode_with_effect_revocation(autonomous_mode)?;
-            }
-            if let Some(max_active_agents) = max_active_agents {
-                candidate.set_max_active_agents(max_active_agents);
             }
             *monitor = candidate;
             Some(true)
@@ -1894,10 +1887,6 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::Heartbeat { issue_number, at } => {
             monitor.record_autonomous_heartbeat(issue_number, &at);
             false
-        }
-        IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
-            monitor.set_max_active_agents(max_active_agents);
-            true
         }
         IssueMonitorControl::PriorityOrder(issue_numbers) => {
             monitor.set_priority_order(issue_numbers);
@@ -2193,23 +2182,15 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
                 };
-                let max_active_agents = match config.get("max_active_agents") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
-                };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
-                    || max_active_agents == Some(0)
-                    || (enabled.is_none()
-                        && autonomous_mode.is_none()
-                        && max_active_agents.is_none())
+                    || (enabled.is_none() && autonomous_mode.is_none())
                 {
                     return None;
                 }
                 return Some(IssueMonitorControl::ConfigSet {
                     enabled,
                     autonomous_mode,
-                    max_active_agents,
                 });
             }
             // SPEC-3431 FR-006: `scan_now` carries no fields — its presence is
@@ -2250,13 +2231,6 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     reviewed_sha,
                     verdict_raw,
                 });
-            }
-            if let Some(max_active_agents) = payload
-                .get("max_active_agents")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-            {
-                return Some(IssueMonitorControl::MaxActiveAgents(max_active_agents));
             }
             if let Some(claim) = payload.get("claim_launch_delivery") {
                 let issue_number = claim.get("issue_number")?.as_u64()?;
@@ -3438,24 +3412,14 @@ fn scan_issue_monitor_once_blocking(
         )?;
     }
     if loaded.authorizes_remote_effects() && monitor.config.enabled && gui_connected {
-        let active_cap = if monitor.has_launch_profile() {
-            monitor.config.max_active.max(1)
-        } else {
-            0
-        };
-        if monitor.active_count() < active_cap {
-            monitor.try_prepare_claim_effects_with_probe(
-                &monitor_owner,
-                &now,
-                active_cap,
-                |issue_number| {
-                    crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
-                        &owner,
-                        &repo,
-                        issue_number,
-                    )
-                },
-            )?;
+        if monitor.has_launch_profile() {
+            monitor.try_prepare_claim_effects_with_probe(&monitor_owner, &now, |issue_number| {
+                crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
+                    &owner,
+                    &repo,
+                    issue_number,
+                )
+            })?;
         }
     }
     crate::issue_monitor_worker::ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)?;
@@ -4530,7 +4494,7 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let initial = crate::IssueMonitorPrefs {
-            max_active_agents: 1,
+            enabled: true,
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
@@ -4553,7 +4517,7 @@ exit 0
                         "control",
                         serde_json::json!({
                             "config_set": {
-                                "max_active_agents": 3,
+                                "enabled": false,
                             }
                         }),
                         std::process::id().wrapping_add(1),
@@ -4593,7 +4557,7 @@ exit 0
         .expect("deserialize agent projection");
 
         assert_eq!(projected, monitor.agent_status());
-        assert_eq!(projected.max_active, 3);
+        assert!(!projected.enabled);
     }
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
@@ -5320,7 +5284,6 @@ exit 0
                 },
                 false,
             ),
-            ("max active", IssueMonitorControl::MaxActiveAgents(7), true),
             (
                 "priority",
                 IssueMonitorControl::PriorityOrder(vec![42]),
@@ -5962,7 +5925,6 @@ exit 0
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig {
                     enabled: true,
-                    max_active: 2,
                     ..crate::IssueMonitorConfig::default()
                 },
                 crate::IssueMonitorPrefs {
@@ -6091,7 +6053,7 @@ exit 0
                 monitor
                     .next_launch_request("2026-08-13T00:00:02Z")
                     .is_none(),
-                "capacity remains for a second launch, so None proves the duplicate control did not leave another queued successor"
+                "None proves the duplicate control did not leave another queued successor"
             );
             let duplicate_effect_id = format!("effect-42-{control_name}-duplicate");
             assert!(
@@ -6237,17 +6199,11 @@ exit 0
     }
 
     #[test]
-    fn issue_monitor_runtime_controls_request_immediate_scan_when_launch_order_changes() {
+    fn issue_monitor_priority_control_requests_immediate_scan() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
-            max_active: 1,
             ..crate::IssueMonitorConfig::default()
         });
-
-        let should_scan =
-            apply_issue_monitor_control(&mut monitor, IssueMonitorControl::MaxActiveAgents(5));
-        assert!(should_scan);
-        assert_eq!(monitor.status_view().max_active_agents, 5);
 
         let should_scan = apply_issue_monitor_control(
             &mut monitor,
@@ -6277,7 +6233,6 @@ exit 0
         let prefs = crate::IssueMonitorPrefs {
             enabled: true,
             autonomous_mode: true,
-            max_active_agents: 3,
             priority_order: vec![9, 4],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -6303,7 +6258,6 @@ exit 0
                 "config_set": {
                     "enabled": false,
                     "autonomous_mode": false,
-                    "max_active_agents": 4,
                 }
             }),
             std::process::id() + 1,
@@ -6314,7 +6268,6 @@ exit 0
             IssueMonitorControl::ConfigSet {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
-                max_active_agents: Some(4),
             }
         );
 
@@ -6338,7 +6291,6 @@ exit 0
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         assert!(!persisted.enabled);
         assert!(!persisted.autonomous_mode);
-        assert_eq!(persisted.max_active_agents, 4);
         assert_eq!(persisted.effect_authority_epoch, 9);
     }
 
@@ -6347,7 +6299,6 @@ exit 0
         for config_set in [
             serde_json::json!({"enabled": true}),
             serde_json::json!({"autonomous_mode": true}),
-            serde_json::json!({"max_active_agents": 0}),
             serde_json::json!({}),
         ] {
             let payload = crate::runtime_daemon_events::issue_monitor_payload(
@@ -6366,7 +6317,6 @@ exit 0
         let initial = crate::IssueMonitorPrefs {
             enabled: true,
             autonomous_mode: true,
-            max_active_agents: 1,
             effect_authority_epoch: u64::MAX,
             ..crate::IssueMonitorPrefs::default()
         };
@@ -6383,7 +6333,6 @@ exit 0
             IssueMonitorControl::ConfigSet {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
-                max_active_agents: Some(4),
             },
         ));
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
@@ -6625,7 +6574,6 @@ exit 0
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
-                max_active_agents: 1,
                 launch_profile: Some(sample_issue_monitor_profile()),
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -6997,28 +6945,16 @@ exit 0
             })
             .await
             .is_ok();
-        let max_active_queued = hub
-            .publish_issue_monitor_control(DaemonFrame::Event {
-                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
-                payload: crate::runtime_daemon_events::issue_monitor_payload(
-                    "control",
-                    serde_json::json!({"max_active_agents": 7}),
-                    source_pid,
-                ),
-            })
-            .await
-            .is_ok();
-
         let responsive_status = recv_issue_monitor_status_matching(
             &mut status_rx,
             Duration::from_millis(500),
-            |status| status.max_active_agents == 7,
+            |status| status.enabled,
         )
         .await;
         let tick_status = recv_issue_monitor_status_matching(
             &mut status_rx,
             Duration::from_millis(1_500),
-            |status| status.max_active_agents == 7,
+            |status| status.enabled,
         )
         .await;
         let scans_started_while_blocked = fs::read_to_string(&scan_started_path)
@@ -7048,7 +6984,7 @@ exit 0
         fs::write(&release_scan_path, b"release").expect("release fake gh scan");
         let settled_status =
             recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(3), |status| {
-                status.max_active_agents == 7 && status.last_scan_at.is_some()
+                status.last_scan_at.is_some()
             })
             .await;
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
@@ -7082,7 +7018,6 @@ exit 0
         // poison unrelated env tests in the same test binary.
         assert!(scan_started, "fake gh scan must be in flight");
         assert!(heartbeat_queued, "worker must receive controls");
-        assert!(max_active_queued, "worker must receive controls");
         assert!(disabled_queued, "OFF control must reach the worker");
         assert!(
             responsive_status.is_some(),
@@ -7824,7 +7759,7 @@ exit 1
                         .to_string(),
                     payload: crate::runtime_daemon_events::issue_monitor_payload(
                         "control",
-                        serde_json::json!({"config_set": {"max_active_agents": 2}}),
+                        serde_json::json!({"config_set": {"enabled": false}}),
                         std::process::id().wrapping_add(1),
                     ),
                 })
@@ -8493,7 +8428,7 @@ exit 1
             crate::IssueMonitorConfig::default(),
             initial.clone(),
         );
-        late.set_max_active_agents(9);
+        late.set_priority_order(vec![9]);
         let handle = tokio::task::spawn_blocking(move || {
             started_tx.send(()).expect("signal started scan");
             release_rx.recv().expect("release scan");
@@ -8541,7 +8476,7 @@ exit 1
         let late_result = result
             .expect("late scan task joins")
             .expect("late scan result remains inspectable");
-        assert_eq!(late_result.status_view().max_active_agents, 9);
+        assert_eq!(late_result.prefs().priority_order, vec![9]);
         let revision_after_watchdog = 8;
         assert!(!super::accept_completed_issue_monitor_scan(
             &prefs_path,
@@ -8552,12 +8487,10 @@ exit 1
             captured_epoch,
             captured_deadline,
         ));
-        assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path)
-                .expect("late result not persisted")
-                .max_active_agents,
-            1
-        );
+        assert!(crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("late result not persisted")
+            .priority_order
+            .is_empty());
         assert!(canonical
             .status_view()
             .last_error
@@ -10896,7 +10829,6 @@ exit 1
             &prefs_path,
             &crate::IssueMonitorPrefs {
                 enabled: true,
-                max_active_agents: 4,
                 priority_order: vec![99, 42],
                 merged_issues: vec![88],
                 autonomous_mode: true,
@@ -10913,7 +10845,6 @@ exit 1
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: false,
-                max_active_agents: 1,
                 priority_order: vec![42],
                 merged_issues: vec![77],
                 autonomous_mode: false,
@@ -10927,7 +10858,6 @@ exit 1
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload daemon state");
         for prefs in [&persisted, &daemon.prefs()] {
             assert!(prefs.enabled, "latest disk enabled flag wins");
-            assert_eq!(prefs.max_active_agents, 4);
             assert_eq!(prefs.priority_order, vec![99, 42]);
             assert!(prefs.autonomous_mode);
             assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
@@ -10951,7 +10881,6 @@ exit 1
         };
         let mut stale_prefs = legacy_failed_prefs(temp.path());
         stale_prefs.enabled = true;
-        stale_prefs.max_active_agents = 3;
         stale_prefs.priority_order = vec![99, 43];
         stale_prefs.autonomous_mode = true;
         stale_prefs.failed_issues.push(unrelated_failure.clone());
@@ -11034,7 +10963,6 @@ exit 1
             assert_eq!(prefs.launch_profile.as_ref(), Some(&disk_profile));
             assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
             assert!(!prefs.enabled, "latest committed disk config wins");
-            assert_eq!(prefs.max_active_agents, 1);
             assert!(prefs.priority_order.is_empty());
             assert!(!prefs.autonomous_mode);
             assert_eq!(
@@ -11914,7 +11842,7 @@ exit 1
                         .to_string(),
                     payload: crate::runtime_daemon_events::issue_monitor_payload(
                         "control",
-                        serde_json::json!({"max_active_agents": 4}),
+                        serde_json::json!({"priority_order": [4]}),
                         source_pid,
                     ),
                 })
@@ -11953,7 +11881,6 @@ exit 1
         assert!(queued_result.is_err());
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
         assert!(persisted.enabled, "uncommitted OFF is never acknowledged");
-        assert_eq!(persisted.max_active_agents, 1);
     }
 
     #[tokio::test]
@@ -11977,14 +11904,8 @@ exit 1
         )
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        crate::save_issue_monitor_prefs(
-            &prefs_path,
-            &crate::IssueMonitorPrefs {
-                max_active_agents: 1,
-                ..crate::IssueMonitorPrefs::default()
-            },
-        )
-        .expect("seed prefs");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let shutdown = Arc::new(DaemonShutdown::new());
@@ -11999,14 +11920,14 @@ exit 1
             Duration::from_secs(1),
         );
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
-        let publish = |hub: BroadcastHub, max_active_agents| {
+        let publish = |hub: BroadcastHub, issue_number| {
             tokio::spawn(async move {
                 hub.publish_issue_monitor_control(DaemonFrame::Event {
                     channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
                         .to_string(),
                     payload: crate::runtime_daemon_events::issue_monitor_payload(
                         "control",
-                        serde_json::json!({"max_active_agents": max_active_agents}),
+                        serde_json::json!({"priority_order": [issue_number]}),
                         std::process::id().wrapping_add(1),
                     ),
                 })
@@ -12030,12 +11951,10 @@ exit 1
             "retryable routine receipt stays pending"
         );
         assert!(!second.is_finished(), "FIFO successor stays pending");
-        assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path)
-                .expect("load unchanged prefs")
-                .max_active_agents,
-            1
-        );
+        assert!(crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("load unchanged prefs")
+            .priority_order
+            .is_empty());
 
         FileExt::unlock(&lock).expect("release prefs lock");
         first
@@ -12049,8 +11968,8 @@ exit 1
         assert_eq!(
             crate::load_issue_monitor_prefs(&prefs_path)
                 .expect("reload committed prefs")
-                .max_active_agents,
-            7,
+                .priority_order,
+            vec![7],
             "routine controls commit in accepted FIFO order"
         );
         shutdown.request();

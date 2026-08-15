@@ -233,11 +233,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
-            let max_active = optional_usize(params, "max_active")?;
-            if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
-                return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active",
-                ));
+            if enabled.is_none() && autonomous_mode.is_none() {
+                return Err(CliParseError::MissingFlag("enabled|autonomous_mode"));
             }
             // SPEC-3431 FR-008/FR-009: Issue #3357's asymmetric boundary keeps
             // applying to every agent session — raising a switch stays a GUI
@@ -257,16 +254,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     ));
                 }
             }
-            if max_active == Some(0) {
-                return Err(CliParseError::InvalidJson(
-                    "max_active must be greater than zero".to_string(),
-                ));
-            }
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
                 project_root: optional_path(params, "project_root")?,
                 enabled,
                 autonomous_mode,
-                max_active,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -494,6 +485,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         operation: envelope.operation,
         command,
     })
+}
+
+/// Return whether an operation name is owned by the JSON-envelope router.
+/// Parameter validation errors still prove that the route exists; only the
+/// explicit unknown-subcommand result means an advertised recovery is not
+/// executable through the canonical operation surface.
+pub(crate) fn operation_is_registered(operation: &str) -> bool {
+    let input = serde_json::json!({
+        "schema_version": 1,
+        "operation": operation,
+        "params": {},
+    })
+    .to_string();
+    !matches!(parse(&input), Err(CliParseError::UnknownSubcommand(_)))
 }
 
 fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1863,7 +1868,6 @@ mod tests {
                 project_root: Some(project_root.clone()),
                 enabled: None,
                 autonomous_mode: Some(true),
-                max_active: None,
             })
         );
 
@@ -2132,13 +2136,12 @@ mod tests {
         assert_eq!(
             ok(
                 "issue.monitor.config.set",
-                json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
+                json!({"enabled": false, "autonomous_mode": false})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
                 project_root: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
-                max_active: Some(3),
             })
         );
     }
@@ -2149,6 +2152,7 @@ mod tests {
             json!({}),
             json!({"enabled": true}),
             json!({"max_active": 0}),
+            json!({"max_active": 3}),
         ] {
             assert!(matches!(
                 err("issue.monitor.config.set", params),

@@ -81,7 +81,6 @@ export function createKnowledgeKanbanSurface({
         state: "disabled",
         queue_len: 0,
         active_count: 0,
-        max_active_agents: 1,
         total_candidates: 0,
         autonomous_mode: false,
       };
@@ -115,16 +114,12 @@ export function createKnowledgeKanbanSurface({
       function renderIssueMonitorControls(element) {
         const panel = element?.querySelector(".knowledge-monitor-panel");
         if (!panel) return;
-        const maxActive = Math.max(
-          1,
-          Number.parseInt(String(issueMonitorStatus.max_active_agents || 1), 10) || 1,
-        );
         const summary = panel.querySelector(".knowledge-monitor-summary");
         if (summary) {
           const parts = [
             issueMonitorStateText(issueMonitorStatus.state),
             `Queue ${issueMonitorStatus.queue_len || 0}`,
-            `Active ${issueMonitorStatus.active_count || 0}/${maxActive}`,
+            `Active ${issueMonitorStatus.active_count || 0}`,
           ];
           if (issueMonitorStatus.total_candidates) {
             parts.push(`Total ${issueMonitorStatus.total_candidates}`);
@@ -139,10 +134,6 @@ export function createKnowledgeKanbanSurface({
           const profile =
             issueMonitorStatus.launch_profile_summary || "configure before auto start";
           settings.textContent = `Agent settings ${source}: ${profile}`;
-        }
-        const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
-        if (maxActiveInput && document.activeElement !== maxActiveInput) {
-          maxActiveInput.value = String(maxActive);
         }
         const toggle = panel.querySelector('[data-action="monitor-toggle"]');
         if (toggle) {
@@ -203,18 +194,6 @@ export function createKnowledgeKanbanSurface({
           ?.addEventListener("click", () => {
             send({ kind: "issue_monitor_configure_profile" });
           });
-        const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
-        maxActiveInput?.addEventListener("change", () => {
-          const value = Math.max(
-            1,
-            Number.parseInt(String(maxActiveInput.value || "1"), 10) || 1,
-          );
-          maxActiveInput.value = String(value);
-          send({
-            kind: "set_issue_monitor_max_active_agents",
-            max_active_agents: value,
-          });
-        });
         panel
           .querySelector('[data-action="monitor-toggle"]')
           ?.addEventListener("click", () => {
@@ -2500,15 +2479,11 @@ export function createKnowledgeKanbanSurface({
                 </div>
                 <section class="knowledge-monitor-panel" aria-label="Issue execution monitor">
                   <div class="knowledge-monitor-overview">
-                    <div class="knowledge-monitor-summary" aria-live="polite">Stopped | Queue 0 | Active 0/1</div>
+                    <div class="knowledge-monitor-summary" aria-live="polite">Stopped | Queue 0 | Active 0</div>
                     <div class="knowledge-monitor-settings-copy">Agent settings Missing saved profile: configure before auto start</div>
                   </div>
                   <div class="knowledge-monitor-controls">
                     <button type="button" class="wizard-button" data-action="monitor-settings">Agent settings</button>
-                    <label class="knowledge-monitor-max-active">
-                      <span>Max active</span>
-                      <input type="number" min="1" step="1" value="1" />
-                    </label>
                     <button type="button" class="wizard-button primary" data-action="monitor-toggle">Start</button>
                     <button type="button" class="wizard-button" data-action="monitor-autonomous">Autonomous: OFF</button>
                   </div>

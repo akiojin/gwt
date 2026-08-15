@@ -189,11 +189,10 @@ fn answering_a_handoff_resumes_the_same_session_without_a_duplicate_launch() {
     );
 }
 
-/// AC-4/AC-8 (the point of the whole change): parking one Issue on a question
-/// lets the Monitor launch the NEXT ready Issue on the same pass, instead of
-/// the queue stalling until the stuck timeout expires.
+/// AC-4/AC-8: parking one Issue on a question does not disturb another ready
+/// Issue that was delivered independently.
 #[test]
-fn parking_a_question_lets_the_next_ready_issue_launch_immediately() {
+fn parking_a_question_preserves_the_independently_launched_next_issue() {
     let mut monitor = autonomous_monitor();
     monitor.set_gui_connected(true);
     let blocked = auto_issue(42);
@@ -202,20 +201,19 @@ fn parking_a_question_lets_the_next_ready_issue_launch_immediately() {
     monitor.prepare_autonomous_candidate(&blocked, &verified(), NOW);
     monitor.complete_active_launch(42, "tab-1::agent-1");
 
-    // max_active is 1: while #42 holds the slot nothing else can start.
     assert_eq!(monitor.active_count(), 1);
-    assert!(
-        monitor.next_launch_request(NOW).is_none(),
-        "the queue is stalled while the question-blocked issue holds the slot"
-    );
+    let next = monitor
+        .next_launch_request(NOW)
+        .expect("the next ready issue launches without a capacity gate");
+    assert_eq!(next.issue_number, 43);
 
     monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);
     monitor.apply_pending_autonomous_handoffs(NOW);
 
-    let next = monitor
-        .next_launch_request(NOW)
-        .expect("the freed slot admits the next ready issue");
-    assert_eq!(next.issue_number, 43);
+    assert_eq!(
+        monitor.inbox_item(43).map(|item| item.state),
+        Some(MonitorInboxState::Launching)
+    );
 }
 
 /// AC-5: the answer is delivered to the resumed launch exactly once, so a

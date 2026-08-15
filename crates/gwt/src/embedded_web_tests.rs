@@ -249,12 +249,13 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
 }
 
 #[test]
-fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
+fn embedded_web_issue_surface_exposes_priority_without_capacity_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
 
     assert!(
-        surface_js.contains("set_issue_monitor_max_active_agents"),
-        "Issue Monitor must let users change max active agents"
+        !surface_js.contains("set_issue_monitor_max_active_agents")
+            && !surface_js.contains("knowledge-monitor-max-active"),
+        "Issue Monitor must not expose a launch capacity gate"
     );
     assert!(
         surface_js.contains("reorder_issue_monitor_issues"),

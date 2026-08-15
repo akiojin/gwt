@@ -134,6 +134,12 @@ fn finalize(
         ));
         return Ok(2);
     }
+    if !current.active {
+        out.push_str(&format!(
+            "{verb}: {skill_display} is already terminal for SPEC-{spec}; keeping the first terminal state\n"
+        ));
+        return Ok(0);
+    }
     let next = SkillState {
         active: false,
         phase: reason
@@ -157,6 +163,98 @@ fn finalize(
         Err(err) => {
             out.push_str(&format!("{verb}: finalize failed: {err}\n"));
             Ok(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_terminal_state_wins_and_later_terminal_calls_are_idempotent() {
+        for complete_first in [true, false] {
+            let worktree = tempfile::tempdir().unwrap();
+            skill_state::save(
+                worktree.path(),
+                "build-spec",
+                &SkillState {
+                    active: true,
+                    owner_spec: Some(3590),
+                    started_at: Utc::now(),
+                    phase: None,
+                    session_id: "session-terminal-order".to_string(),
+                },
+            )
+            .unwrap();
+            let mut out = String::new();
+            if complete_first {
+                assert_eq!(
+                    finalize(
+                        worktree.path(),
+                        "build-spec",
+                        "gwt-build-spec",
+                        "build",
+                        3590,
+                        None,
+                        &mut out,
+                    )
+                    .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    finalize(
+                        worktree.path(),
+                        "build-spec",
+                        "gwt-build-spec",
+                        "build",
+                        3590,
+                        Some("late abort".to_string()),
+                        &mut out,
+                    )
+                    .unwrap(),
+                    0
+                );
+            } else {
+                assert_eq!(
+                    finalize(
+                        worktree.path(),
+                        "build-spec",
+                        "gwt-build-spec",
+                        "build",
+                        3590,
+                        Some("first abort".to_string()),
+                        &mut out,
+                    )
+                    .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    finalize(
+                        worktree.path(),
+                        "build-spec",
+                        "gwt-build-spec",
+                        "build",
+                        3590,
+                        None,
+                        &mut out,
+                    )
+                    .unwrap(),
+                    0
+                );
+            }
+            let state = skill_state::load(worktree.path(), "build-spec")
+                .unwrap()
+                .unwrap();
+            assert!(!state.active);
+            assert_eq!(
+                state.phase,
+                if complete_first {
+                    None
+                } else {
+                    Some("aborted: first abort".to_string())
+                }
+            );
         }
     }
 }

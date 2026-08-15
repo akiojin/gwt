@@ -215,7 +215,7 @@ test.describe("Issue Bridge load recovery", () => {
     );
     await expect(issueSurface.locator("button button")).toHaveCount(0);
     await expect(issueSurface.locator(".knowledge-monitor-summary")).toContainText(
-      "Queue 3 | Active 1/2",
+      "Queue 3 | Active 1",
     );
 
     await issueSurface
@@ -224,8 +224,7 @@ test.describe("Issue Bridge load recovery", () => {
     await issueSurface
       .locator('[data-issue-number="3095"] [data-action="move-up"]')
       .click();
-    await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
-    await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
+    await expect(issueSurface.locator(".knowledge-monitor-max-active")).toHaveCount(0);
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
     await issueSurface.locator('[data-action="monitor-autonomous"]').click();
     await issueSurface.locator('[data-action="monitor-settings"]').click();
@@ -243,10 +242,6 @@ test.describe("Issue Bridge load recovery", () => {
     expect(messages).toContainEqual({
       kind: "reorder_issue_monitor_issues",
       issue_numbers: [3095, 3273, 3094],
-    });
-    expect(messages).toContainEqual({
-      kind: "set_issue_monitor_max_active_agents",
-      max_active_agents: 4,
     });
     expect(messages).toContainEqual({
       kind: "set_issue_monitor_enabled",
@@ -1475,7 +1470,6 @@ async function installIssueBridgeBackend(
                 state: "disabled",
                 queue_len: 3,
                 active_count: 1,
-                max_active_agents: 2,
                 total_candidates: 5,
                 autonomous_mode: false,
                 launch_profile_source: "saved",

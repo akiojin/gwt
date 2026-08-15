@@ -515,6 +515,43 @@ fn sample_work_event(work_id: &str, updated_at: chrono::DateTime<chrono::Utc>) -
     event.title = Some(format!("title {work_id}"));
     event
 }
+
+#[test]
+fn concurrent_sessions_append_work_events_without_loss_or_order_dependency() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let events_path = Arc::new(temp.path().join(".gwt/work/events.jsonl"));
+    let barrier = Arc::new(Barrier::new(3));
+    let timestamp = chrono::Utc::now();
+
+    std::thread::scope(|scope| {
+        for session in ["session-a", "session-b"] {
+            let events_path = Arc::clone(&events_path);
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                let event = sample_work_event(session, timestamp);
+                barrier.wait();
+                append_workspace_work_event_to_path(&events_path, &event)
+                    .expect("append concurrent Work event");
+            });
+        }
+        barrier.wait();
+    });
+
+    let mut work_ids = fs::read_to_string(events_path.as_ref())
+        .expect("read concurrent event log")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<WorkEvent>(line)
+                .expect("each append remains one complete JSON record")
+                .work_item_id
+        })
+        .collect::<Vec<_>>();
+    work_ids.sort();
+    assert_eq!(work_ids, ["session-a", "session-b"]);
+}
+
 /// SPEC-2359 Phase W-11 (US-58 / SC-228): the one-time reset clears
 /// legacy title_summary / current_focus exactly once (version-guarded),
 /// later runs are a no-op, and agent-authored values written after the

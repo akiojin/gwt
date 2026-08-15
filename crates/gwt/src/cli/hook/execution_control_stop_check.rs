@@ -50,8 +50,8 @@ pub fn handle_with_input(
             ),
         );
         let repair = execution_state::integrity_repair_guidance(record.status);
-        return HookOutput::stop_block(format!(
-            "Execution control record failed integrity validation: it was edited outside the canonical operations. {repair}{capture_note}",
+        return HookOutput::system_message(format!(
+            "Warning: execution control record failed integrity validation: it was edited outside the canonical operations. {repair}{capture_note} Stop is not blocked by this bookkeeping state.",
         ));
     }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
@@ -72,12 +72,12 @@ pub fn handle_with_input(
         kind = record.owner_kind.as_str(),
         number = record.owner_number
     );
-    HookOutput::stop_block(format!(
-        "Execution for {owner} is still active (execution control record, entrypoint {entrypoint}).\n\
+    HookOutput::system_message(format!(
+        "Warning: execution for {owner} is still active (execution control record, entrypoint {entrypoint}).\n\
          Continue the execution workflow until the owner's scope is implemented, verified, and handed off. Settle the execution before stopping:\n\
          - done and verified: run JSON operation `execution.complete` (a successful `build.complete` with `params.spec:<n>` also settles it for gwt-build-spec flows), or\n\
          - blocked by the environment or missing verification: run JSON operation `execution.blocked` with a non-empty `params.reason` and optional `params.missing_verification`. Blocked is not done — report the blocker.\n\
-         Do not settle as complete without the verification evidence the owner requires.",
+         Do not settle as complete without the verification evidence the owner requires. Stop is not blocked by this bookkeeping state.",
         entrypoint = record.entrypoint,
     ))
 }
@@ -95,10 +95,8 @@ mod tests {
         dir
     }
 
-    // T-108: an active launch-written record blocks Stop even though
-    // build.start was never called.
     #[test]
-    fn active_record_blocks_stop_without_skill_state() {
+    fn active_record_warns_without_blocking_stop() {
         let dir = mk_worktree();
         materialize_at_launch(
             dir.path(),
@@ -111,8 +109,8 @@ mod tests {
         .unwrap();
 
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected StopBlock, got {output:?}");
+        let HookOutput::SystemMessage(reason) = output else {
+            panic!("expected SystemMessage, got {output:?}");
         };
         assert!(reason.contains("issue #42"), "{reason}");
         assert!(reason.contains("execution.complete"), "{reason}");
@@ -210,11 +208,11 @@ mod tests {
         );
     }
 
-    // T-124: a tampered record does not just block — repeated tamper blocks
-    // auto-capture one deduped issue-spec-workflow improvement candidate
+    // T-124: repeated tamper warnings auto-capture one deduped
+    // issue-spec-workflow improvement candidate
     // (same dedupe key across repeats, no secrets in the summary).
     #[test]
-    fn tampered_record_block_captures_improvement_candidate() {
+    fn tampered_record_warning_captures_improvement_candidate() {
         // The capture store lives under gwt home; scope it thread-locally so
         // parallel tests flipping HOME cannot split the two captures across
         // different stores (ScopedGwtHome doc convention).
@@ -238,8 +236,8 @@ mod tests {
 
         for expected_occurrences in [1u64, 2u64] {
             let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
-            let HookOutput::StopBlock { reason } = output else {
-                panic!("expected StopBlock, got {output:?}");
+            let HookOutput::SystemMessage(reason) = output else {
+                panic!("expected SystemMessage, got {output:?}");
             };
             assert!(reason.contains("integrity validation"), "{reason}");
             assert!(reason.contains("Self-improvement candidate"), "{reason}");
@@ -281,9 +279,9 @@ mod tests {
             .replace("temporary dependency", "forged dependency");
         std::fs::write(&path, tampered).unwrap();
 
-        let HookOutput::StopBlock { reason } = handle_with_input(dir.path(), "{}", Some("sess-1"))
+        let HookOutput::SystemMessage(reason) = handle_with_input(dir.path(), "{}", Some("sess-1"))
         else {
-            panic!("expected StopBlock");
+            panic!("expected SystemMessage");
         };
         assert!(reason.contains("execution.repair"), "{reason}");
         assert!(reason.contains("quarantines"), "{reason}");
@@ -294,9 +292,9 @@ mod tests {
     }
 
     // SPEC #3245 FR-007: the former intake-lane exclusion is gone — a
-    // launch-written record gates Stop uniformly in every worktree.
+    // launch-written record warns uniformly in every worktree.
     #[test]
-    fn former_intake_worktree_gates_like_any_other() {
+    fn former_intake_worktree_warns_like_any_other() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -313,9 +311,9 @@ mod tests {
         assert!(
             matches!(
                 handle_with_input(dir.path(), "{}", Some("sess-1")),
-                HookOutput::StopBlock { .. }
+                HookOutput::SystemMessage(_)
             ),
-            "the execution control record gates uniformly after the lane removal"
+            "the execution control record must not block Stop"
         );
     }
 }
