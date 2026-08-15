@@ -476,6 +476,7 @@ mod monitor_snapshot_cache_tests {
                 body: None,
                 url: None,
                 readiness: gwt::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             state,
             claim_id: None,

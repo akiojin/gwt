@@ -1192,6 +1192,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 state
                 url
                 body
+                mergedAt
               }
             }
           }
@@ -1204,6 +1205,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 state
                 url
                 body
+                mergedAt
               }
             }
           }
@@ -1299,14 +1301,22 @@ pub(crate) fn parse_linked_pr_nodes(
         let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
+        let merged_at = pr
+            .get("mergedAt")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         if let Some(existing) = index.get(&pr_number) {
             out[*existing].will_close_target |= will_close_target;
+            if out[*existing].merged_at.is_none() {
+                out[*existing].merged_at = merged_at;
+            }
             continue;
         }
         index.insert(pr_number, out.len());
         out.push(LinkedPrSummary {
             number: pr_number,
             will_close_target,
+            merged_at,
             title: pr
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -1405,7 +1415,7 @@ mod tests {
         // body (`Closes #N` — the gwt PR-body contract).
         let value = serde_json::json!({"data":{"repository":{"issue":{"timelineItems":{"nodes":[
             {"__typename":"CrossReferencedEvent","willCloseTarget":true,
-             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":""}},
+             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":"","mergedAt":"2026-08-10T00:00:00Z"}},
             {"__typename":"CrossReferencedEvent","willCloseTarget":false,
              "source":{"__typename":"PullRequest","number":11,"title":"refs only","state":"MERGED","url":"u11","body":"Related to #42 (no closing keyword)"}},
             {"__typename":"ConnectedEvent",
@@ -1420,6 +1430,7 @@ mod tests {
         let prs = parse_linked_pr_nodes(&value, 42);
         let get = |n: u64| prs.iter().find(|pr| pr.number == n).expect("pr");
         assert!(get(10).will_close_target, "GraphQL willCloseTarget");
+        assert_eq!(get(10).merged_at.as_deref(), Some("2026-08-10T00:00:00Z"));
         assert!(!get(11).will_close_target, "plain reference must NOT close");
         assert!(
             get(12).will_close_target,
@@ -1862,12 +1873,75 @@ mod tests {
                 // regardless of whether the daemon happens to be publishing.
                 "needs_human": [],
                 "inbox": [
-                    { "issue_number": 2, "state": "queued" },
-                    { "issue_number": 1, "state": "queued" },
+                    {
+                        "issue_number": 2,
+                        "state": "queued",
+                        "github_state": "open",
+                        "issue_updated_at": "2026-08-03T00:00:00Z",
+                        "readiness": "not_applicable",
+                        "recoverable_merged": false,
+                    },
+                    {
+                        "issue_number": 1,
+                        "state": "queued",
+                        "github_state": "open",
+                        "issue_updated_at": "2026-08-03T00:00:00Z",
+                        "readiness": "not_applicable",
+                        "recoverable_merged": false,
+                    },
                 ],
                 "last_scan_at": "gwtd-status",
             })
         );
+    }
+
+    #[test]
+    fn issue_monitor_status_exposes_recoverable_legacy_merged_evidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version: 0,
+                completion_records: Vec::new(),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save legacy prefs");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(42),
+                title: "Still open".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                updated_at: UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write cache");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(status["inbox"][0]["issue_number"], 42);
+        assert_eq!(status["inbox"][0]["github_state"], "open");
+        assert_eq!(status["inbox"][0]["state"], "merged");
+        assert_eq!(status["inbox"][0]["recoverable_merged"], true);
+        assert_eq!(status["inbox"][0]["completion_reason"], "legacy_unverified");
     }
 
     #[test]
@@ -2427,6 +2501,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://github.com/akiojin/gwt/pull/128".to_string(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         let linked =
