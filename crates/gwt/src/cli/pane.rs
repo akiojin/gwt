@@ -12,7 +12,8 @@ use tokio_tungstenite::{
     tungstenite::{
         client::IntoClientRequest,
         http::{header::AUTHORIZATION, HeaderValue},
-        Message,
+        protocol::frame::coding::CloseCode,
+        Error as WebSocketError, Message,
     },
 };
 
@@ -32,11 +33,124 @@ const DEFAULT_READ_LINES: usize = 50;
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
 const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
+const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
 const PM_TARGET_REFUSAL: &str =
     "pm.message.send refused: target is not an authorized live agent pane";
 
 type PaneWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// SPEC-3431 FR-124: ask the authenticated GUI authority for one project
+/// Monitor scan. The request intentionally carries no project path; the
+/// agent WebSocket principal is the sole scope authority.
+#[cfg_attr(unix, allow(dead_code))]
+pub(super) fn request_issue_monitor_scan_now(project_root: &Path) -> Result<(), String> {
+    let ws_url = pane_websocket_url_from_env().map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor GUI command endpoint is unavailable");
+        "gui_command_unavailable".to_string()
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to create Issue Monitor GUI command runtime");
+            "gui_command_unavailable".to_string()
+        })?;
+    let expected_project_scope = gwt_core::paths::project_scope_hash(project_root);
+    runtime.block_on(request_issue_monitor_scan_now_async(
+        &ws_url,
+        expected_project_scope.as_str(),
+    ))
+}
+
+async fn request_issue_monitor_scan_now_async(
+    ws_url: &str,
+    expected_project_scope: &str,
+) -> Result<(), String> {
+    let request = pane_websocket_request(ws_url).map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor GUI command request is unavailable");
+        "gui_command_unavailable".to_string()
+    })?;
+    let mut socket = connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(|error| {
+            let code = issue_monitor_scan_connect_error(&error);
+            tracing::warn!(%error, code, "Issue Monitor GUI command connection failed");
+            code.to_string()
+        })?;
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "agent_issue_monitor_scan_now",
+            "expected_project_scope": expected_project_scope,
+        }),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor GUI scan request failed");
+        "scan_delivery_unknown".to_string()
+    })?;
+    tokio::time::timeout(ISSUE_MONITOR_SCAN_RESULT_DEADLINE, async {
+        loop {
+            let value = next_issue_monitor_scan_json(&mut socket).await?;
+            let Some(reply) = parse_issue_monitor_scan_result(&value).map_err(|error| {
+                tracing::warn!(%error, "Issue Monitor GUI scan response was invalid");
+                "scan_delivery_unknown".to_string()
+            })?
+            else {
+                continue;
+            };
+            return if reply.accepted {
+                Ok(())
+            } else {
+                Err(reply
+                    .reason
+                    .unwrap_or_else(|| "scan_request_rejected".to_string()))
+            };
+        }
+    })
+    .await
+    .map_err(|_| "scan_delivery_unknown".to_string())?
+}
+
+fn issue_monitor_scan_connect_error(error: &WebSocketError) -> &'static str {
+    match error {
+        WebSocketError::Http(response) if matches!(response.status().as_u16(), 401 | 403 | 409) => {
+            "gui_capability_rejected"
+        }
+        WebSocketError::Http(response) if response.status().as_u16() == 503 => {
+            "gui_execution_authority_unavailable"
+        }
+        _ => "gui_command_unavailable",
+    }
+}
+
+async fn next_issue_monitor_scan_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
+    let message = socket
+        .next()
+        .await
+        .ok_or_else(|| "scan_delivery_unknown".to_string())?
+        .map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor GUI scan response failed");
+            "scan_delivery_unknown".to_string()
+        })?;
+    match message {
+        Message::Text(text) => serde_json::from_str(text.as_ref()).map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor GUI scan response was invalid JSON");
+            "scan_delivery_unknown".to_string()
+        }),
+        Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor GUI scan response was invalid JSON");
+            "scan_delivery_unknown".to_string()
+        }),
+        Message::Close(Some(frame)) if frame.code == CloseCode::Policy => {
+            Err("gui_capability_rejected".to_string())
+        }
+        Message::Close(_) => Err("scan_delivery_unknown".to_string()),
+        _ => Err("scan_delivery_unknown".to_string()),
+    }
+}
 
 pub fn parse(args: &[String]) -> Result<PaneCommand, CliParseError> {
     let Some((head, rest)) = args.split_first() else {
@@ -589,6 +703,12 @@ struct PmMessageSendReply {
     reason: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct IssueMonitorScanReply {
+    accepted: bool,
+    reason: Option<String>,
+}
+
 fn parse_pane_close_acceptance(
     value: &Value,
     expected_request_id: &str,
@@ -672,6 +792,21 @@ fn parse_pm_message_send_result(
         .and_then(Value::as_str)
         .map(str::to_string);
     Ok(Some(PmMessageSendReply { status, reason }))
+}
+
+fn parse_issue_monitor_scan_result(value: &Value) -> Result<Option<IssueMonitorScanReply>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("issue_monitor_scan_request_result") {
+        return Ok(None);
+    }
+    let accepted = value
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "issue_monitor_scan_request_result missing accepted".to_string())?;
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some(IssueMonitorScanReply { accepted, reason }))
 }
 
 /// The injected text must end with a submit key so the runtime actually
@@ -1093,6 +1228,68 @@ mod tests {
     }
 
     #[test]
+    fn parse_issue_monitor_scan_result_distinguishes_acceptance_from_unavailable() {
+        let accepted = serde_json::json!({
+            "kind": "issue_monitor_scan_request_result",
+            "accepted": true,
+            "reason": null,
+        });
+        assert_eq!(
+            parse_issue_monitor_scan_result(&accepted).unwrap(),
+            Some(IssueMonitorScanReply {
+                accepted: true,
+                reason: None,
+            })
+        );
+
+        let unavailable = serde_json::json!({
+            "kind": "issue_monitor_scan_request_result",
+            "accepted": false,
+            "reason": "monitor_disabled",
+        });
+        assert_eq!(
+            parse_issue_monitor_scan_result(&unavailable).unwrap(),
+            Some(IssueMonitorScanReply {
+                accepted: false,
+                reason: Some("monitor_disabled".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_issue_monitor_scan_result(&serde_json::json!({"kind": "workspace_state"}))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_monitor_scan_connect_error_preserves_capability_and_authority_diagnostics() {
+        let http_error = |status| {
+            WebSocketError::Http(Box::new(
+                tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(status)
+                    .body(None)
+                    .expect("HTTP response"),
+            ))
+        };
+        assert_eq!(
+            issue_monitor_scan_connect_error(&http_error(401)),
+            "gui_capability_rejected"
+        );
+        assert_eq!(
+            issue_monitor_scan_connect_error(&http_error(409)),
+            "gui_capability_rejected"
+        );
+        assert_eq!(
+            issue_monitor_scan_connect_error(&http_error(503)),
+            "gui_execution_authority_unavailable"
+        );
+        assert_eq!(
+            issue_monitor_scan_connect_error(&WebSocketError::ConnectionClosed),
+            "gui_command_unavailable"
+        );
+    }
+
+    #[test]
     fn ensure_trailing_submit_appends_carriage_return_once() {
         assert_eq!(ensure_trailing_submit("/goal x"), "/goal x\r");
         assert_eq!(ensure_trailing_submit("/goal x\r"), "/goal x\r");
@@ -1364,6 +1561,124 @@ mod tests {
             .as_str()
             .expect("frontend frame kind")
             .to_string()
+    }
+
+    #[test]
+    fn issue_monitor_scan_client_sends_pathless_request_and_honors_ack() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "agent-capability-secret-sentinel",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build scan client test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scan client mock");
+            let address = listener.local_addr().expect("scan client mock address");
+            let server = tokio::spawn(async move {
+                for (accepted, reason) in [(true, None), (false, Some("scan_already_in_flight"))] {
+                    let (stream, _) = listener.accept().await.expect("accept scan client");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept scan client websocket");
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(
+                        request,
+                        json!({
+                            "kind": "agent_issue_monitor_scan_now",
+                            "expected_project_scope": "scope-123",
+                        })
+                    );
+                    assert!(
+                        request.get("project_root").is_none(),
+                        "the client must not claim project scope"
+                    );
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "issue_monitor_scan_request_result",
+                                "accepted": accepted,
+                                "reason": reason,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("send scan request result");
+                }
+            });
+            let ws_url = format!("ws://{address}/internal/pane-ws");
+
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Ok(())
+            );
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Err("scan_already_in_flight".to_string())
+            );
+            server.await.expect("scan client mock task");
+        });
+    }
+
+    #[test]
+    fn issue_monitor_scan_client_marks_post_send_response_loss_as_unknown() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "agent-capability-secret-sentinel",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build scan client test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scan client mock");
+            let address = listener.local_addr().expect("scan client mock address");
+            let server = tokio::spawn(async move {
+                for close in [
+                    None,
+                    Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: CloseCode::Policy,
+                        reason: "stale capability".into(),
+                    }),
+                ] {
+                    let (stream, _) = listener.accept().await.expect("accept scan client");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept scan client websocket");
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(request["expected_project_scope"], "scope-123");
+                    socket
+                        .close(close)
+                        .await
+                        .expect("close after accepting request without a result");
+                }
+            });
+            let ws_url = format!("ws://{address}/internal/pane-ws");
+
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Err("scan_delivery_unknown".to_string())
+            );
+            assert_eq!(
+                request_issue_monitor_scan_now_async(&ws_url, "scope-123").await,
+                Err("gui_capability_rejected".to_string())
+            );
+            server.await.expect("scan client mock task");
+        });
     }
 
     #[derive(Clone, Copy)]

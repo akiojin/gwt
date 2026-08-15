@@ -14,7 +14,11 @@
  * release-notes-live and console-window-live specs).
  */
 import { test, expect } from "@playwright/test";
-import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
+import {
+  clearLiveLaunchWizard,
+  gotoLiveGwt,
+  openLiveGwtProject,
+} from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -29,8 +33,10 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
       keepPresetModal: true,
     });
     await openLiveGwtProject(page);
+    await clearLiveLaunchWizard(page);
     await expect(page.locator("#op-briefing")).toBeHidden();
     await expect(page.locator("#project-picker")).toBeHidden();
+    await expect(page.locator("#wizard-modal")).toBeHidden();
   });
 
   async function logsWindowIds(page) {

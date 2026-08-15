@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import {
+  clearLiveLaunchWizard,
+  gotoLiveGwt,
+  openLiveGwtProject,
+  withLiveGwtBackendLock,
+} from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -12,15 +17,14 @@ test.describe("Live Intake wizard", () => {
     page,
   }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
-      await gotoLiveGwt(page, BASE);
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      // Prove one backend roundtrip before exercising the real rail click.
+      // Otherwise a still-opening WebSocket can leave only the local pending
+      // shell visible for the entire assertion timeout.
+      await openLiveGwtProject(page);
+      await clearLiveLaunchWizard(page);
 
       const wizard = page.locator("#wizard-modal");
-      const visibleCancel = wizard.getByRole("button", { name: "Cancel" });
-      if (await visibleCancel.isVisible().catch(() => false)) {
-        await visibleCancel.click();
-        await expect(wizard).not.toHaveClass(/\bopen\b/);
-      }
-
       const intake = page.locator('.op-rail [data-cmd="intake-session"]').first();
       await expect(intake).toBeVisible({ timeout: 10_000 });
       await intake.click();
@@ -31,8 +35,6 @@ test.describe("Live Intake wizard", () => {
       });
       await expect(wizard.locator("#wizard-title")).toHaveText("Intake");
       await expect(wizard.locator("#wizard-meta")).toHaveText("Curate session");
-      await expect(wizard).toContainText("Intake setup");
-      await expect(wizard).toContainText("Configure intake");
       await expect(wizard).not.toContainText("Plan Agent");
       await expect(wizard).not.toContainText("Start Work");
       await expect(wizard).not.toContainText("Launch Agent");

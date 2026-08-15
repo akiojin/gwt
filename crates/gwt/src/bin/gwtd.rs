@@ -440,6 +440,8 @@ fn format_verify_help() -> String {
         "",
         "Operations:",
         "  verify.plan | verify.run",
+        "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
+        "  verify.lease.status",
         "",
         "Notes:",
         "  Register the derived matrix with verify.plan first; a run must cover it.",
@@ -447,6 +449,14 @@ fn format_verify_help() -> String {
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
         "  evidence. execution.complete and Ready PR handoffs require a fresh,",
         "  all-passing record.",
+        "",
+        "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
+        "  take the lease before cargo test --all-features / cargo llvm-cov /",
+        "  headed Playwright, then release it. acquire answers immediately —",
+        "  granted, or unavailable with the current holder and its remaining",
+        "  TTL, so no agent polls another agent's process. Default TTL is 45",
+        "  minutes (params.ttl_minutes); the holder self-releases when it",
+        "  lapses, and a killed holder releases at once.",
         "",
     ]
     .join("
