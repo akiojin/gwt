@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.81.0] - 2026-08-15
+
+### Bug Fixes
+
+- **workspace:** Project store identity の曖昧性を拒否する
+- **issue-monitor:** 単一 PR の merge で Issue を終端 merged 扱いしない
+- **test:** Fake docker の ETXTBSY spawn を再試行する
+
+### Features
+
+- **workspace:** Project store を repository identity へ収束させ分裂 store を移行する
+- **pane:** Surface agent approval waits
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3466 の完了 Work event を記録
+- **work:** #3466 の検証準備を記録する
+
 ## [9.80.0] - 2026-08-15
 
 ### Bug Fixes
