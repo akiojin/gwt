@@ -22,6 +22,25 @@ use crate::{
     worktree_inventory::WorktreeEntry,
 };
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum U64OrDecimalString {
+    Number(u64),
+    Decimal(String),
+}
+
+fn deserialize_u64_or_decimal_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match U64OrDecimalString::deserialize(deserializer)? {
+        U64OrDecimalString::Number(value) => Ok(value),
+        U64OrDecimalString::Decimal(value) => {
+            value.parse::<u64>().map_err(serde::de::Error::custom)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileContentMode {
@@ -231,6 +250,11 @@ pub enum FrontendEvent {
     /// Governs the next project open only — it never stops a live PM.
     SetPmAutoStart {
         enabled: bool,
+    },
+    /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
+    SetPmLoopInterval {
+        #[serde(deserialize_with = "deserialize_u64_or_decimal_string")]
+        loop_interval_secs: u64,
     },
     /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
     /// pane is untouched; applying the change is the explicit restart below.
@@ -1689,7 +1713,18 @@ pub enum BackendEvent {
     /// the panel's "restart to apply" affordance exists precisely because a
     /// profile change cannot migrate a running conversation.
     PmStatus {
+        /// Whether the active tab is a Git project with PM settings.
+        /// `false` clears shared Settings mounts after switching to a
+        /// non-project surface or closing the final project tab.
+        available: bool,
         auto_start: bool,
+        /// SPEC-3431 FR-132: effective resident-loop interval after applying
+        /// the backend minimum to legacy or manually edited preferences.
+        loop_interval_secs: u64,
+        /// Lossless decimal mirror for JavaScript clients. JSON numbers above
+        /// 2^53 are rounded by `JSON.parse`; the numeric field remains for
+        /// backwards compatibility while this field preserves every u64.
+        loop_interval_secs_decimal: String,
         configured_agent_id: String,
         configured_model: Option<String>,
         running_agent_id: Option<String>,
@@ -3084,6 +3119,96 @@ mod tests {
             FrontendEvent::PaneSendInput { session_id, text }
                 if session_id == "session-1" && text == "/goal all tests pass\r"
         ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_deserializes_seconds_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_pm_loop_interval",
+            "loop_interval_secs": 10
+        }))
+        .expect("deserialize PM loop interval setting");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SetPmLoopInterval {
+                loop_interval_secs: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_accepts_u64_max_exactly() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_pm_loop_interval",
+            "loop_interval_secs": u64::MAX
+        }))
+        .expect("deserialize maximum u64 PM loop interval");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SetPmLoopInterval { loop_interval_secs }
+                if loop_interval_secs == u64::MAX
+        ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_accepts_lossless_decimal_string() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_pm_loop_interval",
+            "loop_interval_secs": u64::MAX.to_string()
+        }))
+        .expect("deserialize maximum u64 PM loop interval from browser-safe decimal text");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SetPmLoopInterval { loop_interval_secs }
+                if loop_interval_secs == u64::MAX
+        ));
+    }
+
+    #[test]
+    fn set_pm_loop_interval_rejects_negative_and_fractional_numbers() {
+        for invalid in [serde_json::json!(-1), serde_json::json!(10.5)] {
+            let result = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "set_pm_loop_interval",
+                "loop_interval_secs": invalid
+            }));
+
+            assert!(
+                result.is_err(),
+                "loop_interval_secs must preserve the u64 wire contract"
+            );
+        }
+    }
+
+    #[test]
+    fn pm_status_serializes_effective_loop_interval() {
+        let event = BackendEvent::PmStatus {
+            available: true,
+            auto_start: true,
+            loop_interval_secs: u64::MAX,
+            loop_interval_secs_decimal: u64::MAX.to_string(),
+            configured_agent_id: "claude".to_string(),
+            configured_model: None,
+            running_agent_id: None,
+            is_running: false,
+            agent_options: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize PM status");
+        assert_eq!(value.get("kind").and_then(Value::as_str), Some("pm_status"));
+        assert_eq!(value.get("available").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            value.get("loop_interval_secs").and_then(Value::as_u64),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            value
+                .get("loop_interval_secs_decimal")
+                .and_then(Value::as_str),
+            Some("18446744073709551615")
+        );
     }
 
     #[test]

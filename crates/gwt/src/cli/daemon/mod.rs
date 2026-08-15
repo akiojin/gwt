@@ -40,6 +40,14 @@ use crate::cli::{CliEnv, CliParseError, DaemonCommand};
 #[cfg(unix)]
 const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(unix)]
+fn subscribe_deadline_from(
+    now: tokio::time::Instant,
+    timeout_seconds: u64,
+) -> Option<tokio::time::Instant> {
+    now.checked_add(Duration::from_secs(timeout_seconds))
+}
+
 pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
     match args.first().map(String::as_str) {
         None | Some("start") => {
@@ -270,7 +278,7 @@ fn subscribe_command<E: CliEnv>(
         // timeout would never fire and the caller would never get its turn
         // back.
         let deadline = timeout_seconds
-            .map(|seconds| tokio::time::Instant::now() + std::time::Duration::from_secs(seconds));
+            .and_then(|seconds| subscribe_deadline_from(tokio::time::Instant::now(), seconds));
         loop {
             let frame: DaemonFrame = match deadline {
                 Some(deadline) => {
@@ -445,6 +453,18 @@ mod tests {
             );
         }
         assert!(parse(&[s("subscribe"), s("board"), s("--timeout-seconds")]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_deadline_treats_instant_overflow_as_effectively_unbounded() {
+        let now = tokio::time::Instant::now();
+
+        assert_eq!(
+            subscribe_deadline_from(now, 30),
+            now.checked_add(Duration::from_secs(30))
+        );
+        assert_eq!(subscribe_deadline_from(now, u64::MAX), None);
     }
 
     #[test]

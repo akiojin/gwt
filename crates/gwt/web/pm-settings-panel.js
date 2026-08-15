@@ -1,21 +1,18 @@
-// SPEC-3431 FR-026 — Project Manager settings panel.
+// SPEC-3431 FR-026 / FR-132 — shared Project Manager settings editor.
 //
-// The PM is the one agent that never goes through the Launch Wizard: it is
-// started for the user when a project opens, so the only place its
-// configuration can live is beside its launcher.
-//
-// The panel keeps two facts visibly separate — what the PM is running as right
-// now, and what the next start will use. They can differ, and no amount of UI
-// can migrate a live conversation across agents (a Claude history is not a
-// Codex history), so a profile change is stored and then *applied* by an
-// explicit, confirmed restart. The pending chip exists to make that gap
-// impossible to miss.
-//
-// Pure rendering + a `send` transport, so the whole contract is unit-testable
-// without a socket.
+// Settings windows are independent DOM mounts over one controller snapshot.
+// The controller owns every PM settings event so entry points and Settings
+// rendering cannot grow separate mutation paths.
 
+const DEFAULT_LOOP_INTERVAL_SECS = 60;
+const MIN_LOOP_INTERVAL_SECS = 10;
+const MAX_U64 = 18446744073709551615n;
 const AUTO_START_HELP =
   "Start the Project Manager automatically when this project opens.";
+const LOOP_INTERVAL_HELP =
+  "Default: 60 seconds. Minimum: 10 seconds. Changes apply to the next cycle without restarting the Project Manager.";
+const PROFILE_HELP =
+  "Agent and model changes apply after restart. Restarting starts a new conversation; history is not carried over.";
 const RESTART_CONFIRM =
   "Restart the Project Manager?\n\n"
   + "The current PM session ends and a new conversation starts on the "
@@ -25,14 +22,29 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-/// The snapshot the panel renders before any `pm_status` arrives. Chosen so a
-/// panel opened during hydration shows "not running" rather than inventing a
-/// configuration the project may not have.
+function normalizedLoopInterval(value) {
+  const decimal = String(value ?? "").trim();
+  if (!/^\d+$/.test(decimal)) return String(DEFAULT_LOOP_INTERVAL_SECS);
+  try {
+    const interval = BigInt(decimal);
+    return interval >= BigInt(MIN_LOOP_INTERVAL_SECS) && interval <= MAX_U64
+      ? interval.toString()
+      : String(DEFAULT_LOOP_INTERVAL_SECS);
+  } catch {
+    return String(DEFAULT_LOOP_INTERVAL_SECS);
+  }
+}
+
+// Before the first pm_status, keep controls unavailable while exposing the
+// effective interval default. This prevents edits from targeting an unknown
+// project during hydration.
 function emptyStatus() {
   return {
+    available: false,
     autoStart: true,
     configuredAgentId: "",
     configuredModel: "",
+    loopIntervalSecs: String(DEFAULT_LOOP_INTERVAL_SECS),
     runningAgentId: "",
     isRunning: false,
     agentOptions: [],
@@ -42,14 +54,21 @@ function emptyStatus() {
 function normalizeStatus(status) {
   const options = Array.isArray(status?.agent_options) ? status.agent_options : [];
   return {
+    available: status?.available !== false,
     autoStart: status?.auto_start !== false,
     configuredAgentId: String(status?.configured_agent_id ?? ""),
     configuredModel: String(status?.configured_model ?? ""),
+    loopIntervalSecs: normalizedLoopInterval(
+      status?.loop_interval_secs_decimal ?? status?.loop_interval_secs,
+    ),
     runningAgentId: String(status?.running_agent_id ?? ""),
     isRunning: Boolean(status?.is_running),
     agentOptions: options
       .filter((option) => option && option.id)
-      .map((option) => ({ id: String(option.id), name: String(option.name ?? option.id) })),
+      .map((option) => ({
+        id: String(option.id),
+        name: String(option.name ?? option.id),
+      })),
   };
 }
 
@@ -67,13 +86,9 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     : (message) => Boolean(document.defaultView?.confirm?.(message));
 
   let state = emptyStatus();
-  let panelEl = null;
-  let toggleEl = null;
-  let agentSelect = null;
-  let modelInput = null;
-  let autoStartInput = null;
-  let runningLine = null;
-  let pendingChip = null;
+  const mounts = new Map();
+  const boundDocuments = new Set();
+  let nextErrorId = 0;
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -82,13 +97,63 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     return node;
   }
 
-  // The two selectors write the SAME event: the backend stores one profile, so
-  // sending a partial update from either control would silently drop the other
-  // field.
-  function sendProfile() {
-    const agentId = agentSelect?.value || state.configuredAgentId;
+  function pruneDetachedMounts() {
+    for (const [container] of mounts) {
+      if (!container.isConnected) mounts.delete(container);
+    }
+  }
+
+  function renderView(view) {
+    const runningName = agentLabel(state, state.runningAgentId);
+    view.runningLine.textContent = !state.available
+      ? "Project Manager unavailable for this project."
+      : state.isRunning && runningName
+        ? `Running as: ${runningName}`
+        : "Not running";
+
+    view.pendingChip.hidden = !(
+      state.isRunning
+      && state.runningAgentId !== ""
+      && state.configuredAgentId !== ""
+      && state.configuredAgentId !== state.runningAgentId
+    );
+
+    clear(view.agentSelect);
+    for (const option of state.agentOptions) {
+      const node = document.createElement("option");
+      node.value = option.id;
+      node.textContent = option.name;
+      if (option.id === state.configuredAgentId) node.selected = true;
+      view.agentSelect.appendChild(node);
+    }
+
+    view.modelInput.value = state.configuredModel;
+    view.intervalInput.value = String(state.loopIntervalSecs);
+    view.autoStartInput.checked = state.autoStart;
+    for (const control of [
+      view.agentSelect,
+      view.modelInput,
+      view.intervalInput,
+      view.autoStartInput,
+      view.restart,
+    ]) {
+      control.disabled = !state.available;
+    }
+    view.intervalError.hidden = true;
+    view.intervalError.textContent = "";
+    view.intervalInput.setAttribute("aria-invalid", "false");
+  }
+
+  function renderAll() {
+    pruneDetachedMounts();
+    for (const view of mounts.values()) renderView(view);
+  }
+
+  function sendProfile(view) {
+    if (!state.available) return;
+    const agentId = view.agentSelect.value || state.configuredAgentId;
     if (!agentId) return;
-    const model = (modelInput?.value ?? "").trim();
+    const model = view.modelInput.value.trim();
     dispatch({
       kind: "set_pm_launch_profile",
       agent_id: agentId,
@@ -97,130 +162,184 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     });
   }
 
-  function build() {
-    clear(panelEl);
+  function setIntervalError(view, message) {
+    view.intervalError.textContent = message;
+    view.intervalError.dataset.kind = "error";
+    view.intervalError.hidden = false;
+    view.intervalInput.setAttribute("aria-invalid", "true");
+  }
 
-    panelEl.appendChild(el("h2", "pm-settings-panel__title", "Project Manager"));
+  function sendLoopInterval(view) {
+    if (!state.available) return;
+    const decimal = view.intervalInput.value.trim();
+    if (!/^\d+$/.test(decimal)) {
+      setIntervalError(view, "Enter a whole number of seconds.");
+      return;
+    }
+    const interval = BigInt(decimal);
+    if (interval < BigInt(MIN_LOOP_INTERVAL_SECS)) {
+      setIntervalError(view, "Loop interval must be at least 10 seconds.");
+      return;
+    }
+    if (interval > MAX_U64) {
+      setIntervalError(view, "Loop interval exceeds the supported range.");
+      return;
+    }
+    view.intervalError.hidden = true;
+    view.intervalError.textContent = "";
+    view.intervalInput.setAttribute("aria-invalid", "false");
+    dispatch({
+      kind: "set_pm_loop_interval",
+      loop_interval_secs: interval <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(interval)
+        : interval.toString(),
+    });
+  }
 
-    runningLine = el("p", "pm-settings-panel__running");
+  function build(container) {
+    clear(container);
+
+    const section = el("div", "settings-section");
+    const heading = el("h3", "settings-section-heading", "Project Manager");
+    section.appendChild(heading);
+
+    const runningLine = el("p", "settings-status");
     runningLine.dataset.role = "pm-running-as";
-    panelEl.appendChild(runningLine);
+    section.appendChild(runningLine);
 
-    pendingChip = el("p", "pm-settings-panel__pending");
+    const pendingChip = el(
+      "p",
+      "settings-status",
+      "Pending profile change — restart to apply.",
+    );
     pendingChip.dataset.role = "pm-pending-chip";
-    pendingChip.textContent = "Pending — restart to apply";
     pendingChip.hidden = true;
-    panelEl.appendChild(pendingChip);
+    section.appendChild(pendingChip);
 
-    const agentField = el("label", "pm-settings-panel__field");
-    agentField.appendChild(el("span", "pm-settings-panel__label", "Agent"));
-    agentSelect = el("select", "pm-settings-panel__select");
+    const agentField = el("label", "settings-field");
+    agentField.appendChild(el("span", "settings-label", "Agent"));
+    const agentSelect = el("select", "settings-select");
     agentSelect.dataset.role = "pm-agent-select";
-    agentSelect.addEventListener("change", sendProfile);
     agentField.appendChild(agentSelect);
-    panelEl.appendChild(agentField);
+    section.appendChild(agentField);
 
-    const modelField = el("label", "pm-settings-panel__field");
-    modelField.appendChild(el("span", "pm-settings-panel__label", "Model"));
-    modelInput = el("input", "pm-settings-panel__input");
+    const modelField = el("label", "settings-field");
+    modelField.appendChild(el("span", "settings-label", "Model"));
+    const modelInput = el("input", "settings-input");
     modelInput.type = "text";
     modelInput.placeholder = "Agent default";
     modelInput.dataset.role = "pm-model-input";
-    modelInput.addEventListener("change", sendProfile);
     modelField.appendChild(modelInput);
-    panelEl.appendChild(modelField);
+    section.appendChild(modelField);
+    section.appendChild(el("p", "settings-help", PROFILE_HELP));
 
-    const autoField = el("label", "pm-settings-panel__field pm-settings-panel__field--inline");
-    autoStartInput = el("input");
+    const intervalField = el("label", "settings-field");
+    intervalField.appendChild(el("span", "settings-label", "Loop interval (seconds)"));
+    const intervalInput = el("input", "settings-input");
+    intervalInput.type = "number";
+    intervalInput.min = String(MIN_LOOP_INTERVAL_SECS);
+    intervalInput.step = "1";
+    intervalInput.dataset.role = "pm-loop-interval";
+    intervalInput.setAttribute("aria-invalid", "false");
+    intervalField.appendChild(intervalInput);
+    section.appendChild(intervalField);
+    section.appendChild(el("p", "settings-help", LOOP_INTERVAL_HELP));
+
+    const intervalError = el("p", "settings-status");
+    intervalError.dataset.role = "pm-loop-interval-error";
+    intervalError.dataset.kind = "error";
+    intervalError.id = `pm-loop-interval-error-${++nextErrorId}`;
+    intervalError.setAttribute("role", "alert");
+    intervalError.setAttribute("aria-live", "polite");
+    intervalError.hidden = true;
+    intervalInput.setAttribute("aria-describedby", intervalError.id);
+    section.appendChild(intervalError);
+
+    const autoField = el("label", "settings-checkbox-label");
+    const autoStartInput = el("input", "settings-checkbox");
     autoStartInput.type = "checkbox";
-    autoStartInput.className = "pm-settings-panel__checkbox";
     autoStartInput.dataset.role = "pm-auto-start";
-    autoStartInput.addEventListener("change", () => {
-      dispatch({ kind: "set_pm_auto_start", enabled: Boolean(autoStartInput.checked) });
-    });
     autoField.appendChild(autoStartInput);
-    autoField.appendChild(el("span", "pm-settings-panel__label", "Auto start"));
-    panelEl.appendChild(autoField);
-    panelEl.appendChild(el("p", "pm-settings-panel__help", AUTO_START_HELP));
+    autoField.appendChild(el("span", "", "Auto start"));
+    section.appendChild(autoField);
+    section.appendChild(el("p", "settings-help", AUTO_START_HELP));
 
-    const restart = el("button", "pm-settings-panel__restart", "Restart PM");
+    const restart = el("button", "wizard-button", "Restart Project Manager");
     restart.type = "button";
     restart.dataset.role = "pm-restart";
+    section.appendChild(restart);
+    container.appendChild(section);
+
+    const view = {
+      agentSelect,
+      autoStartInput,
+      intervalError,
+      intervalInput,
+      modelInput,
+      pendingChip,
+      restart,
+      runningLine,
+    };
+
+    agentSelect.addEventListener("change", () => sendProfile(view));
+    modelInput.addEventListener("change", () => sendProfile(view));
+    intervalInput.addEventListener("change", () => sendLoopInterval(view));
+    autoStartInput.addEventListener("change", () => {
+      if (!state.available) return;
+      dispatch({
+        kind: "set_pm_auto_start",
+        enabled: Boolean(autoStartInput.checked),
+      });
+    });
     restart.addEventListener("click", () => {
-      // Losing the running conversation is not undoable, so it is never a
-      // single click.
+      if (!state.available) return;
       if (!ask(RESTART_CONFIRM)) return;
       dispatch({ kind: "restart_pm_agent" });
     });
-    panelEl.appendChild(restart);
+
+    return view;
   }
 
-  function render() {
-    if (!panelEl) return;
-
-    const runningName = agentLabel(state, state.runningAgentId);
-    runningLine.textContent = state.isRunning && runningName
-      ? `Running as: ${runningName}`
-      : "Not running";
-
-    // "Pending" only means something while a PM is actually running a
-    // different agent. A stopped PM is not waiting on a restart — it is simply
-    // stopped, and the next start already uses the configured profile.
-    pendingChip.hidden = !(
-      state.isRunning
-      && state.runningAgentId !== ""
-      && state.configuredAgentId !== ""
-      && state.configuredAgentId !== state.runningAgentId
+  function openSettings(entryDocument) {
+    const CustomEventCtor = entryDocument.defaultView?.CustomEvent || CustomEvent;
+    entryDocument.dispatchEvent(
+      new CustomEventCtor("settings:open", {
+        detail: { target: "project-manager" },
+      }),
     );
-
-    clear(agentSelect);
-    for (const option of state.agentOptions) {
-      const node = document.createElement("option");
-      node.value = option.id;
-      node.textContent = option.name;
-      // Selection is expressed on the option, not `select.value`: that is the
-      // form the DOM actually stores it in, and it survives the select being
-      // rebuilt on the next snapshot.
-      if (option.id === state.configuredAgentId) node.selected = true;
-      agentSelect.appendChild(node);
-    }
-
-    modelInput.value = state.configuredModel;
-    autoStartInput.checked = state.autoStart;
-  }
-
-  function setOpen(open) {
-    if (!panelEl) return;
-    panelEl.hidden = !open;
-    toggleEl?.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   return {
-    mount() {
-      panelEl = document.getElementById("pm-settings-panel");
-      toggleEl = document.getElementById("op-pm-settings-button");
-      if (!panelEl) return this;
-      build();
-      render();
-      setOpen(false);
-      toggleEl?.addEventListener("click", (event) => {
-        event.preventDefault();
-        setOpen(panelEl.hidden);
-      });
+    mount(container) {
+      if (!container) {
+        throw new TypeError("pmSettingsPanel.mount requires a container");
+      }
+      pruneDetachedMounts();
+      const view = build(container);
+      mounts.set(container, view);
+      renderView(view);
       return this;
     },
     applyStatus(status) {
       state = normalizeStatus(status);
-      render();
+      renderAll();
     },
-    open() {
-      setOpen(true);
-    },
-    close() {
-      setOpen(false);
-    },
-    isOpen() {
-      return Boolean(panelEl) && !panelEl.hidden;
+    bindEntryPoints({ document: entryDocument = document } = {}) {
+      if (!entryDocument || boundDocuments.has(entryDocument)) return this;
+      boundDocuments.add(entryDocument);
+
+      entryDocument
+        .getElementById("op-pm-settings-button")
+        ?.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openSettings(entryDocument);
+        });
+      entryDocument.addEventListener("op:command", (event) => {
+        if (event.detail?.id !== "pm-settings") return;
+        openSettings(entryDocument);
+      });
+      return this;
     },
   };
 }

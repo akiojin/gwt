@@ -26,6 +26,78 @@ import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 
+function settingsTabId(windowId, tabId) {
+  return `settings-${windowId}-tab-${tabId}`;
+}
+
+function settingsPanelId(windowId, tabId) {
+  return `settings-${windowId}-panel-${tabId}`;
+}
+
+function linkSettingsPanel(panel, windowId, tabId) {
+  panel.id = settingsPanelId(windowId, tabId);
+  panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
+}
+
+export function mountProjectManagerSettingsPanel(
+  document,
+  parent,
+  pmSettingsPanel,
+  windowId = "shared",
+) {
+  const panel = document.createElement("section");
+  panel.className = "settings-panel hidden";
+  panel.setAttribute("role", "tabpanel");
+  panel.dataset.settingsPanel = "project-manager";
+  panel.id = `settings-${windowId}-panel-project-manager`;
+  panel.setAttribute(
+    "aria-labelledby",
+    `settings-${windowId}-tab-project-manager`,
+  );
+  parent.appendChild(panel);
+  pmSettingsPanel?.mount?.(panel);
+  return panel;
+}
+
+export function switchSettingsTab(body, target) {
+  const tabs = body.querySelectorAll(".settings-tab");
+  tabs.forEach((tab) => {
+    const isSelected = tab.dataset.settingsTab === target;
+    tab.setAttribute("aria-selected", String(isSelected));
+    tab.classList.toggle("active", isSelected);
+  });
+  const panels = body.querySelectorAll(".settings-panel");
+  panels.forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.settingsPanel !== target);
+  });
+}
+
+export function installSettingsOpenHandler(options) {
+  const {
+    document,
+    settingsWindowBodies,
+    focusOrSpawnPreset,
+    setPendingTarget,
+  } = options;
+  document.addEventListener("settings:open", (event) => {
+    const target = event?.detail?.target || "system";
+    if (target === "index") {
+      focusOrSpawnPreset("index");
+      return;
+    }
+    const existingBody = Array.from(settingsWindowBodies).find(
+      (settingsBody) => settingsBody.isConnected,
+    );
+    if (existingBody) {
+      switchSettingsTab(existingBody, target);
+      focusOrSpawnPreset("settings");
+      return;
+    }
+    setPendingTarget(target);
+    focusOrSpawnPreset("settings");
+  });
+}
+
 export function createSettingsSurface({
   send,
   createNode,
@@ -34,6 +106,7 @@ export function createSettingsSurface({
   focusOrSpawnPreset,
   renderUsagePanel,
   indexStatusByProjectRoot,
+  pmSettingsPanel,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
       // Output Language `<select>`. Backend echoes `system_settings`
@@ -198,15 +271,29 @@ export function createSettingsSurface({
         const tabs = document.createElement("nav");
         tabs.className = "settings-tabs";
         tabs.setAttribute("role", "tablist");
-        tabs.appendChild(buildSettingsTab("system", "System", true));
-        tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+        tabs.appendChild(buildSettingsTab("system", "System", true, windowData.id));
+        tabs.appendChild(
+          buildSettingsTab(
+            "project-manager",
+            "Project Manager",
+            false,
+            windowData.id,
+          ),
+        );
+        tabs.appendChild(
+          buildSettingsTab("custom-agents", "Custom Agents", false, windowData.id),
+        );
         // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends tab is the
         // dedicated surface for Claude Code / Codex Backend Override profiles.
         // Kept distinct from `custom-agents` so External CLI rows and
         // built-in LLM redirection have separate physical UI.
-        tabs.appendChild(buildSettingsTab("agent-backends", "Agent Backends", false));
+        tabs.appendChild(
+          buildSettingsTab("agent-backends", "Agent Backends", false, windowData.id),
+        );
         // SPEC-2970: provider usage display preferences (Claude opt-in).
-        tabs.appendChild(buildSettingsTab("usage", "Usage & Limits", false));
+        tabs.appendChild(
+          buildSettingsTab("usage", "Usage & Limits", false, windowData.id),
+        );
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -217,11 +304,13 @@ export function createSettingsSurface({
         panelSystem.className = "settings-panel";
         panelSystem.setAttribute("role", "tabpanel");
         panelSystem.dataset.settingsPanel = "system";
+        linkSettingsPanel(panelSystem, windowData.id, "system");
 
         const panelAgents = document.createElement("section");
         panelAgents.className = "settings-panel hidden";
         panelAgents.setAttribute("role", "tabpanel");
         panelAgents.dataset.settingsPanel = "custom-agents";
+        linkSettingsPanel(panelAgents, windowData.id, "custom-agents");
         // Existing renderSettingsAgentList queries this attribute to inject
         // the Add button and agent rows.
         panelAgents.dataset.role = "settings-scroll";
@@ -230,15 +319,23 @@ export function createSettingsSurface({
         panelBackends.className = "settings-panel hidden";
         panelBackends.setAttribute("role", "tabpanel");
         panelBackends.dataset.settingsPanel = "agent-backends";
+        linkSettingsPanel(panelBackends, windowData.id, "agent-backends");
         panelBackends.dataset.role = "settings-scroll";
 
         const panelUsage = document.createElement("section");
         panelUsage.className = "settings-panel hidden";
         panelUsage.setAttribute("role", "tabpanel");
         panelUsage.dataset.settingsPanel = "usage";
+        linkSettingsPanel(panelUsage, windowData.id, "usage");
         panelUsage.dataset.role = "settings-scroll";
 
         bodyEl.appendChild(panelSystem);
+        mountProjectManagerSettingsPanel(
+          document,
+          bodyEl,
+          pmSettingsPanel,
+          windowData.id,
+        );
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
@@ -407,48 +504,26 @@ export function createSettingsSurface({
         send({ kind: "refresh_index_status", project_root: activeProjectRoot });
       }
 
-      document.addEventListener("settings:open", (event) => {
-        const target = event?.detail?.target || "system";
-        if (target === "index") {
-          focusOrSpawnPreset("index");
-          return;
-        }
-        const existingBody = Array.from(settingsWindowBodies).find(
-          (settingsBody) => settingsBody.isConnected,
-        );
-        if (existingBody) {
-          switchSettingsTab(existingBody, target);
-          return;
-        }
-        pendingSettingsTabTarget = target;
-        focusOrSpawnPreset("settings");
+      installSettingsOpenHandler({
+        document,
+        settingsWindowBodies,
+        focusOrSpawnPreset,
+        setPendingTarget: (target) => {
+          pendingSettingsTabTarget = target;
+        },
       });
 
-      function buildSettingsTab(id, label, selected) {
+      function buildSettingsTab(id, label, selected, windowId) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = selected ? "settings-tab active" : "settings-tab";
         btn.setAttribute("role", "tab");
         btn.setAttribute("aria-selected", String(selected));
+        btn.id = settingsTabId(windowId, id);
+        btn.setAttribute("aria-controls", settingsPanelId(windowId, id));
         btn.dataset.settingsTab = id;
         btn.textContent = label;
         return btn;
-      }
-
-      function switchSettingsTab(body, target) {
-        const tabs = body.querySelectorAll(".settings-tab");
-        tabs.forEach((tab) => {
-          const isSelected = tab.dataset.settingsTab === target;
-          tab.setAttribute("aria-selected", String(isSelected));
-          tab.classList.toggle("active", isSelected);
-        });
-        const panels = body.querySelectorAll(".settings-panel");
-        panels.forEach((panel) => {
-          panel.classList.toggle(
-            "hidden",
-            panel.dataset.settingsPanel !== target,
-          );
-        });
       }
 
       function composeTeamsDefaultChannel(teamId, channelId) {

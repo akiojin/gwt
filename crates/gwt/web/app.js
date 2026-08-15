@@ -70,8 +70,8 @@
       // launch-controls / interaction-guard imports) moved to
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
-      // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
-      // Settings window — the PM is configured where it is seen.
+      // SPEC-3431 FR-026 / FR-132: one shared PM settings controller feeds
+      // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
@@ -4719,15 +4719,14 @@
         requestWorkAdvisory,
       });
 
-      // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
-      // `pm_status` hydration that arrives with the initial sync has somewhere
-      // to land.
+      // The controller is created before Settings so pm_status may hydrate its
+      // shared snapshot before the first Settings window is mounted.
       const pmSettingsPanel = createPmSettingsPanel({
         document,
         send,
         confirm: (message) => window.confirm(message),
       });
-      pmSettingsPanel.mount();
+      pmSettingsPanel.bindEntryPoints({ document });
 
       // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
       // scrollable side-toast stack so nothing is missed while the operator is
@@ -5090,6 +5089,7 @@
         focusOrSpawnPreset,
         renderUsagePanel,
         indexStatusByProjectRoot,
+        pmSettingsPanel,
       });
 
       function ensureWindow(windowData) {
@@ -7028,6 +7028,11 @@
         const id = event.detail?.id;
         if (!id) return;
         switch (id) {
+          case "pm-settings":
+            // The shared PM settings controller owns this route. Keeping an
+            // explicit arm prevents an "unknown" diagnostic without stopping
+            // other command-bus observers.
+            return;
           case "open-board":
             focusOrSpawnPreset("board");
             return;
@@ -7061,11 +7066,6 @@
             return;
           case "stop-all-windows":
             requestStopAllWindows();
-            return;
-          case "pm-settings":
-            // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
-            // is the keyboard-only path to the same panel.
-            frontendUnits.pmSettingsPanel.open();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
@@ -7111,6 +7111,11 @@
             return;
           }
           send(detail);
+        });
+        window.__gwtPmSettingsTestApi = Object.freeze({
+          mount(container) {
+            pmSettingsPanel.mount(container);
+          },
         });
         window.__gwtTerminalTestApi = Object.freeze({
           metrics(windowId) {

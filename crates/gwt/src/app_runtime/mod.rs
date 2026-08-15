@@ -4831,9 +4831,12 @@ impl AppRuntime {
                     pm::PmEnsureTrigger::Explicit,
                 )
             }
-            // SPEC-3431 FR-026: PM settings. The two writes never touch the
+            // SPEC-3431 FR-026/FR-132: PM settings. The three writes never touch the
             // running pane; only the explicit restart does.
             FrontendEvent::SetPmAutoStart { enabled } => self.set_pm_auto_start_events(enabled),
+            FrontendEvent::SetPmLoopInterval { loop_interval_secs } => {
+                self.set_pm_loop_interval_events(loop_interval_secs)
+            }
             FrontendEvent::SetPmLaunchProfile {
                 agent_id,
                 model,
@@ -6097,9 +6100,10 @@ impl AppRuntime {
         // SPEC-3431 FR-026: hydrate the PM settings panel on connect. Without
         // this a freshly loaded page shows the panel's built-in defaults until
         // some unrelated PM transition happens to broadcast.
-        if let Some(event) = self.pm_status_event() {
-            events.push(OutboundEvent::reply(client_id.to_string(), event));
-        }
+        events.push(OutboundEvent::reply(
+            client_id.to_string(),
+            self.pm_status_event(),
+        ));
         self.schedule_active_improvement_candidates_refresh();
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting

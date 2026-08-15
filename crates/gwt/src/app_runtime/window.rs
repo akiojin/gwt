@@ -105,9 +105,7 @@ impl AppRuntime {
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
         if tab_changed {
-            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
-                events.push(event);
-            }
+            events.extend(self.active_project_snapshot_broadcasts());
         }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));

@@ -68,6 +68,15 @@ pub struct PmLaunchProfile {
 /// silently become the PM's.
 pub const PM_DEFAULT_AGENT: &str = "claude";
 
+/// SPEC-3431 FR-132: effective interval for PM loop settings that predate the
+/// persisted field or whose preferences file is missing.
+pub const PM_LOOP_INTERVAL_DEFAULT_SECS: u64 = 60;
+
+/// SPEC-3431 FR-132: minimum accepted/effective PM loop interval. Keeping the
+/// floor beside the persisted default gives every reader and writer one
+/// contract for preventing a runaway resident loop.
+pub const PM_LOOP_INTERVAL_MIN_SECS: u64 = 10;
+
 /// Agents that can resolve the `$gwt-pm` bootstrap prompt.
 ///
 /// Managed assets only reach agents with a skills mirror, and `pm_guidance`
@@ -90,21 +99,21 @@ pub struct PmSettings {
     /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
-    /// FR-035 (user ruling 2026-08-08): resident-loop cycle interval in
-    /// seconds. Both the Stop-gate floor and the subscribe timeout the PM is
-    /// told to use. Clamped to at least 10s so a typo cannot spin the loop.
+    /// SPEC-3431 FR-132: resident-loop cycle interval in seconds. Both the
+    /// Stop-gate floor and the subscribe timeout the PM is told to use.
+    /// Missing values default to 60s and effective values are at least 10s.
     #[serde(default = "default_loop_interval_secs")]
     pub loop_interval_secs: u64,
 }
 
 fn default_loop_interval_secs() -> u64 {
-    60
+    PM_LOOP_INTERVAL_DEFAULT_SECS
 }
 
 impl PmSettings {
     /// The effective loop interval, with the runaway floor applied.
     pub fn loop_interval_secs_clamped(&self) -> u64 {
-        self.loop_interval_secs.max(10)
+        self.loop_interval_secs.max(PM_LOOP_INTERVAL_MIN_SECS)
     }
 }
 

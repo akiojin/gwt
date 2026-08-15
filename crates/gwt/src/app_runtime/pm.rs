@@ -234,11 +234,24 @@ impl AppRuntime {
 
     /// SPEC-3431 FR-026: the PM settings snapshot for the active project tab.
     ///
-    /// `None` when there is no Git project to configure — the panel then keeps
-    /// showing whatever it last had rather than being fed an empty project's
-    /// defaults as if they were this one's.
-    pub(crate) fn pm_status_event(&self) -> Option<BackendEvent> {
-        let project_root = self.active_pm_project_root()?;
+    /// A non-Git or missing active tab produces an explicit unavailable
+    /// snapshot. Shared Settings windows can outlive a project tab, so silence
+    /// would leak the previous project's values into the new scope.
+    pub(crate) fn pm_status_event(&self) -> BackendEvent {
+        let Some(project_root) = self.active_pm_project_root() else {
+            let loop_interval_secs = pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS;
+            return BackendEvent::PmStatus {
+                available: false,
+                auto_start: true,
+                loop_interval_secs,
+                loop_interval_secs_decimal: loop_interval_secs.to_string(),
+                agent_options: Vec::new(),
+                configured_agent_id: String::new(),
+                configured_model: None,
+                running_agent_id: None,
+                is_running: false,
+            };
+        };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).unwrap_or_default();
         let configured = prefs.settings.launch_profile_or_default();
@@ -249,24 +262,25 @@ impl AppRuntime {
             .registration
             .as_ref()
             .filter(|registration| self.pm_registration_is_live(registration));
-        Some(BackendEvent::PmStatus {
+        let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
+        BackendEvent::PmStatus {
+            available: true,
             auto_start: prefs.settings.auto_start,
+            loop_interval_secs,
+            loop_interval_secs_decimal: loop_interval_secs.to_string(),
             agent_options: Self::pm_agent_options(&configured.agent_id),
             configured_agent_id: configured.agent_id,
             configured_model: configured.model,
             running_agent_id: running.map(|registration| registration.agent_id.clone()),
             is_running: running.is_some(),
-        })
+        }
     }
 
     /// The PM settings snapshot as a broadcast, for the call sites that change
     /// PM state. Every PM state transition must pass through here — the panel
     /// has no other source of truth, so a silent transition leaves it stale.
     pub(crate) fn pm_status_broadcast_events(&self) -> Vec<OutboundEvent> {
-        self.pm_status_event()
-            .map(OutboundEvent::broadcast)
-            .into_iter()
-            .collect()
+        vec![OutboundEvent::broadcast(self.pm_status_event())]
     }
 
     /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
@@ -289,7 +303,9 @@ impl AppRuntime {
 
     fn active_pm_project_root(&self) -> Option<PathBuf> {
         let tab_id = self.active_tab_id.clone()?;
-        self.tab(&tab_id).map(|tab| tab.project_root.clone())
+        self.tab(&tab_id)
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+            .map(|tab| tab.project_root.clone())
     }
 
     /// SPEC-3431 FR-026/FR-002: persist the auto-start opt-out.
@@ -306,6 +322,37 @@ impl AppRuntime {
             prefs.settings.auto_start = enabled;
         }) {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
+            return Vec::new();
+        }
+        self.pm_status_broadcast_events()
+    }
+
+    /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
+    ///
+    /// Reject before resolving or opening the preferences file so an invalid
+    /// wire value cannot enter the shared read-modify-write path. A committed
+    /// write changes only the interval; the live PM and its registration keep
+    /// running and reload the preference on their next loop/wake evaluation.
+    pub(crate) fn set_pm_loop_interval_events(
+        &mut self,
+        loop_interval_secs: u64,
+    ) -> Vec<OutboundEvent> {
+        if loop_interval_secs < pm_registry::PM_LOOP_INTERVAL_MIN_SECS {
+            tracing::warn!(
+                loop_interval_secs,
+                minimum = pm_registry::PM_LOOP_INTERVAL_MIN_SECS,
+                "rejected PM loop interval below the minimum"
+            );
+            return Vec::new();
+        }
+        let Some(project_root) = self.active_pm_project_root() else {
+            return Vec::new();
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.loop_interval_secs = loop_interval_secs;
+        }) {
+            tracing::warn!(%error, "failed to persist the PM loop interval");
             return Vec::new();
         }
         self.pm_status_broadcast_events()

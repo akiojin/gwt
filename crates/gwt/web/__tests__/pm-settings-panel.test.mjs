@@ -1,10 +1,9 @@
-/* SPEC-3431 FR-026 — PM settings panel.
+/* SPEC-3431 FR-026 / FR-132 — shared Project Manager settings editor.
  *
  * The PM is the one agent the user never launches through the wizard, so the
- * only place it can be configured is next to its launcher. The panel owes the
- * user four things: what the PM is running as right now, what it will run as
- * next, an auto-start opt-out, and a restart that is honest about starting a
- * NEW conversation (a Claude history cannot be carried into Codex).
+ * canonical editor lives in Settings and may be mounted in more than one
+ * Settings window. The rail gear and command palette only route to that tab;
+ * they do not own a second editor or state path.
  *
  * These are DOM-level contract assertions over the real index.html +
  * components.css plus wiring assertions over app.js / operator-shell.js — a
@@ -28,9 +27,11 @@ const appJs = readFileSync(resolve(here, "../app.js"), "utf8");
 const operatorShellJs = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 
 const RUNNING_STATUS = {
+  available: true,
   auto_start: true,
   configured_agent_id: "claude",
   configured_model: null,
+  loop_interval_secs: 60,
   running_agent_id: "claude",
   is_running: true,
   agent_options: [
@@ -39,8 +40,9 @@ const RUNNING_STATUS = {
   ],
 };
 
-function fixture({ confirmAnswer = true } = {}) {
+function fixture({ confirmAnswer = true, mounts = 1 } = {}) {
   const { document } = parseHTML(html);
+  document.getElementById("pm-settings-panel")?.remove();
   const sent = [];
   const confirmed = [];
   const panel = createPmSettingsPanel({
@@ -51,12 +53,51 @@ function fixture({ confirmAnswer = true } = {}) {
       return confirmAnswer;
     },
   });
-  panel.mount();
-  return { document, sent, confirmed, panel };
+  const views = [];
+  for (let index = 0; index < mounts; index += 1) {
+    const view = document.createElement("section");
+    view.className = "settings-panel";
+    view.dataset.settingsPanel = "project-manager";
+    document.body.appendChild(view);
+    panel.mount(view);
+    views.push(view);
+  }
+  return { document, sent, confirmed, panel, views };
 }
 
 function changeEvent(document) {
   return new document.defaultView.Event("change");
+}
+
+function required(root, selector) {
+  const node = root.querySelector(selector);
+  assert.ok(node, `expected ${selector}`);
+  return node;
+}
+
+function sharedPrimitiveRule(className) {
+  const match = componentsCss.match(
+    new RegExp(`:root\\[data-theme\\]\\s+\\.${className}\\s*\\{([^}]*)\\}`),
+  );
+  assert.ok(match, `expected shared .${className} rule`);
+  return match[1];
+}
+
+function accessibleName(root, control) {
+  const ariaLabel = control.getAttribute("aria-label")?.trim();
+  if (ariaLabel) return ariaLabel;
+  const wrappingLabel = control.closest("label")?.textContent?.trim();
+  if (wrappingLabel) return wrappingLabel;
+  const id = control.getAttribute("id");
+  return id ? root.querySelector(`label[for="${id}"]`)?.textContent?.trim() || "" : "";
+}
+
+function assertIntervalError(view, copyPattern) {
+  const error = required(view, '[data-role="pm-loop-interval-error"]');
+  assert.ok(error.classList.contains("settings-status"));
+  assert.equal(error.dataset.kind, "error");
+  assert.match(error.textContent, copyPattern);
+  assert.doesNotMatch(error.textContent, /[\u3040-\u30ff\u3400-\u9fff]/);
 }
 
 /** Select `value` the way the DOM stores a selection (option-level), then fire
@@ -68,25 +109,32 @@ function chooseAgent(document, select, value) {
   select.dispatchEvent(changeEvent(document));
 }
 
-test("FR-026: パネルは既定で非表示、かつ PM ランチャーに隣接する", () => {
-  const { document } = fixture();
-  const panelEl = document.getElementById("pm-settings-panel");
-  assert.ok(panelEl, "PM 設定パネルの器が必要");
-  assert.ok(panelEl.hasAttribute("hidden"), "既定は非表示");
+test("FR-132: Settings mount は英語の PM controls と shared primitives を使う", () => {
+  const { views } = fixture();
+  const view = views[0];
 
-  // アンカー: PM rail item と同じシェルに属していること。別の場所に浮かぶと
-  // 「どの PM の設定か」が読めなくなる。
-  const shell = panelEl.closest(".pm-launcher-shell");
-  assert.ok(shell, "パネルは .pm-launcher-shell の中に置く");
-  assert.equal(
-    shell.querySelector("#op-pm-entry")?.id,
-    "op-pm-entry",
-    "同じシェルに PM ランチャーが居ること",
+  assert.ok(view.querySelector(".settings-section"));
+  const agent = required(view, '[data-role="pm-agent-select"]');
+  const model = required(view, '[data-role="pm-model-input"]');
+  const interval = required(view, '[data-role="pm-loop-interval"]');
+  const autoStart = required(view, '[data-role="pm-auto-start"]');
+  assert.ok(agent.classList.contains("settings-select"));
+  assert.ok(model.classList.contains("settings-input"));
+  assert.ok(interval.classList.contains("settings-input"));
+  assert.ok(autoStart.classList.contains("settings-checkbox"));
+  assert.match(accessibleName(view, agent), /Agent/i);
+  assert.match(accessibleName(view, model), /Model/i);
+  assert.match(accessibleName(view, interval), /Loop interval/i);
+  assert.match(accessibleName(view, autoStart), /Auto start/i);
+  assert.doesNotMatch(
+    view.textContent,
+    /[\u3040-\u30ff\u3400-\u9fff]/,
+    "PM Settings copy must stay English",
   );
 });
 
-test("FR-026: 歯車は PM ボタンの外側にあり、PM クリックを奪わない", () => {
-  const { document } = fixture();
+test("FR-132: rail gear remains separate from the PM launcher without a standalone overlay", () => {
+  const { document } = parseHTML(html);
   const gear = document.getElementById("op-pm-settings-button");
   assert.ok(gear, "設定を開く歯車が必要");
   // 歯車が PM ボタンの子だと、歯車クリックが PM の click に必ず bubble して
@@ -96,34 +144,110 @@ test("FR-026: 歯車は PM ボタンの外側にあり、PM クリックを奪�
     false,
     "歯車は PM ボタンの内側に置かない",
   );
-  // 歯車は rail の item 語彙に入らない（Navigate 先頭は PM のまま）。
   assert.equal(gear.classList.contains("op-rail__item"), false);
+  assert.equal(
+    document.getElementById("pm-settings-panel"),
+    null,
+    "standalone PM overlay must be removed",
+  );
+  assert.equal(gear.getAttribute("aria-controls"), null);
 
-  // PM ボタン自身の click は open_pm_agent のまま（回帰固定）。
   assert.match(
     appJs,
     /for \(const id of \["op-pm-entry", "canvas-pm-launcher"\]\)/,
     "PM ランチャーの click 配線は維持する",
   );
-  // bounds は付けない。バックエンドの center 計算は viewport-sync に
-  // 捨てられるため、フレーミングはローカルの pendingPmFrame が担う。
   assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/);
 });
 
-test("FR-026: 歯車でパネルが開閉する", () => {
-  const { document, panel } = fixture();
-  const gear = document.getElementById("op-pm-settings-button");
-  const panelEl = document.getElementById("pm-settings-panel");
+test("FR-132: shared controller routes gear and pm-settings command to Settings", () => {
+  const { document, panel, sent } = fixture({ mounts: 0 });
+  assert.equal(typeof panel.bindEntryPoints, "function");
+  panel.bindEntryPoints({ document });
 
-  assert.equal(gear.getAttribute("aria-expanded"), "false");
-  gear.click();
-  assert.equal(panelEl.hasAttribute("hidden"), false, "歯車でパネルが開く");
-  assert.equal(gear.getAttribute("aria-expanded"), "true");
-  assert.equal(panel.isOpen(), true);
+  const openedTargets = [];
+  document.addEventListener("settings:open", (event) => {
+    openedTargets.push(event.detail?.target);
+  });
 
-  gear.click();
-  assert.equal(panelEl.hasAttribute("hidden"), true, "もう一度押すと閉じる");
-  assert.equal(gear.getAttribute("aria-expanded"), "false");
+  required(document, "#op-pm-settings-button").click();
+  assert.deepEqual(openedTargets, ["project-manager"]);
+  assert.deepEqual(sent, [], "opening Settings must not start or mutate the PM");
+
+  openedTargets.length = 0;
+  let observedCommands = 0;
+  document.addEventListener("op:command", () => {
+    observedCommands += 1;
+  });
+  document.dispatchEvent(
+    new document.defaultView.CustomEvent("op:command", {
+      detail: { id: "pm-settings" },
+    }),
+  );
+  assert.deepEqual(openedTargets, ["project-manager"]);
+  assert.equal(observedCommands, 1, "routing must not hide the command from observers");
+  assert.deepEqual(sent, [], "the PM settings command must not mutate the PM");
+});
+
+test("FR-132: late and existing mounts share the controller's current snapshot", () => {
+  const { document, panel, views } = fixture();
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    auto_start: false,
+    configured_agent_id: "codex",
+    configured_model: "gpt-5.1-codex-max",
+    loop_interval_secs: 42,
+  });
+
+  const lateView = document.createElement("section");
+  lateView.className = "settings-panel";
+  lateView.dataset.settingsPanel = "project-manager";
+  document.body.appendChild(lateView);
+  panel.mount(lateView);
+  views.push(lateView);
+
+  for (const view of views) {
+    assert.equal(required(view, '[data-role="pm-auto-start"]').checked, false);
+    assert.equal(required(view, '[data-role="pm-agent-select"]').value, "codex");
+    assert.equal(
+      required(view, '[data-role="pm-model-input"]').value,
+      "gpt-5.1-codex-max",
+    );
+    assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "42");
+  }
+
+  panel.applyStatus({ ...RUNNING_STATUS, loop_interval_secs: 84 });
+  for (const view of views) {
+    assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "84");
+  }
+});
+
+test("FR-132: active-project status replacement updates every mount without leaking the prior project", () => {
+  const { panel, views } = fixture({ mounts: 2 });
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    configured_agent_id: "claude",
+    configured_model: "claude-opus-4-1",
+    loop_interval_secs: 30,
+  });
+
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    configured_agent_id: "codex",
+    configured_model: "gpt-5.1-codex-max",
+    loop_interval_secs: 75,
+    running_agent_id: "codex",
+  });
+
+  for (const view of views) {
+    assert.equal(required(view, '[data-role="pm-agent-select"]').value, "codex");
+    assert.equal(
+      required(view, '[data-role="pm-model-input"]').value,
+      "gpt-5.1-codex-max",
+    );
+    assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "75");
+    assert.doesNotMatch(view.textContent, /claude-opus-4-1/);
+  }
 });
 
 test("FR-026: Running as は稼働中エージェントを名乗る", () => {
@@ -199,10 +323,111 @@ test("FR-026: Auto start トグルは set_pm_auto_start を送る", () => {
   assert.deepEqual(sent.at(-1), { kind: "set_pm_auto_start", enabled: true });
 });
 
+test("FR-132: missing loop interval displays the effective 60 second default", () => {
+  const { views, panel } = fixture();
+  const statusWithoutInterval = { ...RUNNING_STATUS };
+  delete statusWithoutInterval.loop_interval_secs;
+  panel.applyStatus(statusWithoutInterval);
+
+  const input = views[0].querySelector('[data-role="pm-loop-interval"]');
+  assert.ok(input, "loop interval input is required");
+  assert.equal(input.type, "number");
+  assert.equal(input.min, "10");
+  assert.equal(input.value, "60");
+});
+
+test("FR-132: unavailable project clears and disables every PM editor mount", () => {
+  const { document, sent, views, panel } = fixture({ mounts: 2 });
+  panel.applyStatus(RUNNING_STATUS);
+
+  panel.applyStatus({ available: false });
+
+  for (const view of views) {
+    assert.match(
+      required(view, '[data-role="pm-running-as"]').textContent,
+      /unavailable/i,
+    );
+    assert.equal(
+      required(view, '[data-role="pm-agent-select"]').querySelectorAll("option").length,
+      0,
+    );
+    assert.equal(required(view, '[data-role="pm-model-input"]').value, "");
+    assert.equal(required(view, '[data-role="pm-loop-interval"]').value, "60");
+    for (const control of view.querySelectorAll("input, select, button")) {
+      assert.equal(control.disabled, true);
+    }
+  }
+
+  required(views[0], '[data-role="pm-auto-start"]').dispatchEvent(changeEvent(document));
+  assert.deepEqual(sent, []);
+});
+
+test("FR-132: interval 9 emits no event and explains the 10 second minimum", () => {
+  const { document, sent, views, panel } = fixture();
+  panel.applyStatus(RUNNING_STATUS);
+  const input = required(views[0], '[data-role="pm-loop-interval"]');
+
+  input.value = "9";
+  input.dispatchEvent(changeEvent(document));
+  assert.deepEqual(sent, []);
+  assertIntervalError(views[0], /at least 10 seconds/i);
+  const error = required(views[0], '[data-role="pm-loop-interval-error"]');
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(error.getAttribute("role"), "alert");
+  assert.equal(error.getAttribute("aria-live"), "polite");
+  assert.equal(input.getAttribute("aria-describedby"), error.id);
+});
+
+test("FR-132: fractional interval emits no event and requests integer seconds", () => {
+  const { document, sent, views, panel } = fixture();
+  panel.applyStatus(RUNNING_STATUS);
+  const input = required(views[0], '[data-role="pm-loop-interval"]');
+
+  input.value = "10.5";
+  input.dispatchEvent(changeEvent(document));
+  assert.deepEqual(sent, []);
+  assertIntervalError(
+    views[0],
+    /(?:whole|integer)[^.]*seconds|seconds[^.]*(?:whole|integer)/i,
+  );
+});
+
+test("FR-132: boundary loop interval 10 emits set_pm_loop_interval", () => {
+  const { document, sent, views, panel } = fixture();
+  panel.applyStatus(RUNNING_STATUS);
+  const input = required(views[0], '[data-role="pm-loop-interval"]');
+  input.value = "10";
+  input.dispatchEvent(changeEvent(document));
+
+  assert.deepEqual(sent, [
+    { kind: "set_pm_loop_interval", loop_interval_secs: 10 },
+  ]);
+  assert.equal(input.getAttribute("aria-invalid"), "false");
+});
+
+test("FR-132: u64 status and edits stay exact beyond JavaScript's safe integer range", () => {
+  const { document, sent, views, panel } = fixture();
+  panel.applyStatus({
+    ...RUNNING_STATUS,
+    loop_interval_secs: 18446744073709552000,
+    loop_interval_secs_decimal: "18446744073709551615",
+  });
+  const input = required(views[0], '[data-role="pm-loop-interval"]');
+  assert.equal(input.value, "18446744073709551615");
+
+  input.dispatchEvent(changeEvent(document));
+  assert.deepEqual(sent, [
+    {
+      kind: "set_pm_loop_interval",
+      loop_interval_secs: "18446744073709551615",
+    },
+  ]);
+});
+
 test("FR-026: Restart は confirm を通ったときだけ restart_pm_agent を送る", () => {
   const declined = fixture({ confirmAnswer: false });
   declined.panel.applyStatus(RUNNING_STATUS);
-  declined.document.querySelector('[data-role="pm-restart"]').click();
+  required(declined.document, '[data-role="pm-restart"]').click();
   assert.equal(declined.confirmed.length, 1, "確認は必ず出す");
   assert.equal(
     declined.sent.some((event) => event.kind === "restart_pm_agent"),
@@ -214,7 +439,7 @@ test("FR-026: Restart は confirm を通ったときだけ restart_pm_agent を�
 
   const accepted = fixture({ confirmAnswer: true });
   accepted.panel.applyStatus(RUNNING_STATUS);
-  accepted.document.querySelector('[data-role="pm-restart"]').click();
+  required(accepted.document, '[data-role="pm-restart"]').click();
   assert.deepEqual(accepted.sent.at(-1), { kind: "restart_pm_agent" });
 });
 
@@ -240,37 +465,47 @@ test("FR-026: Pending チップは configured != running のときだけ出る",
   assert.equal(chip.hidden, true, "停止中に pending は意味を持たない");
 });
 
-test("FR-026: PM 設定の CSS は Operator トークンのみを使う", () => {
-  const start = componentsCss.indexOf(".pm-launcher-shell");
-  assert.ok(start >= 0, "PM 設定の CSS が存在すること");
-  const block = componentsCss.slice(start);
-  assert.doesNotMatch(
-    block,
-    /#[0-9a-fA-F]{3,8}\b|\brgba?\(/,
-    "PM 設定の CSS は Operator トークンのみを使う",
-  );
-  // 歯車は常時表示すると rail のノイズになるので hover/focus で現れる。
-  assert.match(block, /\.pm-launcher-shell:hover \.pm-launcher-gear/);
-  assert.match(block, /\.pm-launcher-shell:focus-within \.pm-launcher-gear/);
+test("FR-132: theme-scoped shared Settings primitives consume tokens without raw colors", () => {
+  for (const className of [
+    "settings-section",
+    "settings-label",
+    "settings-select",
+    "settings-input",
+    "settings-checkbox",
+    "settings-help",
+    "settings-status",
+  ]) {
+    const body = sharedPrimitiveRule(className);
+    assert.match(body, /var\(--/, `.${className} must consume an Operator token`);
+    assert.doesNotMatch(
+      body,
+      /#[0-9a-fA-F]{3,8}\b|\brgba?\(/,
+      `.${className} must not introduce a raw color`,
+    );
+  }
 });
 
-test("FR-026: パネルは app.js に mount され pm_status を受け取る", () => {
-  // 実装されていても配線されていなければ機能は死んでいる。
+test("FR-132: app owns one controller and applies pm_status to it", () => {
   assert.match(appJs, /import \{ createPmSettingsPanel \} from "\/pm-settings-panel\.js"/);
-  assert.match(appJs, /createPmSettingsPanel\(\{[\s\S]*?\}\)/);
-  assert.match(appJs, /pmSettingsPanel\.mount\(\)/);
+  assert.equal(
+    appJs.match(/\bcreatePmSettingsPanel\s*\(/g)?.length ?? 0,
+    1,
+    "app must instantiate exactly one shared PM settings controller",
+  );
+  assert.match(appJs, /pmSettingsPanel\.bindEntryPoints\(\{\s*document\s*\}\)/);
   assert.match(
     appJs,
     /case "pm_status":[\s\S]{0,200}pmSettingsPanel\.applyStatus\(/,
     "pm_status が受信ディスパッチに繋がっていること",
   );
-});
-
-test("FR-026: pm-settings はコマンドパレットから開ける", () => {
-  assert.match(operatorShellJs, /id: "pm-settings"/);
   assert.match(
     appJs,
-    /case "pm-settings":[\s\S]{0,200}pmSettingsPanel\.open\(\)/,
-    "op:command が実際にパネルを開くこと",
+    /__gwtPmSettingsTestApi\s*=\s*Object\.freeze\(\{[\s\S]{0,160}pmSettingsPanel\.mount\(container\)/,
+    "Playwright bridge must mount the app-owned controller, not a test-only duplicate",
   );
+});
+
+test("FR-132: command palette exposes the pm-settings command", () => {
+  assert.match(operatorShellJs, /id: "pm-settings"/);
+  assert.match(appJs, /case "pm-settings":[\s\S]{0,320}return;/);
 });
