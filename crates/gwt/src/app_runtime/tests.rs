@@ -11891,6 +11891,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3456,
@@ -16836,6 +16837,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         fixture.owner.number,
@@ -35148,6 +35150,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
@@ -35405,6 +35408,7 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     };
     monitor.record_candidate(issue.clone());
     let key = monitor
@@ -35561,6 +35565,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         42,
@@ -37017,6 +37022,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37109,6 +37115,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37224,6 +37231,7 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37318,6 +37326,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -37884,6 +37893,7 @@ fn monitor_relaunch_fixture(
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::Ready,
+            updated_at: None,
         });
         assert!(monitor.apply_confirmed_claim(
             3165,
@@ -47550,6 +47560,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         },
         state,
         claim_id: None,

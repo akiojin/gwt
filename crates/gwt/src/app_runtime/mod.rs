@@ -1798,11 +1798,15 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                             monitor.claim_probe_plan(monitor.config.max_active.max(1));
                         let completed_issues =
                             completed_claim_candidates(available, candidates, |issue_number| {
-                                gwt::issue_monitor_worker::issue_completed_by_merged_pr(
-                                    &owner,
-                                    &repo,
-                                    issue_number,
-                                )
+                                loaded
+                                    .issues
+                                    .iter()
+                                    .find(|issue| issue.number == issue_number)
+                                    .is_some_and(|issue| {
+                                        gwt::issue_monitor_worker::issue_completed_by_merged_pr(
+                                            &owner, &repo, issue,
+                                        )
+                                    })
                             });
                         local_claim_proposal = Some((
                             format!("{}:{}", whoami::username(), std::process::id()),
@@ -1949,6 +1953,7 @@ fn issue_monitor_issue_from_snapshot(
         body: (!snapshot.body.is_empty()).then(|| snapshot.body.clone()),
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: Some(snapshot.updated_at.0.clone()),
     }
 }
 
@@ -4269,7 +4274,7 @@ impl AppRuntime {
                                     gwt::issue_monitor_worker::issue_completed_by_merged_pr(
                                         &owner,
                                         &repo,
-                                        issue.number,
+                                        issue,
                                     )
                                     .then_some(issue.number)
                                 })
