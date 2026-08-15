@@ -131,7 +131,9 @@ pub fn runtime_status_payload(
 
 pub fn runtime_hook_payload(event: &crate::RuntimeHookEvent, source_pid: u32) -> Value {
     let mut event = event.clone();
-    event.continuation_readiness_nonce = None;
+    if event.source_event.as_deref() != Some("SessionStart") {
+        event.continuation_readiness_nonce = None;
+    }
     serde_json::to_value(RuntimeHookPayload { source_pid, event })
         .expect("runtime hook payload serializes")
 }
@@ -320,8 +322,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_hook_payload_never_publishes_continue_work_readiness_nonce() {
-        let mut event = RuntimeHookEvent {
+    fn runtime_hook_payload_preserves_continue_work_readiness_nonce_for_authenticated_fanout() {
+        let event = RuntimeHookEvent {
             kind: RuntimeHookEventKind::CoordinationEvent,
             source_event: Some("SessionStart".to_string()),
             gwt_session_id: Some("session-private".to_string()),
@@ -337,16 +339,43 @@ mod tests {
 
         let payload = runtime_hook_payload(&event, 42);
         let encoded = serde_json::to_string(&payload).expect("serialize daemon payload");
+        assert!(encoded.contains("continue-ready-private"));
+
+        let RuntimeDaemonEvent::Hook { event: decoded } =
+            decode_runtime_daemon_event(RUNTIME_HOOK_CHANNEL, payload, 7)
+                .expect("decode authenticated hook fanout")
+        else {
+            panic!("expected hook event");
+        };
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn runtime_hook_payload_scrubs_readiness_nonce_from_non_session_start_fanout() {
+        let mut event = RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("PreToolUse".to_string()),
+            gwt_session_id: Some("session-private".to_string()),
+            continuation_readiness_nonce: Some("continue-ready-private".to_string()),
+            agent_session_id: Some("provider-session".to_string()),
+            project_root: Some("/tmp/project".to_string()),
+            branch: Some("work/issue-3480".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: Some("Bash".to_string()),
+            message: None,
+            occurred_at: "2026-08-15T00:00:00Z".to_string(),
+        };
+
+        let payload = runtime_hook_payload(&event, 42);
+        let encoded = serde_json::to_string(&payload).expect("serialize daemon payload");
         assert!(!encoded.contains("continue-ready-private"));
 
         let RuntimeDaemonEvent::Hook { event: decoded } =
             decode_runtime_daemon_event(RUNTIME_HOOK_CHANNEL, payload, 7)
-                .expect("decode sanitized hook")
+                .expect("decode non-readiness hook fanout")
         else {
             panic!("expected hook event");
         };
-        assert!(decoded.continuation_readiness_nonce.is_none());
-
         event.continuation_readiness_nonce = None;
         assert_eq!(decoded, event);
     }

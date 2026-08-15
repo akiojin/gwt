@@ -45,6 +45,7 @@ impl LaunchWizardState {
         let mut state = Self {
             context: context.clone(),
             wizard_mode: LaunchWizardMode::Branch,
+            holder_decision: None,
             step,
             selected: 0,
             launch_path,
@@ -456,7 +457,10 @@ impl LaunchWizardState {
 
     pub fn apply(&mut self, action: LaunchWizardAction) {
         self.error = None;
-        if self.runtime_resolution_pending || self.launch_materialization_pending {
+        if self.launch_materialization_pending {
+            return;
+        }
+        if self.runtime_resolution_pending {
             match action {
                 LaunchWizardAction::Cancel => {
                     self.completion = Some(LaunchWizardCompletion::Cancelled);
@@ -471,7 +475,12 @@ impl LaunchWizardState {
                 self.completion = Some(LaunchWizardCompletion::Cancelled);
             }
             LaunchWizardAction::Submit => {
-                self.submit_panel();
+                if self.holder_decision.is_some() {
+                    self.error =
+                        Some("Resolve the current holder before launching a successor".to_string());
+                } else {
+                    self.submit_panel();
+                }
             }
             LaunchWizardAction::GotoStep { phase } => {
                 self.goto_phase(phase);
@@ -493,6 +502,10 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::FocusExistingSession { index } => {
                 self.focus_existing_session(index);
+            }
+            LaunchWizardAction::StopAndStartSuccessor { .. }
+            | LaunchWizardAction::MoveExistingPane { .. } => {
+                self.error = Some("Holder decision requires runtime handling".to_string());
             }
             LaunchWizardAction::SetBranchMode { create_new } => {
                 self.set_branch_mode(create_new);
@@ -2182,6 +2195,72 @@ mod tests {
         );
         state.set_agent_id("codex");
         state
+    }
+
+    #[test]
+    fn holder_decision_actions_fail_closed_in_state_without_runtime_handling() {
+        let actions = [
+            LaunchWizardAction::StopAndStartSuccessor {
+                fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                window_id: "tab-1:successor".to_string(),
+            },
+            LaunchWizardAction::MoveExistingPane {
+                fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                window_id: "tab-1:destination".to_string(),
+            },
+        ];
+
+        for action in actions {
+            let mut state = codex_manual_state();
+            let original_step = state.step;
+
+            state.apply(action);
+
+            assert!(state.completion.is_none());
+            assert_eq!(state.step, original_step);
+            assert_eq!(
+                state.error.as_deref(),
+                Some("Holder decision requires runtime handling")
+            );
+        }
+    }
+
+    #[test]
+    fn holder_decision_blocks_legacy_submit_without_runtime_mutation() {
+        let mut state = codex_manual_state();
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "exact-holder".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1::agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: true,
+            move_unavailable_reason: None,
+        });
+
+        state.apply(LaunchWizardAction::Submit);
+
+        assert!(state.completion.is_none());
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Resolve the current holder before launching a successor")
+        );
+    }
+
+    #[test]
+    fn launch_materialization_pending_rejects_cancel() {
+        let mut state = codex_manual_state();
+        state.mark_launch_materialization_pending("Starting successor...");
+
+        state.apply(LaunchWizardAction::Cancel);
+
+        assert!(state.completion.is_none());
+        assert!(state.launch_materialization_pending);
+        assert_eq!(
+            state.launch_materialization_message.as_deref(),
+            Some("Starting successor...")
+        );
     }
 
     // SPEC-1921 US-20 / FR-123: before any explicit choice the reasoning stop

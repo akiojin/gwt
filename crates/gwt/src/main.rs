@@ -1054,6 +1054,7 @@ enum UserEvent {
     },
     RuntimeOutput {
         id: String,
+        incarnation: u64,
         data: Vec<u8>,
     },
     /// A submit-terminated choice or standalone Escape is about to be written
@@ -1075,8 +1076,10 @@ enum UserEvent {
     },
     RuntimeStatus {
         id: String,
+        incarnation: u64,
         status: WindowProcessStatus,
         detail: Option<String>,
+        exit_confirmed: bool,
     },
     DaemonRuntimeStatus {
         id: String,
@@ -1204,11 +1207,11 @@ enum UserEvent {
     },
     LaunchComplete {
         window_id: String,
-        result: AgentLaunchResult,
+        result: Box<AgentLaunchResult>,
     },
     ShellLaunchComplete {
         window_id: String,
-        result: Result<ProcessLaunch, String>,
+        result: Box<Result<ProcessLaunch, String>>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
@@ -2742,6 +2745,7 @@ mod tests {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_launch_wizard_materializations: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
@@ -2847,6 +2851,8 @@ mod tests {
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+            origin: super::app_runtime::LaunchWizardOrigin::ManualLaunchAgent,
+            manual_holder_intent: None,
         }
     }
 
@@ -2965,6 +2971,8 @@ mod tests {
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+            origin: super::app_runtime::LaunchWizardOrigin::ManualLaunchAgent,
+            manual_holder_intent: None,
         }
     }
 
@@ -4027,7 +4035,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 3);
+        assert_eq!(error_events.len(), 2);
         assert!(
             runtime.active_agent_sessions.contains_key(&claude_one_id),
             "PTY Error with a live hook state keeps Agent session ownership for recovery"
@@ -4041,25 +4049,21 @@ mod tests {
         );
         assert!(matches!(
             error_events[0].event,
-            BackendEvent::ActiveWorkProjection { ref projection }
-                if projection.active_agents == 2 && projection.agents.len() == 2
-        ));
-        assert!(matches!(
-            error_events[1].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_one_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            error_events[2].event,
+            error_events[1].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
         ));
 
-        let close_events = runtime.handle_runtime_status(
+        let close_events = runtime.handle_runtime_status_with_exit_confirmation(
             claude_two_id.clone(),
             WindowProcessStatus::Exited,
             Some("Process exited".to_string()),
+            true,
         );
         // PTY exit alone keeps the window open so launch diagnostics remain
         // visible; explicit hook stop owns structural auto-close.
@@ -4118,7 +4122,7 @@ mod tests {
                 gwt_agent::LaunchRuntimeTarget::Host,
                 gwt_agent::SessionMode::Normal,
                 false,
-                repo.display().to_string(),
+                repo.display().to_string().into(),
             )),
         );
         assert!(matches!(
@@ -4177,8 +4181,12 @@ mod tests {
             .window_details
             .insert(stale_id.clone(), "stale detail".to_string());
 
-        let events =
-            runtime.handle_runtime_status(stale_id.clone(), WindowProcessStatus::Exited, None);
+        let events = runtime.handle_runtime_status_with_exit_confirmation(
+            stale_id.clone(),
+            WindowProcessStatus::Exited,
+            None,
+            true,
+        );
 
         assert!(events.is_empty());
         assert!(!runtime.active_agent_sessions.contains_key(&stale_id));
@@ -5079,6 +5087,8 @@ mod tests {
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+            origin: super::app_runtime::LaunchWizardOrigin::ManualLaunchAgent,
+            manual_holder_intent: None,
         });
         {
             let wizard = &mut runtime.launch_wizard.as_mut().unwrap().wizard;
@@ -5220,7 +5230,7 @@ mod tests {
                 gwt_agent::LaunchRuntimeTarget::Host,
                 gwt_agent::SessionMode::Normal,
                 false,
-                repo.display().to_string(),
+                repo.display().to_string().into(),
             )),
         );
         assert!(matches!(
@@ -5263,7 +5273,7 @@ mod tests {
                 gwt_agent::LaunchRuntimeTarget::Host,
                 gwt_agent::SessionMode::Normal,
                 false,
-                repo.display().to_string(),
+                repo.display().to_string().into(),
             )),
         );
         assert!(matches!(
@@ -7717,6 +7727,21 @@ fn apply_agent_frontend_dispatch_outcome(
 }
 
 fn main() -> std::io::Result<()> {
+    let argv: Vec<String> = std::env::args().collect();
+    if matches!(
+        argv.get(1).map(String::as_str),
+        Some("__internal-pty-start-gate")
+    ) {
+        let exit_code = match gwt_terminal::pty::run_start_gate_from_env() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("PTY start gate failed: {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code.clamp(0, 255));
+    }
+
     // Hydrate process PATH before any subprocess can spawn. macOS GUI launches
     // via launchd inherit a minimal PATH that omits /usr/local/bin and
     // /opt/homebrew/bin, breaking docker / gh / claude / codex / bunx / npx
@@ -7724,7 +7749,6 @@ fn main() -> std::io::Result<()> {
     // dispatch so spawned children inherit the augmented PATH.
     gwt_agent::environment::apply_host_path_hydration_to_std_env();
 
-    let argv: Vec<String> = std::env::args().collect();
     let route = front_door_route(&argv);
     if !matches!(route, runtime_support::FrontDoorRoute::Gui) {
         // SPEC-1942 US-14 follow-up: Windows builds use
@@ -8270,8 +8294,12 @@ fn main() -> std::io::Result<()> {
                 // `AppRuntime::process_line_events`.
                 clients.dispatch(app.process_line_events(line));
             }
-            Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
-                let events = app.handle_runtime_output(id, data);
+            Event::UserEvent(UserEvent::RuntimeOutput {
+                id,
+                incarnation,
+                data,
+            }) => {
+                let events = app.handle_runtime_output_event(id, incarnation, data);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
@@ -8287,8 +8315,20 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_daemon_runtime_output(id, data);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
-                let events = app.handle_runtime_status(id, status, detail);
+            Event::UserEvent(UserEvent::RuntimeStatus {
+                id,
+                incarnation,
+                status,
+                detail,
+                exit_confirmed,
+            }) => {
+                let events = app.handle_runtime_status_event(
+                    id,
+                    incarnation,
+                    status,
+                    detail,
+                    exit_confirmed,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {
@@ -8484,11 +8524,11 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
-                let events = app.handle_launch_complete(window_id, result);
+                let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
-                let events = app.handle_shell_launch_complete(window_id, result);
+                let events = app.handle_shell_launch_complete(window_id, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {

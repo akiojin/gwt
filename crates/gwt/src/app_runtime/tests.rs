@@ -45,8 +45,8 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 use super::continuation::set_durable_launch_recovery_directory_sync_test_hook;
 use super::continuation::{
     clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
-    durable_launch_recovery_exists, persist_durable_launch_recovery,
-    resolve_split_workspace_state_external_commit,
+    durable_launch_recovery_exists, durable_launch_recovery_session_identity,
+    persist_durable_launch_recovery, resolve_split_workspace_state_external_commit,
     set_fresh_execution_pre_work_commit_hook_for_test, set_missing_session_cleanup_hook_for_test,
     ActiveOwnerLiveness, DurableLaunchRecoveryKind,
 };
@@ -59,14 +59,15 @@ use super::{
     reset_local_issue_monitor_remote_scan_count, save_resumed_workspace_projection,
     save_start_work_workspace_projection, save_workspace_launch_projection,
     set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AppEventProxy, AppRuntime,
-    ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
-    ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
-    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
-    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
-    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch,
-    ProjectTabRuntime, ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent,
-    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AgentLaunchRuntimeContext,
+    AppEventProxy, AppRuntime, ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner,
+    CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
+    IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
+    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
+    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
+    ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent, WindowRuntime,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::embedded_server::AgentPmSendResponder;
 use crate::{
@@ -74,6 +75,15 @@ use crate::{
     AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
     UploadedAttachment,
 };
+
+#[test]
+fn pty_start_gate_helper() {
+    if std::env::var_os("GWT_INTERNAL_PTY_GATE_ENDPOINT").is_none() {
+        return;
+    }
+    let exit_code = gwt_terminal::pty::run_start_gate_from_env().expect("run test PTY start gate");
+    assert_eq!(exit_code, 0, "released PTY target failed");
+}
 
 #[test]
 fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
@@ -847,11 +857,21 @@ impl Visit for CaptureTracingVisitor {
 }
 
 fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
+    static CAPTURE_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    let _capture_lock = CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(CaptureTracingLayer {
         events: Arc::clone(&events),
     });
-    tracing::subscriber::with_default(subscriber, run);
+    super::launch_errors::with_launch_wizard_error_log_capture(|| {
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            run();
+        });
+    });
     let captured_events = events.lock().expect("captured tracing events").clone();
     captured_events
 }
@@ -3219,14 +3239,46 @@ fn long_running_test_pane(id: &str) -> Pane {
 }
 
 fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
+    let incarnation = super::next_window_runtime_incarnation();
+    let pane = Arc::new(Mutex::new(long_running_test_pane(window_id)));
+    let child_pid = pane
+        .lock()
+        .expect("test pane")
+        .pty()
+        .process_id()
+        .expect("test child pid");
+    let child_started_at =
+        gwt::process::host_process_start_time(child_pid).expect("test child process start time");
     runtime.runtimes.insert(
         window_id.to_string(),
         WindowRuntime {
-            pane: Arc::new(Mutex::new(long_running_test_pane(window_id))),
+            incarnation,
+            pane,
             output_thread: None,
             status_thread: None,
         },
     );
+    if let Some(session_id) = runtime
+        .active_agent_sessions
+        .get(window_id)
+        .map(|active| active.session_id.clone())
+    {
+        let path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+        if let Ok(session) = gwt_agent::Session::load(&path) {
+            if let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            {
+                let _ = gwt_agent::persist_session_running_state_if_execution_identity_matches(
+                    &runtime.sessions_dir,
+                    &identity,
+                    incarnation,
+                    gwt::process::host_process_start_time(std::process::id())
+                        .expect("test Host process start time"),
+                    child_pid,
+                    child_started_at,
+                );
+            }
+        }
+    }
 }
 
 fn sample_runtime_with_events(
@@ -3262,6 +3314,7 @@ fn sample_runtime_with_events(
         sessions_dir,
         launch_wizard_cache,
         launch_wizard: None,
+        pending_launch_wizard_materializations: HashMap::new(),
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
         pending_pm_launches: HashMap::new(),
@@ -4469,7 +4522,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
         gwt_agent::LaunchRuntimeTarget::Host,
         gwt_agent::SessionMode::Normal,
         false,
-        temp.path().display().to_string(),
+        temp.path().display().to_string().into(),
     );
 
     dispatch_agent_launch_success(
@@ -4543,6 +4596,8 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
         auto_submit_after_runtime_resolution: None,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
+        origin: super::LaunchWizardOrigin::ManualLaunchAgent,
+        manual_holder_intent: None,
     }
 }
 
@@ -4757,6 +4812,8 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
         auto_submit_after_runtime_resolution: None,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
+        origin: super::LaunchWizardOrigin::ManualLaunchAgent,
+        manual_holder_intent: None,
     }
 }
 
@@ -4825,6 +4882,8 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
         auto_submit_after_runtime_resolution: None,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
+        origin: super::LaunchWizardOrigin::StartWork,
+        manual_holder_intent: None,
     }
 }
 
@@ -4870,7 +4929,1888 @@ fn sample_ready_agent_launch_wizard_session(
         auto_submit_after_runtime_resolution: None,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
+        origin: super::LaunchWizardOrigin::ManualLaunchAgent,
+        manual_holder_intent: None,
     }
+}
+
+fn install_manual_launch_holder(
+    runtime: &mut AppRuntime,
+    repo: &Path,
+    session_id: &str,
+    status: gwt_agent::AgentStatus,
+    local_window_id: Option<&str>,
+) -> gwt_agent::SessionExecutionIdentity {
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let mut session = gwt_agent::Session::new(repo, "feature/demo", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.to_path_buf());
+    session.linked_issue_number = Some(owner.number);
+    session.status = status;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save manual launch holder Session");
+    gwt::cli::execution_state::materialize_at_launch(
+        repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize manual holder execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize manual holder ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(repo, owner)
+        .expect("read manual holder binding")
+        .expect("manual holder binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: session.repo_hash.clone().expect("holder repository hash"),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    session
+        .set_execution_binding(Some(binding))
+        .expect("bind manual holder Session");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist bound manual holder Session");
+    if let Some(window_id) = local_window_id {
+        runtime.active_agent_sessions.insert(
+            window_id.to_string(),
+            ActiveAgentSession {
+                window_id: window_id.to_string(),
+                session_id: session_id.to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/demo".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.to_path_buf(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+        runtime
+            .window_pty_statuses
+            .insert(window_id.to_string(), WindowProcessStatus::Running);
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .expect("validate holder Session identity")
+        .expect("holder Session identity");
+    if matches!(
+        status,
+        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+    ) {
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            status,
+            &identity,
+            1,
+            gwt::process::host_process_start_time(std::process::id())
+                .expect("test Host process start time"),
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            session_id,
+        ))
+        .expect("persist terminal holder runtime proof");
+    }
+    identity
+}
+
+fn install_manual_holder_capability(
+    runtime: &mut AppRuntime,
+    repo: &Path,
+    window_id: &str,
+    holder: &gwt_agent::SessionExecutionIdentity,
+) -> crate::embedded_server::AgentCapabilityIssuer {
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue_bound(repo, &holder.session_id, holder.execution_binding.clone())
+        .expect("issue exact holder capability");
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.to_string(), capability.token);
+    issuer
+}
+
+#[test]
+fn manual_launch_live_local_holder_requires_typed_decision_before_materialization() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-holder", Some("manual-live-holder".to_string())));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let holder_window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-live-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(&holder_window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &holder_window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &holder_window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+    let events =
+        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+    let wizard = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("holder decision keeps wizard open")
+        .wizard
+        .view();
+    let decision = wizard.holder_decision.expect("exact live holder decision");
+    assert_eq!(decision.holder_session_id, holder.session_id);
+    assert_eq!(
+        decision.holder_window_id.as_deref(),
+        Some(holder_window_id.as_str())
+    );
+    assert!(decision.stop_available);
+    assert!(decision.move_available);
+    assert!(!wizard.launch_materialization_pending);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::LaunchWizardState { wizard: Some(view) }
+            if view.holder_decision.is_some()
+    )));
+    assert!(!recorded_events
+        .lock()
+        .expect("event log")
+        .iter()
+        .any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+            )
+        }));
+}
+
+#[test]
+fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_materialization() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-holder", Some("manual-stop-holder".to_string())));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let holder_window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-stop-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(&holder_window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &holder_window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &holder_window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("holder decision wizard")
+        .wizard
+        .view()
+        .holder_decision
+        .expect("local holder decision");
+
+    let events = runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id: holder_window_id.clone(),
+        },
+        Some(canvas_bounds()),
+    );
+
+    assert!(!runtime.runtimes.contains_key(&holder_window_id));
+    assert!(!runtime
+        .active_agent_sessions
+        .contains_key(&holder_window_id));
+    let persisted = gwt_agent::Session::load(
+        &runtime
+            .sessions_dir
+            .join(format!("{}.toml", holder.session_id)),
+    )
+    .expect("load stopped holder");
+    assert_eq!(persisted.status, gwt_agent::AgentStatus::Stopped);
+    assert_eq!(
+        gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            &holder.session_id,
+        ))
+        .expect("exact stopped runtime sidecar")
+        .status,
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let handoff_path = gwt_agent::manual_handoff_path(&runtime.sessions_dir, &holder.session_id);
+    assert!(
+        handoff_path.exists(),
+        "Stop must durably fence Active relaunch until successor preparation"
+    );
+    assert!(
+        gwt::cli::execution_state::begin_active_session_launch_handshake(
+            &runtime.sessions_dir,
+            &holder,
+        )
+        .expect("relaunch fence check")
+        .is_none(),
+        "a durable manual handoff must exclude a late Active relaunch"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::LaunchWizardState { wizard: Some(view) }
+            if view.launch_materialization_pending && view.holder_decision.is_none()
+    )));
+    wait_for_recorded_event(
+        "stop-and-start materialization",
+        &recorded_events,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                        if matches!(
+                            config.as_ref(),
+                            gwt::LaunchWizardLaunchRequest::Agent(config)
+                                if matches!(
+                                    &config.execution_intent,
+                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                        expected_predecessor,
+                                        ..
+                                    } if expected_predecessor.as_deref() == Some(&holder)
+                                )
+                        )
+                )
+            })
+        },
+    );
+    let mut successor_config = recorded_events
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. } => {
+                match config.as_ref().clone() {
+                    gwt::LaunchWizardLaunchRequest::Agent(config) => Some(config),
+                    gwt::LaunchWizardLaunchRequest::Shell(_) => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("stop-and-start Agent materialization request");
+    runtime
+        .prepare_manual_successor_before_pane(&repo, &mut successor_config)
+        .expect("the committed stop handoff must be consumed by successor preflight");
+    assert!(
+        !handoff_path.exists(),
+        "Prepared successor commit consumes the exact durable handoff fence"
+    );
+    assert!(matches!(
+        successor_config.execution_intent,
+        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
+    ));
+}
+
+#[test]
+fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_session_id(
+        "agent-holder",
+        Some("manual-replaced-wizard-holder".to_string())
+    ));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let holder_window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-replaced-wizard-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(&holder_window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &holder_window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &holder_window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id: holder_window_id,
+        },
+        Some(canvas_bounds()),
+    );
+    wait_for_recorded_event(
+        "replacement-safe holder materialization",
+        &recorded_events,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+        },
+    );
+    let request = {
+        let mut events = recorded_events.lock().expect("event log");
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+            .expect("materialization request");
+        events.remove(index)
+    };
+    let UserEvent::LaunchWizardLaunchMaterializationRequested {
+        wizard_id,
+        client_id,
+        config,
+        bounds,
+    } = request
+    else {
+        unreachable!("matched above")
+    };
+    let mut replacement = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+    replacement.wizard_id = "replacement-wizard".to_string();
+    runtime.launch_wizard = Some(replacement);
+    let windows_before = runtime.tabs[0].workspace.persisted().windows.len();
+
+    let first = runtime.handle_launch_wizard_launch_materialization_requested(
+        wizard_id.clone(),
+        client_id.clone(),
+        config.as_ref().clone(),
+        bounds.clone(),
+    );
+
+    assert!(
+        !first.is_empty(),
+        "the original request must still materialize"
+    );
+    assert_eq!(
+        runtime
+            .launch_wizard
+            .as_ref()
+            .expect("replacement remains visible")
+            .wizard_id,
+        "replacement-wizard"
+    );
+    let windows_after_first = runtime.tabs[0].workspace.persisted().windows.len();
+    assert_eq!(windows_after_first, windows_before + 1);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let attempts_after_first = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read ledger")
+        .expect("ledger")
+        .continuation_attempts
+        .len();
+
+    let duplicate = runtime.handle_launch_wizard_launch_materialization_requested(
+        wizard_id,
+        client_id,
+        config.as_ref().clone(),
+        bounds,
+    );
+
+    assert!(duplicate.is_empty());
+    assert_eq!(
+        runtime.tabs[0].workspace.persisted().windows.len(),
+        windows_after_first
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read ledger after duplicate")
+            .expect("ledger after duplicate")
+            .continuation_attempts
+            .len(),
+        attempts_after_first
+    );
+    wait_for_recorded_event(
+        "replacement-safe launch completion",
+        &recorded_events,
+        |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+enum StaleManualHolderAction {
+    Stop,
+    Move,
+}
+
+fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolderAction) {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let session_id = match action {
+        StaleManualHolderAction::Stop => "manual-stale-stop-holder",
+        StaleManualHolderAction::Move => "manual-stale-move-holder",
+    };
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-holder", Some(session_id.to_string())));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let holder_window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+        Some(&holder_window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &holder_window_id);
+    let holder_incarnation = runtime
+        .runtimes
+        .get(&holder_window_id)
+        .expect("holder runtime")
+        .incarnation;
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue_bound(&repo, session_id, holder.execution_binding.clone())
+        .expect("issue exact holder capability");
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(holder_window_id.clone(), capability.token.clone());
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("holder decision wizard")
+        .wizard
+        .view()
+        .holder_decision
+        .expect("local holder decision");
+
+    let replaced = runtime
+        .runtimes
+        .remove(&holder_window_id)
+        .expect("replace decided holder runtime");
+    replaced
+        .pane
+        .lock()
+        .expect("lock replaced holder pane")
+        .kill()
+        .expect("stop replaced holder pane");
+    insert_test_pane_runtime(&mut runtime, &holder_window_id);
+    let successor_runtime = runtime
+        .runtimes
+        .get(&holder_window_id)
+        .expect("successor runtime");
+    let successor_incarnation = successor_runtime.incarnation;
+    let successor_pane = successor_runtime.pane.clone();
+    assert_ne!(successor_incarnation, holder_incarnation);
+
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let runtime_state_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, session_id);
+    let session_before = fs::read(&session_path).expect("read successor Session before action");
+    let runtime_state_before = fs::read(&runtime_state_path).ok();
+    let ledger_before = serde_json::to_vec(
+        &gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read successor ledger")
+            .expect("successor ledger"),
+    )
+    .expect("serialize successor ledger");
+    let projection_before =
+        fs::read(gwt::cli::execution_state::state_path(&repo)).expect("read successor projection");
+    let workspace_before = runtime.tabs[0].workspace.persisted().clone();
+    let active_before = runtime
+        .active_agent_sessions
+        .get(&holder_window_id)
+        .expect("successor active Session")
+        .clone();
+    let capabilities_before = runtime.agent_capability_tokens.clone();
+    assert!(issuer.authenticates_token(&capability.token));
+    assert!(recorded_events.lock().expect("event log").is_empty());
+
+    let action = match action {
+        StaleManualHolderAction::Stop => LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id: holder_window_id.clone(),
+        },
+        StaleManualHolderAction::Move => LaunchWizardAction::MoveExistingPane {
+            fingerprint: decision.fingerprint,
+            window_id: holder_window_id.clone(),
+        },
+    };
+    let events = runtime.handle_launch_wizard_action(action, Some(canvas_bounds()));
+
+    let current_runtime = runtime
+        .runtimes
+        .get(&holder_window_id)
+        .expect("stale action must preserve successor runtime");
+    assert_eq!(current_runtime.incarnation, successor_incarnation);
+    assert!(Arc::ptr_eq(&current_runtime.pane, &successor_pane));
+    assert!(matches!(
+        successor_pane
+            .lock()
+            .expect("lock successor pane")
+            .check_status()
+            .expect("read successor pane status"),
+        gwt_terminal::PaneStatus::Running
+    ));
+    assert_eq!(
+        runtime.tabs[0].workspace.persisted(),
+        &workspace_before,
+        "stale action must not focus, stop, or rewrite the successor workspace",
+    );
+    let active_after = runtime
+        .active_agent_sessions
+        .get(&holder_window_id)
+        .expect("stale action must preserve successor active Session");
+    assert_eq!(format!("{active_after:?}"), format!("{active_before:?}"));
+    assert_eq!(
+        fs::read(&session_path).expect("read successor Session after refusal"),
+        session_before,
+        "stale action must not rewrite the durable Session",
+    );
+    assert_eq!(
+        fs::read(&runtime_state_path).ok(),
+        runtime_state_before,
+        "stale action must not write runtime terminal proof",
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+                .expect("read successor ledger after refusal")
+                .expect("successor ledger after refusal"),
+        )
+        .expect("serialize successor ledger after refusal"),
+        ledger_before,
+        "stale action must not change generation authority",
+    );
+    assert_eq!(
+        fs::read(gwt::cli::execution_state::state_path(&repo))
+            .expect("read successor projection after refusal"),
+        projection_before,
+        "stale action must not rewrite execution projection",
+    );
+    assert_eq!(runtime.agent_capability_tokens, capabilities_before);
+    assert!(issuer.authenticates_token(&capability.token));
+    assert!(recorded_events.lock().expect("event log").is_empty());
+    assert!(runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.error.as_deref())
+        .is_some_and(|error| error.contains("holder changed")));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::LaunchWizardState { wizard: Some(view) }
+            if view.error.as_deref().is_some_and(|error| error.contains("holder changed"))
+    )));
+
+    runtime.stop_window_runtime_without_session_projection(&holder_window_id);
+}
+
+#[test]
+fn manual_launch_stop_rejects_intent_after_same_window_runtime_is_replaced() {
+    assert_manual_launch_action_rejects_replaced_runtime(StaleManualHolderAction::Stop);
+}
+
+#[test]
+fn manual_launch_move_rejects_intent_after_same_window_runtime_is_replaced() {
+    assert_manual_launch_action_rejects_replaced_runtime(StaleManualHolderAction::Move);
+}
+
+#[test]
+fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_session_id(
+        "agent-holder",
+        Some("manual-durable-replacement".to_string())
+    ));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-durable-replacement",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+    let expected_incarnation = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("holder runtime")
+        .incarnation;
+    let session_path = runtime
+        .sessions_dir
+        .join(format!("{}.toml", holder.session_id));
+    let mut replacement = gwt_agent::Session::load(&session_path).expect("load holder");
+    replacement.agent_id = gwt_agent::AgentId::Custom("replacement".to_string());
+    replacement
+        .save(&runtime.sessions_dir)
+        .expect("replace holder");
+    let replacement_bytes = fs::read(&session_path).expect("replacement bytes");
+
+    let logs = capture_tracing_events(|| {
+        runtime.handle_launch_wizard_action(
+            LaunchWizardAction::StopAndStartSuccessor {
+                fingerprint: decision.fingerprint.clone(),
+                window_id: window_id.clone(),
+            },
+            Some(canvas_bounds()),
+        );
+    });
+
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(matches!(
+        runtime
+            .runtimes
+            .get(&window_id)
+            .expect("preserved pane")
+            .pane
+            .lock()
+            .expect("pane")
+            .check_status()
+            .expect("status"),
+        gwt_terminal::PaneStatus::Running
+    ));
+    assert_eq!(
+        fs::read(&session_path).expect("session bytes"),
+        replacement_bytes
+    );
+    assert!(recorded_events.lock().expect("events").is_empty());
+    let log = logs
+        .iter()
+        .find(|event| {
+            event.level == Level::ERROR
+                && event.target == "gwt::agent_launch"
+                && event.fields.get("stage").map(String::as_str) == Some("stop_and_start_successor")
+        })
+        .expect("holder rejection log");
+    assert_eq!(
+        log.fields.get("holder_session_id").map(String::as_str),
+        Some(holder.session_id.as_str())
+    );
+    assert_eq!(
+        log.fields.get("holder_window_id").map(String::as_str),
+        Some(window_id.as_str())
+    );
+    assert_eq!(
+        log.fields
+            .get("holder_runtime_incarnation")
+            .map(String::as_str),
+        Some(expected_incarnation.to_string().as_str())
+    );
+    let digest = log
+        .fields
+        .get("holder_fingerprint_digest")
+        .expect("holder fingerprint digest");
+    assert_eq!(digest.len(), 16);
+    assert_ne!(digest, &decision.fingerprint);
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+}
+
+#[test]
+fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-holder", Some("manual-fenced-stop".to_string())));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-fenced-stop",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    let handshake = gwt::cli::execution_state::begin_active_session_launch_handshake(
+        &runtime.sessions_dir,
+        &holder,
+    )
+    .expect("begin Active relaunch")
+    .expect("Active relaunch fence");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+    let session_path = runtime
+        .sessions_dir
+        .join(format!("{}.toml", holder.session_id));
+    let session_before = fs::read(&session_path).expect("Session bytes before losing Stop");
+
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id: window_id.clone(),
+        },
+        Some(canvas_bounds()),
+    );
+
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        fs::read(&session_path).expect("Session bytes"),
+        session_before
+    );
+    assert!(recorded_events.lock().expect("events").is_empty());
+    assert!(runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.error.as_deref())
+        .is_some_and(|error| error.contains("fenced")));
+
+    assert!(
+        gwt::cli::execution_state::finish_active_session_launch_handshake(
+            &runtime.sessions_dir,
+            &handshake,
+        )
+        .expect("clear Active relaunch fence")
+    );
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+}
+
+#[test]
+fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-holder", Some("manual-retry-after-stop".to_string())));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-retry-after-stop",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id,
+        },
+        Some(canvas_bounds()),
+    );
+    let materialization = recorded_events
+        .lock()
+        .expect("events")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchWizardLaunchMaterializationRequested {
+                wizard_id,
+                client_id,
+                config,
+                bounds,
+            } => Some((
+                wizard_id.clone(),
+                client_id.clone(),
+                config.as_ref().clone(),
+                bounds.clone(),
+            )),
+            _ => None,
+        })
+        .expect("materialization request");
+    runtime.agent_capability_issuer = None;
+    runtime.handle_launch_wizard_launch_materialization_requested(
+        materialization.0,
+        materialization.1,
+        materialization.2,
+        materialization.3,
+    );
+    let session = runtime.launch_wizard.as_ref().expect("retry wizard");
+    assert!(session.wizard.error.is_some());
+    assert!(session.wizard.holder_decision.is_none());
+    assert!(session.manual_holder_intent.is_some());
+
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::SetModel {
+            model: "default".to_string(),
+        },
+        Some(canvas_bounds()),
+    );
+    assert!(!runtime
+        .launch_wizard
+        .as_ref()
+        .expect("mutable retry wizard")
+        .wizard
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("Resolve or cancel")));
+}
+
+#[test]
+fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_session_id(
+        "agent-holder",
+        Some("manual-async-failure-holder".to_string())
+    ));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-async-failure-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id,
+        },
+        Some(canvas_bounds()),
+    );
+    wait_for_recorded_event(
+        "initial manual successor request",
+        &recorded_events,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+        },
+    );
+    let initial_request = {
+        let mut events = recorded_events.lock().expect("events");
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+            .expect("initial materialization request");
+        events.remove(index)
+    };
+    let UserEvent::LaunchWizardLaunchMaterializationRequested {
+        wizard_id,
+        client_id,
+        config,
+        bounds,
+    } = initial_request
+    else {
+        unreachable!("matched above")
+    };
+    let operation_id = match config.as_ref() {
+        gwt::LaunchWizardLaunchRequest::Agent(config) => match &config.execution_intent {
+            gwt_agent::ExecutionLaunchIntent::ManualSuccessor { operation_id, .. } => {
+                operation_id.clone()
+            }
+            intent => panic!("expected manual successor intent, got {intent:?}"),
+        },
+        gwt::LaunchWizardLaunchRequest::Shell(_) => panic!("expected Agent request"),
+    };
+    let invalid_profile = temp.path().join("invalid-profile.toml");
+    fs::write(&invalid_profile, "this is not valid TOML = [").expect("write invalid profile");
+    runtime.profile_config_path = Some(invalid_profile);
+    runtime.handle_launch_wizard_launch_materialization_requested(
+        wizard_id,
+        client_id,
+        config.as_ref().clone(),
+        bounds,
+    );
+    wait_for_recorded_event(
+        "manual successor async failure",
+        &recorded_events,
+        |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_err()))
+        },
+    );
+    let (failed_window_id, failed_result) = {
+        let mut events = recorded_events.lock().expect("events");
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_err()))
+            .expect("failed completion");
+        match events.remove(index) {
+            UserEvent::LaunchComplete { window_id, result } => (window_id, result),
+            _ => unreachable!("matched above"),
+        }
+    };
+    runtime.handle_launch_complete(failed_window_id, *failed_result);
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &repo,
+            gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 42,
+            },
+            &operation_id,
+        )
+        .expect("read prepared attempt")
+        .expect("prepared attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+
+    runtime.profile_config_path = Some(temp.path().join("missing-default-profile.toml"));
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+    wait_for_recorded_event("manual successor exact retry", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                    if matches!(
+                        config.as_ref(),
+                        gwt::LaunchWizardLaunchRequest::Agent(config)
+                            if matches!(
+                                &config.execution_intent,
+                                gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                    operation_id: replayed,
+                                    ..
+                                } if replayed == &operation_id
+                            )
+                    )
+            )
+        })
+    });
+    let mut replay = recorded_events
+        .lock()
+        .expect("events")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. } => {
+                match config.as_ref().clone() {
+                    gwt::LaunchWizardLaunchRequest::Agent(config) => Some(config),
+                    gwt::LaunchWizardLaunchRequest::Shell(_) => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("replayed Agent request");
+    runtime
+        .prepare_manual_successor_before_pane(&repo, &mut replay)
+        .expect("same operation must remain exactly replayable");
+    assert!(matches!(
+        replay.execution_intent,
+        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
+    ));
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(
+            &repo,
+            gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 42,
+            },
+        )
+        .expect("read ledger")
+        .expect("ledger")
+        .continuation_attempts
+        .len(),
+        1,
+    );
+}
+
+#[test]
+fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_session_id(
+        "agent-holder",
+        Some("manual-sync-failure-holder".to_string())
+    ));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-sync-failure-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id,
+        },
+        Some(canvas_bounds()),
+    );
+    wait_for_recorded_event("sync failure request", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+            )
+        })
+    });
+    let request = {
+        let mut events = recorded_events.lock().expect("events");
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+            .expect("materialization request");
+        events.remove(index)
+    };
+    let UserEvent::LaunchWizardLaunchMaterializationRequested {
+        wizard_id,
+        client_id: _client_id,
+        config,
+        bounds,
+    } = request
+    else {
+        unreachable!("matched above")
+    };
+    let agent_config = match config.as_ref().clone() {
+        gwt::LaunchWizardLaunchRequest::Agent(config) => config,
+        gwt::LaunchWizardLaunchRequest::Shell(_) => panic!("expected Agent request"),
+    };
+    let operation_id = match &agent_config.execution_intent {
+        gwt_agent::ExecutionLaunchIntent::ManualSuccessor { operation_id, .. } => {
+            operation_id.clone()
+        }
+        intent => panic!("expected manual successor, got {intent:?}"),
+    };
+    let session = runtime
+        .launch_wizard
+        .take()
+        .expect("materializing wizard remains visible");
+    runtime
+        .pending_launch_wizard_materializations
+        .remove(&wizard_id)
+        .expect("consume exact pending materialization snapshot");
+
+    let mut failure = None;
+    let logs = capture_tracing_events(|| {
+        failure = Some(runtime.materialize_launch_wizard_agent_with(
+            session,
+            true,
+            agent_config,
+            |_runtime, _session, _config| Err("injected synchronous spawn failure".to_string()),
+        ));
+    });
+    let failure = failure.expect("synchronous failure events");
+
+    assert!(failure.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::LaunchWizardState { wizard: Some(view) }
+            if view.error.as_deref() == Some("injected synchronous spawn failure")
+    )));
+    let recovery = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.manual_holder_intent.as_ref())
+        .expect("exact holder recovery survives synchronous spawn failure");
+    assert_eq!(recovery.operation_id, operation_id);
+    assert_eq!(recovery.predecessor, holder);
+    let log = logs
+        .iter()
+        .find(|event| {
+            event.level == Level::ERROR
+                && event.target == "gwt::agent_launch"
+                && event.fields.get("stage").map(String::as_str) == Some("spawn_agent_window")
+        })
+        .unwrap_or_else(|| panic!("structured synchronous spawn failure log: {logs:#?}"));
+    assert_eq!(
+        log.fields.get("holder_session_id").map(String::as_str),
+        Some(holder.session_id.as_str())
+    );
+    assert_ne!(
+        log.fields
+            .get("holder_fingerprint_digest")
+            .map(String::as_str),
+        Some("none")
+    );
+
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(bounds));
+    wait_for_recorded_event("exact sync failure retry", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+            )
+        })
+    });
+    let replay = recorded_events
+        .lock()
+        .expect("events")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. } => {
+                match config.as_ref().clone() {
+                    gwt::LaunchWizardLaunchRequest::Agent(config) => Some(config),
+                    gwt::LaunchWizardLaunchRequest::Shell(_) => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("retry Agent request");
+    assert!(matches!(
+        &replay.execution_intent,
+        gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+            operation_id: replay_operation_id,
+            ..
+        } if replay_operation_id == &operation_id
+    ));
+}
+
+#[test]
+fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-holder",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-holder", Some("manual-fixed-intent".to_string())));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-holder");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-fixed-intent",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let decision = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.view().holder_decision)
+        .expect("holder decision");
+
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::SetLaunchTarget {
+            target: gwt::LaunchTargetKind::Shell,
+        },
+        Some(canvas_bounds()),
+    );
+    assert_eq!(
+        runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .launch_target,
+        gwt::LaunchTargetKind::Agent
+    );
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::StopAndStartSuccessor {
+            fingerprint: decision.fingerprint,
+            window_id: window_id.clone(),
+        },
+        None,
+    );
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(recorded_events.lock().expect("events").is_empty());
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+}
+
+#[test]
+fn manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_intent() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-terminal-holder",
+        gwt_agent::AgentStatus::Stopped,
+        None,
+    );
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+    let events =
+        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::LaunchWizardState { wizard: Some(view) }
+            if view.launch_materialization_pending && view.holder_decision.is_none()
+    )));
+    wait_for_recorded_event(
+        "manual terminal successor materialization",
+        &recorded_events,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                        if matches!(
+                            config.as_ref(),
+                            gwt::LaunchWizardLaunchRequest::Agent(config)
+                                if matches!(
+                                    &config.execution_intent,
+                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                        expected_predecessor,
+                                        ..
+                                    } if expected_predecessor.as_deref() == Some(&holder)
+                                )
+                        )
+                )
+            })
+        },
+    );
+}
+
+#[test]
+fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.agent_capability_issuer =
+        Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        ));
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-defunct-holder",
+        gwt_agent::AgentStatus::Running,
+        None,
+    );
+    let proof = gwt_agent::ManualLaunchRuntimeProof {
+        host_pid: u32::MAX - 1,
+        runtime_incarnation: 73,
+    };
+    gwt_agent::SessionRuntimeState::for_execution_process(
+        gwt_agent::AgentStatus::Running,
+        &holder,
+        proof.runtime_incarnation,
+        1,
+        u32::MAX - 2,
+        1,
+    )
+    .save(&gwt_agent::runtime_state_path_for_pid(
+        &runtime.sessions_dir,
+        proof.host_pid,
+        &holder.session_id,
+    ))
+    .expect("persist defunct exact runtime proof");
+    let mut fence =
+        gwt_agent::with_session_lease(&runtime.sessions_dir, &holder.session_id, |_| {
+            gwt_agent::begin_session_manual_handoff_under_lease(
+                &runtime.sessions_dir,
+                &holder,
+                "manual-defunct-holder-fence",
+                1,
+            )
+        })
+        .expect("lock exact holder")
+        .expect("create exact manual handoff fence");
+    fence.host_pid = proof.host_pid;
+    fence.host_started_at = 1;
+    fs::write(
+        gwt_agent::manual_handoff_path(&runtime.sessions_dir, &holder.session_id),
+        serde_json::to_vec_pretty(&fence).expect("encode manual handoff fence"),
+    )
+    .expect("persist exact manual handoff fence");
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+    wait_for_recorded_event("defunct holder successor", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                    if matches!(
+                        config.as_ref(),
+                        gwt::LaunchWizardLaunchRequest::Agent(config)
+                            if matches!(
+                                &config.execution_intent,
+                                gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                    expected_predecessor,
+                                    expected_runtime: Some(runtime),
+                                    predecessor_kind:
+                                        gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+                                    ..
+                                } if expected_predecessor.as_deref() == Some(&holder)
+                                    && runtime == &proof
+                            )
+                    )
+            )
+        })
+    });
+    let mut successor = recorded_events
+        .lock()
+        .expect("events")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. } => {
+                match config.as_ref().clone() {
+                    gwt::LaunchWizardLaunchRequest::Agent(config) => Some(config),
+                    gwt::LaunchWizardLaunchRequest::Shell(_) => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("defunct successor request");
+    runtime
+        .prepare_manual_successor_before_pane(&repo, &mut successor)
+        .expect("coordinator revalidates the exact defunct runtime proof");
+    assert!(matches!(
+        successor.execution_intent,
+        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
+    ));
+}
+
+#[test]
+fn manual_launch_unknown_terminal_proof_refuses_before_pane_and_authority_mutation() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.agent_capability_issuer =
+        Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        ));
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "manual-unknown-terminal-holder",
+        gwt_agent::AgentStatus::Stopped,
+        None,
+    );
+    fs::remove_file(gwt_agent::runtime_state_path(
+        &runtime.sessions_dir,
+        &holder.session_id,
+    ))
+    .expect("remove exact terminal proof");
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let ledger_before = serde_json::to_vec(
+        &gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read ledger")
+            .expect("ledger"),
+    )
+    .expect("serialize ledger");
+    let projection_before = serde_json::to_vec(
+        &gwt::cli::execution_state::load(&repo)
+            .expect("read projection")
+            .expect("projection"),
+    )
+    .expect("serialize projection");
+    let windows_before = runtime.tabs[0].workspace.persisted().windows.len();
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+    let events =
+        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+    assert_eq!(
+        runtime.tabs[0].workspace.persisted().windows.len(),
+        windows_before
+    );
+    assert!(runtime.runtimes.is_empty());
+    assert!(runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.wizard.error.as_deref())
+        .is_some_and(|error| error.contains("runtime exit proof")));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::LaunchWizardState { wizard: Some(view) }
+            if !view.launch_materialization_pending && view.error.is_some()
+    )));
+    assert!(!recorded_events
+        .lock()
+        .expect("event log")
+        .iter()
+        .any(|event| matches!(
+            event,
+            UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+        )));
+    assert_eq!(
+        serde_json::to_vec(
+            &gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+                .expect("read ledger after refusal")
+                .expect("ledger after refusal")
+        )
+        .expect("serialize ledger after refusal"),
+        ledger_before
+    );
+    assert_eq!(
+        serde_json::to_vec(
+            &gwt::cli::execution_state::load(&repo)
+                .expect("read projection after refusal")
+                .expect("projection after refusal")
+        )
+        .expect("serialize projection after refusal"),
+        projection_before
+    );
+    assert!(
+        fs::read_dir(runtime.sessions_dir.join("execution-launch-recovery"))
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "a rejected preflight must clear its pre-issuance recovery receipt"
+    );
+}
+
+#[test]
+fn manual_launch_completed_and_blocked_use_typed_successor_routes_without_holder_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempdir().expect("home tempdir");
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    for (suffix, settlement, expected_kind) in [
+        (
+            "completed",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+            gwt_agent::ManualLaunchSuccessorPredecessor::Completed,
+        ),
+        (
+            "blocked",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "manual recovery fixture".to_string(),
+                missing_verification: None,
+            },
+            gwt_agent::ManualLaunchSuccessorPredecessor::Blocked,
+        ),
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        fs::create_dir_all(&runtime.sessions_dir).expect("create canonical sessions dir");
+        let holder_id = format!("manual-{suffix}-holder");
+        install_manual_launch_holder(
+            &mut runtime,
+            &repo,
+            &holder_id,
+            gwt_agent::AgentStatus::Stopped,
+            None,
+        );
+        assert!(matches!(
+            gwt::cli::execution_state::settle(&repo, &holder_id, settlement)
+                .expect("settle manual predecessor"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+        fs::remove_file(runtime.sessions_dir.join(format!("{holder_id}.toml")))
+            .expect("remove terminal holder Session fixture");
+        runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+        wait_for_recorded_event("terminal generation route", &recorded_events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                        if matches!(
+                            config.as_ref(),
+                            gwt::LaunchWizardLaunchRequest::Agent(config)
+                                if matches!(
+                                    &config.execution_intent,
+                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                        expected_predecessor: None,
+                                        predecessor_kind,
+                                        ..
+                                    } if *predecessor_kind == expected_kind
+                                )
+                        )
+                )
+            })
+        });
+    }
+}
+
+#[test]
+fn manual_launch_replays_existing_prepared_owner_successor_after_response_loss() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&runtime.sessions_dir).expect("create canonical sessions dir");
+    let holder_id = "manual-existing-prepared-holder";
+    install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        holder_id,
+        gwt_agent::AgentStatus::Stopped,
+        None,
+    );
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            holder_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("complete predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let predecessor = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .unwrap()
+        .unwrap();
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "manual-existing-prepared-operation".to_string(),
+        principal_id: "gwt-host-manual-launch".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "manual-existing-prepared-binding".to_string(),
+        initial_session_id: "manual-existing-prepared-candidate".to_string(),
+        entrypoint: "$gwt-execute #3547".to_string(),
+        requested_at: Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_exact_manual_launch_successor(
+        &repo,
+        owner,
+        &request,
+        gwt::cli::execution_state::ExactManualLaunchPredecessor {
+            sessions_dir: &runtime.sessions_dir,
+            session: None,
+            runtime: None,
+            binding: &predecessor,
+            status: gwt::cli::execution_state::SuccessorPredecessorStatus::Completed,
+            terminal_reason: "unused",
+        },
+    )
+    .expect("prepare response-loss fixture");
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+    wait_for_recorded_event("existing Prepared replay", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                    if matches!(
+                        config.as_ref(),
+                        gwt::LaunchWizardLaunchRequest::Agent(config)
+                            if matches!(
+                                &config.execution_intent,
+                                gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                    operation_id,
+                                    ..
+                                } if operation_id == &request.operation_id
+                            )
+                    )
+            )
+        })
+    });
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.continuation_attempts.len(), 1);
+}
+
+#[test]
+fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
+    let origins = [
+        super::LaunchWizardOrigin::Knowledge,
+        super::LaunchWizardOrigin::StartWork,
+        super::LaunchWizardOrigin::IssueMonitor,
+        super::LaunchWizardOrigin::WorkspaceResume,
+    ];
+    for origin in origins {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        install_manual_launch_holder(
+            &mut runtime,
+            &repo,
+            "origin-isolation-holder",
+            gwt_agent::AgentStatus::Running,
+            None,
+        );
+        let mut wizard = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+        wizard.origin = origin;
+        runtime.launch_wizard = Some(wizard);
+
+        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+        wait_for_recorded_event(
+            "origin-isolated automatic launch",
+            &recorded_events,
+            |events| {
+                events.iter().any(|event| {
+                    matches!(
+                        event,
+                        UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                            if matches!(
+                                config.as_ref(),
+                                gwt::LaunchWizardLaunchRequest::Agent(config)
+                                    if matches!(
+                                        config.execution_intent,
+                                        gwt_agent::ExecutionLaunchIntent::Automatic
+                                    )
+                            )
+                    )
+                })
+            },
+        );
+        assert!(runtime
+            .launch_wizard
+            .as_ref()
+            .is_some_and(|session| session.wizard.holder_decision.is_none()));
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    wait_for_recorded_event("manual genesis", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                    if matches!(
+                        config.as_ref(),
+                        gwt::LaunchWizardLaunchRequest::Agent(config)
+                            if matches!(
+                                config.execution_intent,
+                                gwt_agent::ExecutionLaunchIntent::Automatic
+                            )
+                    )
+            )
+        })
+    });
 }
 
 #[test]
@@ -5042,13 +6982,13 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
                 "/d".to_string(),
                 "/s".to_string(),
                 "/c".to_string(),
-                "exit /b 0".to_string(),
+                "ping -n 2 127.0.0.1 >nul & exit /b 0".to_string(),
             ],
         )
     } else {
         (
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "exit 0".to_string()],
+            vec!["-lc".to_string(), "sleep 0.2; exit 0".to_string()],
         )
     };
     let mut pane = Pane::new(
@@ -5065,6 +7005,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
     runtime.runtimes.insert(
         window_id.clone(),
         WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: None,
@@ -5131,6 +7072,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
     runtime.runtimes.insert(
         window_id.clone(),
         WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: None,
@@ -5212,6 +7154,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
     runtime.runtimes.insert(
         window_id.clone(),
         WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: None,
@@ -5275,6 +7218,7 @@ fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
         runtime.runtimes.insert(
             window_id.clone(),
             WindowRuntime {
+                incarnation: super::next_window_runtime_incarnation(),
                 pane: Arc::new(Mutex::new(pane)),
                 output_thread: None,
                 status_thread: None,
@@ -7660,7 +9604,6 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
-
     let events = runtime.handle_launch_complete(
         window_id.clone(),
         Err("launch failed before process spawn".to_string()),
@@ -7795,7 +9738,7 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -7975,7 +9918,7 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -9934,6 +11877,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3456,
@@ -10008,8 +11952,8 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
                 event,
                 UserEvent::LaunchComplete {
                     window_id: completed_window,
-                    result: Err(_),
-                } if completed_window == &window_id
+                    result,
+                } if completed_window == &window_id && result.is_err()
             )
         })
     });
@@ -10022,8 +11966,8 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
                     event,
                     UserEvent::LaunchComplete {
                         window_id: completed_window,
-                        result: Err(_),
-                    } if completed_window == &window_id
+                        result,
+                    } if completed_window == &window_id && result.is_err()
                 )
             })
             .expect("failed completion");
@@ -10032,7 +11976,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
     let UserEvent::LaunchComplete { result, .. } = completion else {
         unreachable!("matched launch completion")
     };
-    let failure_events = runtime.handle_launch_complete(window_id, result);
+    let failure_events = runtime.handle_launch_complete(window_id, *result);
 
     assert!(initial_events.iter().chain(&failure_events).all(|event| {
         !matches!(
@@ -10056,7 +12000,9 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
         .lock()
         .expect("event log")
         .iter()
-        .all(|event| { !matches!(event, UserEvent::LaunchComplete { result: Ok(_), .. }) }));
+        .all(|event| {
+            !matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_ok())
+        }));
 }
 
 #[derive(Clone, Copy)]
@@ -14553,6 +16499,98 @@ fn pending_fresh_execution_fixture_with_owner_kind(
 }
 
 #[test]
+fn durable_launch_recovery_receipt_is_monotonic_and_replays_base_write_without_downgrade() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "fresh-receipt-monotonic");
+    let expected = durable_launch_recovery_session_identity(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    )
+    .expect("read bound receipt")
+    .expect("bound identity");
+
+    persist_durable_launch_recovery(
+        &fixture.runtime.sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: fixture.operation_id.clone(),
+        },
+        &fixture.candidate_session_id,
+        &fixture.repo,
+        &fixture.repo,
+        fixture.owner,
+        None,
+        None,
+    )
+    .expect("a retry must retain the stronger exact recovery identity");
+    assert_eq!(
+        durable_launch_recovery_session_identity(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id,
+        )
+        .expect("read retained bound receipt"),
+        Some(expected)
+    );
+}
+
+#[test]
+fn prepared_manual_successor_loser_is_rejected_before_pane_creation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "manual-pre-pane-claim");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&fixture.repo)
+        .branch("work/issue-2359")
+        .linked_issue_number(fixture.owner.number)
+        .extra_arg("$gwt-execute #2359")
+        .build();
+    config.execution_intent =
+        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(fixture.binding.clone());
+    let winner = super::launch::claim_prepared_manual_successor_launch(
+        &fixture.runtime.sessions_dir,
+        &fixture.repo,
+        &config,
+    )
+    .expect("claim Prepared candidate")
+    .expect("manual successor claim");
+    let tab = sample_project_tab("tab-1", "Repo", fixture.repo.clone(), ProjectKind::Git, &[]);
+    let runtime_root = fixture
+        .runtime
+        .sessions_dir
+        .parent()
+        .expect("runtime root")
+        .to_path_buf();
+    let mut losing_runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+
+    let error = losing_runtime
+        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .expect_err("the concurrent Prepared materializer must lose before pane creation");
+
+    assert!(error.contains("already being materialized"), "{error}");
+    assert!(losing_runtime.window_lookup.is_empty());
+    assert!(losing_runtime
+        .tab("tab-1")
+        .expect("loser tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+    assert!(
+        gwt::cli::execution_state::finish_active_session_launch_handshake(
+            &fixture.runtime.sessions_dir,
+            &winner,
+        )
+        .expect("release winner claim")
+    );
+}
+
+#[test]
 fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -14785,6 +16823,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         fixture.owner.number,
@@ -14989,6 +17028,137 @@ fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_bloc
 }
 
 #[test]
+fn fresh_execution_missing_session_start_nonce_aborts_candidate_and_preserves_blocked_predecessor()
+{
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-missing-nonce");
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                if detail.contains("readiness nonce did not match")
+        )),
+        "missing nonce must produce a fail-closed diagnostic: {events:#?}"
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn fresh_execution_session_start_via_daemon_fanout_preserves_readiness_nonce() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-daemon-fanout");
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", &fixture.candidate_session_id);
+    session_start.continuation_readiness_nonce = Some(readiness_nonce);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let current_pid = std::process::id();
+    let source_pid = current_pid.wrapping_add(1);
+    let payload = gwt::runtime_daemon_events::runtime_hook_payload(&session_start, source_pid);
+    let gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } =
+        gwt::runtime_daemon_events::decode_runtime_daemon_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            payload,
+            current_pid,
+        )
+        .expect("decode foreign daemon fanout")
+    else {
+        panic!("expected runtime hook fanout");
+    };
+
+    let events = fixture.runtime.handle_daemon_runtime_hook_event(event);
+
+    assert!(
+        !events.is_empty(),
+        "activation must publish committed state"
+    );
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert!(
+        fixture
+            .issuer
+            .active_token_is_current(&fixture.token, &fixture.binding),
+        "daemon fanout must activate the exact prepared capability"
+    );
+}
+
+#[test]
+fn fresh_execution_session_start_requires_gwt_session_identity_before_nonce_validation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-foreign-gwt-session");
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let mut session_start =
+        runtime_hook_state_for_event("Working", "SessionStart", "foreign-gwt-session");
+    session_start.agent_session_id = Some(fixture.candidate_session_id.clone());
+    session_start.continuation_readiness_nonce = Some(readiness_nonce);
+    session_start.project_root = Some(fixture.repo.display().to_string());
+    session_start.branch = Some("work/issue-2359".to_string());
+
+    let events = fixture.runtime.handle_runtime_hook_event(session_start);
+
+    assert!(fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert!(
+        fixture
+            .issuer
+            .prepared_token_is_current(&fixture.token, &fixture.binding),
+        "foreign gwt identity must neither activate nor abort the candidate"
+    );
+    assert!(
+        events.iter().all(|outbound| !matches!(
+            &outbound.event,
+            BackendEvent::TerminalStatus { id, .. } if id == &fixture.window_id
+        )),
+        "foreign gwt identity must not emit candidate status events: {events:#?}"
+    );
+}
+
+#[test]
 fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
         .lock()
@@ -15075,10 +17245,7 @@ fn production_host_launch_persists_and_dispatches_checked_latest_runner_fallback
     let completion = recorded
         .iter()
         .find_map(|event| match event {
-            UserEvent::LaunchComplete {
-                result: Ok(completion),
-                ..
-            } => Some(completion),
+            UserEvent::LaunchComplete { result, .. } => result.as_ref().as_ref().ok(),
             _ => None,
         })
         .expect("successful LaunchComplete event");
@@ -15097,6 +17264,303 @@ fn production_host_launch_persists_and_dispatches_checked_latest_runner_fallback
         .expect("persisted fallback Session");
     assert_eq!(persisted.launch_command, bunx.display().to_string());
     assert_eq!(persisted.launch_args, completion.0.args);
+}
+
+#[cfg(unix)]
+#[test]
+fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-manual-terminal");
+    let bin = temp.path().join("bin");
+    let runtime_root = temp.path().join(".gwt");
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&bin).expect("create bin");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    init_repo(&repo);
+    let direct = bin.join("codex");
+    fs::write(&direct, "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n").expect("write healthy runner");
+    fs::set_permissions(&direct, fs::Permissions::from_mode(0o755)).expect("chmod healthy runner");
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3547,
+    };
+    let predecessor_session_id = "manual-terminal-predecessor";
+    let mut predecessor =
+        gwt_agent::Session::new(&repo, "work/issue-3547", gwt_agent::AgentId::Codex);
+    predecessor.id = predecessor_session_id.to_string();
+    predecessor.project_state_root = Some(repo.clone());
+    predecessor.linked_issue_number = Some(owner.number);
+    predecessor.status = gwt_agent::AgentStatus::Stopped;
+    predecessor
+        .save(&sessions_dir)
+        .expect("save terminal predecessor");
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "$gwt-execute #3547",
+        false,
+    )
+    .expect("materialize predecessor authority");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize predecessor generation");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+    predecessor
+        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: predecessor_session_id.to_string(),
+            repo_hash: predecessor
+                .repo_hash
+                .clone()
+                .expect("predecessor repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: predecessor_binding.clone(),
+            capability_generation: 1,
+        }))
+        .expect("bind predecessor Session");
+    predecessor
+        .save(&sessions_dir)
+        .expect("persist bound predecessor");
+    let predecessor_identity = gwt_agent::SessionExecutionIdentity::from_session(&predecessor)
+        .expect("validate predecessor identity")
+        .expect("predecessor identity");
+    gwt_agent::SessionRuntimeState::for_execution_process(
+        gwt_agent::AgentStatus::Stopped,
+        &predecessor_identity,
+        1,
+        gwt::process::host_process_start_time(std::process::id())
+            .expect("test Host process start time"),
+        i32::MAX as u32,
+        1,
+    )
+    .save(&gwt_agent::runtime_state_path(
+        &sessions_dir,
+        predecessor_session_id,
+    ))
+    .expect("persist exact terminal runtime sidecar");
+    let operation_id = "manual-terminal-launch-operation";
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .branch("work/issue-3547")
+        .linked_issue_number(owner.number)
+        .extra_arg("$gwt-execute #3547")
+        .build();
+    config.command = direct.display().to_string();
+    config
+        .env_vars
+        .insert("PATH".to_string(), bin.display().to_string());
+    let candidate_session_id = "manual-terminal-successor";
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-manual-launch".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "manual-terminal-successor-binding".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "$gwt-execute".to_string(),
+        requested_at: chrono::Utc::now(),
+    };
+    persist_durable_launch_recovery(
+        &sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: operation_id.to_string(),
+        },
+        candidate_session_id,
+        &repo,
+        &repo,
+        owner,
+        None,
+        None,
+    )
+    .expect("persist pre-prepare recovery receipt");
+    gwt::cli::execution_state::prepare_exact_manual_launch_successor(
+        &repo,
+        owner,
+        &request,
+        gwt::cli::execution_state::ExactManualLaunchPredecessor {
+            sessions_dir: &sessions_dir,
+            session: Some(&predecessor_identity),
+            runtime: Some(gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: 1,
+            }),
+            binding: &predecessor_identity.execution_binding.identity,
+            status: gwt::cli::execution_state::SuccessorPredecessorStatus::Active,
+            terminal_reason: "exact producing runtime terminated before manual Launch Agent",
+        },
+    )
+    .expect("prepare exact terminal successor");
+    let successor_identity =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive Prepared successor binding");
+    config.execution_intent = gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(
+        gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: candidate_session_id.to_string(),
+            repo_hash: predecessor
+                .repo_hash
+                .clone()
+                .expect("predecessor repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: successor_identity,
+            capability_generation: 1,
+        },
+    );
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::agent-manual-terminal".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        Some(issuer.clone()),
+    );
+
+    let recorded = events.lock().expect("event log").clone();
+    let completion = recorded
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete { result, .. } => result.as_ref().as_ref().ok().cloned(),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("successful manual terminal LaunchComplete event: {recorded:#?}")
+        });
+    let candidate_session_id = completion.1.clone();
+    let readiness_nonce = completion
+        .0
+        .env
+        .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+        .cloned()
+        .expect("manual successor readiness nonce");
+    assert!(!readiness_nonce.is_empty());
+    assert!(durable_launch_recovery_exists(
+        &sessions_dir,
+        &candidate_session_id,
+    ));
+    let candidate =
+        gwt_agent::Session::load(&sessions_dir.join(format!("{candidate_session_id}.toml")))
+            .expect("persisted manual successor Session");
+    let binding = candidate
+        .execution_binding
+        .as_ref()
+        .expect("Prepared manual successor binding");
+    let candidate_execution_identity =
+        gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+            .expect("validate Prepared manual successor identity")
+            .expect("Prepared manual successor identity");
+    assert_eq!(
+        completion.11.expected_execution_identity.as_ref(),
+        Some(&candidate_execution_identity),
+        "the launch worker must carry the exact persisted identity to the PTY handoff",
+    );
+    assert!(issuer.prepared_token_is_current(
+        completion
+            .0
+            .env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("Prepared capability token"),
+        binding,
+    ));
+    let current_after_prepare = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read current predecessor after Prepared launch")
+        .expect("terminal predecessor remains current");
+    assert_eq!(
+        current_after_prepare.generation_id, predecessor_binding.generation_id,
+        "readiness preparation must not activate the successor generation",
+    );
+    assert_eq!(
+        current_after_prepare.binding_id, predecessor_binding.binding_id,
+        "readiness preparation must preserve the predecessor binding",
+    );
+    let attempt =
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
+            .expect("read manual successor attempt")
+            .expect("manual successor attempt");
+    assert_eq!(
+        attempt.status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-manual-terminal",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    runtime.agent_capability_issuer = Some(issuer);
+    let window_id = combined_window_id("tab-1", "agent-manual-terminal");
+    let launch_events = runtime.handle_launch_complete(window_id.clone(), Ok(completion));
+    let runtime_incarnation = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("manual successor PTY runtime")
+        .incarnation;
+    let running_runtime = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+        &sessions_dir,
+        &candidate_session_id,
+    ))
+    .expect("load exact Prepared manual successor runtime state");
+    assert_eq!(
+        running_runtime.execution_identity.as_ref(),
+        Some(&candidate_execution_identity),
+    );
+    assert_eq!(
+        running_runtime.runtime_incarnation,
+        Some(runtime_incarnation),
+    );
+    let pending = runtime
+        .pending_fresh_execution_launches
+        .get(&window_id)
+        .expect("manual successor must reuse fresh readiness finalization");
+    assert_eq!(pending.operation_id, operation_id);
+    assert_eq!(pending.readiness_nonce, readiness_nonce);
+    assert!(launch_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus { detail: Some(detail), .. }
+            if detail == "Waiting for authenticated SessionStart..."
+    )));
+    let candidate_binding = pending.binding.identity.clone();
+    let ready_events =
+        runtime.finalize_fresh_execution_launch_session_start(&window_id, Some(&readiness_nonce));
+    assert!(
+        !ready_events.is_empty(),
+        "authenticated readiness must finish the manual successor"
+    );
+    let activated = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read activated manual successor");
+    assert_eq!(
+        activated,
+        Some(candidate_binding),
+        "manual readiness did not activate: events={ready_events:#?}; attempt={:?}",
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id,)
+            .expect("read post-ready attempt"),
+    );
 }
 
 #[cfg(unix)]
@@ -15154,9 +17618,7 @@ fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispat
     let error = recorded
         .iter()
         .find_map(|event| match event {
-            UserEvent::LaunchComplete {
-                result: Err(error), ..
-            } => Some(error),
+            UserEvent::LaunchComplete { result, .. } => result.as_ref().as_ref().err(),
             _ => None,
         })
         .expect("failed LaunchComplete event");
@@ -15164,7 +17626,7 @@ fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispat
     assert!(error.contains("exit status 1"), "{error}");
     assert!(recorded
         .iter()
-        .all(|event| !matches!(event, UserEvent::LaunchComplete { result: Ok(_), .. })));
+        .all(|event| !matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_ok())));
     let persisted_sessions = fs::read_dir(&sessions_dir)
         .expect("read sessions dir")
         .flatten()
@@ -15228,7 +17690,7 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
     let recorded = events.lock().expect("event log");
     assert!(recorded
         .iter()
-        .any(|event| matches!(event, UserEvent::LaunchComplete { result: Err(_), .. })));
+        .any(|event| matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_err())));
     assert_eq!(
         fs::read_to_string(&invocation_counter)
             .expect("Codex invocation counter")
@@ -15320,9 +17782,7 @@ fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
         .expect("event log")
         .iter()
         .find_map(|event| match event {
-            UserEvent::LaunchComplete {
-                result: Err(error), ..
-            } => Some(error.clone()),
+            UserEvent::LaunchComplete { result, .. } => result.as_ref().as_ref().err().cloned(),
             _ => None,
         })
         .expect("failed LaunchComplete event");
@@ -15391,9 +17851,7 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
         .expect("event log")
         .iter()
         .find_map(|event| match event {
-            UserEvent::LaunchComplete {
-                result: Err(error), ..
-            } => Some(error.clone()),
+            UserEvent::LaunchComplete { result, .. } => result.as_ref().as_ref().err().cloned(),
             _ => None,
         })
         .expect("failed LaunchComplete event");
@@ -15424,10 +17882,24 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
         .and_then(|value| value.to_str())
         .expect("retained Session id")
         .to_string();
-    let recovery_receipts = fs::read_dir(sessions_dir.join("execution-launch-recovery"))
-        .map(|entries| entries.flatten().collect::<Vec<_>>())
+    let recovery_dir = sessions_dir.join("execution-launch-recovery");
+    let recovery_receipts = fs::read_dir(&recovery_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry.path().extension().and_then(|ext| ext.to_str()) == Some("json")
+                })
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     assert_eq!(recovery_receipts.len(), 1, "{recovery_receipts:?}");
+    assert!(
+        recovery_dir
+            .join(format!("{retained_session_id}.lock"))
+            .exists(),
+        "the durable receipt keeps its exact cross-process lock file"
+    );
 
     fs::remove_file(sessions_dir.join("runtime")).expect("remove runtime path blocker");
     let mut restarted = sample_runtime(temp.path(), Vec::new(), None);
@@ -16490,13 +18962,13 @@ fn durable_launch_recovery_persist_syncs_new_directory_and_receipt_entry() {
     let fixture = pending_fresh_execution_fixture(temp.path(), "durable-receipt-persist");
     clear_durable_launch_recovery(&fixture.runtime.sessions_dir, &fixture.candidate_session_id)
         .expect("clear fixture receipt");
-    fs::remove_dir(
-        fixture
-            .runtime
-            .sessions_dir
-            .join("execution-launch-recovery"),
-    )
-    .expect("remove empty recovery directory");
+    let recovery_dir = fixture
+        .runtime
+        .sessions_dir
+        .join("execution-launch-recovery");
+    fs::remove_file(recovery_dir.join(format!("{}.lock", fixture.candidate_session_id)))
+        .expect("remove durable receipt lock fixture");
+    fs::remove_dir(&recovery_dir).expect("remove empty recovery directory");
 
     let synced_directories = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
     let observed = Arc::clone(&synced_directories);
@@ -17685,7 +20157,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            fixture.repo.display().to_string(),
+            fixture.repo.display().to_string().into(),
         )),
     );
 
@@ -18440,7 +20912,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -18576,7 +21048,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -18675,10 +21147,11 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_runtime_status(
+    let events = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Error,
         Some("Stop-block hit an error".to_string()),
+        true,
     );
 
     let status = events
@@ -19062,7 +21535,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            worktree.display().to_string(),
+            worktree.display().to_string().into(),
         )),
     );
 
@@ -19153,7 +21626,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -19255,7 +21728,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            project_root.display().to_string(),
+            project_root.display().to_string().into(),
         )),
     );
 
@@ -19368,7 +21841,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Resume,
             true,
-            worktree.display().to_string(),
+            worktree.display().to_string().into(),
         )),
     );
 
@@ -19465,7 +21938,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Resume,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -19572,7 +22045,7 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Resume,
             false,
-            repo.display().to_string(),
+            repo.display().to_string().into(),
         )),
     );
 
@@ -19743,7 +22216,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            worktree.display().to_string(),
+            worktree.display().to_string().into(),
         )),
     );
 
@@ -19845,7 +22318,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            worktree_one.display().to_string(),
+            worktree_one.display().to_string().into(),
         )),
     );
     let second_events = runtime.handle_launch_complete(
@@ -19862,7 +22335,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             gwt_agent::LaunchRuntimeTarget::Host,
             gwt_agent::SessionMode::Normal,
             false,
-            worktree_two.display().to_string(),
+            worktree_two.display().to_string().into(),
         )),
     );
 
@@ -22273,6 +24746,549 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
 }
 
 #[test]
+fn stale_runtime_events_cannot_mutate_same_window_successor() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let predecessor_incarnation = super::next_window_runtime_incarnation();
+    runtime.runtimes.insert(
+        window_id.clone(),
+        WindowRuntime {
+            incarnation: predecessor_incarnation,
+            pane: Arc::new(Mutex::new(long_running_test_pane(&window_id))),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+    runtime.stop_window_runtime(&window_id);
+
+    let successor_incarnation = super::next_window_runtime_incarnation();
+    assert!(
+        successor_incarnation > predecessor_incarnation,
+        "runtime incarnations must increase monotonically within the process"
+    );
+    runtime.runtimes.insert(
+        window_id.clone(),
+        WindowRuntime {
+            incarnation: successor_incarnation,
+            pane: Arc::new(Mutex::new(long_running_test_pane(&window_id))),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime.window_output_bytes.insert(window_id.clone(), 41);
+    runtime
+        .window_details
+        .insert(window_id.clone(), "successor ready".to_string());
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+
+    let output_events = runtime.handle_runtime_output_event(
+        window_id.clone(),
+        predecessor_incarnation,
+        b"late predecessor output".to_vec(),
+    );
+    let status_events = runtime.handle_runtime_status_event(
+        window_id.clone(),
+        predecessor_incarnation,
+        WindowProcessStatus::Stopped,
+        Some("predecessor exited".to_string()),
+        true,
+    );
+
+    assert!(output_events.is_empty());
+    assert!(status_events.is_empty());
+    assert_eq!(runtime.window_output_bytes.get(&window_id), Some(&41));
+    assert_eq!(
+        runtime.window_pty_statuses.get(&window_id),
+        Some(&WindowProcessStatus::Running)
+    );
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("successor ready")
+    );
+    assert_eq!(
+        runtime
+            .runtimes
+            .get(&window_id)
+            .map(|runtime| runtime.incarnation),
+        Some(successor_incarnation)
+    );
+    let successor_screen = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("successor runtime")
+        .pane
+        .lock()
+        .expect("successor pane")
+        .screen()
+        .contents();
+    assert!(!successor_screen.contains("late predecessor output"));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+}
+
+#[test]
+fn unconfirmed_runtime_error_cannot_publish_terminal_execution_proof() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-1", Some("unconfirmed-reader-error".to_string())));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let identity = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "unconfirmed-reader-error",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let incarnation = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("live runtime")
+        .incarnation;
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, &identity.session_id);
+    gwt_agent::SessionRuntimeState::for_execution(
+        gwt_agent::AgentStatus::Running,
+        &identity,
+        incarnation,
+    )
+    .save(&runtime_path)
+    .expect("save exact Running runtime proof");
+    let session_path = runtime
+        .sessions_dir
+        .join(format!("{}.toml", identity.session_id));
+    let session_before = fs::read(&session_path).expect("read Running Session");
+
+    runtime.handle_runtime_status_event(
+        window_id.clone(),
+        incarnation,
+        WindowProcessStatus::Error,
+        Some("PTY reader failed".to_string()),
+        false,
+    );
+
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        fs::read(&session_path).expect("read Session after unconfirmed error"),
+        session_before
+    );
+    let proof = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("load runtime proof after unconfirmed error");
+    assert_eq!(proof.status, gwt_agent::AgentStatus::Running);
+    assert_eq!(proof.execution_identity.as_ref(), Some(&identity));
+    assert_eq!(proof.runtime_incarnation, Some(incarnation));
+
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+}
+
+fn bound_runtime_launch_completion(
+    repo: &Path,
+    session_id: &str,
+    expected_identity: gwt_agent::SessionExecutionIdentity,
+    command: String,
+    args: Vec<String>,
+) -> AgentLaunchCompletion {
+    (
+        ProcessLaunch {
+            command,
+            args,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: Some(repo.to_path_buf()),
+            pending_tool_runtime_migration: None,
+        },
+        session_id.to_string(),
+        "feature/demo".to_string(),
+        "Codex".to_string(),
+        repo.to_path_buf(),
+        gwt_agent::AgentId::Codex,
+        Some(42),
+        None,
+        gwt_agent::LaunchRuntimeTarget::Host,
+        gwt_agent::SessionMode::Resume,
+        false,
+        AgentLaunchRuntimeContext {
+            agent_project_root: repo.display().to_string(),
+            expected_execution_identity: Some(expected_identity),
+            active_launch_handshake: None,
+        },
+    )
+}
+
+#[test]
+fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retains_it() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let session_id = "bound-runtime-natural-exit";
+    let identity = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+        None,
+    );
+    let handshake = gwt::cli::execution_state::begin_active_session_launch_handshake(
+        &runtime.sessions_dir,
+        &identity,
+    )
+    .expect("begin bound launch handshake")
+    .expect("acquire bound launch handshake");
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, session_id);
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(&runtime_path)
+        .expect("save pre-spawn runtime state");
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+
+    let mut completion =
+        bound_runtime_launch_completion(&repo, session_id, identity.clone(), command, args);
+    completion.11.active_launch_handshake = Some(handshake);
+    let events = runtime.handle_launch_complete(window_id.clone(), Ok(completion));
+
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    let incarnation = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("spawned bound runtime")
+        .incarnation;
+    let running = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("load exact Running runtime state");
+    assert_eq!(running.status, gwt_agent::AgentStatus::Running);
+    assert_eq!(running.execution_identity.as_ref(), Some(&identity));
+    assert_eq!(running.runtime_incarnation, Some(incarnation));
+    assert!(running.child_pid.is_some_and(|pid| pid > 0));
+    assert!(running
+        .child_started_at
+        .is_some_and(|started_at| started_at > 0));
+    assert!(
+        !gwt_agent::active_launch_handshake_path(&runtime.sessions_dir, session_id).exists(),
+        "Running publication must clear the exact child-spawned gate marker"
+    );
+
+    wait_for_recorded_event("bound runtime natural exit", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::RuntimeStatus {
+                    id,
+                    incarnation: event_incarnation,
+                    status: WindowProcessStatus::Stopped,
+                    ..
+                } if id == &window_id && *event_incarnation == incarnation
+            )
+        })
+    });
+    runtime.handle_runtime_status_event(
+        window_id,
+        incarnation,
+        WindowProcessStatus::Stopped,
+        Some("Process exited".to_string()),
+        true,
+    );
+
+    let stopped = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("load naturally stopped runtime state");
+    assert_eq!(stopped.status, gwt_agent::AgentStatus::Stopped);
+    assert_eq!(stopped.execution_identity.as_ref(), Some(&identity));
+    assert_eq!(stopped.runtime_incarnation, Some(incarnation));
+    assert_eq!(stopped.child_pid, running.child_pid);
+    assert_eq!(stopped.child_started_at, running.child_started_at);
+}
+
+#[test]
+fn production_bound_agent_launch_rejects_replaced_identity_without_runtime_sidecar_rewrite() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session_id = "bound-runtime-replaced";
+    let identity = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+        None,
+    );
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, session_id);
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Idle)
+        .save(&runtime_path)
+        .expect("save sentinel runtime state");
+    let sentinel_bytes = fs::read(&runtime_path).expect("read sentinel runtime state");
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut replacement = gwt_agent::Session::load(&session_path).expect("load bound Session");
+    replacement.agent_id = gwt_agent::AgentId::Custom("replacement".to_string());
+    replacement
+        .save(&runtime.sessions_dir)
+        .expect("save same-id replacement");
+    let replacement_bytes = fs::read(&session_path).expect("read replacement Session");
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok(bound_runtime_launch_completion(
+            &repo, session_id, identity, command, args,
+        )),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            detail: Some(detail),
+            ..
+        } if detail.contains("Session identity changed")
+    )));
+    assert!(!runtime.runtimes.contains_key(&window_id));
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        fs::read(&runtime_path).expect("read retained sentinel runtime state"),
+        sentinel_bytes,
+    );
+    assert_eq!(
+        fs::read(&session_path).expect("read retained replacement Session"),
+        replacement_bytes,
+    );
+}
+
+#[test]
+fn production_bound_agent_spawn_failure_never_publishes_exact_runtime_proof() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session_id = "bound-runtime-spawn-failure";
+    let identity = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+        None,
+    );
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, session_id);
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(&runtime_path)
+        .expect("save pre-spawn runtime state");
+    let window_id = combined_window_id("tab-1", "agent-1");
+    super::launch::set_bound_pty_gate_program_for_test(PathBuf::from(
+        "/definitely/missing/gwt-pty-start-gate",
+    ));
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok(bound_runtime_launch_completion(
+            &repo,
+            session_id,
+            identity,
+            "/definitely/missing/gwt-bound-agent".to_string(),
+            Vec::new(),
+        )),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Error,
+                ..
+            }
+        )),
+        "spawn failure events: {events:?}"
+    );
+    assert!(!runtime.runtimes.contains_key(&window_id));
+    let runtime_state = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("load failed spawn runtime state");
+    assert!(runtime_state.execution_identity.is_none());
+    assert!(runtime_state.runtime_incarnation.is_none());
+}
+
+#[test]
+fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let session_id = "ordinary-bound-runtime-stop";
+    let identity = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    let issuer = install_manual_holder_capability(&mut runtime, &repo, &window_id, &identity);
+    let pane = Arc::new(Mutex::new(long_running_test_pane(&window_id)));
+    let child_pid = pane
+        .lock()
+        .expect("pane")
+        .pty()
+        .process_id()
+        .expect("child pid");
+    let child_started_at =
+        gwt::process::host_process_start_time(child_pid).expect("child process start time");
+    let host_started_at =
+        gwt::process::host_process_start_time(std::process::id()).expect("Host process start time");
+    let incarnation = super::next_window_runtime_incarnation();
+    runtime.runtimes.insert(
+        window_id.clone(),
+        WindowRuntime {
+            incarnation,
+            pane,
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+    gwt_agent::persist_session_running_state_if_execution_identity_matches(
+        &runtime.sessions_dir,
+        &identity,
+        incarnation,
+        host_started_at,
+        child_pid,
+        child_started_at,
+    )
+    .expect("publish exact Running proof");
+
+    runtime.stop_window_runtime(&window_id);
+
+    assert!(!gwt::process::exact_pty_process_tree_is_alive(
+        child_pid,
+        child_started_at
+    ));
+    assert_eq!(
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("load terminal Session")
+            .status,
+        gwt_agent::AgentStatus::Stopped
+    );
+    let proof = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+        &runtime.sessions_dir,
+        session_id,
+    ))
+    .expect("load terminal runtime proof");
+    assert_eq!(proof.status, gwt_agent::AgentStatus::Stopped);
+    assert_eq!(proof.execution_identity.as_ref(), Some(&identity));
+    assert_eq!(proof.runtime_incarnation, Some(incarnation));
+    assert_eq!(proof.child_pid, Some(child_pid));
+    assert_eq!(proof.child_started_at, Some(child_started_at));
+    assert!(
+        !gwt_agent::manual_handoff_path(&runtime.sessions_dir, session_id).exists(),
+        "ordinary close must release the successor-only durable fence"
+    );
+    issuer
+        .issue_bound(&repo, session_id, identity.execution_binding.clone())
+        .expect("ordinary close must keep same-Session resume capability issuable");
+}
+
+#[test]
 fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics() {
     let _env_lock = env_test_lock()
         .lock()
@@ -22293,10 +25309,11 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
         sample_active_agent_session("tab-1", &window_id),
     );
 
-    let events = runtime.handle_runtime_status(
+    let events = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Stopped,
         Some("Process exited".to_string()),
+        true,
     );
 
     assert!(
@@ -22348,10 +25365,11 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
         .expect("pane")
         .process_bytes(b"No conversation found with session ID: resume-target-1\r\n");
 
-    let _ = runtime.handle_runtime_status(
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Error,
         Some("Process exited with status 1".to_string()),
+        true,
     );
 
     let detail = runtime
@@ -22427,15 +25445,17 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
         .expect("shell pane")
         .process_bytes(b"command not found: frobnicate\r\n");
 
-    let _ = runtime.handle_runtime_status(
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
         agent_window_id.clone(),
         WindowProcessStatus::Error,
         Some("Process exited with status 1".to_string()),
+        true,
     );
-    let _ = runtime.handle_runtime_status(
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
         shell_window_id.clone(),
         WindowProcessStatus::Error,
         Some("Process exited with status 1".to_string()),
+        true,
     );
 
     let agent_detail = runtime
@@ -22528,7 +25548,7 @@ fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
 }
 
 #[test]
-fn app_runtime_runtime_status_error_without_live_hook_stops_active_agent() {
+fn app_runtime_unconfirmed_status_error_without_live_hook_keeps_active_agent() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -22554,7 +25574,11 @@ fn app_runtime_runtime_status_error_without_live_hook_stops_active_agent() {
         Some("process failed".to_string()),
     );
 
-    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("process failed")
+    );
     assert!(error_events.iter().any(|event| matches!(
         event.event,
         BackendEvent::WindowState {
@@ -22716,8 +25740,12 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
             window_id.clone(),
             sample_active_agent_session("tab-1", &window_id),
         );
-        let events =
-            runtime.handle_runtime_status(window_id, status, Some("Process exited".to_string()));
+        let events = runtime.handle_runtime_status_with_exit_confirmation(
+            window_id,
+            status,
+            Some("Process exited".to_string()),
+            true,
+        );
         events
             .iter()
             .map(|outbound| outbound.event.event_kind().to_string())
@@ -22781,10 +25809,11 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
         "session-1",
     ));
 
-    let kept_for_diagnosis = runtime.handle_runtime_status(
+    let kept_for_diagnosis = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Error,
         Some("You've hit your usage limit.".to_string()),
+        true,
     );
     assert!(
         runtime.recoverable_agent_error_windows.contains(&window_id),
@@ -22812,10 +25841,11 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
         window_id.clone(),
         sample_active_agent_session("tab-1", &window_id),
     );
-    let notified = control.handle_runtime_status(
+    let notified = control.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Error,
         Some("You've hit your usage limit.".to_string()),
+        true,
     );
 
     let kinds = |events: &[OutboundEvent]| {
@@ -22883,10 +25913,11 @@ fn app_runtime_live_hook_recovery_clears_recoverable_pty_error_marker() {
     );
     runtime.window_hook_states.remove(&window_id);
 
-    let _ = runtime.handle_runtime_status(
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Error,
         Some("process exited".to_string()),
+        true,
     );
 
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
@@ -26432,10 +29463,11 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     )
     .expect("save projection");
 
-    let events = runtime.handle_runtime_status(
+    let events = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Stopped,
         Some("Process exited".to_string()),
+        true,
     );
 
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
@@ -26507,15 +29539,23 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
             let _ = pane.pty().write_input(b"\x1b[1;1R");
         }
     }
-    let status_thread = runtime.spawn_status_thread(window_id.clone(), pane.clone());
+    let incarnation = super::next_window_runtime_incarnation();
+    let status_thread = runtime.spawn_status_thread(window_id.clone(), incarnation, pane.clone());
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut observed_status = None;
     while Instant::now() < deadline {
         if let Ok(events) = captured_events.lock() {
             observed_status = events.iter().find_map(|event| match event {
-                UserEvent::RuntimeStatus { id, status, detail }
-                    if id == &window_id && *status == WindowProcessStatus::Stopped =>
+                UserEvent::RuntimeStatus {
+                    id,
+                    incarnation: event_incarnation,
+                    status,
+                    detail,
+                    ..
+                } if id == &window_id
+                    && *event_incarnation == incarnation
+                    && *status == WindowProcessStatus::Stopped =>
                 {
                     Some(detail.clone())
                 }
@@ -26656,6 +29696,32 @@ fn app_runtime_runtime_state_hooks_use_status_events_without_browser_hook_event(
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+}
+
+#[test]
+fn app_runtime_non_session_start_hook_keeps_agent_session_id_fallback() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let mut event = runtime_hook_state("Waiting", "foreign-gwt-session");
+    event.agent_session_id = Some("session-1".to_string());
+
+    let events = runtime.handle_runtime_hook_event(event);
+
+    assert!(events.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::WindowState { window_id: id, .. } if id == &window_id
+    )));
 }
 
 #[test]
@@ -32959,6 +36025,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
@@ -33216,6 +36283,7 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     };
     monitor.record_candidate(issue.clone());
     let key = monitor
@@ -33372,6 +36440,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         42,
@@ -34828,6 +37897,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -34920,6 +37990,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -35035,6 +38106,7 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -35129,6 +38201,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -35282,10 +38355,11 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
         },
     );
 
-    let events = runtime.handle_runtime_status(
+    let events = runtime.handle_runtime_status_with_exit_confirmation(
         window_id,
         WindowProcessStatus::Error,
         Some("Stop-block hit an error".to_string()),
+        true,
     );
 
     let status = events
@@ -35395,7 +38469,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
             })
             .expect("launch complete")
     };
-    let Ok((process, _, _, _, _, _, _, _, runtime_target, _, _, _)) = result else {
+    let Ok((process, _, _, _, _, _, _, _, runtime_target, _, _, _)) = *result else {
         panic!("Issue Monitor auto launch failed: {result:?}");
     };
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
@@ -35694,6 +38768,7 @@ fn monitor_relaunch_fixture(
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::Ready,
+            updated_at: None,
         });
         assert!(monitor.apply_confirmed_claim(
             3165,
@@ -35842,7 +38917,7 @@ fn take_monitor_launch_complete(
     let UserEvent::LaunchComplete { result, .. } = events.remove(index) else {
         unreachable!("matched launch complete above")
     };
-    result
+    *result
 }
 
 fn assert_monitor_exact_resume(result: AgentLaunchResult, fixture: &MonitorRelaunchFixture) {
@@ -44333,10 +47408,11 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
         },
     );
 
-    let events = runtime.handle_runtime_status(
+    let events = runtime.handle_runtime_status_with_exit_confirmation(
         "project-b::agent-1".to_string(),
         WindowProcessStatus::Error,
         Some("agent failed".to_string()),
+        true,
     );
 
     assert!(
@@ -44903,10 +47979,11 @@ fn pm_crash_records_backoff_and_respawns() {
     )
     .expect("seed registration");
 
-    runtime.handle_runtime_status(
+    runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Error,
         Some("agent crashed".to_string()),
+        true,
     );
 
     let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
@@ -45358,6 +48435,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
             body: None,
             url: None,
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         },
         state,
         claim_id: None,
@@ -46149,6 +49227,242 @@ fn scheduled_tick_is_single_flight_per_canonical_project_scope() {
         "duplicate tabs and duplicate ticks enqueue one worker"
     );
     assert_eq!(runtime.issue_monitor_scheduled_scans_in_flight.len(), 1);
+}
+
+#[test]
+fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overlap() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let foreign_repo = temp.path().join("foreign-repo");
+    fs::create_dir_all(&foreign_repo).expect("foreign repo");
+    init_repo_with_initial_commit(&foreign_repo);
+    let foreign_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&foreign_repo);
+    gwt::save_issue_monitor_prefs(
+        &foreign_prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed foreign monitor prefs");
+    runtime.tabs.insert(
+        0,
+        sample_project_tab(
+            "tab-foreign",
+            "Foreign",
+            foreign_repo.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let principal =
+        AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("registered PM principal");
+
+    let mismatched = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&foreign_repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(mismatched.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "project_scope_mismatch"
+    )));
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a mismatched requested scope must be rejected before enqueue"
+    );
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(accepted.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: true,
+            reason: None,
+        }
+    )));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "one exact project worker is queued"
+    );
+    assert_eq!(
+        runtime.issue_monitor_scheduled_scans_in_flight,
+        HashSet::from([prefs_path])
+    );
+    assert!(!runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&foreign_prefs_path));
+
+    let overlapping = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        principal,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(overlapping.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "scan_already_in_flight"
+    )));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "overlap never creates a second worker"
+    );
+}
+
+#[test]
+fn authenticated_scan_now_rejects_non_pm_and_disabled_monitor_without_enqueuing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let ordinary =
+        AgentSessionPrincipal::for_test(&repo, "other-session").expect("ordinary principal");
+    let denied = runtime.handle_agent_frontend_event(
+        "agent-client".to_string(),
+        ordinary,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(denied.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "caller_not_registered_pm"
+    )));
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            ..gwt::load_issue_monitor_prefs(&prefs_path).expect("monitor prefs")
+        },
+    )
+    .expect("disable monitor");
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+    let disabled = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(disabled.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "monitor_disabled"
+    )));
+
+    runtime.tabs.clear();
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+    let missing_project = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+    assert!(missing_project.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "project_not_open"
+    )));
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "rejected requests enqueue no worker"
+    );
+}
+
+#[test]
+fn authenticated_scan_now_reports_worker_failure_and_releases_single_flight() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("injected spawn failure");
+    let pm = AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("PM principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorScanNow {
+            expected_project_scope: gwt_core::paths::project_scope_hash(&repo)
+                .as_str()
+                .to_string(),
+        },
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorScanRequestResult {
+            accepted: false,
+            reason: Some(reason),
+        } if reason == "scan_worker_unavailable"
+    )));
+    assert!(runtime.issue_monitor_scheduled_scans_in_flight.is_empty());
 }
 
 #[test]
