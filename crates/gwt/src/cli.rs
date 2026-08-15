@@ -79,6 +79,10 @@ pub struct LinkedPrSummary {
     pub url: String,
     #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
     pub will_close_target: bool,
+    /// GitHub merge instant used to prove that an ordinary Issue has not
+    /// advanced since the closing work was delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -792,6 +796,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -860,6 +865,7 @@ mod tests {
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
             will_close_target: true,
+            merged_at: None,
         }];
 
         assert!(
