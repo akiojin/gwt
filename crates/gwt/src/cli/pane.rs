@@ -402,6 +402,25 @@ async fn request_window_list_with_timeout(
     let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(&mut socket, json!({ "kind": "list_windows" })).await?;
 
+    let listed = next_workspace_windows_with_timeout(
+        &mut socket,
+        project_root,
+        "pane list",
+        response_timeout,
+    )
+    .await;
+    if listed.is_ok() {
+        return listed;
+    }
+
+    // `gwtd` runs from the installed bundle while the GUI keeps running the
+    // build it was started with, so an in-place upgrade leaves the two on
+    // different pane protocols until the app restarts. A backend without the
+    // lightweight route drops `list_windows` without replying; the full sync
+    // request is understood by every version, so falling back to it keeps
+    // `pane.list` answering. This is never worse than the pre-#3510 client,
+    // which always paid for the full sync.
+    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
     next_workspace_windows_with_timeout(&mut socket, project_root, "pane list", response_timeout)
         .await
 }
@@ -1712,6 +1731,74 @@ mod tests {
                 error,
                 "pane list: pane websocket timed out waiting for backend response"
             );
+        });
+    }
+
+    /// Issue #3510: `gwtd` and the running GUI can disagree about the pane
+    /// protocol whenever the app is upgraded in place but not restarted. A
+    /// backend from before the lightweight route silently drops
+    /// `list_windows`, so `pane.list` must still answer instead of failing
+    /// for the whole upgrade window.
+    #[test]
+    fn request_window_list_falls_back_to_frontend_ready_on_older_backends() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-list-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane list test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind pane list mock");
+            let address = listener.local_addr().expect("pane list mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept pane list connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane list websocket");
+                // An older backend rejects the unknown request without any
+                // reply, exactly as `AgentPaneSessionScope::filter_inbound`
+                // used to.
+                let mut kinds = vec![next_frontend_kind(&mut socket).await];
+                kinds.push(next_frontend_kind(&mut socket).await);
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(
+                        "tab-project::agent-project",
+                        WindowPreset::Agent,
+                        Some("codex"),
+                    )],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send pane list workspace state");
+                kinds
+            });
+
+            let windows = request_window_list_with_timeout(
+                &format!("ws://{address}/internal/pane-ws"),
+                project_root,
+                Duration::from_millis(50),
+            )
+            .await
+            .expect("pane list must answer through the compatibility fallback");
+            let kinds = server.await.expect("pane list mock task");
+
+            assert_eq!(kinds, vec!["list_windows", "frontend_ready"]);
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, "tab-project::agent-project");
         });
     }
 
