@@ -197,6 +197,23 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+## A repository has exactly one PM
+
+- `pm.status` reports `repository_registrations`: every PM registration
+  in this repository, including ones held by a different project store.
+  A row with `is_current_store` false is a PM your own project state
+  cannot see. Two live rows means two PMs are supervising one
+  repository, and they will overwrite each other's priority order and
+  launch instructions.
+- `pm.stop` with `params.session_id` from one of those rows retires that
+  PM: it clears the registration and marks the Session unrestorable, so
+  the resident loop releases and startup will not bring it back. Only a
+  registered PM of the same repository may call it. With no
+  `session_id` it retires you, which is how an orphaned PM stands down
+  on its own.
+- `pm.stop` does not close the pane. It ends PM authority and the loop;
+  the window is left for the user to close.
+
 Hard limits, no exceptions:
 
 - Never run `pane.send`. Input injection is scoped to a session's own
@@ -397,6 +414,15 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3607: the PM singleton is per repository, and an orphan
+            // PM has a CLI route out. Without these the contract leaves the
+            // PM believing GUI clicks are the only way to stop one.
+            "`repository_registrations`",
+            "is_current_store` false",
+            "`pm.stop`",
+            "clears the registration and marks the Session unrestorable",
+            "Only a registered PM of the same repository may call it",
+            "`pm.stop` does not close the pane",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
