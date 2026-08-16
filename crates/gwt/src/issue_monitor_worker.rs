@@ -140,6 +140,7 @@ pub fn issue_monitor_daemon_payloads(
                     "branch_name": request.branch_name,
                     "linked_issue_kind": request.linked_issue_kind,
                     "delivery_id": delivery_id,
+                    "launch_session_strategy": request.launch_session_strategy,
                 }),
             });
             if request.delivery_id.is_none() {
@@ -228,22 +229,102 @@ fn issue_monitor_candidate(
         body: issue.body,
         url: (!issue.url.is_empty()).then_some(issue.url),
         readiness,
+        updated_at: issue.updated_at,
     }
 }
 
 fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
-    let has_content = |name: &str| {
+    let section = |name: &str| {
         entry
             .spec_body
             .sections
             .get(&SectionName(name.to_string()))
-            .is_some_and(|content| !content.trim().is_empty())
+            .map(String::as_str)
+            .filter(|content| !content.trim().is_empty())
     };
-    if has_content("plan") && has_content("tasks") {
-        IssueMonitorReadiness::Ready
-    } else {
-        IssueMonitorReadiness::NotReady
+    let (Some(_plan), Some(tasks)) = (section("plan"), section("tasks")) else {
+        return IssueMonitorReadiness::NotReady;
+    };
+    let mut open_fence = None;
+    let checkbox_states = tasks.lines().filter_map(|line| {
+        let content = line.trim_start_matches([' ', '\t']);
+        let indentation = &line[..line.len() - content.len()];
+        if indentation.len() > 3 || indentation.contains('\t') {
+            return markdown_list_item(content)
+                .filter(|item| item.starts_with('['))
+                .map(|_| None);
+        }
+        let fence = markdown_fence(content);
+        if let Some((open_marker, open_length)) = open_fence {
+            if fence.is_some_and(|(marker, length, suffix)| {
+                marker == open_marker && length >= open_length && suffix.trim().is_empty()
+            }) {
+                open_fence = None;
+            }
+            return None;
+        }
+        if let Some((marker, length, _)) = fence {
+            open_fence = Some((marker, length));
+            return None;
+        }
+        let item = markdown_list_item(content)?;
+        if item.starts_with("[ ]") {
+            Some(Some(false))
+        } else if item.starts_with("[x]") || item.starts_with("[X]") {
+            Some(Some(true))
+        } else if item.starts_with('[') {
+            // A checkbox-like task with an unknown marker must never turn a
+            // partially parsed task list into Issue-wide completion.
+            Some(None)
+        } else {
+            None
+        }
+    });
+    let mut saw_checkbox = false;
+    let mut saw_open = false;
+    for checked in checkbox_states {
+        if let Some(checked) = checked {
+            saw_checkbox = true;
+            saw_open |= !checked;
+        } else {
+            saw_open = true;
+        }
     }
+    if saw_open {
+        IssueMonitorReadiness::ReadyWithOpenTasks
+    } else if saw_checkbox {
+        IssueMonitorReadiness::ReadyWithCompletedTasks
+    } else {
+        IssueMonitorReadiness::Ready
+    }
+}
+
+fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
+    let marker = *line.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let length = line
+        .bytes()
+        .take_while(|candidate| *candidate == marker)
+        .count();
+    (length >= 3).then_some((marker, length, &line[length..]))
+}
+
+fn markdown_list_item(line: &str) -> Option<&str> {
+    if let Some(item) = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))
+    {
+        return Some(item.trim_start());
+    }
+    let (marker, item) = line.split_once(char::is_whitespace)?;
+    let ordered = marker
+        .strip_suffix('.')
+        .or_else(|| marker.strip_suffix(')'))?;
+    (!ordered.is_empty() && ordered.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(item.trim_start())
 }
 
 fn issue_monitor_candidates_with_readiness<F>(
@@ -311,7 +392,7 @@ where
                     let refreshed = cache.load_entry(number);
                     match refreshed {
                         Some(entry)
-                            if issue.updated_at.as_ref().is_none_or(|updated_at| {
+                            if issue.updated_at.as_ref().is_some_and(|updated_at| {
                                 entry.snapshot.updated_at.0 == *updated_at
                             }) =>
                         {
@@ -496,16 +577,16 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
 }
 
 /// Issue #3225: GitHub-derived completion probe for the claim loop — "does
-/// this issue have a linked PR that is already MERGED?". Uses the issue's
-/// timeline (cross-referenced / connected PRs), so it catches fixes merged via
-/// ANY branch, not just the monitor's own `work/issue-N`. Fails open (false)
-/// on errors so a transient gh failure never blocks real work.
-pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) -> bool {
-    match try_issue_completed_by_merged_pr(owner, repo, issue_number) {
+/// this current Issue generation have fresh, Issue-wide merged PR evidence?".
+/// Ordinary Issues require a merge at or after the Issue revision; SPECs
+/// require every structured task to be checked. Fails open (false) on remote
+/// errors so a transient gh failure never blocks real work.
+pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue: &IssueMonitorIssue) -> bool {
+    match try_issue_completed_by_merged_pr(owner, repo, issue) {
         Ok(completed) => completed,
         Err(error) => {
             tracing::debug!(
-                issue = issue_number,
+                issue = issue.number,
                 error = %error,
                 "issue monitor completion probe failed (fail-open)"
             );
@@ -518,27 +599,54 @@ pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) 
 pub fn try_issue_completed_by_merged_pr(
     owner: &str,
     repo: &str,
-    issue_number: u64,
+    issue: &IssueMonitorIssue,
 ) -> Result<bool, IssueMonitorScanFailure> {
     let prs = run_scan_stage(IssueMonitorScanStage::ClaimCompletionReadback, || {
         crate::cli::issue::fetch_linked_prs_via_gh(
             owner,
             repo,
-            gwt_github::IssueNumber(issue_number),
+            gwt_github::IssueNumber(issue.number),
         )
     })?;
-    // codex #3226 review: only a PR that actually CLOSES the issue counts — a
-    // merged PR that merely references it (Refs #N / partial work) is not done.
-    Ok(prs
-        .iter()
-        .any(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged")))
+    Ok(linked_pr_completion_is_fresh_for_issue(issue, &prs))
 }
 
-/// Mark any active launched Issue whose work branch has a merged PR as
-/// `Merged`, freeing the active slot. Skips the network call when nothing is
-/// launched, and leaves work launched when the PR query fails (so a transient
-/// error never closes the slot on a false signal). Query failures are returned
-/// so the scan owner can surface them after its final state rebase.
+pub fn linked_pr_completion_is_fresh_for_issue(
+    issue: &IssueMonitorIssue,
+    prs: &[crate::cli::LinkedPrSummary],
+) -> bool {
+    let Some(issue_updated_at) = issue
+        .updated_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return false;
+    };
+    let is_spec = issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    if is_spec && issue.readiness != IssueMonitorReadiness::ReadyWithCompletedTasks {
+        return false;
+    }
+    let closing_merged = prs
+        .iter()
+        .filter(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged"));
+    if is_spec {
+        return closing_merged.into_iter().next().is_some();
+    }
+    closing_merged.into_iter().any(|pr| {
+        pr.merged_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|merged_at| merged_at >= issue_updated_at)
+    })
+}
+
+/// Reconcile active launched work branches that have merged, freeing the slot
+/// and delegating Issue-wide completion vs requeue to the domain policy. Skips
+/// the network call when nothing is launched and returns query failures so the
+/// scan owner can surface them after its final state rebase.
 pub fn reconcile_issue_monitor_merges(
     monitor: &mut IssueMonitorState,
     repo_path: &Path,
@@ -551,7 +659,7 @@ pub fn reconcile_issue_monitor_merges(
     if !merged.is_empty() {
         tracing::info!(
             issues = ?merged,
-            "issue monitor marked merged work and freed active slots"
+            "issue monitor reconciled merged work deliveries and freed active slots"
         );
     }
     Ok(merged)
@@ -936,6 +1044,7 @@ pub fn load_cached_issue_monitor_candidates(
             },
             body: (!entry.snapshot.body.is_empty()).then_some(entry.snapshot.body),
             url: None,
+            updated_at: Some(entry.snapshot.updated_at.0),
         })
         .collect::<Vec<_>>();
     issues.sort_by_key(|issue| issue.number);
@@ -1108,6 +1217,7 @@ mod tests {
             body: None,
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-15T00:00:00Z".to_string()),
         }
     }
 
@@ -1203,9 +1313,122 @@ mod tests {
 
         assert!(errors.is_empty());
         assert_eq!(refreshes, 0, "matching generations must not hit GitHub");
-        assert_eq!(issues[0].readiness, crate::IssueMonitorReadiness::Ready);
+        assert_eq!(
+            issues[0].readiness,
+            crate::IssueMonitorReadiness::ReadyWithOpenTasks
+        );
         assert_eq!(issues[1].readiness, crate::IssueMonitorReadiness::NotReady);
         assert_eq!(issues[2].readiness, crate::IssueMonitorReadiness::NotReady);
+    }
+
+    #[test]
+    fn structured_spec_task_completion_is_explicit_and_fail_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        for (number, tasks) in [
+            (41, "- [x] T-001\n- [X] T-002"),
+            (42, "- [x] T-001\n- [ ] T-002"),
+            (43, "Tasks are described without checkboxes"),
+            (44, "- [x] T-001\n- [?] malformed task marker"),
+            (
+                45,
+                "```markdown\n- [x] example only\n```\n1. [x] T-001\n2. [ ] T-002",
+            ),
+            (46, "```markdown\n~~~\n- [x] example only\n~~~\n```"),
+            (47, "    - [x] indented code only"),
+            (48, "- [x] T-001\n    - [ ] T-002"),
+        ] {
+            cache
+                .write_snapshot(&structured_spec(number, "t1", "Plan", tasks))
+                .expect("write spec");
+        }
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![
+                live_issue(41, &["gwt-spec"], Some("t1")),
+                live_issue(42, &["gwt-spec"], Some("t1")),
+                live_issue(43, &["gwt-spec"], Some("t1")),
+                live_issue(44, &["gwt-spec"], Some("t1")),
+                live_issue(45, &["gwt-spec"], Some("t1")),
+                live_issue(46, &["gwt-spec"], Some("t1")),
+                live_issue(47, &["gwt-spec"], Some("t1")),
+                live_issue(48, &["gwt-spec"], Some("t1")),
+            ],
+            dir.path(),
+            |_| panic!("matching cache must not refresh"),
+        );
+
+        assert!(errors.is_empty());
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.readiness)
+                .collect::<Vec<_>>(),
+            vec![
+                IssueMonitorReadiness::ReadyWithCompletedTasks,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
+                IssueMonitorReadiness::Ready,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
+                IssueMonitorReadiness::Ready,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
+                IssueMonitorReadiness::ReadyWithOpenTasks,
+            ]
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_requires_current_issue_evidence() {
+        let ordinary = IssueMonitorIssue {
+            updated_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..issue(42)
+        };
+        let merged = |merged_at: Option<&str>| crate::cli::LinkedPrSummary {
+            number: 99,
+            title: "fix".to_string(),
+            state: "MERGED".to_string(),
+            url: "https://example.test/pull/99".to_string(),
+            will_close_target: true,
+            merged_at: merged_at.map(str::to_string),
+        };
+
+        assert!(linked_pr_completion_is_fresh_for_issue(
+            &ordinary,
+            &[merged(Some("2026-08-11T00:00:00Z"))]
+        ));
+        assert!(!linked_pr_completion_is_fresh_for_issue(
+            &ordinary,
+            &[merged(Some("2026-08-09T00:00:00Z"))]
+        ));
+        assert!(!linked_pr_completion_is_fresh_for_issue(
+            &ordinary,
+            &[merged(None)]
+        ));
+
+        let complete_spec = IssueMonitorIssue {
+            labels: vec!["gwt-spec".to_string()],
+            readiness: IssueMonitorReadiness::ReadyWithCompletedTasks,
+            ..ordinary.clone()
+        };
+        let incomplete_spec = IssueMonitorIssue {
+            readiness: IssueMonitorReadiness::ReadyWithOpenTasks,
+            ..complete_spec.clone()
+        };
+        assert!(linked_pr_completion_is_fresh_for_issue(
+            &complete_spec,
+            &[merged(Some("2026-08-09T00:00:00Z"))],
+        ));
+        assert!(!linked_pr_completion_is_fresh_for_issue(
+            &incomplete_spec,
+            &[merged(Some("2026-08-11T00:00:00Z"))],
+        ));
+        let missing_revision_spec = IssueMonitorIssue {
+            updated_at: None,
+            ..complete_spec
+        };
+        assert!(!linked_pr_completion_is_fresh_for_issue(
+            &missing_revision_spec,
+            &[merged(Some("2026-08-11T00:00:00Z"))],
+        ));
     }
 
     #[test]
@@ -1248,7 +1471,10 @@ mod tests {
         );
 
         assert_eq!(refreshed_numbers, vec![42, 43]);
-        assert_eq!(issues[0].readiness, crate::IssueMonitorReadiness::Ready);
+        assert_eq!(
+            issues[0].readiness,
+            crate::IssueMonitorReadiness::ReadyWithOpenTasks
+        );
         assert_eq!(issues[1].readiness, crate::IssueMonitorReadiness::NotReady);
         assert_eq!(
             issues[2].readiness,
@@ -1286,7 +1512,10 @@ mod tests {
         );
 
         assert_eq!(refreshed_numbers, vec![42]);
-        assert_eq!(issues[0].readiness, IssueMonitorReadiness::Ready);
+        assert_eq!(
+            issues[0].readiness,
+            IssueMonitorReadiness::ReadyWithOpenTasks
+        );
         assert_eq!(issues[1].readiness, IssueMonitorReadiness::NotReady);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("#43"));
@@ -1319,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn targeted_refresh_requires_matching_generation_and_accepts_missing_live_timestamp() {
+    fn targeted_refresh_requires_a_known_matching_live_generation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = Cache::new(dir.path().to_path_buf());
         let (issues, errors) = issue_monitor_candidates_with_readiness(
@@ -1346,9 +1575,11 @@ mod tests {
         );
 
         assert_eq!(issues[0].readiness, IssueMonitorReadiness::NotReady);
-        assert_eq!(issues[1].readiness, IssueMonitorReadiness::Ready);
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("generation mismatch"));
+        assert_eq!(issues[1].readiness, IssueMonitorReadiness::NotReady);
+        assert_eq!(errors.len(), 2);
+        assert!(errors
+            .iter()
+            .all(|error| error.contains("generation mismatch")));
     }
 
     #[test]
@@ -1387,7 +1618,10 @@ mod tests {
         );
 
         assert!(errors.is_empty());
-        assert_eq!(issues[0].readiness, IssueMonitorReadiness::Ready);
+        assert_eq!(
+            issues[0].readiness,
+            IssueMonitorReadiness::ReadyWithOpenTasks
+        );
     }
 
     #[test]
@@ -1820,8 +2054,8 @@ mod tests {
         assert_eq!(candidates[2].number, 3166);
         assert_eq!(
             candidates[2].readiness,
-            crate::IssueMonitorReadiness::Ready,
-            "unchecked tasks are valid implementation-ready content"
+            crate::IssueMonitorReadiness::ReadyWithOpenTasks,
+            "unchecked tasks are launch-ready but not completion-ready"
         );
     }
 
@@ -2109,6 +2343,7 @@ exit 1
             body: Some("## Acceptance Criteria\n- [ ] AC-1: x\n".to_string()),
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         }];
         apply_autonomous_eligibility(
             &mut monitor,
@@ -2181,6 +2416,7 @@ exit 1
             body: None,
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         }];
         advance_autonomous_in_flight(
             &mut monitor,
@@ -2440,6 +2676,7 @@ exit 0
             body: Some("## Acceptance Criteria\n- [ ] AC-1: returns 200\n".to_string()),
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-15T00:00:00Z".to_string()),
         }];
         // `enabled` is required as well as `autonomous_mode`: the global kill
         // switch gates every autonomous remote call

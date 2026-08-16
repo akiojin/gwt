@@ -1,14 +1,18 @@
 //! Utility functions for gwt filesystem paths.
 
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use crate::{
     error::Result,
-    repo_hash::{compute_path_hash, detect_repo_hash, RepoHash},
+    repo_hash::{
+        compute_path_hash, detect_repo_hash, resolve_repo_identity, RepoHash,
+        RepoIdentityCandidate, RepoIdentityResolution, RepoIdentitySource,
+    },
 };
 
 /// Return the gwt home directory (`~/.gwt/`).
@@ -174,9 +178,142 @@ pub fn gwt_project_dir(repo_hash: &RepoHash) -> PathBuf {
     gwt_projects_dir().join(repo_hash.as_str())
 }
 
+/// How a [`ProjectScope`] hash was derived.
+///
+/// Issue #3466: an unresolvable repository identity falls back to a path hash,
+/// which scopes the project store to *where* it was opened instead of *which*
+/// repository it is. Reporting the source lets callers surface that split
+/// instead of discovering it as two divergent stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectScopeSource {
+    /// Resolved from a repository identity (origin URL).
+    Repository(RepoIdentitySource),
+    /// No repository identity was resolvable; the hash is a path hash and the
+    /// store is therefore not shared with any other view of this project.
+    PathFallback,
+    /// Several direct-child bare repositories name different origins. No
+    /// candidate is selected; the isolated path hash prevents cross-repository
+    /// writes while retaining every candidate for an explicit diagnostic.
+    AmbiguousNestedBareRepositories(Vec<RepoIdentityCandidate>),
+}
+
+/// The project store scope for a path: its hash plus how the hash was derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectScope {
+    pub hash: RepoHash,
+    pub source: ProjectScopeSource,
+}
+
+/// Resolve the project store scope for a repository, worktree, or layout root.
+///
+/// A path-hash fallback is reported once per path so the condition that split
+/// the store in #3466 is visible in `~/.gwt/logs/` rather than only in its
+/// consequences.
+pub fn resolve_project_scope(repo_path: &Path) -> ProjectScope {
+    match resolve_repo_identity(repo_path) {
+        RepoIdentityResolution::Resolved(identity) => ProjectScope {
+            hash: identity.hash,
+            source: ProjectScopeSource::Repository(identity.source),
+        },
+        RepoIdentityResolution::NotFound => {
+            let hash = compute_path_hash(repo_path);
+            warn_path_fallback_once(repo_path, &hash, None);
+            ProjectScope {
+                hash,
+                source: ProjectScopeSource::PathFallback,
+            }
+        }
+        RepoIdentityResolution::Ambiguous(candidates) => {
+            let hash = compute_path_hash(repo_path);
+            warn_path_fallback_once(repo_path, &hash, Some(&candidates));
+            ProjectScope {
+                hash,
+                source: ProjectScopeSource::AmbiguousNestedBareRepositories(candidates),
+            }
+        }
+    }
+}
+
+/// A diagnostic already reported by [`warn_path_fallback_once`]. Including the
+/// resolution state prevents an earlier plain fallback from hiding a later
+/// ambiguity (and its candidate paths/origins) at the same project root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectScopeWarningKey {
+    project_root: PathBuf,
+    resolution: ProjectScopeWarningResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProjectScopeWarningResolution {
+    NotFound,
+    Ambiguous(Vec<(PathBuf, String)>),
+}
+
+static REPORTED_PATH_FALLBACKS: OnceLock<Mutex<HashSet<ProjectScopeWarningKey>>> = OnceLock::new();
+
+fn project_scope_warning_key(
+    repo_path: &Path,
+    ambiguous_candidates: Option<&[RepoIdentityCandidate]>,
+) -> ProjectScopeWarningKey {
+    let project_root = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let resolution = match ambiguous_candidates {
+        None => ProjectScopeWarningResolution::NotFound,
+        Some(candidates) => {
+            let mut fingerprints: Vec<_> = candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        dunce::canonicalize(&candidate.path)
+                            .unwrap_or_else(|_| candidate.path.clone()),
+                        candidate.normalized_origin.clone(),
+                    )
+                })
+                .collect();
+            fingerprints.sort();
+            ProjectScopeWarningResolution::Ambiguous(fingerprints)
+        }
+    };
+    ProjectScopeWarningKey {
+        project_root,
+        resolution,
+    }
+}
+
+fn warn_path_fallback_once(
+    repo_path: &Path,
+    hash: &RepoHash,
+    ambiguous_candidates: Option<&[RepoIdentityCandidate]>,
+) {
+    let reported = REPORTED_PATH_FALLBACKS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut reported = reported
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !reported.insert(project_scope_warning_key(repo_path, ambiguous_candidates)) {
+        return;
+    }
+    if let Some(candidates) = ambiguous_candidates {
+        tracing::warn!(
+            target: "gwt::paths",
+            project_root = %repo_path.display(),
+            project_hash = %hash,
+            candidates = ?candidates,
+            "multiple direct-child bare repositories have distinct origins; no repository \
+             identity was selected and project state is isolated to this path (#3466)."
+        );
+        return;
+    }
+    tracing::warn!(
+        target: "gwt::paths",
+        project_root = %repo_path.display(),
+        project_hash = %hash,
+        "no repository identity resolved; project state is scoped to this path. \
+         A second view of the same repository will use a different store (#3466)."
+    );
+}
+
 /// Return the project scope hash for a repository path.
 pub fn project_scope_hash(repo_path: &Path) -> RepoHash {
-    detect_repo_hash(repo_path).unwrap_or_else(|| compute_path_hash(repo_path))
+    resolve_project_scope(repo_path).hash
 }
 
 /// Return the project data directory for a repository path.
@@ -846,6 +983,39 @@ mod tests {
             .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn project_scope_warning_key_changes_when_path_resolution_becomes_ambiguous() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("layout");
+        std::fs::create_dir_all(&root).expect("layout root");
+        let fallback = project_scope_warning_key(&root, None);
+        let ambiguous = project_scope_warning_key(
+            &root,
+            Some(&[
+                RepoIdentityCandidate {
+                    path: root.join("a.git"),
+                    normalized_origin: "github.com/example/a".to_string(),
+                    hash: compute_repo_hash("github.com/example/a"),
+                },
+                RepoIdentityCandidate {
+                    path: root.join("b.git"),
+                    normalized_origin: "github.com/example/b".to_string(),
+                    hash: compute_repo_hash("github.com/example/b"),
+                },
+            ]),
+        );
+
+        assert_ne!(
+            fallback, ambiguous,
+            "a later ambiguity must emit its candidate diagnostics"
+        );
+        assert_eq!(
+            fallback,
+            project_scope_warning_key(&root.join("."), None),
+            "equivalent path spellings must still deduplicate one diagnostic"
+        );
     }
 
     #[test]

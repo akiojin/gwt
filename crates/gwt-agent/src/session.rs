@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    launch::{normalize_launch_args, LaunchConfig},
+    launch::{normalize_launch_args, LaunchConfig, ManualLaunchRuntimeProof},
     types::{
         AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode,
         WindowsShellKind, WorkflowBypass,
@@ -162,6 +162,63 @@ pub struct SessionExecutionIdentity {
     pub agent_id: AgentId,
     pub linked_issue_number: Option<u64>,
     pub execution_binding: SessionExecutionBinding,
+}
+
+/// Durable cross-process fence for an in-place Active Session relaunch.
+///
+/// The owner and Session leases serialize creation with terminal successor
+/// settlement. A marker survives process failure, so an uncertain launch can
+/// never be mistaken for an exact terminal holder until recovery clears it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionActiveLaunchHandshake {
+    pub schema_version: u32,
+    pub nonce: String,
+    pub execution_identity: SessionExecutionIdentity,
+    pub host_pid: u32,
+    pub host_started_at: u64,
+    #[serde(default)]
+    pub phase: SessionActiveLaunchPhase,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SessionActiveLaunchHandshake {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+}
+
+/// Durable progress of one exact Active Session launch.
+///
+/// `LegacyUnclassified` exists only so a phase-less schema-v1 marker remains
+/// deserializable. Validation rejects it, keeping recovery fail-closed instead
+/// of guessing whether a child was spawned before the Host crashed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SessionActiveLaunchPhase {
+    #[default]
+    LegacyUnclassified,
+    PreSpawn,
+    ChildSpawned {
+        child_pid: u32,
+        child_started_at: u64,
+    },
+}
+
+/// Durable cross-process fence for one exact manual Session handoff.
+///
+/// The marker shares the Session lease with Active launch handshakes so the
+/// two ownership transitions cannot be prepared concurrently. The host start
+/// identity disambiguates PID reuse after a coordinator process restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionManualHandoffFence {
+    pub schema_version: u32,
+    pub nonce: String,
+    pub execution_identity: SessionExecutionIdentity,
+    pub host_pid: u32,
+    pub host_started_at: u64,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SessionManualHandoffFence {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 }
 
 impl SessionExecutionIdentity {
@@ -399,6 +456,26 @@ pub struct SessionRuntimeState {
     pub status: AgentStatus,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
+    /// Exact durable producing Session represented by this runtime sidecar.
+    /// Legacy and hook-only sidecars omit it and therefore cannot authorize a
+    /// destructive terminal handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity: Option<SessionExecutionIdentity>,
+    /// Process-local PTY identity paired with [`Self::execution_identity`].
+    /// A reused window id receives a new value, fencing late predecessor
+    /// events from terminalizing its successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_incarnation: Option<u64>,
+    /// OS start timestamp for the Host process named by the sidecar's PID
+    /// namespace. Recovery compares both values before trusting that namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_started_at: Option<u64>,
+    /// OS process identity for the PTY child. The start timestamp prevents a
+    /// recycled PID from keeping an abandoned launch fence alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_started_at: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
     #[serde(default)]
@@ -1384,8 +1461,43 @@ impl SessionRuntimeState {
             status,
             updated_at: now,
             last_activity_at: now,
+            execution_identity: None,
+            runtime_incarnation: None,
+            host_started_at: None,
+            child_pid: None,
+            child_started_at: None,
             source_event: None,
             pending_discussion: None,
+        }
+    }
+
+    /// Create an exact runtime proof for one durable producing Session.
+    pub fn for_execution(
+        status: AgentStatus,
+        identity: &SessionExecutionIdentity,
+        incarnation: u64,
+    ) -> Self {
+        Self {
+            execution_identity: Some(identity.clone()),
+            runtime_incarnation: Some(incarnation),
+            ..Self::new(status)
+        }
+    }
+
+    /// Create exact Running proof including the PTY child process identity.
+    pub fn for_execution_process(
+        status: AgentStatus,
+        identity: &SessionExecutionIdentity,
+        incarnation: u64,
+        host_started_at: u64,
+        child_pid: u32,
+        child_started_at: u64,
+    ) -> Self {
+        Self {
+            host_started_at: Some(host_started_at),
+            child_pid: Some(child_pid),
+            child_started_at: Some(child_started_at),
+            ..Self::for_execution(status, identity, incarnation)
         }
     }
 
@@ -1411,7 +1523,7 @@ impl SessionRuntimeState {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("runtime.json"),
-            std::process::id()
+            Uuid::new_v4()
         ));
 
         {
@@ -1421,10 +1533,11 @@ impl SessionRuntimeState {
             tmp.sync_all()?;
         }
 
-        if cfg!(windows) && path.exists() {
-            std::fs::remove_file(path)?;
+        if let Err(error) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error);
         }
-        std::fs::rename(tmp_path, path)
+        sync_parent_dir(dir)
     }
 
     /// Load the runtime state from a JSON sidecar file.
@@ -1449,6 +1562,349 @@ pub fn runtime_state_dir_for_pid(sessions_dir: &Path, pid: u32) -> PathBuf {
 /// specific gwt process id.
 pub fn runtime_state_path_for_pid(sessions_dir: &Path, pid: u32, session_id: &str) -> PathBuf {
     runtime_state_dir_for_pid(sessions_dir, pid).join(format!("{session_id}.json"))
+}
+
+pub fn active_launch_handshake_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir
+        .join("active-launch-handshakes")
+        .join(format!("{session_id}.json"))
+}
+
+pub fn manual_handoff_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir
+        .join("manual-handoffs")
+        .join(format!("{session_id}.json"))
+}
+
+fn validate_active_launch_handshake(
+    handshake: &SessionActiveLaunchHandshake,
+    session_id: &str,
+) -> io::Result<()> {
+    let valid_phase = matches!(handshake.phase, SessionActiveLaunchPhase::PreSpawn)
+        || matches!(
+            handshake.phase,
+            SessionActiveLaunchPhase::ChildSpawned {
+                child_pid,
+                child_started_at,
+            } if child_pid > 0 && child_started_at > 0
+        );
+    if handshake.schema_version != SessionActiveLaunchHandshake::CURRENT_SCHEMA_VERSION
+        || handshake.nonce.trim().is_empty()
+        || handshake.execution_identity.session_id != session_id
+        || handshake.host_pid == 0
+        || handshake.host_started_at == 0
+        || !valid_phase
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "active launch handshake is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manual_handoff(
+    handoff: &SessionManualHandoffFence,
+    session_id: &str,
+) -> io::Result<()> {
+    if handoff.schema_version != SessionManualHandoffFence::CURRENT_SCHEMA_VERSION
+        || handoff.nonce.trim().is_empty()
+        || handoff.execution_identity.session_id != session_id
+        || handoff.host_pid == 0
+        || handoff.host_started_at == 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manual Session handoff fence is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn load_active_launch_handshake(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<Option<SessionActiveLaunchHandshake>> {
+    let path = active_launch_handshake_path(sessions_dir, session_id);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let handshake: SessionActiveLaunchHandshake =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("active launch handshake is malformed: {error}"),
+                    )
+                })?;
+            validate_active_launch_handshake(&handshake, session_id)?;
+            Ok(Some(handshake))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn load_manual_handoff(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<Option<SessionManualHandoffFence>> {
+    let path = manual_handoff_path(sessions_dir, session_id);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let handoff: SessionManualHandoffFence =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("manual Session handoff fence is malformed: {error}"),
+                    )
+                })?;
+            validate_manual_handoff(&handoff, session_id)?;
+            Ok(Some(handoff))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn save_json_fence(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Session fence has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session-fence.json"),
+        Uuid::new_v4()
+    ));
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+    }
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    sync_parent_dir(parent)
+}
+
+fn save_active_launch_handshake(
+    sessions_dir: &Path,
+    handshake: &SessionActiveLaunchHandshake,
+) -> io::Result<()> {
+    let path = active_launch_handshake_path(sessions_dir, &handshake.execution_identity.session_id);
+    let bytes = serde_json::to_vec_pretty(handshake)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    save_json_fence(&path, &bytes)
+}
+
+fn save_manual_handoff(sessions_dir: &Path, handoff: &SessionManualHandoffFence) -> io::Result<()> {
+    let path = manual_handoff_path(sessions_dir, &handoff.execution_identity.session_id);
+    let bytes = serde_json::to_vec_pretty(handoff)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    save_json_fence(&path, &bytes)
+}
+
+/// Create a cross-process Active launch fence while the caller holds the
+/// exact Session lease. Existing or malformed evidence fails closed.
+pub fn begin_session_active_launch_handshake_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    nonce: &str,
+    host_started_at: u64,
+) -> io::Result<Option<SessionActiveLaunchHandshake>> {
+    require_current_thread_session_lease()?;
+    if nonce.trim().is_empty()
+        || host_started_at == 0
+        || exact_durable_session_under_lease(sessions_dir, expected)?.is_none()
+    {
+        return Ok(None);
+    }
+    if load_active_launch_handshake(sessions_dir, &expected.session_id)?.is_some()
+        || load_manual_handoff(sessions_dir, &expected.session_id)?.is_some()
+    {
+        return Ok(None);
+    }
+    let handshake = SessionActiveLaunchHandshake {
+        schema_version: SessionActiveLaunchHandshake::CURRENT_SCHEMA_VERSION,
+        nonce: nonce.to_string(),
+        execution_identity: expected.clone(),
+        host_pid: std::process::id(),
+        host_started_at,
+        phase: SessionActiveLaunchPhase::PreSpawn,
+        created_at: Utc::now(),
+    };
+    save_active_launch_handshake(sessions_dir, &handshake)?;
+    Ok(Some(handshake))
+}
+
+pub fn read_session_active_launch_handshake_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+) -> io::Result<Option<SessionActiveLaunchHandshake>> {
+    require_current_thread_session_lease()?;
+    if exact_durable_session_under_lease(sessions_dir, expected)?.is_none() {
+        return Ok(None);
+    }
+    match load_active_launch_handshake(sessions_dir, &expected.session_id)? {
+        None => Ok(None),
+        Some(handshake) if handshake.execution_identity == *expected => Ok(Some(handshake)),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "active launch handshake does not match the exact Session identity",
+        )),
+    }
+}
+
+/// Advance an exact Active launch marker from `PreSpawn` to `ChildSpawned`.
+///
+/// The complete previously-read marker is the CAS token. A stale/replaced
+/// marker, changed durable Session, invalid child identity, or non-`PreSpawn`
+/// phase returns `None` without rewriting the marker.
+pub fn mark_session_active_launch_handshake_child_spawned_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionActiveLaunchHandshake,
+    child_pid: u32,
+    child_started_at: u64,
+) -> io::Result<Option<SessionActiveLaunchHandshake>> {
+    require_current_thread_session_lease()?;
+    if child_pid == 0
+        || child_started_at == 0
+        || expected.phase != SessionActiveLaunchPhase::PreSpawn
+        || exact_durable_session_under_lease(sessions_dir, &expected.execution_identity)?.is_none()
+    {
+        return Ok(None);
+    }
+    let Some(current) =
+        load_active_launch_handshake(sessions_dir, &expected.execution_identity.session_id)?
+    else {
+        return Ok(None);
+    };
+    if current != *expected {
+        return Ok(None);
+    }
+
+    let mut updated = current;
+    updated.phase = SessionActiveLaunchPhase::ChildSpawned {
+        child_pid,
+        child_started_at,
+    };
+    save_active_launch_handshake(sessions_dir, &updated)?;
+    Ok(Some(updated))
+}
+
+pub fn session_active_launch_handshake_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+) -> io::Result<bool> {
+    Ok(read_session_active_launch_handshake_under_lease(sessions_dir, expected)?.is_some())
+}
+
+/// Clear only the exact fence captured by the launch worker. A replacement
+/// marker is never removed by a stale success/failure response.
+pub fn clear_session_active_launch_handshake_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionActiveLaunchHandshake,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    if exact_durable_session_under_lease(sessions_dir, &expected.execution_identity)?.is_none() {
+        return Ok(false);
+    }
+    let Some(current) =
+        load_active_launch_handshake(sessions_dir, &expected.execution_identity.session_id)?
+    else {
+        return Ok(false);
+    };
+    if current != *expected {
+        return Ok(false);
+    }
+    fs::remove_file(active_launch_handshake_path(
+        sessions_dir,
+        &expected.execution_identity.session_id,
+    ))?;
+    Ok(true)
+}
+
+/// Create one exact durable manual handoff fence while the Session lease is
+/// held. Active launch and manual handoff fences are mutually exclusive.
+pub fn begin_session_manual_handoff_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    nonce: &str,
+    host_started_at: u64,
+) -> io::Result<Option<SessionManualHandoffFence>> {
+    require_current_thread_session_lease()?;
+    if nonce.trim().is_empty()
+        || host_started_at == 0
+        || exact_durable_session_under_lease(sessions_dir, expected)?.is_none()
+    {
+        return Ok(None);
+    }
+    if load_active_launch_handshake(sessions_dir, &expected.session_id)?.is_some()
+        || load_manual_handoff(sessions_dir, &expected.session_id)?.is_some()
+    {
+        return Ok(None);
+    }
+    let handoff = SessionManualHandoffFence {
+        schema_version: SessionManualHandoffFence::CURRENT_SCHEMA_VERSION,
+        nonce: nonce.to_string(),
+        execution_identity: expected.clone(),
+        host_pid: std::process::id(),
+        host_started_at,
+        created_at: Utc::now(),
+    };
+    save_manual_handoff(sessions_dir, &handoff)?;
+    Ok(Some(handoff))
+}
+
+/// Read a manual handoff fence only for the exact durable producing Session.
+/// Malformed or foreign evidence fails closed instead of being ignored.
+pub fn read_session_manual_handoff_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+) -> io::Result<Option<SessionManualHandoffFence>> {
+    require_current_thread_session_lease()?;
+    if exact_durable_session_under_lease(sessions_dir, expected)?.is_none() {
+        return Ok(None);
+    }
+    match load_manual_handoff(sessions_dir, &expected.session_id)? {
+        None => Ok(None),
+        Some(handoff) if handoff.execution_identity == *expected => Ok(Some(handoff)),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manual Session handoff fence does not match the exact Session identity",
+        )),
+    }
+}
+
+pub fn session_manual_handoff_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionManualHandoffFence,
+) -> io::Result<bool> {
+    Ok(
+        read_session_manual_handoff_under_lease(sessions_dir, &expected.execution_identity)?
+            .as_ref()
+            == Some(expected),
+    )
+}
+
+/// Clear only the exact manual handoff fence observed by the caller. A stale
+/// completion cannot remove a replacement fence or evidence for a replaced
+/// durable Session.
+pub fn clear_session_manual_handoff_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionManualHandoffFence,
+) -> io::Result<bool> {
+    if !session_manual_handoff_matches_under_lease(sessions_dir, expected)? {
+        return Ok(false);
+    }
+    fs::remove_file(manual_handoff_path(
+        sessions_dir,
+        &expected.execution_identity.session_id,
+    ))?;
+    Ok(true)
 }
 
 /// Recover the sessions directory from a runtime sidecar path like
@@ -1487,7 +1943,247 @@ pub fn persist_session_status(
         session.update_status(status);
         Ok(())
     })?;
-    SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
+    let runtime_path = runtime_state_path(sessions_dir, session_id);
+    let mut runtime = SessionRuntimeState::new(status);
+    if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
+        runtime.execution_identity = previous.execution_identity;
+        runtime.runtime_incarnation = previous.runtime_incarnation;
+        runtime.host_started_at = previous.host_started_at;
+        runtime.child_pid = previous.child_pid;
+        runtime.child_started_at = previous.child_started_at;
+    }
+    runtime.save(&runtime_path)
+}
+
+fn validate_exact_runtime_proof_request(
+    expected: &SessionExecutionIdentity,
+    runtime_incarnation: u64,
+) -> io::Result<bool> {
+    validate_session_id_path_component(&expected.session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if runtime_incarnation == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime incarnation must be non-zero",
+        ));
+    }
+    Ok(expected.execution_binding.session_id == expected.session_id)
+}
+
+fn exact_durable_session_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+) -> io::Result<Option<Session>> {
+    require_current_thread_session_lease()?;
+    let session = match inspect_session_path(&session_file_path(sessions_dir, &expected.session_id))
+    {
+        SessionPathState::Present(session) => *session,
+        SessionPathState::Missing => return Ok(None),
+        SessionPathState::Error(error) => return Err(error),
+    };
+    Ok((SessionExecutionIdentity::from_session(&session)
+        .ok()
+        .flatten()
+        .as_ref()
+        == Some(expected))
+    .then_some(session))
+}
+
+fn require_current_thread_session_lease() -> io::Result<()> {
+    if current_thread_holds_session_lease() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "exact runtime persistence requires an existing Session lease",
+        ))
+    }
+}
+
+fn persist_session_running_state_if_execution_identity_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    runtime_incarnation: u64,
+    host_started_at: u64,
+    child_pid: u32,
+    child_started_at: u64,
+) -> io::Result<bool> {
+    if !validate_exact_runtime_proof_request(expected, runtime_incarnation)?
+        || host_started_at == 0
+        || child_pid == 0
+        || child_started_at == 0
+    {
+        return Ok(false);
+    }
+    if exact_durable_session_under_lease(sessions_dir, expected)?.is_none() {
+        return Ok(false);
+    }
+    SessionRuntimeState::for_execution_process(
+        AgentStatus::Running,
+        expected,
+        runtime_incarnation,
+        host_started_at,
+        child_pid,
+        child_started_at,
+    )
+    .save(&runtime_state_path(sessions_dir, &expected.session_id))?;
+    Ok(true)
+}
+
+/// Publish the exact producing Session and process-local PTY incarnation only
+/// while the durable Session still matches the identity captured by launch.
+/// Missing, invalid, or replaced Sessions return `false` without replacing an
+/// existing runtime sidecar.
+pub fn persist_session_running_state_if_execution_identity_matches(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    runtime_incarnation: u64,
+    host_started_at: u64,
+    child_pid: u32,
+    child_started_at: u64,
+) -> io::Result<bool> {
+    if !validate_exact_runtime_proof_request(expected, runtime_incarnation)?
+        || host_started_at == 0
+        || child_pid == 0
+        || child_started_at == 0
+    {
+        return Ok(false);
+    }
+    with_session_path_lease(sessions_dir, &expected.session_id, |_| {
+        persist_session_running_state_if_execution_identity_matches_under_lease(
+            sessions_dir,
+            expected,
+            runtime_incarnation,
+            host_started_at,
+            child_pid,
+            child_started_at,
+        )
+    })
+}
+
+fn validate_terminal_runtime_status(status: AgentStatus) -> io::Result<()> {
+    if !matches!(status, AgentStatus::Stopped | AgentStatus::Interrupted) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "exact runtime terminal proof requires Stopped or Interrupted status",
+        ));
+    }
+    Ok(())
+}
+
+/// Persist exact terminal process evidence while the caller already holds the
+/// matching Session lease. Owner+Session coordinators use this primitive to
+/// preserve their owner-before-Session lock order without recursively taking
+/// the Session lock.
+pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    runtime_incarnation: u64,
+    status: AgentStatus,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    validate_terminal_runtime_status(status)?;
+    if !validate_exact_runtime_proof_request(expected, runtime_incarnation)? {
+        return Ok(false);
+    }
+    let Some(mut session) = exact_durable_session_under_lease(sessions_dir, expected)? else {
+        return Ok(false);
+    };
+
+    session.update_status(status);
+    let session_content = serialize_session_toml(&session)?;
+    let runtime_path = runtime_state_path(sessions_dir, &expected.session_id);
+    let mut runtime = SessionRuntimeState::for_execution(status, expected, runtime_incarnation);
+    if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
+        if previous.execution_identity.as_ref() == Some(expected)
+            && previous.runtime_incarnation == Some(runtime_incarnation)
+        {
+            runtime.host_started_at = previous.host_started_at;
+            runtime.child_pid = previous.child_pid;
+            runtime.child_started_at = previous.child_started_at;
+        }
+    }
+    write_session_toml_atomic(
+        &session_file_path(sessions_dir, &expected.session_id),
+        &session_content,
+    )?;
+    runtime.save(&runtime_path)?;
+    Ok(true)
+}
+
+/// Persist terminal status for an exact runtime namespace while the caller
+/// already holds the matching Session lease.
+///
+/// Unlike the process-local convenience API, recovery coordinators use the
+/// explicit Host PID and incarnation captured by their liveness proof. The
+/// remote sidecar must already match that proof; missing or replaced evidence
+/// returns `false` without creating a terminal record in the caller's runtime
+/// namespace.
+pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    runtime: ManualLaunchRuntimeProof,
+    status: AgentStatus,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    validate_terminal_runtime_status(status)?;
+    if !validate_exact_runtime_proof_request(expected, runtime.runtime_incarnation)?
+        || runtime.host_pid == 0
+    {
+        return Ok(false);
+    }
+    let Some(mut session) = exact_durable_session_under_lease(sessions_dir, expected)? else {
+        return Ok(false);
+    };
+    let runtime_path =
+        runtime_state_path_for_pid(sessions_dir, runtime.host_pid, &expected.session_id);
+    let mut exact_runtime = match SessionRuntimeState::load(&runtime_path) {
+        Ok(runtime) => runtime,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if exact_runtime.execution_identity.as_ref() != Some(expected)
+        || exact_runtime.runtime_incarnation != Some(runtime.runtime_incarnation)
+    {
+        return Ok(false);
+    }
+
+    session.update_status(status);
+    exact_runtime.status = status;
+    exact_runtime.updated_at = Utc::now();
+    let session_content = serialize_session_toml(&session)?;
+    write_session_toml_atomic(
+        &session_file_path(sessions_dir, &expected.session_id),
+        &session_content,
+    )?;
+    exact_runtime.save(&runtime_path)?;
+    Ok(true)
+}
+
+/// Persist terminal process evidence only while the durable Session still has
+/// the exact producing identity observed by the exiting runtime.
+///
+/// Callers must invoke this only after confirming that exact PTY process has
+/// exited. Missing, unbound, invalid, or replaced Sessions return `false`
+/// without rewriting either the Session TOML or runtime sidecar.
+pub fn persist_session_terminal_status_if_execution_identity_matches(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    runtime_incarnation: u64,
+    status: AgentStatus,
+) -> io::Result<bool> {
+    validate_terminal_runtime_status(status)?;
+    if !validate_exact_runtime_proof_request(expected, runtime_incarnation)? {
+        return Ok(false);
+    }
+    with_session_path_lease(sessions_dir, &expected.session_id, |_| {
+        persist_session_terminal_status_if_execution_identity_matches_under_lease(
+            sessions_dir,
+            expected,
+            runtime_incarnation,
+            status,
+        )
+    })
 }
 
 pub fn persist_session_hook_event(
@@ -3641,6 +4337,780 @@ display_name = "Claude Code"
         assert_eq!(idle.source_event.as_deref(), Some("Stop"));
 
         assert!(SessionRuntimeState::from_hook_event("Notification").is_none());
+    }
+
+    #[test]
+    fn runtime_state_legacy_json_defaults_execution_proof_to_none() {
+        let legacy = r#"{
+  "status": "Running",
+  "updated_at": "2026-08-13T00:00:00Z",
+  "last_activity_at": "2026-08-13T00:00:00Z",
+  "source_event": "SessionStart"
+}"#;
+
+        let runtime: SessionRuntimeState =
+            serde_json::from_str(legacy).expect("deserialize legacy runtime sidecar");
+
+        assert!(runtime.execution_identity.is_none());
+        assert!(runtime.runtime_incarnation.is_none());
+        assert!(runtime.host_started_at.is_none());
+    }
+
+    #[test]
+    fn runtime_state_for_execution_carries_exact_identity_and_incarnation() {
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        let runtime = SessionRuntimeState::for_execution(AgentStatus::Running, &identity, 17);
+
+        assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
+        assert_eq!(runtime.runtime_incarnation, Some(17));
+    }
+
+    fn save_bound_session_for_fence_test(
+        sessions_dir: &Path,
+    ) -> (Session, SessionExecutionIdentity) {
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(sessions_dir).expect("save bound Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+        (session, identity)
+    }
+
+    #[test]
+    fn manual_and_active_session_fences_are_mutually_exclusive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+
+        with_session_lease(dir.path(), &session.id, |_| {
+            assert!(begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-zero-start",
+                0,
+            )?
+            .is_none());
+            assert!(!active_launch_handshake_path(dir.path(), &session.id).exists());
+
+            let manual =
+                begin_session_manual_handoff_under_lease(dir.path(), &identity, "manual-one", 101)?
+                    .expect("begin manual handoff");
+            assert_eq!(manual.execution_identity, identity);
+            assert_eq!(manual.host_pid, std::process::id());
+            assert_eq!(manual.host_started_at, 101);
+            assert!(begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-blocked",
+                102,
+            )?
+            .is_none());
+
+            assert!(clear_session_manual_handoff_under_lease(
+                dir.path(),
+                &manual,
+            )?);
+            let active = begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-one",
+                103,
+            )?
+            .expect("begin Active launch handshake");
+            assert_eq!(active.host_started_at, 103);
+            assert!(begin_session_manual_handoff_under_lease(
+                dir.path(),
+                &identity,
+                "manual-blocked",
+                104,
+            )?
+            .is_none());
+            Ok(())
+        })
+        .expect("exercise mutually exclusive fences");
+    }
+
+    #[test]
+    fn active_launch_handshake_exact_read_fails_closed_for_replacement_and_malformed_evidence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let handshake = with_session_lease(dir.path(), &session.id, |_| {
+            begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-read",
+                151,
+            )?
+            .ok_or_else(|| io::Error::other("Active handshake was not created"))
+        })
+        .expect("begin Active handshake");
+        with_session_lease(dir.path(), &session.id, |_| {
+            assert_eq!(
+                read_session_active_launch_handshake_under_lease(dir.path(), &identity)?.as_ref(),
+                Some(&handshake),
+            );
+            Ok(())
+        })
+        .expect("read exact Active handshake");
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement
+            .save(dir.path())
+            .expect("replace durable Session");
+        let replacement_identity = SessionExecutionIdentity::from_session(&replacement)
+            .expect("derive replacement identity")
+            .expect("bound replacement identity");
+        let path = active_launch_handshake_path(dir.path(), &session.id);
+        let handshake_bytes = fs::read(&path).expect("read Active handshake");
+        with_session_lease(dir.path(), &session.id, |_| {
+            assert!(
+                read_session_active_launch_handshake_under_lease(dir.path(), &identity)?.is_none()
+            );
+            let mismatch =
+                read_session_active_launch_handshake_under_lease(dir.path(), &replacement_identity)
+                    .expect_err("foreign Active handshake must fail closed");
+            assert_eq!(mismatch.kind(), io::ErrorKind::InvalidData);
+            Ok(())
+        })
+        .expect("reject replaced Active handshake");
+        assert_eq!(
+            fs::read(&path).expect("retain Active handshake"),
+            handshake_bytes
+        );
+
+        fs::write(&path, b"{malformed").expect("install malformed Active handshake");
+        let malformed_bytes = fs::read(&path).expect("read malformed Active handshake");
+        with_session_lease(dir.path(), &session.id, |_| {
+            let error =
+                read_session_active_launch_handshake_under_lease(dir.path(), &replacement_identity)
+                    .expect_err("malformed Active handshake must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            Ok(())
+        })
+        .expect("inspect malformed Active handshake");
+        assert_eq!(
+            fs::read(&path).expect("retain malformed Active handshake"),
+            malformed_bytes,
+        );
+    }
+
+    #[test]
+    fn active_launch_handshake_phase_cas_publishes_exact_child_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+
+        with_session_lease(dir.path(), &session.id, |_| {
+            let pre_spawn = begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-phase",
+                161,
+            )?
+            .expect("begin Active handshake");
+            assert_eq!(pre_spawn.phase, SessionActiveLaunchPhase::PreSpawn);
+
+            let child_spawned = mark_session_active_launch_handshake_child_spawned_under_lease(
+                dir.path(),
+                &pre_spawn,
+                401,
+                402,
+            )?
+            .expect("publish exact spawned child");
+            assert_eq!(
+                child_spawned.phase,
+                SessionActiveLaunchPhase::ChildSpawned {
+                    child_pid: 401,
+                    child_started_at: 402,
+                }
+            );
+            assert_eq!(
+                read_session_active_launch_handshake_under_lease(dir.path(), &identity)?.as_ref(),
+                Some(&child_spawned)
+            );
+
+            let phase_bytes = fs::read(active_launch_handshake_path(dir.path(), &session.id))?;
+            assert!(
+                mark_session_active_launch_handshake_child_spawned_under_lease(
+                    dir.path(),
+                    &pre_spawn,
+                    501,
+                    502,
+                )?
+                .is_none(),
+                "a stale pre-spawn CAS must not replace child identity"
+            );
+            assert_eq!(
+                fs::read(active_launch_handshake_path(dir.path(), &session.id))?,
+                phase_bytes,
+            );
+            Ok(())
+        })
+        .expect("advance Active handshake phase exactly once");
+    }
+
+    #[test]
+    fn active_launch_handshake_phase_cas_rejects_invalid_child_without_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+
+        with_session_lease(dir.path(), &session.id, |_| {
+            let pre_spawn = begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-invalid-child",
+                162,
+            )?
+            .expect("begin Active handshake");
+            let path = active_launch_handshake_path(dir.path(), &session.id);
+            let bytes = fs::read(&path)?;
+
+            assert!(
+                mark_session_active_launch_handshake_child_spawned_under_lease(
+                    dir.path(),
+                    &pre_spawn,
+                    0,
+                    402,
+                )?
+                .is_none()
+            );
+            assert!(
+                mark_session_active_launch_handshake_child_spawned_under_lease(
+                    dir.path(),
+                    &pre_spawn,
+                    401,
+                    0,
+                )?
+                .is_none()
+            );
+            assert_eq!(fs::read(path)?, bytes);
+            Ok(())
+        })
+        .expect("reject invalid child identities");
+    }
+
+    #[test]
+    fn active_launch_handshake_phase_cas_rejects_replacement_malformed_and_legacy_markers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let path = active_launch_handshake_path(dir.path(), &session.id);
+
+        let stale = with_session_lease(dir.path(), &session.id, |_| {
+            begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-stale",
+                171,
+            )?
+            .ok_or_else(|| io::Error::other("begin stale Active handshake"))
+        })
+        .expect("begin stale Active handshake");
+        with_session_lease(dir.path(), &session.id, |_| {
+            assert!(clear_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &stale,
+            )?);
+            begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &identity,
+                "active-replacement",
+                172,
+            )?
+            .ok_or_else(|| io::Error::other("begin replacement Active handshake"))
+        })
+        .expect("replace Active handshake");
+        let replacement_bytes = fs::read(&path).expect("read replacement marker");
+        with_session_lease(dir.path(), &session.id, |_| {
+            assert!(
+                mark_session_active_launch_handshake_child_spawned_under_lease(
+                    dir.path(),
+                    &stale,
+                    601,
+                    602,
+                )?
+                .is_none()
+            );
+            Ok(())
+        })
+        .expect("reject stale marker CAS");
+        assert_eq!(
+            fs::read(&path).expect("retain replacement"),
+            replacement_bytes
+        );
+
+        fs::write(&path, b"{malformed").expect("install malformed marker");
+        let malformed_bytes = fs::read(&path).expect("read malformed marker");
+        with_session_lease(dir.path(), &session.id, |_| {
+            let error = mark_session_active_launch_handshake_child_spawned_under_lease(
+                dir.path(),
+                &stale,
+                701,
+                702,
+            )
+            .expect_err("malformed marker must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            Ok(())
+        })
+        .expect("inspect malformed marker");
+        assert_eq!(
+            fs::read(&path).expect("retain malformed marker"),
+            malformed_bytes
+        );
+
+        let mut legacy = serde_json::to_value(&stale).expect("serialize legacy fixture");
+        legacy["schema_version"] = serde_json::json!(1);
+        legacy
+            .as_object_mut()
+            .expect("handshake object")
+            .remove("phase");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy marker"),
+        )
+        .expect("install legacy marker");
+        let legacy_bytes = fs::read(&path).expect("read legacy marker");
+        with_session_lease(dir.path(), &session.id, |_| {
+            let error = read_session_active_launch_handshake_under_lease(dir.path(), &identity)
+                .expect_err("legacy phase-less marker must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            Ok(())
+        })
+        .expect("inspect legacy marker");
+        assert_eq!(fs::read(&path).expect("retain legacy marker"), legacy_bytes);
+    }
+
+    #[test]
+    fn manual_handoff_exact_read_match_and_stale_clear_preserve_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+
+        with_session_lease(dir.path(), &session.id, |_| {
+            let stale = begin_session_manual_handoff_under_lease(
+                dir.path(),
+                &identity,
+                "manual-stale",
+                201,
+            )?
+            .expect("begin stale handoff");
+            assert_eq!(
+                read_session_manual_handoff_under_lease(dir.path(), &identity)?.as_ref(),
+                Some(&stale),
+            );
+            assert!(session_manual_handoff_matches_under_lease(
+                dir.path(),
+                &stale,
+            )?);
+            assert!(clear_session_manual_handoff_under_lease(
+                dir.path(),
+                &stale,
+            )?);
+
+            let replacement = begin_session_manual_handoff_under_lease(
+                dir.path(),
+                &identity,
+                "manual-replacement",
+                202,
+            )?
+            .expect("begin replacement handoff");
+            let path = manual_handoff_path(dir.path(), &session.id);
+            let replacement_bytes = fs::read(&path)?;
+
+            assert!(!session_manual_handoff_matches_under_lease(
+                dir.path(),
+                &stale,
+            )?);
+            assert!(!clear_session_manual_handoff_under_lease(
+                dir.path(),
+                &stale,
+            )?);
+            assert_eq!(fs::read(&path)?, replacement_bytes);
+            assert_eq!(
+                read_session_manual_handoff_under_lease(dir.path(), &identity)?.as_ref(),
+                Some(&replacement),
+            );
+            Ok(())
+        })
+        .expect("exercise exact manual handoff APIs");
+    }
+
+    #[test]
+    fn manual_handoff_replacement_and_malformed_evidence_are_zero_mutation_refusals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let fence = with_session_lease(dir.path(), &session.id, |_| {
+            begin_session_manual_handoff_under_lease(dir.path(), &identity, "manual-original", 301)?
+                .ok_or_else(|| io::Error::other("manual fence was not created"))
+        })
+        .expect("begin manual handoff");
+        let fence_path = manual_handoff_path(dir.path(), &session.id);
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement
+            .save(dir.path())
+            .expect("replace durable Session");
+        let session_path = dir.path().join(format!("{}.toml", session.id));
+        let session_bytes = fs::read(&session_path).expect("read replacement Session");
+        let fence_bytes = fs::read(&fence_path).expect("read manual fence");
+        let replacement_identity = SessionExecutionIdentity::from_session(&replacement)
+            .expect("derive replacement identity")
+            .expect("bound replacement identity");
+        with_session_lease(dir.path(), &session.id, |_| {
+            assert!(read_session_manual_handoff_under_lease(dir.path(), &identity)?.is_none());
+            let mismatch =
+                read_session_manual_handoff_under_lease(dir.path(), &replacement_identity)
+                    .expect_err("foreign manual fence must fail closed");
+            assert_eq!(mismatch.kind(), io::ErrorKind::InvalidData);
+            assert!(!session_manual_handoff_matches_under_lease(
+                dir.path(),
+                &fence,
+            )?);
+            assert!(!clear_session_manual_handoff_under_lease(
+                dir.path(),
+                &fence,
+            )?);
+            assert!(begin_session_manual_handoff_under_lease(
+                dir.path(),
+                &identity,
+                "manual-stale-session",
+                302,
+            )?
+            .is_none());
+            Ok(())
+        })
+        .expect("reject replaced Session");
+        assert_eq!(
+            fs::read(&session_path).expect("retain replacement"),
+            session_bytes
+        );
+        assert_eq!(
+            fs::read(&fence_path).expect("retain manual fence"),
+            fence_bytes
+        );
+
+        fs::write(&fence_path, b"{malformed").expect("install malformed manual fence");
+        let malformed_bytes = fs::read(&fence_path).expect("read malformed fence");
+        with_session_lease(dir.path(), &session.id, |_| {
+            let read_error =
+                read_session_manual_handoff_under_lease(dir.path(), &replacement_identity)
+                    .expect_err("malformed manual evidence must reject exact reads");
+            assert_eq!(read_error.kind(), io::ErrorKind::InvalidData);
+            let error = begin_session_active_launch_handshake_under_lease(
+                dir.path(),
+                &replacement_identity,
+                "active-blocked-by-malformed-manual",
+                303,
+            )
+            .expect_err("malformed manual evidence must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            Ok(())
+        })
+        .expect("inspect malformed manual evidence");
+        assert_eq!(
+            fs::read(&fence_path).expect("retain malformed evidence"),
+            malformed_bytes,
+        );
+        assert!(!active_launch_handshake_path(dir.path(), &session.id).exists());
+    }
+
+    #[test]
+    fn exact_running_runtime_publish_survives_natural_status_persistence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        assert!(persist_session_running_state_if_execution_identity_matches(
+            dir.path(),
+            &identity,
+            23,
+            101,
+            std::process::id(),
+            1,
+        )
+        .expect("publish exact Running runtime"));
+        persist_session_status(dir.path(), &session.id, AgentStatus::Stopped)
+            .expect("persist natural process exit");
+
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session.id))
+            .expect("load naturally stopped runtime sidecar");
+        assert_eq!(runtime.status, AgentStatus::Stopped);
+        assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
+        assert_eq!(runtime.runtime_incarnation, Some(23));
+        assert_eq!(runtime.host_started_at, Some(101));
+        assert_eq!(runtime.child_pid, Some(std::process::id()));
+        assert_eq!(runtime.child_started_at, Some(1));
+    }
+
+    #[test]
+    fn exact_running_runtime_publish_rejects_replacement_without_sidecar_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+        let runtime_path = runtime_state_path(dir.path(), &session.id);
+        SessionRuntimeState::new(AgentStatus::Idle)
+            .save(&runtime_path)
+            .expect("save sentinel sidecar");
+        let sentinel_bytes = fs::read(&runtime_path).expect("read sentinel sidecar");
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.save(dir.path()).expect("save replacement");
+        let replacement_path = dir.path().join(format!("{}.toml", session.id));
+        let replacement_bytes = fs::read(&replacement_path).expect("read replacement Session");
+
+        assert!(
+            !persist_session_running_state_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                24,
+                102,
+                std::process::id(),
+                1,
+            )
+            .expect("reject replaced Session")
+        );
+        assert_eq!(
+            fs::read(&runtime_path).expect("read retained sentinel sidecar"),
+            sentinel_bytes,
+        );
+        assert_eq!(
+            fs::read(&replacement_path).expect("read retained replacement Session"),
+            replacement_bytes,
+        );
+    }
+
+    #[test]
+    fn exact_running_runtime_publish_rejects_missing_host_identity_without_sidecar_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let runtime_path = runtime_state_path(dir.path(), &session.id);
+        SessionRuntimeState::new(AgentStatus::Idle)
+            .save(&runtime_path)
+            .expect("save sentinel sidecar");
+        let sentinel_bytes = fs::read(&runtime_path).expect("read sentinel sidecar");
+
+        assert!(
+            !persist_session_running_state_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                25,
+                0,
+                std::process::id(),
+                1,
+            )
+            .expect("reject missing Host start identity")
+        );
+        assert_eq!(
+            fs::read(runtime_path).expect("retain sentinel sidecar"),
+            sentinel_bytes
+        );
+    }
+
+    #[test]
+    fn exact_terminal_status_persistence_updates_session_and_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        assert!(persist_session_running_state_if_execution_identity_matches(
+            dir.path(),
+            &identity,
+            29,
+            103,
+            std::process::id(),
+            2,
+        )
+        .expect("publish exact Running proof"));
+        assert!(
+            persist_session_terminal_status_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                29,
+                AgentStatus::Stopped,
+            )
+            .expect("persist exact terminal proof")
+        );
+
+        let durable = Session::load(&dir.path().join(format!("{}.toml", session.id)))
+            .expect("load updated Session");
+        assert_eq!(durable.status, AgentStatus::Stopped);
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session.id))
+            .expect("load exact runtime sidecar");
+        assert_eq!(runtime.status, AgentStatus::Stopped);
+        assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
+        assert_eq!(runtime.runtime_incarnation, Some(29));
+        assert_eq!(runtime.host_started_at, Some(103));
+        assert_eq!(runtime.child_pid, Some(std::process::id()));
+        assert_eq!(runtime.child_started_at, Some(2));
+    }
+
+    #[test]
+    fn exact_terminal_status_under_lease_requires_and_reuses_existing_session_lease() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        let error = persist_session_terminal_status_if_execution_identity_matches_under_lease(
+            dir.path(),
+            &identity,
+            31,
+            AgentStatus::Stopped,
+        )
+        .expect_err("under-lease primitive must reject an unlocked caller");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        assert!(with_session_lease(dir.path(), &session.id, |_| {
+            persist_session_terminal_status_if_execution_identity_matches_under_lease(
+                dir.path(),
+                &identity,
+                31,
+                AgentStatus::Stopped,
+            )
+        })
+        .expect("reuse existing Session lease"));
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session.id))
+            .expect("load leased terminal proof");
+        assert_eq!(runtime.status, AgentStatus::Stopped);
+        assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
+        assert_eq!(runtime.runtime_incarnation, Some(31));
+    }
+
+    #[test]
+    fn exact_terminal_status_under_lease_updates_the_proven_remote_runtime_namespace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+        let proof = crate::ManualLaunchRuntimeProof {
+            host_pid: u32::MAX - 7,
+            runtime_incarnation: 37,
+        };
+        let remote_path = runtime_state_path_for_pid(dir.path(), proof.host_pid, &session.id);
+        SessionRuntimeState::for_execution_process(
+            AgentStatus::Running,
+            &identity,
+            proof.runtime_incarnation,
+            101,
+            u32::MAX - 8,
+            103,
+        )
+        .save(&remote_path)
+        .expect("save remote exact runtime");
+
+        assert!(with_session_lease(dir.path(), &session.id, |_| {
+            persist_session_terminal_status_for_exact_runtime_under_lease(
+                dir.path(),
+                &identity,
+                proof,
+                AgentStatus::Interrupted,
+            )
+        })
+        .expect("reuse existing Session lease"));
+
+        let runtime = SessionRuntimeState::load(&remote_path).expect("load remote terminal proof");
+        assert_eq!(runtime.status, AgentStatus::Interrupted);
+        assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
+        assert_eq!(runtime.runtime_incarnation, Some(proof.runtime_incarnation));
+        assert_eq!(runtime.host_started_at, Some(101));
+        assert_eq!(runtime.child_pid, Some(u32::MAX - 8));
+        assert_eq!(runtime.child_started_at, Some(103));
+        assert!(!runtime_state_path(dir.path(), &session.id).exists());
+    }
+
+    #[test]
+    fn exact_terminal_status_persistence_rejects_changed_or_missing_session_without_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+        let runtime_path = runtime_state_path(dir.path(), &session.id);
+        SessionRuntimeState::new(AgentStatus::Running)
+            .save(&runtime_path)
+            .expect("save sentinel sidecar");
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.save(dir.path()).expect("save replacement");
+        let session_path = dir.path().join(format!("{}.toml", session.id));
+        let replacement_bytes = fs::read(&session_path).expect("read replacement bytes");
+        let sentinel_bytes = fs::read(&runtime_path).expect("read sentinel bytes");
+
+        assert!(
+            !persist_session_terminal_status_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                30,
+                AgentStatus::Stopped,
+            )
+            .expect("reject replacement")
+        );
+        assert_eq!(
+            fs::read(&session_path).expect("read retained replacement"),
+            replacement_bytes
+        );
+        assert_eq!(
+            fs::read(&runtime_path).expect("read retained sidecar"),
+            sentinel_bytes
+        );
+
+        fs::remove_file(&session_path).expect("remove Session");
+        assert!(
+            !persist_session_terminal_status_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                31,
+                AgentStatus::Interrupted,
+            )
+            .expect("reject missing Session")
+        );
+        assert!(!session_path.exists());
+        assert_eq!(
+            fs::read(runtime_path).expect("read sidecar after missing CAS"),
+            sentinel_bytes
+        );
     }
 
     #[test]

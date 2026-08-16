@@ -112,13 +112,134 @@ pub fn compute_path_hash(path: &Path) -> RepoHash {
     RepoHash(hex_full[..HASH_HEX_LEN].to_string())
 }
 
+/// How a repository identity was resolved.
+///
+/// Issue #3466: the identity used to be an opaque `Option<RepoHash>`, so a
+/// failed lookup silently degraded to a path hash and split the project store
+/// in two. Carrying the source makes that observable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoIdentitySource {
+    /// `origin` came from the path's own git directory (or its common dir),
+    /// i.e. the path is a repository or one of its worktrees.
+    Origin,
+    /// The path itself is not a repository, but a bare repository nested
+    /// directly beneath it holds `origin`. This is the Nested Bare + Worktree
+    /// layout root that gwt materializes worktrees under.
+    NestedBareRepository(PathBuf),
+}
+
+/// A resolved repository identity together with how it was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub hash: RepoHash,
+    pub source: RepoIdentitySource,
+}
+
+/// A direct-child bare repository that contributes to an ambiguous layout
+/// root. Both the path and normalized origin are retained for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentityCandidate {
+    pub path: PathBuf,
+    pub normalized_origin: String,
+    pub hash: RepoHash,
+}
+
+/// Result of resolving a path to one repository identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoIdentityResolution {
+    Resolved(RepoIdentity),
+    NotFound,
+    Ambiguous(Vec<RepoIdentityCandidate>),
+}
+
 /// Detect a `RepoHash` from the `origin` remote configured for `repo_root`.
+///
+/// Strict: `repo_root` must itself be a repository or worktree. Callers that
+/// resolve a *project* scope want [`detect_repo_identity`], which also accepts
+/// a Nested Bare + Worktree layout root.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
-    let url = origin_url_from_git_config(repo_root)?;
-    if url.is_empty() {
+    repository_identity_candidate(repo_root).map(|candidate| candidate.hash)
+}
+
+/// Resolve the repository identity for `repo_root`, accepting both a
+/// repository/worktree and a Nested Bare + Worktree layout root.
+pub fn detect_repo_identity(repo_root: &Path) -> Option<RepoIdentity> {
+    match resolve_repo_identity(repo_root) {
+        RepoIdentityResolution::Resolved(identity) => Some(identity),
+        RepoIdentityResolution::NotFound | RepoIdentityResolution::Ambiguous(_) => None,
+    }
+}
+
+/// Resolve a repository identity without collapsing an ambiguous layout root
+/// into whichever child happens to sort first.
+pub fn resolve_repo_identity(repo_root: &Path) -> RepoIdentityResolution {
+    if let Some(candidate) = repository_identity_candidate(repo_root) {
+        return RepoIdentityResolution::Resolved(RepoIdentity {
+            hash: candidate.hash,
+            source: RepoIdentitySource::Origin,
+        });
+    }
+
+    let candidates: Vec<_> = child_bare_repositories(repo_root)
+        .into_iter()
+        .filter_map(|bare| repository_identity_candidate(&bare))
+        .collect();
+    let Some(first) = candidates.first() else {
+        return RepoIdentityResolution::NotFound;
+    };
+    if candidates
+        .iter()
+        .all(|candidate| candidate.normalized_origin == first.normalized_origin)
+    {
+        return RepoIdentityResolution::Resolved(RepoIdentity {
+            hash: first.hash.clone(),
+            source: RepoIdentitySource::NestedBareRepository(first.path.clone()),
+        });
+    }
+
+    RepoIdentityResolution::Ambiguous(candidates)
+}
+
+fn repository_identity_candidate(repo_root: &Path) -> Option<RepoIdentityCandidate> {
+    let origin = origin_url_from_git_config(repo_root)?;
+    if origin.is_empty() {
         return None;
     }
-    Some(compute_repo_hash(&url))
+    let normalized_origin = normalize_origin_url(&origin);
+    if normalized_origin.is_empty() {
+        return None;
+    }
+    Some(RepoIdentityCandidate {
+        path: repo_root.to_path_buf(),
+        hash: compute_repo_hash(&normalized_origin),
+        normalized_origin,
+    })
+}
+
+/// Bare repositories sitting *directly* under `repo_path`, sorted by path.
+///
+/// Only direct children qualify, so an unrelated deep checkout can never
+/// hijack the identity of an enclosing directory. Sorting keeps diagnostics
+/// stable; resolution itself never chooses between distinct origins by order.
+pub fn child_bare_repositories(repo_path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(repo_path) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_bare_repository(path))
+        .collect();
+    candidates.sort();
+    candidates
+}
+
+/// A bare repository has no working tree, so recognise it by its git layout.
+fn is_bare_repository(path: &Path) -> bool {
+    path.is_dir()
+        && path.join("HEAD").is_file()
+        && path.join("objects").is_dir()
+        && path.join("refs").is_dir()
 }
 
 fn origin_url_from_git_config(repo_root: &Path) -> Option<String> {
