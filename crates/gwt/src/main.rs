@@ -413,6 +413,34 @@ fn spawn_gui_exit_backstop(reason: GuiShutdownReason, grace: Duration) {
         .expect("spawn gui exit backstop thread");
 }
 
+/// Report a fatal front-door startup failure on every surface that can still
+/// be read afterwards, then terminate.
+///
+/// Issue #1764: on Windows the tray front door runs under
+/// `windows_subsystem = "windows"` and never attaches a console, so `eprintln!`
+/// alone leaves a user whose gwt "just disappeared" with nothing to inspect.
+/// The message therefore also goes to the canonical project log.
+///
+/// The log writer is non-blocking and only flushes when its `WorkerGuard`
+/// drops, while `std::process::exit` skips destructors — so the handles are
+/// dropped here explicitly. Without that the freshly emitted event would be
+/// discarded along with the buffer, which is precisely the silence this
+/// function exists to end.
+fn fatal_startup_exit(
+    log_handles: &mut Option<gwt_core::logging::LoggingHandles>,
+    message: &str,
+    code: i32,
+) -> ! {
+    tracing::error!(
+        target: "gwt::startup",
+        exit_code = code,
+        "{message}"
+    );
+    eprintln!("{message}");
+    drop(log_handles.take());
+    std::process::exit(code);
+}
+
 enum BoardProjectionWatcherMessage {
     Changed(Vec<PathBuf>),
     Stop,
@@ -7776,6 +7804,33 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let log_dir = logging_dir_for_startup_path(&startup_dir);
+
+    // Install the tracing subscriber so that `tracing::debug!/info!` lands in
+    // the startup project's canonical `gwt.log.YYYY-MM-DD`. The returned guard
+    // must outlive the event loop; we bind it to `log_handles` and keep it
+    // until `main` returns.
+    //
+    // Issue #1764: this MUST stay ahead of every startup step that can
+    // terminate the front door. Windows builds use
+    // `windows_subsystem = "windows"` and the tray route deliberately never
+    // attaches a console, so the `eprintln!` diagnostics below reach nobody
+    // there — the project log is the only post-mortem surface left once the
+    // process is gone. Initialising after the single-instance lock (as this
+    // used to) meant a stale Windows lock killed gwt with no trace anywhere,
+    // and even the `GWT_FORCE_NEW_INSTANCE` recovery hint was discarded for
+    // want of a subscriber.
+    //
+    // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
+    // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
+    // `RUST_LOG=gwt_input_trace=debug`.
+    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(log_dir))
+        .map_err(|error| {
+            eprintln!("gwt logging init failed: {error}");
+        })
+        .ok();
+
     // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
     // (tray-resident) route so VPN-reachable hosts can run
     // `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
@@ -7784,10 +7839,7 @@ fn main() -> std::io::Result<()> {
     // Phase 4. Parse errors render the canonical usage hint and exit 2.
     let tray_args = match gwt::cli::tray::parse_tray_argv(&argv) {
         Ok(parsed) => parsed,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(2);
-        }
+        Err(err) => fatal_startup_exit(&mut log_handles, &err.to_string(), 2),
     };
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
@@ -7800,7 +7852,6 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // SPEC #2920: `gwt serve` is removed, so `main()` only ever reaches
     // this point on the GUI route. Phase 3 will rework the kind taxonomy
     // entirely to `(gwt_home, "tray", user_id)`; until then keep the
@@ -7814,29 +7865,18 @@ fn main() -> std::io::Result<()> {
     ) {
         Ok(outcome) => outcome,
         Err(error @ gwt::gui_single_instance::GuiInstanceLockError::AlreadyRunning { .. }) => {
-            eprintln!("gwt {lock_role_label} startup failed: {error}");
-            std::process::exit(2);
+            fatal_startup_exit(
+                &mut log_handles,
+                &format!("gwt {lock_role_label} startup failed: {error}"),
+                2,
+            )
         }
-        Err(error) => {
-            eprintln!("gwt {lock_role_label} startup failed: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fatal_startup_exit(
+            &mut log_handles,
+            &format!("gwt {lock_role_label} startup failed: {error}"),
+            1,
+        ),
     };
-    let log_dir = logging_dir_for_startup_path(&startup_dir);
-
-    // Install the tracing subscriber so that `tracing::debug!/info!` lands in
-    // the startup project's canonical `gwt.log.YYYY-MM-DD`. The returned guard
-    // must outlive the event loop; we bind it to `log_handles` and keep it
-    // until `main` returns.
-    //
-    // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
-    // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
-    // `RUST_LOG=gwt_input_trace=debug`.
-    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(log_dir))
-        .map_err(|error| {
-            eprintln!("gwt logging init failed: {error}");
-        })
-        .ok();
 
     if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
         eprintln!("gwt daemon bootstrap: {error}");
@@ -7849,22 +7889,27 @@ fn main() -> std::io::Result<()> {
     let mut tray_lock_handle = match gwt::cli::tray::lock::acquire(&gwt_core::paths::gwt_home()) {
         Ok(handle) => handle,
         Err(gwt::cli::tray::lock::TrayLockError::AlreadyRunning { url, .. }) => {
+            // Issue #1764: not a failure, but from a console-less Windows
+            // launch it looks identical to one — the user double-clicks gwt
+            // and nothing appears. Record why so the log distinguishes
+            // "declined to start a duplicate" from "crashed on startup".
             if url.trim().is_empty() {
-                eprintln!(
-                        "gwt: another tray-resident gwt instance is already running for this user (server still starting)"
-                    );
+                let message = "gwt: another tray-resident gwt instance is already running for this user (server still starting)";
+                tracing::info!(target: "gwt::startup", "{message}");
+                eprintln!("{message}");
             } else {
+                let message = "gwt: another tray-resident gwt instance is already running for this user (set GWT_FORCE_NEW_INSTANCE=1 to start a second, coexisting instance)";
+                tracing::info!(target: "gwt::startup", running_url = %url, "{message}");
                 eprintln!("gwt browser URL: {url}");
-                eprintln!(
-                    "gwt: another tray-resident gwt instance is already running for this user (set GWT_FORCE_NEW_INSTANCE=1 to start a second, coexisting instance)"
-                );
+                eprintln!("{message}");
             }
             return Ok(());
         }
-        Err(error) => {
-            eprintln!("gwt tray lock acquire failed: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fatal_startup_exit(
+            &mut log_handles,
+            &format!("gwt tray lock acquire failed: {error}"),
+            1,
+        ),
     };
 
     let runtime = Runtime::new().expect("tokio runtime");
@@ -7883,10 +7928,11 @@ fn main() -> std::io::Result<()> {
         ),
     ) {
         Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("gwt embedded server startup failed: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fatal_startup_exit(
+            &mut log_handles,
+            &format!("gwt embedded server startup failed: {error}"),
+            1,
+        ),
     };
     let prepared_port = prepared_listener.port();
     let stable_port_outcome = prepared_listener.outcome();
