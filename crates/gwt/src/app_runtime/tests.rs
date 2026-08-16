@@ -36217,7 +36217,20 @@ fn app_runtime_compatibility_claim_driver_defers_while_scheduled_lease_is_held()
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    // Issue #3601: `issue_monitor_prefs_path_for_repo_path` resolves the
+    // process-global `HOME`, and a parallel test that points `HOME` at its own
+    // tempdir moves this fixture into that tempdir. Once that test drops its
+    // `TempDir`, the fixture is removed and the reload below silently returns
+    // `IssueMonitorPrefs::default()` instead of the persisted Prepared fence.
+    // Pinning the thread-local home keeps the fixture owned by this test.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    assert!(
+        prefs_path.starts_with(temp.path()),
+        "the durable fence fixture must be owned by this test, not by the process-global \
+         home a parallel test may replace and delete: {}",
+        prefs_path.display()
+    );
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
