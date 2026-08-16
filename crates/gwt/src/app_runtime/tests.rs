@@ -3364,6 +3364,7 @@ fn sample_runtime_with_events(
         ),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
@@ -46128,6 +46129,54 @@ fn work_events_ingest_attempt_is_throttled_per_project() {
     assert!(
         runtime.note_work_events_ingest_attempt(&other, false),
         "throttle is per project root"
+    );
+}
+
+/// Issue #3604: the rail's PR-title lookup is a single
+/// `gh pr list --state all --limit 999` — up to ten GraphQL requests. It rode
+/// the 30s ingest throttle, so a GUI in ordinary use re-enumerated every PR in
+/// the repository twice a minute. It now has its own, far longer window.
+#[test]
+fn work_pr_titles_scan_has_its_own_long_window_and_is_per_project() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_pr_titles_scan_attempt(&root));
+    assert!(
+        !runtime.note_work_pr_titles_scan_attempt(&root),
+        "a second PR-title enumeration inside the window is suppressed"
+    );
+
+    let other = temp.path().join("other");
+    assert!(
+        runtime.note_work_pr_titles_scan_attempt(&other),
+        "the window is per project root"
+    );
+
+    assert!(
+        super::WORK_PR_TITLES_SCAN_WINDOW >= Duration::from_secs(300),
+        "the window must be an order of magnitude wider than the 30s ingest throttle"
+    );
+}
+
+/// Issue #3604: bounded staleness must not become unbounded staleness. Opening
+/// a project is the moment a stale rail summary would be noticed, so the forced
+/// ingest reopens the PR-title window.
+#[test]
+fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_pr_titles_scan_attempt(&root));
+    assert!(!runtime.note_work_pr_titles_scan_attempt(&root));
+
+    runtime.reopen_work_pr_titles_window(&root);
+
+    assert!(
+        runtime.note_work_pr_titles_scan_attempt(&root),
+        "reopening the window must allow the next enumeration through"
     );
 }
 
