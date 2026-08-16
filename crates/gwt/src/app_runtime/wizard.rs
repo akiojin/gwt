@@ -2927,15 +2927,21 @@ impl AppRuntime {
         let runtime_proof = match runtime_disposition {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof)
             | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(proof) => {
-                Some(proof)
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live => {
                 local_runtime_incarnation.map(|runtime_incarnation| {
-                    gwt_agent::ManualLaunchRuntimeProof {
-                        host_pid: std::process::id(),
-                        runtime_incarnation,
-                    }
+                    gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                        gwt_agent::ManualLaunchRuntimeProof {
+                            host_pid: std::process::id(),
+                            runtime_incarnation,
+                        },
+                    )
                 })
+            }
+            // Issue #3457: absence is exact evidence, not a missing proof.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
@@ -2969,6 +2975,14 @@ impl AppRuntime {
                 ))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(_) => Ok(
+                super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
+            ),
+            // Issue #3457: the holder published no sidecar in any namespace,
+            // so no Host is running it and no proof can ever appear. Unlike a
+            // Terminal holder there is no exit record to cross-check against
+            // the durable status, so a `.toml` a crashed Host left behind as
+            // Running must still be recoverable here.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
                 super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
             ),
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {

@@ -537,7 +537,7 @@ pub enum ExecutionLaunchIntent {
         operation_id: String,
         expected_binding: crate::ExecutionBindingIdentity,
         expected_predecessor: Option<Box<crate::SessionExecutionIdentity>>,
-        expected_runtime: Option<ManualLaunchRuntimeProof>,
+        expected_runtime: Option<ManualLaunchRuntimeEvidence>,
         predecessor_kind: ManualLaunchSuccessorPredecessor,
     },
     /// Manual successor already prepared by the typed pre-pane coordinator.
@@ -550,6 +550,27 @@ pub enum ExecutionLaunchIntent {
 pub struct ManualLaunchRuntimeProof {
     pub host_pid: u32,
     pub runtime_incarnation: u64,
+}
+
+/// What the runtime layer can say about an exact terminal predecessor.
+///
+/// Issue #3457: a Host that dies without settling leaves an orphan `.toml`
+/// behind while its runtime namespace is cleared on the next start. Requiring
+/// a sidecar proof then makes the predecessor unrecoverable, because the only
+/// process that could have published one is gone. Absence is itself exact
+/// evidence — a launched Session always publishes a sidecar into its own
+/// Host's namespace — so it is modeled alongside the proof rather than folded
+/// into "no evidence".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualLaunchRuntimeEvidence {
+    Proof(ManualLaunchRuntimeProof),
+    Absent,
+}
+
+impl From<ManualLaunchRuntimeProof> for ManualLaunchRuntimeEvidence {
+    fn from(proof: ManualLaunchRuntimeProof) -> Self {
+        Self::Proof(proof)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

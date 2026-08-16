@@ -588,7 +588,7 @@ pub(crate) struct ManualLaunchHolderIntent {
     pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
     pub(crate) local_window_id: Option<String>,
     pub(crate) local_runtime_incarnation: Option<u64>,
-    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub(crate) operation_id: String,
 }
 
@@ -617,7 +617,7 @@ pub(crate) struct ManualLaunchPreparation {
     pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
     pub(crate) expected_binding: gwt_agent::ExecutionBindingIdentity,
     pub(crate) expected_session: Option<gwt_agent::SessionExecutionIdentity>,
-    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
     pub(crate) operation_id: String,
 }

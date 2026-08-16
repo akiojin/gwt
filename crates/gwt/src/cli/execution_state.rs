@@ -688,6 +688,14 @@ pub enum ExactSessionRuntimeDisposition {
     Terminal(gwt_agent::ManualLaunchRuntimeProof),
     Defunct(gwt_agent::ManualLaunchRuntimeProof),
     Live,
+    /// Issue #3457: no runtime sidecar exists for this Session in any PID
+    /// namespace. A launched Session always publishes a sidecar into its own
+    /// Host's namespace, and a Host clears only the namespace it owns, so the
+    /// total absence of one is decisive evidence that no Host is running this
+    /// Session — unlike [`Self::Unknown`], which means the evidence exists but
+    /// cannot be trusted. There is no runtime proof to carry: absence is
+    /// precisely the lack of one.
+    Absent,
     Unknown,
 }
 
@@ -702,13 +710,14 @@ pub fn classify_exact_session_runtime(
     let entries = match fs::read_dir(&runtime_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(ExactSessionRuntimeDisposition::Unknown)
+            return Ok(ExactSessionRuntimeDisposition::Absent)
         }
         Err(error) => return Err(error),
     };
     let mut terminal = None;
     let mut defunct = None;
     let mut saw_unknown = false;
+    let mut saw_sidecar = false;
     for namespace in entries {
         let namespace = namespace?;
         let Some(host_pid) = namespace
@@ -723,7 +732,7 @@ pub fn classify_exact_session_runtime(
             .join(format!("{}.json", expected.session_id));
         match sidecar.try_exists() {
             Ok(false) => continue,
-            Ok(true) => {}
+            Ok(true) => saw_sidecar = true,
             Err(error) => return Err(error),
         }
         let runtime = match gwt_agent::SessionRuntimeState::load(&sidecar) {
@@ -818,11 +827,16 @@ pub fn classify_exact_session_runtime(
     if let Some(proof) = defunct {
         return Ok(ExactSessionRuntimeDisposition::Defunct(proof));
     }
-    Ok(
-        terminal.map_or(ExactSessionRuntimeDisposition::Unknown, |proof| {
-            ExactSessionRuntimeDisposition::Terminal(proof)
-        }),
-    )
+    if let Some(proof) = terminal {
+        return Ok(ExactSessionRuntimeDisposition::Terminal(proof));
+    }
+    // No namespace held a sidecar for this Session at all (Issue #3457). That
+    // is absence of evidence for a running Host, not conflicting evidence.
+    Ok(if saw_sidecar {
+        ExactSessionRuntimeDisposition::Unknown
+    } else {
+        ExactSessionRuntimeDisposition::Absent
+    })
 }
 
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
@@ -5824,7 +5838,7 @@ pub fn prepare_fresh_linked_owner_launch_successor(
 pub struct ExactManualLaunchPredecessor<'a> {
     pub sessions_dir: &'a Path,
     pub session: Option<&'a gwt_agent::SessionExecutionIdentity>,
-    pub runtime: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub runtime: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub binding: &'a gwt_agent::ExecutionBindingIdentity,
     pub status: SuccessorPredecessorStatus,
     pub terminal_reason: &'a str,
@@ -5849,7 +5863,7 @@ pub fn prepare_exact_manual_launch_successor(
             invalid_generation_data("Active manual successor requires an exact Session identity")
         })?;
         let expected_runtime = expected_runtime.ok_or_else(|| {
-            invalid_generation_data("Active manual successor requires exact runtime proof")
+            invalid_generation_data("Active manual successor requires exact runtime evidence")
         })?;
         if &expected_session.execution_binding.identity != expected_binding {
             return Err(generation_conflict(
@@ -6047,9 +6061,10 @@ pub fn prepare_exact_terminal_active_successor(
     request: &SuccessorRequest,
     sessions_dir: &Path,
     expected_session: &gwt_agent::SessionExecutionIdentity,
-    expected_runtime: gwt_agent::ManualLaunchRuntimeProof,
+    expected_runtime: impl Into<gwt_agent::ManualLaunchRuntimeEvidence>,
     reason: &str,
 ) -> io::Result<ContinuationAttempt> {
+    let expected_runtime = expected_runtime.into();
     validate_successor_request(request)?;
     if request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
         return Err(invalid_generation_data(
@@ -6089,61 +6104,94 @@ pub fn prepare_exact_terminal_active_successor(
                     "terminal predecessor Session changed before successor preparation",
                 ));
             }
-            if expected_runtime.host_pid == 0 || expected_runtime.runtime_incarnation == 0 {
-                return Err(io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    "terminal predecessor runtime proof is invalid",
-                ));
-            }
-            let runtime_path = gwt_agent::runtime_state_path_for_pid(
-                sessions_dir,
-                expected_runtime.host_pid,
-                &expected_session.session_id,
-            );
-            let runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).map_err(|error| {
-                io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    format!("terminal predecessor runtime sidecar is unavailable: {error}"),
-                )
-            })?;
-            if runtime.execution_identity.as_ref() != Some(expected_session)
-                || runtime.runtime_incarnation != Some(expected_runtime.runtime_incarnation)
-            {
-                return Err(io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    "terminal predecessor runtime proof changed",
-                ));
-            }
-            let runtime_is_terminal = matches!(
-                runtime.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            );
-            if runtime_is_terminal {
-                match (runtime.child_pid, runtime.child_started_at) {
-                    (Some(child_pid), Some(child_started_at))
-                        if child_pid > 0 && child_started_at > 0 =>
+            // Issue #3457: `Absent` carries no sidecar to revalidate, so the
+            // lease re-proves the absence itself. Anything else means the
+            // predecessor published runtime evidence between classification
+            // and this transaction, and the caller must reclassify.
+            let proof = match expected_runtime {
+                gwt_agent::ManualLaunchRuntimeEvidence::Absent => {
+                    if classify_exact_session_runtime(sessions_dir, expected_session)?
+                        != ExactSessionRuntimeDisposition::Absent
                     {
-                        if crate::process::exact_pty_process_tree_is_alive(
-                            child_pid,
-                            child_started_at,
-                        ) {
+                        return Err(io::Error::new(
+                            ErrorKind::PermissionDenied,
+                            "terminal predecessor published runtime evidence before successor preparation",
+                        ));
+                    }
+                    None
+                }
+                gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof) => Some(proof),
+            };
+            let runtime = match proof {
+                None => None,
+                Some(expected_runtime) => {
+                    if expected_runtime.host_pid == 0 || expected_runtime.runtime_incarnation == 0 {
+                        return Err(io::Error::new(
+                            ErrorKind::PermissionDenied,
+                            "terminal predecessor runtime proof is invalid",
+                        ));
+                    }
+                    let runtime_path = gwt_agent::runtime_state_path_for_pid(
+                        sessions_dir,
+                        expected_runtime.host_pid,
+                        &expected_session.session_id,
+                    );
+                    let runtime =
+                        gwt_agent::SessionRuntimeState::load(&runtime_path).map_err(|error| {
+                            io::Error::new(
+                                ErrorKind::PermissionDenied,
+                                format!(
+                                    "terminal predecessor runtime sidecar is unavailable: {error}"
+                                ),
+                            )
+                        })?;
+                    if runtime.execution_identity.as_ref() != Some(expected_session)
+                        || runtime.runtime_incarnation != Some(expected_runtime.runtime_incarnation)
+                    {
+                        return Err(io::Error::new(
+                            ErrorKind::PermissionDenied,
+                            "terminal predecessor runtime proof changed",
+                        ));
+                    }
+                    Some(runtime)
+                }
+            };
+            // Absence proves no Host is running the Session, so there is no
+            // process tree left to outlive the record.
+            let runtime_is_terminal = runtime.as_ref().is_none_or(|runtime| {
+                matches!(
+                    runtime.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                )
+            });
+            if let Some(runtime) = runtime.as_ref() {
+                if runtime_is_terminal {
+                    match (runtime.child_pid, runtime.child_started_at) {
+                        (Some(child_pid), Some(child_started_at))
+                            if child_pid > 0 && child_started_at > 0 =>
+                        {
+                            if crate::process::exact_pty_process_tree_is_alive(
+                                child_pid,
+                                child_started_at,
+                            ) {
+                                return Err(io::Error::new(
+                                    ErrorKind::PermissionDenied,
+                                    "terminal predecessor process tree is still live",
+                                ));
+                            }
+                        }
+                        (None, None) => {
                             return Err(io::Error::new(
                                 ErrorKind::PermissionDenied,
-                                "terminal predecessor process tree is still live",
+                                "terminal predecessor process identity is missing",
                             ));
                         }
-                    }
-                    (None, None) => {
-                        return Err(io::Error::new(
-                            ErrorKind::PermissionDenied,
-                            "terminal predecessor process identity is missing",
-                        ));
-                    }
-                    _ => {
-                        return Err(io::Error::new(
-                            ErrorKind::PermissionDenied,
-                            "terminal predecessor process identity is incomplete",
-                        ));
+                        _ => {
+                            return Err(io::Error::new(
+                                ErrorKind::PermissionDenied,
+                                "terminal predecessor process identity is incomplete",
+                            ));
+                        }
                     }
                 }
             }
@@ -6165,36 +6213,49 @@ pub fn prepare_exact_terminal_active_successor(
             }
             let manual_handoff =
                 gwt_agent::read_session_manual_handoff_under_lease(sessions_dir, expected_session)?;
-            let abandoned_manual_handoff = if runtime_is_terminal && session_is_terminal {
-                false
-            } else {
-                let handoff = manual_handoff.as_ref().ok_or_else(|| {
-                    io::Error::new(
-                        ErrorKind::PermissionDenied,
-                        "nonterminal predecessor has no exact durable manual handoff fence",
-                    )
-                })?;
-                let host_started_at = runtime.host_started_at.filter(|value| *value > 0);
-                let child = runtime.child_pid.zip(runtime.child_started_at).filter(
-                    |(child_pid, child_started_at)| *child_pid > 0 && *child_started_at > 0,
-                );
-                if handoff.execution_identity != *expected_session
-                    || handoff.host_pid != expected_runtime.host_pid
-                    || Some(handoff.host_started_at) != host_started_at
-                    || host_started_at.is_some_and(|started_at| {
-                        crate::process::host_process_start_time(expected_runtime.host_pid)
-                            == Some(started_at)
-                    })
-                    || child.is_none_or(|(child_pid, child_started_at)| {
-                        crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
-                    })
-                {
-                    return Err(io::Error::new(
-                        ErrorKind::PermissionDenied,
-                        "manual handoff Host or child is still live or lacks exact exit evidence",
-                    ));
+            let abandoned_manual_handoff = match (runtime.as_ref(), proof) {
+                // Issue #3457: absence is already exact evidence that no Host
+                // is running this Session. A handoff fence exists to explain a
+                // *published* nonterminal runtime; there is nothing published
+                // here, so a `.toml` a crashed Host left behind as Running
+                // must not be required to carry one.
+                (None, _) | (_, None) => false,
+                (Some(runtime), Some(expected_runtime)) => {
+                    if runtime_is_terminal && session_is_terminal {
+                        false
+                    } else {
+                        let handoff = manual_handoff.as_ref().ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::PermissionDenied,
+                                "nonterminal predecessor has no exact durable manual handoff fence",
+                            )
+                        })?;
+                        let host_started_at = runtime.host_started_at.filter(|value| *value > 0);
+                        let child = runtime.child_pid.zip(runtime.child_started_at).filter(
+                            |(child_pid, child_started_at)| *child_pid > 0 && *child_started_at > 0,
+                        );
+                        if handoff.execution_identity != *expected_session
+                            || handoff.host_pid != expected_runtime.host_pid
+                            || Some(handoff.host_started_at) != host_started_at
+                            || host_started_at.is_some_and(|started_at| {
+                                crate::process::host_process_start_time(expected_runtime.host_pid)
+                                    == Some(started_at)
+                            })
+                            || child.is_none_or(|(child_pid, child_started_at)| {
+                                crate::process::exact_pty_process_tree_is_alive(
+                                    child_pid,
+                                    child_started_at,
+                                )
+                            })
+                        {
+                            return Err(io::Error::new(
+                                ErrorKind::PermissionDenied,
+                                "manual handoff Host or child is still live or lacks exact exit evidence",
+                            ));
+                        }
+                        true
+                    }
                 }
-                true
             };
 
             let mut ledger =
@@ -6293,18 +6354,23 @@ pub fn prepare_exact_terminal_active_successor(
                 ));
             }
 
-            if abandoned_manual_handoff
-                && !gwt_agent::persist_session_terminal_status_for_exact_runtime_under_lease(
+            if abandoned_manual_handoff {
+                // Only a published sidecar can be abandoned, so this arm always
+                // carries the proof it needs to fence the exact runtime.
+                let expected_runtime = proof.ok_or_else(|| {
+                    io::Error::other("abandoned manual handoff lost its exact runtime proof")
+                })?;
+                if !gwt_agent::persist_session_terminal_status_for_exact_runtime_under_lease(
                     sessions_dir,
                     expected_session,
                     expected_runtime,
                     gwt_agent::AgentStatus::Interrupted,
-                )?
-            {
-                return Err(io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    "abandoned manual handoff lost its exact runtime evidence",
-                ));
+                )? {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "abandoned manual handoff lost its exact runtime evidence",
+                    ));
+                }
             }
 
             let recorded_at = Utc::now();
@@ -12115,6 +12181,187 @@ mod tests {
             authority_bytes
         );
         assert!(finish_active_session_launch_handshake(&sessions_dir, &winner).unwrap());
+    }
+
+    /// Issue #3457: a durable `.toml` outlives every runtime namespace once
+    /// the Host restarts (`reset_runtime_state_dir_for_pid` clears the
+    /// namespace it owns). A Session with no sidecar in any namespace cannot
+    /// be running under any Host, so that is decisive evidence — not the
+    /// ambiguous `Unknown` used for unreadable or conflicting sidecars.
+    /// Conflating the two is what leaves an Active generation held by a dead
+    /// Session blocking every later launch.
+    #[test]
+    fn exact_session_runtime_without_any_sidecar_is_absent_not_unknown() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-orphan-durable-record";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !gwt_agent::runtime_state_path(&sessions_dir, session_id).exists(),
+            "the fixture must leave the durable record without any runtime sidecar"
+        );
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Absent
+        );
+    }
+
+    /// Issue #3457: the Session a crashed Host left behind never got the
+    /// chance to record a terminal status, so its durable `.toml` still reads
+    /// `Running` while no sidecar exists anywhere. That is exactly the state
+    /// that made an Active generation permanently unlaunchable: the holder can
+    /// never settle and no runtime proof can ever be published for it. Absence
+    /// must therefore be sufficient evidence to prepare a successor.
+    #[test]
+    fn absent_runtime_prepares_a_successor_for_a_still_running_durable_holder() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-crashed-host-holder";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut session = gwt_agent::Session::load(&session_path).unwrap();
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Absent
+        );
+
+        let request = successor_request(
+            "recover-absent-runtime-holder",
+            "gwt-host-manual-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        let prepared = prepare_exact_terminal_active_successor(
+            dir.path(),
+            owner,
+            &request,
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "holder Host exited without settling its generation",
+        )
+        .expect("absent runtime evidence must prepare a successor");
+
+        assert_eq!(prepared.request.operation_id, request.operation_id);
+        assert_eq!(
+            prepared.predecessor.generation_id,
+            identity.execution_binding.identity.generation_id
+        );
+        // The transaction settles the unreachable holder's generation before
+        // planning the successor, so the recorded predecessor status is the
+        // Blocked one it just wrote — the Active generation is released, not
+        // left behind for the next launch to collide with.
+        assert_eq!(
+            prepared.predecessor_status,
+            SuccessorPredecessorStatus::Blocked
+        );
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().status,
+            ExecutionControlStatus::Blocked,
+            "the unreachable holder's generation must no longer be Active"
+        );
+    }
+
+    /// The escape hatch stays narrow: once the holder publishes a sidecar the
+    /// classification is no longer `Absent`, and evidence claiming absence
+    /// must be refused instead of stealing a generation from a live Session.
+    #[test]
+    fn absent_runtime_evidence_is_refused_once_the_holder_publishes_a_sidecar() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-live-sidecar-holder";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            7,
+            1,
+            std::process::id(),
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        let request = successor_request(
+            "refuse-absent-runtime-holder",
+            "gwt-host-manual-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        let error = prepare_exact_terminal_active_successor(
+            dir.path(),
+            owner,
+            &request,
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "holder Host exited without settling its generation",
+        )
+        .expect_err("a published sidecar must refuse absence evidence");
+
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
     }
 
     #[test]

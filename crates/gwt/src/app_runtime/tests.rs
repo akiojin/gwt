@@ -6451,7 +6451,8 @@ fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight(
                                         gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
                                     ..
                                 } if expected_predecessor.as_deref() == Some(&holder)
-                                    && runtime == &proof
+                                    && runtime
+                                        == &gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof)
                             )
                     )
             )
@@ -17411,10 +17412,12 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
         gwt::cli::execution_state::ExactManualLaunchPredecessor {
             sessions_dir: &sessions_dir,
             session: Some(&predecessor_identity),
-            runtime: Some(gwt_agent::ManualLaunchRuntimeProof {
-                host_pid: std::process::id(),
-                runtime_incarnation: 1,
-            }),
+            runtime: Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                gwt_agent::ManualLaunchRuntimeProof {
+                    host_pid: std::process::id(),
+                    runtime_incarnation: 1,
+                },
+            )),
             binding: &predecessor_identity.execution_binding.identity,
             status: gwt::cli::execution_state::SuccessorPredecessorStatus::Active,
             terminal_reason: "exact producing runtime terminated before manual Launch Agent",
