@@ -288,16 +288,123 @@ fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
 /// cores).
 const GUI_EVENT_LOOP_SLOW_DISPATCH_MS: u64 = 30;
 
-/// Cheap variant-name label for a `FrontendEvent`, derived from `Debug` and
-/// truncated to the leading identifier so dispatch-timing logs name the
-/// handler without ever emitting payload fields (which may contain env vars or
-/// tokens). Used only by the Phase 0 dispatch instrumentation.
-fn frontend_event_kind_label(event: &FrontendEvent) -> String {
-    format!("{event:?}")
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .find(|token| !token.is_empty())
-        .unwrap_or("Unknown")
-        .to_string()
+/// Upper bound for a dispatch label. The longest `UserEvent` /
+/// `FrontendEvent` variant name is comfortably inside this; anything longer is
+/// truncated rather than allocated.
+const DISPATCH_LABEL_CAPACITY: usize = 64;
+
+/// Fixed-capacity variant-name buffer for the dispatch-timing instrumentation.
+///
+/// Issue #3611: the timer wraps *every* event-loop iteration — including the
+/// high-frequency PTY output events — so labelling must not allocate. It must
+/// also never carry payload fields, which may contain env vars or tokens.
+#[derive(Clone, Copy)]
+struct DispatchLabel {
+    bytes: [u8; DISPATCH_LABEL_CAPACITY],
+    len: usize,
+}
+
+impl DispatchLabel {
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len])
+            .ok()
+            .filter(|label| !label.is_empty())
+            .unwrap_or("Unknown")
+    }
+}
+
+impl std::fmt::Display for DispatchLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Write for DispatchLabel {
+    /// Accumulates the leading identifier only. `#[derive(Debug)]` writes the
+    /// variant name before any field, so returning `Err` at the first
+    /// non-identifier byte aborts formatting right after the name — the whole
+    /// payload is never rendered.
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        for byte in text.bytes() {
+            if !(byte.is_ascii_alphanumeric() || byte == b'_') || self.len == self.bytes.len() {
+                return Err(std::fmt::Error);
+            }
+            self.bytes[self.len] = byte;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Cheap variant-name label derived from `Debug`, used by the dispatch-timing
+/// instrumentation so a slow handler is identifiable from `~/.gwt/logs/`
+/// without emitting payload fields.
+fn debug_variant_label<T: std::fmt::Debug + ?Sized>(value: &T) -> DispatchLabel {
+    use std::fmt::Write as _;
+    let mut label = DispatchLabel {
+        bytes: [0; DISPATCH_LABEL_CAPACITY],
+        len: 0,
+    };
+    // The `Err` return above is the intended stop signal, not a failure.
+    let _ = write!(&mut label, "{value:?}");
+    label
+}
+
+fn frontend_event_kind_label(event: &FrontendEvent) -> DispatchLabel {
+    debug_variant_label(event)
+}
+
+/// Issue #3611 AC-4: name the event-loop dispatch that is about to be timed.
+/// `UserEvent` carries the interesting handlers (Work/branch scan results,
+/// projection refreshes), so it is labelled by its own variant rather than the
+/// outer `Event::UserEvent` wrapper.
+fn event_loop_dispatch_label(event: &Event<'_, UserEvent>) -> DispatchLabel {
+    match event {
+        Event::UserEvent(user_event) => debug_variant_label(user_event),
+        other => debug_variant_label(other),
+    }
+}
+
+/// Issue #3611 AC-4: the warning text for an event-loop dispatch that held the
+/// GUI thread past [`GUI_EVENT_LOOP_SLOW_DISPATCH_MS`], or `None` when the
+/// dispatch was within budget. Split out from the timer so the threshold is
+/// directly testable.
+fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> {
+    (elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS)
+        .then(|| format!("{label} blocked the GUI event loop for {elapsed_ms}ms"))
+}
+
+/// Times one event-loop dispatch and warns when it stalls the GUI thread.
+///
+/// Issue #3611: a `Drop` guard rather than a trailing measurement because
+/// several dispatch arms `return` early; a stall in one of those is exactly the
+/// case worth recording.
+struct EventLoopDispatchTimer {
+    label: DispatchLabel,
+    started: std::time::Instant,
+}
+
+impl EventLoopDispatchTimer {
+    fn start(event: &Event<'_, UserEvent>) -> Self {
+        Self {
+            label: event_loop_dispatch_label(event),
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for EventLoopDispatchTimer {
+    fn drop(&mut self) {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        if let Some(message) = gui_event_loop_stall_warning(self.label.as_str(), elapsed_ms) {
+            tracing::warn!(
+                target: "gwt.frontend.timing",
+                event = %self.label,
+                elapsed_ms,
+                "{message}"
+            );
+        }
+    }
 }
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
@@ -1098,6 +1205,12 @@ enum UserEvent {
         cleanup_ready_branches: std::collections::HashMap<String, String>,
         dirty_branches: std::collections::HashSet<String>,
         live_process_branches: std::collections::HashSet<String>,
+        /// Issue #3611: every short branch name the scan's single
+        /// `for-each-ref` found. The Workspace projection answers Session
+        /// resumability from this set instead of spawning Git per Session on
+        /// the event loop. `None` when the snapshot failed — the previous
+        /// answer then stands instead of "every branch is gone".
+        known_branch_refs: Option<std::collections::HashSet<String>>,
     },
     /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
     /// caches the `branch -> subject` map and rebroadcasts the Workspace
@@ -1347,9 +1460,9 @@ mod tests {
         apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
         close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content,
-        gui_front_door_launch_surface, hook_forward_authorized,
-        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        docker_bundle_mounts_for_home, docker_bundle_override_content, event_loop_dispatch_label,
+        frontend_event_kind_label, gui_event_loop_stall_warning, gui_front_door_launch_surface,
+        hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
@@ -1375,6 +1488,55 @@ mod tests {
         gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
             .apply_to_parts(&mut env, &mut remove_env);
         remove_env
+    }
+
+    /// Issue #3611 AC-4: a Work/branch scan result that stalls the GUI thread
+    /// must be identifiable after the fact. The dispatch label names the
+    /// `UserEvent` variant — not the `Event::UserEvent` wrapper — and never
+    /// leaks payload fields such as filesystem paths.
+    #[test]
+    fn event_loop_dispatch_label_names_the_user_event_variant_without_payload() {
+        let event = UserEvent::WorkMergeStatus {
+            project_root: PathBuf::from("/tmp/secret-project-root"),
+            merged_branches: HashMap::new(),
+            cleanup_ready_branches: HashMap::new(),
+            dirty_branches: std::collections::HashSet::new(),
+            live_process_branches: std::collections::HashSet::new(),
+            known_branch_refs: None,
+        };
+
+        let label = event_loop_dispatch_label(&tao::event::Event::UserEvent(event));
+
+        assert_eq!(label.as_str(), "WorkMergeStatus");
+        assert!(
+            !label.as_str().contains("secret-project-root"),
+            "dispatch labels must never carry payload fields"
+        );
+    }
+
+    #[test]
+    fn frontend_event_dispatch_label_keeps_naming_its_own_variant() {
+        assert_eq!(
+            frontend_event_kind_label(&gwt::FrontendEvent::FrontendReady).as_str(),
+            "FrontendReady"
+        );
+    }
+
+    /// Issue #3611 AC-4: the warn fires once the dispatch crosses the budget,
+    /// so a multi-second projection stall leaves a durable log record.
+    #[test]
+    fn gui_event_loop_stall_warning_fires_only_past_the_budget() {
+        assert_eq!(
+            gui_event_loop_stall_warning(
+                "WorkMergeStatus",
+                super::GUI_EVENT_LOOP_SLOW_DISPATCH_MS - 1
+            ),
+            None
+        );
+        let warning = gui_event_loop_stall_warning("WorkMergeStatus", 4_000)
+            .expect("a 4s dispatch must be reported");
+        assert!(warning.contains("WorkMergeStatus"), "{warning}");
+        assert!(warning.contains("4000ms"), "{warning}");
     }
 
     #[test]
@@ -2765,6 +2927,7 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
@@ -8169,6 +8332,10 @@ fn main() -> std::io::Result<()> {
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        // Issue #3611 AC-4: every dispatch on this thread is timed, not just
+        // the frontend ones. The Work/branch scan results land as `UserEvent`s,
+        // so a projection stall was previously invisible in the logs.
+        let _dispatch_timer = EventLoopDispatchTimer::start(&event);
         // Keep the tray icon handle alive for the lifetime of the
         // event loop closure; dropping it would unregister the tray
         // icon from the OS. `tray_lock_handle` lives in the outer
@@ -8356,6 +8523,7 @@ fn main() -> std::io::Result<()> {
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
+                known_branch_refs,
             }) => {
                 let events = app.apply_work_merge_status(
                     &project_root,
@@ -8363,6 +8531,7 @@ fn main() -> std::io::Result<()> {
                     cleanup_ready_branches,
                     dirty_branches,
                     live_process_branches,
+                    known_branch_refs,
                 );
                 clients.dispatch(events);
             }
