@@ -31,7 +31,16 @@ use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
-const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one pane request waits for the GUI to answer.
+///
+/// Every `pane.*` reply is produced on the GUI's single event loop, so the
+/// wait is dominated by whatever that loop is doing rather than by the size
+/// of the reply: measured round trips are ~5ms while the loop is idle, and
+/// they run past seconds while it drives a Work/branch scan that spawns tens
+/// of `git` processes per second. A two-second budget therefore turned an
+/// ordinary stall into a hard failure (#3510). The budget covers the stall
+/// instead, and the idle case is unaffected because it never waits.
+const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
 const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
 const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
@@ -418,8 +427,12 @@ async fn request_window_list_with_timeout(
     // different pane protocols until the app restarts. A backend without the
     // lightweight route drops `list_windows` without replying; the full sync
     // request is understood by every version, so falling back to it keeps
-    // `pane.list` answering. This is never worse than the pre-#3510 client,
-    // which always paid for the full sync.
+    // `pane.list` answering across that window.
+    //
+    // The fallback waits out the whole response budget first, which is
+    // deliberate: a merely stalled backend answers the light route within the
+    // budget, so only a backend that truly ignores the request pays the
+    // second round and the heavier reply it triggers.
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
     next_workspace_windows_with_timeout(&mut socket, project_root, "pane list", response_timeout)
         .await
@@ -1730,6 +1743,77 @@ mod tests {
             assert_eq!(
                 error,
                 "pane list: pane websocket timed out waiting for backend response"
+            );
+        });
+    }
+
+    /// Issue #3510: the GUI answers pane requests from its single event loop,
+    /// which stalls for seconds at a time while it drives long synchronous
+    /// work (a Work/branch scan spawns tens of `git` processes per second).
+    /// Measured replies are ~5ms when the loop is idle, so a client budget
+    /// that gives up after two seconds turns an ordinary stall into a hard
+    /// `pane.list` failure. The budget must outlast a multi-second stall.
+    #[test]
+    fn request_window_list_outlasts_a_multi_second_backend_stall() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-list-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane list test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind pane list mock");
+            let address = listener.local_addr().expect("pane list mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept pane list connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane list websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
+                // The stalled event loop answers late, not never.
+                tokio::time::sleep(Duration::from_millis(2_500)).await;
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(
+                        "tab-project::agent-project",
+                        WindowPreset::Agent,
+                        Some("codex"),
+                    )],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send pane list workspace state");
+                // The caller drops the socket once it has the list, so a Close
+                // frame — or nothing at all — means it never fell back.
+                match tokio::time::timeout(Duration::from_millis(200), socket.next()).await {
+                    Err(_) | Ok(None) => true,
+                    Ok(Some(frame)) => !matches!(frame, Ok(Message::Text(_) | Message::Binary(_))),
+                }
+            });
+
+            let windows =
+                request_window_list(&format!("ws://{address}/internal/pane-ws"), project_root)
+                    .await
+                    .expect("pane list must outlast a multi-second backend stall");
+            let stayed_on_the_light_route = server.await.expect("pane list mock task");
+
+            assert_eq!(windows.len(), 1);
+            assert!(
+                stayed_on_the_light_route,
+                "a slow backend must not push pane list onto the heavy sync request"
             );
         });
     }
