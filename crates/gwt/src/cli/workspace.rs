@@ -1517,9 +1517,14 @@ pub(super) fn ensure_workspace_for_agent(
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
     let probe = probe_workspace_ensure(repo_path, &input);
     if !probe.executable() {
+        let reason = probe.reason.as_deref().unwrap_or("unavailable");
+        let refusal = crate::cli::execution_state::terminal_recovery_refusal(
+            repo_path,
+            &input.agent_session,
+            reason,
+        );
         return Err(core_error(GwtError::Other(format!(
-            "workspace.ensure prerequisite probe refused: {}",
-            probe.reason.as_deref().unwrap_or("unavailable")
+            "workspace.ensure prerequisite probe refused: {refusal}",
         ))));
     }
     let recovery = crate::agent_project_state::validated_workspace_recovery_session(
@@ -3643,14 +3648,27 @@ pub(crate) mod tests {
         );
     }
 
+    /// A distinct `origin` per fixture project.
+    ///
+    /// #3466 scopes the project store to the repository identity, so every
+    /// fixture that shared one hard-coded remote would now share one store —
+    /// and, because the fixtures also share `BRANCH`, one canonical Work id.
+    /// Deriving the remote from the project root keeps unrelated fixtures
+    /// isolated while still exercising the real Nested Bare + Worktree layout.
+    fn fixture_origin_url(project_state_root: &Path) -> String {
+        let slug = gwt_core::repo_hash::compute_path_hash(project_state_root);
+        format!("https://example.invalid/acme/workspace-update-{slug}.git")
+    }
+
     fn initialize_session_git_layout(project_state_root: &Path, worktree_path: &Path) {
         const BRANCH: &str = "work/20260601-0934";
-        const REMOTE: &str = "https://example.invalid/acme/workspace-update.git";
         std::fs::create_dir_all(project_state_root).expect("project root");
+        let remote = fixture_origin_url(project_state_root);
+        let remote = remote.as_str();
         if project_state_root == worktree_path {
             crate::cli::trusted_store::init_git_repo_with_origin(worktree_path);
             run_git(&["checkout", "-b", BRANCH], worktree_path);
-            run_git(&["remote", "set-url", "origin", REMOTE], worktree_path);
+            run_git(&["remote", "set-url", "origin", remote], worktree_path);
             return;
         }
 
@@ -3665,7 +3683,7 @@ pub(crate) mod tests {
             &["clone", "--bare", bootstrap_arg, bare_arg],
             project_state_root,
         );
-        run_git(&["remote", "set-url", "origin", REMOTE], &bare);
+        run_git(&["remote", "set-url", "origin", remote], &bare);
         if worktree_path.exists() {
             std::fs::remove_dir(worktree_path).expect("remove empty worktree placeholder");
         }
@@ -4006,6 +4024,23 @@ pub(crate) mod tests {
             content.push('\n');
         }
         content
+    }
+
+    /// Every `project-state/<name>` file that exists under the scoped `~/.gwt`
+    /// home. #3466 unified the layout root and worktree stores, so "no second
+    /// store" is asserted by enumerating what was actually written rather than
+    /// by comparing two paths that can no longer differ.
+    fn materialized_project_state_files(name: &str) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path().join("project-state").join(name))
+            .filter(|path| path.is_file())
+            .collect();
+        found.sort();
+        found
     }
 
     fn seed_exact_workspace_work(
@@ -4948,10 +4983,12 @@ pub(crate) mod tests {
             agent.current_focus.as_deref(),
             Some("Implement canonical Project State identity")
         );
-        assert!(
-            load_workspace_projection(&worktree)
-                .expect("load worktree projection")
-                .is_none(),
+        // #3466: the worktree resolves to the repository's single project
+        // store, so "no split Project State" means the worktree view *is* the
+        // canonical one rather than an absent second file.
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
             "agent workspace update must not create a split Project State under the worktree root"
         );
         assert!(
@@ -5170,6 +5207,11 @@ pub(crate) mod tests {
         );
     }
 
+    /// #3466 removed the condition this test used to guard: a worktree and its
+    /// project root resolve to one project store, so an "obsolete split
+    /// projection" is no longer constructible. The test now pins that
+    /// structural guarantee — one projection file, reached identically from
+    /// either root — instead of the repair behaviour it made necessary.
     #[test]
     fn workspace_update_does_not_run_split_state_repair() {
         let _guard = env_guard();
@@ -5193,13 +5235,11 @@ pub(crate) mod tests {
         ));
         save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
 
-        let mut split = WorkspaceProjection::default_for_project(&worktree);
-        let mut split_agent =
-            assigned_agent_with_window("session-1", "project::agent-1", &worktree);
-        split_agent.title_summary = Some("Split root title".to_string());
-        split_agent.current_focus = Some("Previously written to worktree root".to_string());
-        split.agents.push(split_agent);
-        save_workspace_projection(&worktree, &split).expect("save split projection");
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
+            "a worktree must not be able to address a second Project State"
+        );
 
         let mut env = TestEnv::new(worktree.clone());
         let mut out = String::new();
@@ -5233,21 +5273,16 @@ pub(crate) mod tests {
         assert_eq!(
             agent.title_summary.as_deref(),
             None,
-            "mutation must not import identity from the obsolete split projection"
+            "mutation must not invent identity the caller did not supply"
         );
         assert_eq!(
             agent.current_focus.as_deref(),
             Some("Continue from canonical Project State")
         );
-        let untouched_split = load_workspace_projection(&worktree)
-            .expect("load untouched split projection")
-            .expect("split projection remains present");
         assert_eq!(
-            untouched_split
-                .latest_agent_for_session("session-1")
-                .and_then(|agent| agent.title_summary.as_deref()),
-            Some("Split root title"),
-            "workspace.update must not mutate or repair the obsolete split projection"
+            materialized_project_state_files("current.json"),
+            vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
+            "workspace.update must leave exactly one Project State behind"
         );
     }
 
@@ -6128,10 +6163,11 @@ pub(crate) mod tests {
             container.branch.as_deref() == Some("work/20260601-0934")
                 && container.worktree_path.as_deref() == Some(expected_worktree.as_path())
         }));
-        assert!(
-            load_workspace_projection(&worktree)
-                .expect("load worktree projection")
-                .is_none(),
+        // #3466: the worktree shares the project root's store, so a split
+        // current projection can only show up as a *second* current.json.
+        assert_eq!(
+            materialized_project_state_files("current.json"),
+            vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
             "recovery must not create a split current projection"
         );
         assert!(
@@ -7450,6 +7486,117 @@ pub(crate) mod tests {
 
         assert!(error.to_string().contains("terminal"), "{error}");
         assert_eq!(workspace_recovery_state_bytes(&paths), before);
+    }
+
+    #[test]
+    fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3587");
+        let session_id = "session-terminal-binding-guidance";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3587);
+        gwt_core::skill_state::save(
+            &worktree,
+            crate::cli::build::SKILL_NAME,
+            &gwt_core::skill_state::SkillState {
+                active: true,
+                owner_spec: Some(3587),
+                started_at: Utc::now(),
+                phase: Some("verify".to_string()),
+                session_id: session_id.to_string(),
+            },
+        )
+        .expect("save stranded build lifecycle");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &worktree,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle execution Blocked"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let paths = workspace_recovery_state_paths(&project_root, &worktree);
+        let before = workspace_recovery_state_bytes(&paths);
+
+        let ensure_input = WorkspaceEnsureInput {
+            agent_session: session_id.to_string(),
+            title_summary: "Recover terminal binding".to_string(),
+            current_focus: None,
+            spec: None,
+            issue: Some(3587),
+            topic: None,
+            boundary: None,
+        };
+        let error = ensure_workspace_for_agent(&worktree, ensure_input.clone())
+            .expect_err("terminal execution binding must refuse workspace.ensure");
+        let message = error.to_string();
+
+        assert!(message.contains("terminal"), "{message}");
+        assert!(message.contains("execution.status"), "{message}");
+        assert!(message.contains("recovery_probes"), "{message}");
+        assert!(message.contains("verify.plan"), "{message}");
+        assert!(
+            !message.contains("`build.abort`"),
+            "workspace.ensure must not unconditionally restart the build.abort loop: {message}"
+        );
+        assert_eq!(workspace_recovery_state_bytes(&paths), before);
+
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (plan_code, plan_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                commands: Vec::new(),
+                derive: true,
+            }),
+        )
+        .expect("derive the status-advertised verification plan");
+        assert_eq!(plan_code, 0, "{plan_out}");
+        let plan = crate::cli::verification_record::load_plan(&worktree)
+            .expect("load derived plan")
+            .expect("derived plan");
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (run_code, run_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands: plan.commands,
+            }),
+        )
+        .expect("run the status-advertised verification plan");
+        assert_eq!(run_code, 0, "{run_out}");
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (reopen_code, reopen_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Reopen {
+                    reason: "status-derived verification is fresh".to_string(),
+                },
+            ),
+        )
+        .expect("run the status-advertised execution.reopen");
+        assert_eq!(reopen_code, 0, "{reopen_out}");
+
+        ensure_workspace_for_agent(&worktree, ensure_input)
+            .expect("workspace.ensure must become reachable after verified reopen");
+        let recovered = crate::cli::execution_state::diagnose(&worktree, Some(session_id));
+        assert_eq!(
+            recovered.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Bound
+        );
+        assert!(
+            recovered
+                .available_recoveries
+                .contains(&"workspace.update".to_string()),
+            "the finite recovery chain must reach the normal workspace path: {recovered:?}"
+        );
     }
 
     #[test]

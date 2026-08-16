@@ -323,12 +323,91 @@ fn spawn_issue_monitor_worker_with_config(
     )
 }
 
+#[derive(Clone, Default)]
+struct IssueMonitorWorkerTestHooks {
+    #[cfg(test)]
+    scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct IssueMonitorScanConcurrencyProbe {
+    active: AtomicUsize,
+    overlap_observed: AtomicBool,
+}
+
+#[cfg(test)]
+impl IssueMonitorScanConcurrencyProbe {
+    fn enter(self: &Arc<Self>) -> IssueMonitorScanConcurrencyGuard {
+        if self.active.fetch_add(1, Ordering::AcqRel) > 0 {
+            self.overlap_observed.store(true, Ordering::Release);
+        }
+        IssueMonitorScanConcurrencyGuard {
+            probe: Arc::clone(self),
+        }
+    }
+
+    fn overlap_observed(&self) -> bool {
+        self.overlap_observed.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+struct IssueMonitorScanConcurrencyGuard {
+    probe: Arc<IssueMonitorScanConcurrencyProbe>,
+}
+
+#[cfg(test)]
+impl Drop for IssueMonitorScanConcurrencyGuard {
+    fn drop(&mut self) {
+        self.probe.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+fn spawn_issue_monitor_worker_with_config_and_scan_probe(
+    scope: RuntimeScope,
+    hub: BroadcastHub,
+    shutdown: Arc<DaemonShutdown>,
+    config: crate::IssueMonitorConfig,
+    scan_concurrency_probe: Arc<IssueMonitorScanConcurrencyProbe>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+        scope,
+        hub,
+        shutdown,
+        config,
+        ISSUE_MONITOR_SCAN_TIMEOUT,
+        IssueMonitorWorkerTestHooks {
+            scan_concurrency_probe: Some(scan_concurrency_probe),
+        },
+    )
+}
+
 fn spawn_issue_monitor_worker_with_config_and_timeout(
     scope: RuntimeScope,
     hub: BroadcastHub,
     shutdown: Arc<DaemonShutdown>,
     config: crate::IssueMonitorConfig,
     operation_timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+        scope,
+        hub,
+        shutdown,
+        config,
+        operation_timeout,
+        IssueMonitorWorkerTestHooks::default(),
+    )
+}
+
+fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+    scope: RuntimeScope,
+    hub: BroadcastHub,
+    shutdown: Arc<DaemonShutdown>,
+    config: crate::IssueMonitorConfig,
+    operation_timeout: Duration,
+    test_hooks: IssueMonitorWorkerTestHooks,
 ) -> tokio::task::JoinHandle<()> {
     // Establish the control-lane state from the durable snapshot before the
     // server can accept a publisher connection. Starting publishers wait on
@@ -361,13 +440,16 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                 }
             };
         }
+        // Publish the initial projection before Ready becomes observable.
+        // Status clients may connect as soon as the socket is bound and wait
+        // on that state transition, so Ready must linearize after the value.
+        refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
         let control_rx = if loaded.recovery_blocked {
             hub.mark_issue_monitor_control_recovery_blocked();
             None
         } else {
             hub.take_issue_monitor_control_receiver()
         };
-        refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
         let LoadedDaemonIssueMonitorState {
             mut monitor,
             recovery_blocked,
@@ -886,6 +968,7 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                         monitor.clone(),
                         issue_monitor_gui_connected(&hub),
                         deadline,
+                        test_hooks.clone(),
                     ),
                     deadline,
                     watchdog_fired: false,
@@ -1917,13 +2000,46 @@ fn try_apply_issue_monitor_control_with_disk_migration(
     )
 }
 
+#[cfg(test)]
+fn try_apply_issue_monitor_control_with_disk_migration_observed(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    control: IssueMonitorControl,
+    prefs_timeout: Duration,
+    on_first_contention: impl FnMut(),
+) -> IssueMonitorControlCommit {
+    try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+        prefs_path,
+        monitor,
+        AcceptedIssueMonitorControl::new(control),
+        prefs_timeout,
+        on_first_contention,
+    )
+}
+
 fn try_apply_accepted_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
     accepted: AcceptedIssueMonitorControl,
 ) -> IssueMonitorControlCommit {
+    try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+        prefs_path,
+        monitor,
+        accepted,
+        ISSUE_MONITOR_PREFS_TIMEOUT,
+        || {},
+    )
+}
+
+fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    accepted: AcceptedIssueMonitorControl,
+    prefs_timeout: Duration,
+    on_first_contention: impl FnMut(),
+) -> IssueMonitorControlCommit {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + prefs_timeout,
     );
     let mut applied = None;
     let mut authority_changed = false;
@@ -1935,8 +2051,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration(
     let mut rejected = false;
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
-    let transaction =
-        crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+    let transaction = crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
+        prefs_path,
+        &recovery_baseline,
+        on_first_contention,
+        |disk| {
             candidate.rebase_daemon_driver_prefs(disk);
             if let Some(receipt) = disk
                 .last_control_receipt
@@ -1999,7 +2118,8 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration(
                 });
                 *disk = candidate.prefs();
             }
-        });
+        },
+    );
     match transaction {
         Ok(_) => {
             if rejected {
@@ -2303,7 +2423,13 @@ fn spawn_issue_monitor_scan(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     let deadline = Instant::now() + ISSUE_MONITOR_SCAN_TIMEOUT;
-    spawn_issue_monitor_scan_with_deadline(scope, monitor, gui_connected, deadline)
+    spawn_issue_monitor_scan_with_deadline(
+        scope,
+        monitor,
+        gui_connected,
+        deadline,
+        IssueMonitorWorkerTestHooks::default(),
+    )
 }
 
 fn spawn_issue_monitor_scan_with_deadline(
@@ -2311,10 +2437,18 @@ fn spawn_issue_monitor_scan_with_deadline(
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
     deadline: Instant,
+    test_hooks: IssueMonitorWorkerTestHooks,
 ) -> tokio::task::JoinHandle<
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _scan_concurrency_guard = test_hooks
+            .scan_concurrency_probe
+            .as_ref()
+            .map(IssueMonitorScanConcurrencyProbe::enter);
+        #[cfg(not(test))]
+        let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
@@ -3315,10 +3449,15 @@ fn scan_issue_monitor_once_blocking(
                 &now,
                 active_cap,
                 |issue_number| {
+                    let Some(issue) = loaded
+                        .issues
+                        .iter()
+                        .find(|issue| issue.number == issue_number)
+                    else {
+                        return Ok(false);
+                    };
                     crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
-                        &owner,
-                        &repo,
-                        issue_number,
+                        &owner, &repo, issue,
                     )
                 },
             )?;
@@ -3545,7 +3684,7 @@ async fn handle_connection(
                     uptime_seconds: started_at.elapsed().as_secs(),
                     broadcast_channels: hub.channel_count(),
                     connections: connection_guard.snapshot(),
-                    issue_monitor: hub.issue_monitor_status(),
+                    issue_monitor: hub.wait_for_issue_monitor_status().await,
                 };
                 if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
                     break;
@@ -3729,7 +3868,7 @@ fn config_error(message: impl Into<String>) -> SpecOpsError {
 mod tests {
     use std::{
         fs::{self, OpenOptions},
-        path::Path,
+        path::{Path, PathBuf},
         sync::{
             atomic::{AtomicBool, Ordering},
             mpsc, Arc,
@@ -3754,8 +3893,9 @@ mod tests {
         apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
         issue_monitor_control_is_authorizing, run_server,
         run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
+        spawn_issue_monitor_worker_with_config_and_scan_probe,
         spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, DaemonShutdown,
-        IssueMonitorControl,
+        IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
     };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
@@ -3839,18 +3979,59 @@ if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
   if [ -n "$GWT_FAKE_GH_PID" ]; then
     printf '%s\n' "$$" > "$GWT_FAKE_GH_PID"
   fi
-  if mkdir "$GWT_FAKE_GH_ACTIVE"; then
-    owns_active=1
-  else
-    : > "$GWT_FAKE_GH_OVERLAP"
-    owns_active=0
+  # `spawn_logged_with_deadline` terminates the process tree, so the shell
+  # cannot run normal marker cleanup. Give every invocation its own owner
+  # marker: stale owners can then be reclaimed without deleting a concurrently
+  # registered live owner through a shared-file TOCTOU.
+  mkdir -p "$GWT_FAKE_GH_ACTIVE" || exit 1
+  owner_tmp=$(mktemp "$GWT_FAKE_GH_ACTIVE/.owner-$$.XXXXXX") || exit 1
+  owner_start=$(ps -o lstart= -p "$$" 2>/dev/null) || exit 1
+  if [ -z "$owner_start" ]; then
+    exit 1
   fi
+  printf '%s\n%s\n' "$$" "$owner_start" > "$owner_tmp" || exit 1
+  owner_token=${owner_tmp##*.owner-}
+  owner_marker="$GWT_FAKE_GH_ACTIVE/owner-$owner_token"
+  mv "$owner_tmp" "$owner_marker" || exit 1
+  if [ -n "$GWT_FAKE_GH_OWNER_MARKER" ]; then
+    printf '%s\n' "$owner_marker" > "$GWT_FAKE_GH_OWNER_MARKER" || exit 1
+  fi
+  for candidate in "$GWT_FAKE_GH_ACTIVE"/owner-*; do
+    if [ ! -e "$candidate" ] || [ "$candidate" = "$owner_marker" ]; then
+      continue
+    fi
+    active_pid=$(sed -n '1p' "$candidate" 2>/dev/null || true)
+    expected_start=$(sed -n '2p' "$candidate" 2>/dev/null || true)
+    if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
+      active_state=$(ps -o stat= -p "$active_pid" 2>/dev/null) || exit 1
+      if [ -z "$active_state" ]; then
+        exit 1
+      fi
+      case "$active_state" in
+        *Z*)
+          # kill -0 also succeeds for an unreaped zombie. It has already
+          # stopped executing and cannot overlap the recovery invocation.
+          rm -f "$candidate"
+          ;;
+        *)
+          active_start=$(ps -o lstart= -p "$active_pid" 2>/dev/null) || exit 1
+          if [ -z "$expected_start" ] || [ -z "$active_start" ]; then
+            exit 1
+          elif [ "$active_start" = "$expected_start" ]; then
+            : > "$GWT_FAKE_GH_OVERLAP"
+          else
+            rm -f "$candidate"
+          fi
+          ;;
+      esac
+    else
+      rm -f "$candidate"
+    fi
+  done
   while [ ! -f "$GWT_FAKE_GH_RELEASE" ]; do
     sleep 0.05
   done
-  if [ "$owns_active" = "1" ]; then
-    rmdir "$GWT_FAKE_GH_ACTIVE"
-  fi
+  rm -f "$owner_marker" || exit 1
 fi
 if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   printf '%s\n' 'gh merged query failed' >&2
@@ -3885,10 +4066,14 @@ if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
-  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
-printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+if [ "$GWT_FAKE_GH_MODE" = "completion_recovery" ]; then
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
+  exit 0
+fi
+printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
 exit 0
 "###,
         )
@@ -3914,6 +4099,304 @@ exit 0
         })
         .await
         .is_ok()
+    }
+
+    fn blocking_fake_gh_command(
+        fake_gh: &Path,
+        started_path: &Path,
+        release_path: &Path,
+        active_path: &Path,
+        overlap_path: &Path,
+        pid_path: &Path,
+        owner_marker_path: &Path,
+    ) -> std::process::Command {
+        let request = gwt_core::process::ProcessPlanRequest::new(fake_gh)
+            .args(["issue", "list"])
+            .env("PATH", "/usr/bin:/bin")
+            .env("GWT_FAKE_GH_MODE", "block")
+            .env("GWT_FAKE_GH_STARTED", started_path)
+            .env("GWT_FAKE_GH_RELEASE", release_path)
+            .env("GWT_FAKE_GH_ACTIVE", active_path)
+            .env("GWT_FAKE_GH_OVERLAP", overlap_path)
+            .env("GWT_FAKE_GH_PID", pid_path)
+            .env("GWT_FAKE_GH_OWNER_MARKER", owner_marker_path)
+            .env_remove("GWT_FAKE_GH_MUTATION_MARKER");
+        let mut command =
+            gwt_core::process::resolved_command(request).expect("resolve blocking fake gh command");
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    }
+
+    struct BlockingFakeGhChild {
+        child: std::process::Child,
+        reaped: bool,
+    }
+
+    impl BlockingFakeGhChild {
+        fn new(child: std::process::Child) -> Self {
+            Self {
+                child,
+                reaped: false,
+            }
+        }
+
+        fn kill_and_wait(&mut self) {
+            self.child.kill().expect("kill fake gh");
+            self.child.wait().expect("reap killed fake gh");
+            self.reaped = true;
+        }
+
+        fn kill_without_wait(&mut self) {
+            self.child.kill().expect("kill fake gh");
+        }
+
+        fn wait(&mut self) {
+            self.child.wait().expect("reap fake gh");
+            self.reaped = true;
+        }
+    }
+
+    impl Drop for BlockingFakeGhChild {
+        fn drop(&mut self) {
+            if !self.reaped {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_scan_probe_distinguishes_sequential_and_overlapping_tasks() {
+        let sequential = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        drop(sequential.enter());
+        drop(sequential.enter());
+        assert!(!sequential.overlap_observed());
+
+        let overlapping = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let first = overlapping.enter();
+        let second = overlapping.enter();
+        assert!(overlapping.overlap_observed());
+        drop(second);
+        drop(first);
+        assert!(overlapping.overlap_observed());
+    }
+
+    #[tokio::test]
+    async fn fake_gh_reclaims_a_killed_scan_marker_without_reporting_overlap() {
+        // Issue #3558: the real watchdog kills the process tree at its absolute
+        // deadline, so the shell cannot remove its active marker. A later,
+        // sequential recovery scan must reclaim that dead owner instead of
+        // reporting a concurrent scan.
+        let temp = TempDir::new().expect("tempdir");
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let started_path = temp.path().join("started");
+        let release_path = temp.path().join("release");
+        let active_path = temp.path().join("active");
+        let overlap_path = temp.path().join("overlap");
+        let killed_pid_path = temp.path().join("killed-pid");
+        let killed_owner_marker_path = temp.path().join("killed-owner-marker");
+
+        let mut killed = BlockingFakeGhChild::new(
+            blocking_fake_gh_command(
+                &fake_gh,
+                &started_path,
+                &release_path,
+                &active_path,
+                &overlap_path,
+                &killed_pid_path,
+                &killed_owner_marker_path,
+            )
+            .spawn()
+            .expect("spawn first fake gh"),
+        );
+        let pid_published = wait_for_path(&killed_pid_path, Duration::from_secs(2)).await;
+        let owner_published =
+            wait_for_path(&killed_owner_marker_path, Duration::from_secs(2)).await;
+        let killed_owner_path = fs::read_to_string(&killed_owner_marker_path)
+            .map(|path| PathBuf::from(path.trim()))
+            .unwrap_or_default();
+        let first_started = pid_published
+            && owner_published
+            && wait_for_path(&killed_owner_path, Duration::from_secs(2)).await;
+        killed.kill_and_wait();
+
+        fs::write(&release_path, b"release").expect("release recovery fake gh");
+        let recovery = blocking_fake_gh_command(
+            &fake_gh,
+            &started_path,
+            &release_path,
+            &active_path,
+            &overlap_path,
+            &temp.path().join("recovery-pid"),
+            &temp.path().join("recovery-owner-marker"),
+        )
+        .status()
+        .expect("run recovery fake gh");
+
+        assert!(first_started, "first fake gh must own the active marker");
+        assert!(recovery.success(), "recovery fake gh must exit cleanly");
+        assert!(
+            !overlap_path.exists(),
+            "a marker owned by a reaped process is stale, not an overlap"
+        );
+        assert_eq!(
+            fs::read_dir(&active_path)
+                .expect("read active marker root")
+                .count(),
+            0,
+            "the recovery owner must remove every per-process marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_gh_reclaims_an_unreaped_zombie_marker_without_reporting_overlap() {
+        // The deadline cleanup has a bounded grace period. If its future is
+        // dropped after SIGKILL but before wait(2), the old shell remains a
+        // zombie briefly: kill -0 still succeeds even though it cannot overlap
+        // any subsequent work.
+        let temp = TempDir::new().expect("tempdir");
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let started_path = temp.path().join("started");
+        let release_path = temp.path().join("release");
+        let active_path = temp.path().join("active");
+        let overlap_path = temp.path().join("overlap");
+        let killed_pid_path = temp.path().join("killed-pid");
+        let killed_owner_marker_path = temp.path().join("killed-owner-marker");
+
+        let mut killed = BlockingFakeGhChild::new(
+            blocking_fake_gh_command(
+                &fake_gh,
+                &started_path,
+                &release_path,
+                &active_path,
+                &overlap_path,
+                &killed_pid_path,
+                &killed_owner_marker_path,
+            )
+            .spawn()
+            .expect("spawn first fake gh"),
+        );
+        assert!(
+            wait_for_path(&killed_owner_marker_path, Duration::from_secs(2)).await,
+            "first fake gh must publish its owner marker"
+        );
+        let killed_pid = fs::read_to_string(&killed_pid_path)
+            .expect("read killed fake gh pid")
+            .trim()
+            .parse::<u32>()
+            .expect("parse killed fake gh pid");
+        killed.kill_without_wait();
+        let became_zombie = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let output = gwt_core::process::hidden_command("ps")
+                    .args(["-o", "stat=", "-p", &killed_pid.to_string()])
+                    .output()
+                    .expect("read fake gh process state");
+                if String::from_utf8_lossy(&output.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+
+        fs::write(&release_path, b"release").expect("release recovery fake gh");
+        let recovery = blocking_fake_gh_command(
+            &fake_gh,
+            &started_path,
+            &release_path,
+            &active_path,
+            &overlap_path,
+            &temp.path().join("recovery-pid"),
+            &temp.path().join("recovery-owner-marker"),
+        )
+        .status()
+        .expect("run recovery fake gh");
+        killed.wait();
+
+        assert!(
+            became_zombie,
+            "killed fake gh must remain unreaped for the test"
+        );
+        assert!(recovery.success(), "recovery fake gh must exit cleanly");
+        assert!(
+            !overlap_path.exists(),
+            "an unreaped zombie owner is stale, not an overlap"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_gh_still_reports_overlap_for_a_live_scan_owner() {
+        // The stale-owner recovery above must not weaken the fixture: a second
+        // invocation while the first process is live is a real overlap.
+        let temp = TempDir::new().expect("tempdir");
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let started_path = temp.path().join("started");
+        let release_path = temp.path().join("release");
+        let active_path = temp.path().join("active");
+        let overlap_path = temp.path().join("overlap");
+        let first_pid_path = temp.path().join("first-pid");
+        let first_owner_marker_path = temp.path().join("first-owner-marker");
+
+        let mut first = BlockingFakeGhChild::new(
+            blocking_fake_gh_command(
+                &fake_gh,
+                &started_path,
+                &release_path,
+                &active_path,
+                &overlap_path,
+                &first_pid_path,
+                &first_owner_marker_path,
+            )
+            .spawn()
+            .expect("spawn first fake gh"),
+        );
+        let pid_published = wait_for_path(&first_pid_path, Duration::from_secs(2)).await;
+        let owner_marker_published =
+            wait_for_path(&first_owner_marker_path, Duration::from_secs(2)).await;
+        let owner_path = fs::read_to_string(&first_owner_marker_path)
+            .map(|path| PathBuf::from(path.trim()))
+            .unwrap_or_default();
+        let owner_published = pid_published
+            && owner_marker_published
+            && wait_for_path(&owner_path, Duration::from_secs(2)).await;
+        if !owner_published {
+            fs::write(&release_path, b"release").expect("release first fake gh");
+            first.wait();
+        }
+        assert!(
+            owner_published,
+            "the active marker must publish its owner before contenders inspect it"
+        );
+
+        let mut second = BlockingFakeGhChild::new(
+            blocking_fake_gh_command(
+                &fake_gh,
+                &started_path,
+                &release_path,
+                &active_path,
+                &overlap_path,
+                &temp.path().join("second-pid"),
+                &temp.path().join("second-owner-marker"),
+            )
+            .spawn()
+            .expect("spawn overlapping fake gh"),
+        );
+        let overlap_observed = wait_for_path(&overlap_path, Duration::from_secs(2)).await;
+        fs::write(&release_path, b"release").expect("release fake gh scans");
+        first.wait();
+        second.wait();
+
+        assert!(
+            overlap_observed,
+            "a contender must report an owner that is still alive"
+        );
     }
 
     fn process_exists(pid: u32) -> bool {
@@ -4147,6 +4630,7 @@ exit 0
             body: None,
             url: None,
             readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-15T00:00:00Z".to_string()),
         }
     }
 
@@ -5051,6 +5535,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -5095,6 +5580,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -5139,6 +5625,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -5672,6 +6159,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -5731,6 +6219,7 @@ exit 0
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             "claim-a",
         );
@@ -6302,6 +6791,118 @@ exit 0
         );
     }
 
+    #[test]
+    fn scan_now_driver_persists_legacy_completion_recovery_for_launch_now() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "completion_recovery");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let legacy: crate::IssueMonitorPrefs = serde_json::from_str(
+            r#"{"enabled":true,"max_active_agents":1,"priority_order":[43],"merged_issues":[43]}"#,
+        )
+        .expect("legacy completion prefs");
+        crate::save_issue_monitor_prefs(&prefs_path, &legacy).expect("seed legacy completion");
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
+
+        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("ScanNow live revalidation succeeds");
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Queued)
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted recovery");
+        assert!(
+            persisted.merged_issues.is_empty(),
+            "legacy completion must not revive during persist rebase: {persisted:?}"
+        );
+        assert!(persisted.completion_records.iter().any(|record| {
+            record.issue_number == 43
+                && record.state == crate::issue_monitor::IssueCompletionState::Reopened
+        }));
+    }
+
+    #[test]
+    fn scan_now_driver_preserves_current_completion_as_launch_now_negative_control() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "completion_recovery");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            priority_order: vec![43],
+            merged_issues: vec![43],
+            issue_completion_migration_version:
+                crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+            completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                issue_number: 43,
+                generation: 1,
+                state: crate::issue_monitor::IssueCompletionState::Completed,
+                issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed completion");
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+
+        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("ScanNow negative control succeeds");
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged)
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted completion");
+        assert_eq!(persisted.merged_issues, vec![43]);
+        assert_eq!(persisted.completion_records[0].generation, 1);
+    }
+
     /// Wait until `path` accumulates at least `expected` newline-terminated
     /// markers, so a test can observe repeated fake-gh invocations rather than
     /// only the first one.
@@ -6493,7 +7094,8 @@ exit 0
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let shutdown = Arc::new(DaemonShutdown::new());
-        let worker = spawn_issue_monitor_worker_with_config(
+        let scan_concurrency_probe = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let worker = spawn_issue_monitor_worker_with_config_and_scan_probe(
             scope,
             hub.clone(),
             Arc::clone(&shutdown),
@@ -6501,6 +7103,7 @@ exit 0
                 poll_interval_secs: 1,
                 ..crate::IssueMonitorConfig::default()
             },
+            Arc::clone(&scan_concurrency_probe),
         );
 
         let scan_started = wait_for_path(&scan_started_path, Duration::from_secs(2)).await;
@@ -6549,7 +7152,6 @@ exit 0
             .unwrap_or_default()
             .lines()
             .count();
-        let scan_overlap_while_blocked = overlap_scan_path.exists();
         let disabled_queued = hub
             .publish_issue_monitor_control(DaemonFrame::Event {
                 channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
@@ -6589,6 +7191,22 @@ exit 0
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
 
+        drop(_http_client);
+        drop(_mutation);
+        drop(_overlap);
+        drop(_active);
+        drop(_release);
+        drop(_started);
+        drop(_mode);
+        drop(_gh);
+        drop(_path);
+        drop(_home);
+        drop(_env_lock);
+
+        // Contract assertions intentionally run after the worker has joined,
+        // every process-global env override has been restored, and the shared
+        // env lock has been released. A regression failure therefore cannot
+        // poison unrelated env tests in the same test binary.
         assert!(scan_started, "fake gh scan must be in flight");
         assert!(heartbeat_queued, "worker must receive controls");
         assert!(max_active_queued, "worker must receive controls");
@@ -6610,7 +7228,7 @@ exit 0
             "the blocking scan fixture must observe at least one scan"
         );
         assert!(
-            !scan_overlap_while_blocked,
+            !scan_concurrency_probe.overlap_observed(),
             "should-scan controls and ticks must not overlap fake gh scans; a watchdog may finish \
              one attempt and start its recovery attempt under a heavily loaded full suite"
         );
@@ -10229,6 +10847,7 @@ exit 1
         let prefs_path = temp.path().join("issue-monitor-prefs.json");
 
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42); // a scan-driven transition that must survive restart
         assert!(!prefs_path.exists(), "prefs not written before the scan");
 
@@ -10264,6 +10883,7 @@ exit 1
         );
         assert_eq!(monitor.status_view().active_count, 1);
 
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42);
         assert_eq!(monitor.status_view().active_count, 0);
 
@@ -10297,6 +10917,7 @@ exit 1
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42);
 
         let out = super::scan_join_failure_fallback(
@@ -10359,6 +10980,7 @@ exit 1
         // The daemon's in-memory monitor has NO launch_profile (stale startup)
         // but has a daemon-owned merge completion to persist.
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_merged(42);
         assert!(
             monitor.prefs().launch_profile.is_none(),
@@ -10668,14 +11290,13 @@ exit 1
         let fresh_failure = legacy_git_failure(temp.path());
 
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
-        let (started_tx, started_rx) = mpsc::channel();
+        let (contended_tx, contended_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let writer_path = prefs_path.clone();
         let writer_failure = fresh_failure.clone();
         let writer = thread::spawn(move || {
             let mut monitor = stale_monitor;
-            started_tx.send(()).expect("signal control start");
-            let should_scan = super::apply_issue_monitor_control_with_disk_migration(
+            let commit = super::try_apply_issue_monitor_control_with_disk_migration_observed(
                 &writer_path,
                 &mut monitor,
                 IssueMonitorControl::LaunchFailed {
@@ -10685,26 +11306,39 @@ exit 1
                     materializer_id: None,
                     failure: None,
                 },
+                Duration::from_secs(30),
+                move || {
+                    contended_tx
+                        .send(())
+                        .expect("signal exact sibling-lock contention");
+                },
             );
             done_tx
-                .send((should_scan, monitor))
+                .send((commit, monitor))
                 .expect("return committed control state");
         });
-        started_rx.recv().expect("control writer started");
-
+        contended_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("control transaction reaches the held sibling lock");
         assert!(
-            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
-            "migration adoption, control mutation, and save must share the sibling lock"
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "the contended transaction cannot commit before the sibling lock is released"
         );
 
         write_issue_monitor_prefs_without_lock(&prefs_path, &crate::IssueMonitorPrefs::default());
         FileExt::unlock(&lock).expect("release issue monitor prefs lock");
 
-        let (should_scan, committed_monitor) = done_rx
+        let (commit, committed_monitor) = done_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("control transaction completes after unlock");
         writer.join().expect("control writer thread");
-        assert!(should_scan);
+        assert!(matches!(
+            commit,
+            super::IssueMonitorControlCommit::Committed {
+                should_scan: true,
+                ..
+            }
+        ));
         let committed =
             crate::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
         for prefs in [&committed, &committed_monitor.prefs()] {
@@ -11806,6 +12440,7 @@ exit 1
                 ..crate::IssueMonitorPrefs::default()
             },
         );
+        daemon.record_candidate(sample_issue_monitor_issue(42));
         daemon.record_merged(42);
 
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);

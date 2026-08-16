@@ -428,10 +428,10 @@ fn run_monitor_priority_set<E: CliEnv>(
 
 /// SPEC-3431 FR-006: the PM's launch instruction. It does exactly two things —
 /// move the issue to the head of `priority_order` (prefs is the SOT the scan
-/// driver re-reads) and ask the daemon for one immediate scan. The launch
+/// driver re-reads) and ask the current platform authority for one immediate scan. The launch
 /// itself stays on the Monitor's claim/slot path, so this cannot produce a
-/// duplicate agent. Without a reachable daemon the reorder still lands and the
-/// next scheduled scan picks it up; the response says which happened.
+/// duplicate agent. Priority persistence and scan delivery are reported
+/// separately; no unacknowledged scheduler is presented as future delivery.
 fn run_monitor_launch_now<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -447,24 +447,21 @@ fn run_monitor_launch_now<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
 
-    let payload = crate::runtime_daemon_events::issue_monitor_payload(
-        "control",
-        serde_json::json!({ "scan_now": {} }),
-        std::process::id(),
-    );
-    let scan_requested = publish_monitor_config_set(&project_root, payload).is_ok();
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
 
     out.push_str(
         &serde_json::json!({
             "number": number,
             "priority_order": prefs.priority_order,
-            "scan_requested": scan_requested,
-            "scan_delivery": if scan_requested { "immediate" } else { "next-scheduled-scan" },
+            "priority_updated": true,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(0)
+    Ok(if delivery.scan_requested { 0 } else { 1 })
 }
 
 /// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
@@ -611,12 +608,7 @@ fn run_monitor_failover<E: CliEnv>(
         }
     };
 
-    let payload = crate::runtime_daemon_events::issue_monitor_payload(
-        "control",
-        serde_json::json!({ "scan_now": {} }),
-        std::process::id(),
-    );
-    let scan_requested = publish_monitor_config_set(&project_root, payload).is_ok();
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
 
     out.push_str(
         &serde_json::json!({
@@ -626,8 +618,9 @@ fn run_monitor_failover<E: CliEnv>(
             "stopped_window_id": stopped_window_id,
             "priority_order": prefs.priority_order,
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| &profile.agent_id),
-            "scan_requested": scan_requested,
-            "scan_delivery": if scan_requested { "immediate" } else { "next-scheduled-scan" },
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
             "pane_teardown": if stopped_window_id.is_some() {
                 "close the returned window with pane.close — it is no longer bound to the issue, so the close cannot requeue it"
             } else {
@@ -637,7 +630,63 @@ fn run_monitor_failover<E: CliEnv>(
         .to_string(),
     );
     out.push('\n');
+    // The failover mutation itself is complete even when the follow-up scan
+    // authority is unavailable. Keep the established command success
+    // contract while reporting scan delivery truthfully in the JSON fields.
     Ok(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IssueMonitorScanDelivery {
+    scan_requested: bool,
+    scan_delivery: &'static str,
+    scan_error: Option<String>,
+}
+
+fn issue_monitor_scan_delivery(result: Result<(), String>) -> IssueMonitorScanDelivery {
+    match result {
+        Ok(()) => IssueMonitorScanDelivery {
+            scan_requested: true,
+            scan_delivery: "immediate",
+            scan_error: None,
+        },
+        Err(error) => IssueMonitorScanDelivery {
+            scan_requested: false,
+            scan_delivery: "unavailable",
+            scan_error: Some(error),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "scan_now": {} }),
+        std::process::id(),
+    );
+    publish_monitor_config_set(project_root, payload).map_err(|error| match error {
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(_) => {
+            "daemon_control_unavailable".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_) => {
+            "scan_delivery_unknown".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Busy(_) => {
+            "scan_request_busy".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked => {
+            "authority_recovery_blocked".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_) => {
+            "scan_request_rejected".to_string()
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    super::pane::request_issue_monitor_scan_now(project_root)
 }
 
 /// SPEC-3431 FR-031: a stable, greppable name for each refusal.
@@ -1143,6 +1192,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 state
                 url
                 body
+                mergedAt
               }
             }
           }
@@ -1155,6 +1205,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 state
                 url
                 body
+                mergedAt
               }
             }
           }
@@ -1250,14 +1301,22 @@ pub(crate) fn parse_linked_pr_nodes(
         let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
+        let merged_at = pr
+            .get("mergedAt")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         if let Some(existing) = index.get(&pr_number) {
             out[*existing].will_close_target |= will_close_target;
+            if out[*existing].merged_at.is_none() {
+                out[*existing].merged_at = merged_at;
+            }
             continue;
         }
         index.insert(pr_number, out.len());
         out.push(LinkedPrSummary {
             number: pr_number,
             will_close_target,
+            merged_at,
             title: pr
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -1356,7 +1415,7 @@ mod tests {
         // body (`Closes #N` — the gwt PR-body contract).
         let value = serde_json::json!({"data":{"repository":{"issue":{"timelineItems":{"nodes":[
             {"__typename":"CrossReferencedEvent","willCloseTarget":true,
-             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":""}},
+             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":"","mergedAt":"2026-08-10T00:00:00Z"}},
             {"__typename":"CrossReferencedEvent","willCloseTarget":false,
              "source":{"__typename":"PullRequest","number":11,"title":"refs only","state":"MERGED","url":"u11","body":"Related to #42 (no closing keyword)"}},
             {"__typename":"ConnectedEvent",
@@ -1371,6 +1430,7 @@ mod tests {
         let prs = parse_linked_pr_nodes(&value, 42);
         let get = |n: u64| prs.iter().find(|pr| pr.number == n).expect("pr");
         assert!(get(10).will_close_target, "GraphQL willCloseTarget");
+        assert_eq!(get(10).merged_at.as_deref(), Some("2026-08-10T00:00:00Z"));
         assert!(!get(11).will_close_target, "plain reference must NOT close");
         assert!(
             get(12).will_close_target,
@@ -1496,6 +1556,257 @@ mod tests {
     }
 
     #[test]
+    fn immediate_scan_delivery_never_claims_an_unacknowledged_schedule() {
+        let immediate = issue_monitor_scan_delivery(Ok(()));
+        assert!(immediate.scan_requested);
+        assert_eq!(immediate.scan_delivery, "immediate");
+        assert_eq!(immediate.scan_error, None);
+
+        let unavailable = issue_monitor_scan_delivery(Err("gui_command_unavailable".to_string()));
+        assert!(!unavailable.scan_requested);
+        assert_eq!(unavailable.scan_delivery, "unavailable");
+        assert_eq!(
+            unavailable.scan_error.as_deref(),
+            Some("gui_command_unavailable")
+        );
+        assert_ne!(unavailable.scan_delivery, "next-scheduled-scan");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_now_persists_priority_and_reports_authenticated_gui_ack() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use gwt_core::test_support::ScopedEnvVar;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        let expected_scope = gwt_core::paths::project_scope_hash(&repo)
+            .as_str()
+            .to_string();
+        let (address_tx, address_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build Windows scan mock runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind Windows scan mock");
+                address_tx
+                    .send(listener.local_addr().expect("Windows scan mock address"))
+                    .expect("publish Windows scan mock address");
+                let (stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("Windows launch_now must connect to the GUI scan authority")
+                        .expect("accept scan client");
+                let mut socket = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio_tungstenite::accept_hdr_async(
+                        stream,
+                        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                            assert_eq!(request.uri().path(), "/internal/pane-ws");
+                            assert_eq!(
+                                request
+                                    .headers()
+                                    .get(
+                                        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+                                    )
+                                    .and_then(|value| value.to_str().ok()),
+                                Some("Bearer windows-scan-capability")
+                            );
+                            Ok(response)
+                        },
+                    ),
+                )
+                .await
+                .expect("Windows scan client must complete its WebSocket handshake")
+                .expect("accept authenticated scan WebSocket");
+                let message =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                        .await
+                        .expect("Windows scan client must send its request frame")
+                        .expect("scan request frame")
+                        .expect("valid scan request frame");
+                let text = message.into_text().expect("text scan request");
+                let request: serde_json::Value =
+                    serde_json::from_str(text.as_ref()).expect("scan request JSON");
+                assert_eq!(request["kind"], "agent_issue_monitor_scan_now");
+                assert_eq!(request["expected_project_scope"], expected_scope);
+                assert!(
+                    request.get("project_root").is_none(),
+                    "the Windows request must not claim project authority"
+                );
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "kind": "issue_monitor_scan_request_result",
+                            "accepted": true,
+                            "reason": null,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send immediate scan acknowledgement");
+            });
+        });
+        let address = address_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("Windows scan mock ready");
+        let pane_url = format!("ws://{address}/internal/pane-ws");
+        let _pane_url = ScopedEnvVar::set(gwt_agent::GWT_PANE_WS_URL_ENV, &pane_url);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "windows-scan-capability",
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("Windows launch_now result");
+        server.join().expect("Windows scan mock thread");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 0);
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], true);
+        assert_eq!(result["scan_delivery"], "immediate");
+        assert_eq!(result["scan_error"], serde_json::Value::Null);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order,
+            vec![42, 7]
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_now_reports_gui_unavailable_without_claiming_future_delivery() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("Windows launch_now unavailable result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1);
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], false);
+        assert_eq!(result["scan_delivery"], "unavailable");
+        assert_eq!(result["scan_error"], "gui_command_unavailable");
+        assert_ne!(result["scan_delivery"], "next-scheduled-scan");
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order,
+            vec![42, 7]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_now_persists_priority_but_fails_closed_without_scan_authority() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1, "unaccepted immediate delivery is not success");
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], false);
+        assert_eq!(result["scan_delivery"], "unavailable");
+        assert_eq!(result["scan_error"], "daemon_control_unavailable");
+        assert!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order
+                .starts_with(&[42]),
+            "the partial priority update remains explicit and durable"
+        );
+    }
+
+    #[test]
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -1562,12 +1873,75 @@ mod tests {
                 // regardless of whether the daemon happens to be publishing.
                 "needs_human": [],
                 "inbox": [
-                    { "issue_number": 2, "state": "queued" },
-                    { "issue_number": 1, "state": "queued" },
+                    {
+                        "issue_number": 2,
+                        "state": "queued",
+                        "github_state": "open",
+                        "issue_updated_at": "2026-08-03T00:00:00Z",
+                        "readiness": "not_applicable",
+                        "recoverable_merged": false,
+                    },
+                    {
+                        "issue_number": 1,
+                        "state": "queued",
+                        "github_state": "open",
+                        "issue_updated_at": "2026-08-03T00:00:00Z",
+                        "readiness": "not_applicable",
+                        "recoverable_merged": false,
+                    },
                 ],
                 "last_scan_at": "gwtd-status",
             })
         );
+    }
+
+    #[test]
+    fn issue_monitor_status_exposes_recoverable_legacy_merged_evidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version: 0,
+                completion_records: Vec::new(),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save legacy prefs");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(42),
+                title: "Still open".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                updated_at: UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write cache");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(status["inbox"][0]["issue_number"], 42);
+        assert_eq!(status["inbox"][0]["github_state"], "open");
+        assert_eq!(status["inbox"][0]["state"], "merged");
+        assert_eq!(status["inbox"][0]["recoverable_merged"], true);
+        assert_eq!(status["inbox"][0]["completion_reason"], "legacy_unverified");
     }
 
     #[test]
@@ -2127,6 +2501,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://github.com/akiojin/gwt/pull/128".to_string(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         let linked =
