@@ -1743,6 +1743,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     scan_budget: std::time::Duration,
     commit_budget: std::time::Duration,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
+    // Issue #3609: this runs on the worker thread `enqueue_issue_monitor_scan_worker`
+    // spawned, so the prefs path is resolved from the process-global `HOME` here, not
+    // from the caller's thread. A test that isolates its gwt home with the
+    // `ScopedGwtHome` thread-local pin cannot reach this thread; such tests must hold
+    // `env_test_lock()` and repoint `HOME` instead. The rule is enforced by
+    // `crates/gwt/tests/bin_gwt_home_isolation_contract_test.rs`.
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
 
     // Cheap authority probe before any remote I/O. The lease is intentionally

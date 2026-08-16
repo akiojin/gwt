@@ -1048,6 +1048,24 @@ fn issue_cache_root(repo_path: &Path) -> PathBuf {
     gwt_cache_dir().join("issues").join(repo_hash.as_str())
 }
 
+/// Issue #3609: the issue-link cache handed to `AppRuntime`, derived from the
+/// caller's temp root the way `sessions_dir` / `log_dir` / `session_state_path`
+/// already are.
+///
+/// Resolving `gwt_cache_dir()` here instead made the shared runtime fixture
+/// read the process-global `HOME` at construction time, so the 200+ tests that
+/// build a runtime without owning the home inherited whatever tempdir a
+/// parallel test had installed — the mechanism behind #3411 / #3414 / #3601.
+///
+/// The layout mirrors an isolated gwt home (`<home>/.gwt/cache`) on purpose:
+/// tests that seed the store through [`write_issue_link_store`] reach it via
+/// `gwt_cache_dir()`, because `knowledge_bridge::load_linked_branches` still
+/// resolves that path itself rather than taking the runtime's field. Callers
+/// that pin their home to the same root therefore see one cache, not two.
+fn issue_link_cache_dir_for(temp_root: &Path) -> PathBuf {
+    temp_root.join(".gwt").join("cache")
+}
+
 fn write_issue_link_store(repo_path: &Path, branches: HashMap<String, u64>) {
     let repo_hash = detect_repo_hash(repo_path).expect("repo hash");
     let path = gwt_cache_dir()
@@ -3375,7 +3393,7 @@ fn sample_runtime_with_events(
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
-        issue_link_cache_dir: gwt_cache_dir(),
+        issue_link_cache_dir: issue_link_cache_dir_for(temp_root),
         knowledge_related_snapshot: Default::default(),
         knowledge_monitor_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
@@ -22731,7 +22749,12 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 /// so this still cannot loop.
 #[test]
 fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    // Issue #3609: the other 387 acquisitions in this binary recover from a
+    // poisoned mutex. `expect` here turned any unrelated panic under the lock
+    // into a second, misleading failure in the same run.
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let missing_pin = root.path().join("missing/gwtd");
