@@ -159,7 +159,33 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
         end_own_chain(&mut state);
         return HookOutput::Silent;
     }
-    let interval_secs = pm_registry::load_pm_prefs(&project_state.join("pm.json"))
+    // Issue #3607: the resident loop belongs to the *registered* PM. This gate
+    // keys on the worktree's path shape alone, so a PM that `pm.stop` retired —
+    // or that another PM superseded — otherwise kept forcing itself into the
+    // next cycle and kept rewriting Issue Monitor state a second PM was also
+    // writing. Deregistration is the durable, GUI-free way to end that, so it
+    // has to be observable here.
+    //
+    // A caller with no ambient identity is left alone: the loop cannot be
+    // attributed to anyone, and retiring a healthy PM over a missing
+    // environment variable would be worse than the duplicate this prevents.
+    let pm_prefs_path = project_state.join("pm.json");
+    if let Some(caller_session) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        if !pm_registry::session_is_registered_pm(&pm_prefs_path, &caller_session) {
+            tracing::info!(
+                session_id = %caller_session,
+                worktree = %worktree.display(),
+                "resident PM loop released: this Session is no longer the registered PM"
+            );
+            end_own_chain(&mut state);
+            return HookOutput::Silent;
+        }
+    }
+    let interval_secs = pm_registry::load_pm_prefs(&pm_prefs_path)
         .map(|prefs| prefs.settings.loop_interval_secs_clamped())
         .unwrap_or(60);
     if !has_unconsumed_observations && state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
@@ -203,7 +229,26 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
-    fn pm_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    /// The Session the fixture's PM is registered as. The loop gate reads the
+    /// ambient `GWT_SESSION_ID`, which is process-global, so every fixture user
+    /// must pin it under the env lock rather than inherit whatever another
+    /// test left behind.
+    const FIXTURE_PM_SESSION: &str = "pm-session-fixture";
+
+    struct PmCallerGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _session: ScopedEnvVar,
+    }
+
+    fn pm_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        PmCallerGuard,
+    ) {
+        let lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
@@ -215,23 +260,99 @@ mod tests {
                 enabled: true,
                 ..crate::IssueMonitorPrefs::default()
             };
-            let prefs_path = worktree
+            let project_state = worktree
                 .parent()
                 .and_then(Path::parent)
                 .expect("gwt project dir")
-                .join("project-state/issue-monitor.json");
-            std::fs::create_dir_all(prefs_path.parent().expect("parent")).expect("state dir");
-            crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+                .join("project-state");
+            std::fs::create_dir_all(&project_state).expect("state dir");
+            crate::save_issue_monitor_prefs(&project_state.join("issue-monitor.json"), &prefs)
+                .expect("seed prefs");
+            crate::pm_registry::save_pm_prefs(
+                &project_state.join("pm.json"),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: FIXTURE_PM_SESSION.to_string(),
+                        agent_id: "claude".to_string(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: Some("2026-08-08T00:00:00Z".to_string()),
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    settings: crate::pm_registry::PmSettings::default(),
+                },
+            )
+            .expect("seed PM registration");
             worktree
         };
-        (home, repo, worktree)
+        let guard = PmCallerGuard {
+            _lock: lock,
+            _session: ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, FIXTURE_PM_SESSION),
+        };
+        (home, repo, worktree, guard)
+    }
+
+    /// Issue #3607 AC-5: `pm.stop` clears the registration, and that has to
+    /// actually quiet the PM. The Stop gate keys only on the worktree's path
+    /// shape, so without this a retired orphan kept forcing itself into the
+    /// next cycle — and kept rewriting the Issue Monitor state a second PM was
+    /// also writing.
+    #[test]
+    fn a_deregistered_session_stops_driving_the_resident_loop() {
+        let (home, _repo, worktree, _caller) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("gwt project dir")
+            .join("project-state");
+        crate::pm_registry::deregister_pm(&project_state.join("pm.json"), FIXTURE_PM_SESSION)
+            .expect("deregister");
+
+        let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
+
+        assert!(
+            matches!(output, HookOutput::Silent),
+            "a retired PM must stop looping, got {output:?}"
+        );
+    }
+
+    /// A session that another PM superseded must not keep driving cycles
+    /// either — that is the two-PM state itself.
+    #[test]
+    fn a_superseded_session_stops_driving_the_resident_loop() {
+        let (home, _repo, worktree, _caller) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+        let _other = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "some-other-session");
+
+        let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
+
+        assert!(
+            matches!(output, HookOutput::Silent),
+            "only the registered PM drives the loop, got {output:?}"
+        );
+    }
+
+    /// Without an ambient identity the gate cannot attribute the loop to
+    /// anyone, so it must keep the pre-#3607 behaviour rather than silently
+    /// retiring a healthy PM.
+    #[test]
+    fn a_caller_without_an_ambient_session_id_keeps_looping() {
+        let (home, _repo, worktree, _caller) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+        let _unset = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            HookOutput::StopBlock { .. }
+        ));
     }
 
     /// FR-012: a stopping PM is turned around into the next cycle while the
     /// Monitor is enabled — this is what converts one-shot into resident.
     #[test]
     fn pm_stop_continues_the_resident_loop() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
         let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
@@ -330,7 +451,7 @@ mod tests {
     /// contact; user contact re-arms.
     #[test]
     fn pm_loop_floor_cap_and_user_reset_bound_the_continuations() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
         assert!(matches!(
@@ -363,7 +484,7 @@ mod tests {
     /// Monitor off = parked project; and no other worktree is ever driven.
     #[test]
     fn disabled_monitor_and_non_pm_worktrees_stay_silent() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
         let prefs_path = worktree
             .parent()
@@ -390,7 +511,7 @@ mod tests {
     /// keeps flowing across `stop_hook_active` stops.
     #[test]
     fn foreign_forced_continuations_are_not_ridden_and_own_chain_flows() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
         // A foreign chain: some other gate forced the previous continuation.
@@ -434,7 +555,7 @@ mod tests {
     /// path defers to it) and re-arms the budget.
     #[test]
     fn user_prompt_submit_stamps_the_conversation_clock() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
         assert!(matches!(
@@ -461,7 +582,7 @@ mod tests {
     /// not retire the PM.
     #[test]
     fn park_counting_holds_while_unconsumed_observations_remain() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
         let state_path =
             pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).expect("pm loop state path");
@@ -516,7 +637,7 @@ mod tests {
     /// the empty-cycle brake is unchanged.
     #[test]
     fn park_counting_still_caps_truly_empty_cycles() {
-        let (home, _repo, worktree) = pm_fixture();
+        let (home, _repo, worktree, _caller) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
         let mut minute = 0;
