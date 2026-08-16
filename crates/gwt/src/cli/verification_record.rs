@@ -6150,7 +6150,6 @@ pub(crate) mod tests {
             let descendant = exact_path
                 .strip_prefix(&ancestor_path)
                 .expect("exact shard descends from canonical ancestor");
-            fs::remove_dir_all(&ancestor_path).expect("remove canonical ancestor directory");
             let external = tempfile::tempdir().expect("external event store");
             let external_shard = external.path().join(descendant);
             fs::create_dir_all(external_shard.parent().expect("external shard parent"))
@@ -6158,6 +6157,17 @@ pub(crate) mod tests {
             let mut bytes = serde_json::to_vec(&event).expect("serialize external exact shard");
             bytes.push(b'\n');
             fs::write(&external_shard, bytes).expect("write external exact shard");
+            // The digest bucket of an event that was never written does not
+            // exist yet, so only the ancestors the fixture materialized can be
+            // removed before the symlink takes their place.
+            match fs::remove_dir_all(&ancestor_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir_all(ancestor_path.parent().expect("canonical ancestor parent"))
+                        .expect("create canonical ancestor parent");
+                }
+                Err(error) => panic!("remove canonical ancestor {ancestor}: {error}"),
+            }
             symlink(external.path(), &ancestor_path).expect("symlink canonical ancestor");
 
             let error = save_work_event_settlement_record(&fixture.repo, &session_id, false)
