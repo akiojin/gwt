@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION: u32 = 1;
 
@@ -134,6 +135,16 @@ pub struct AgentWorkTerminalizationRequest {
     pub claimed_session_id: String,
     pub observation: AgentRuntimeObservation,
     pub terminal_kind: AgentWorkTerminalKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentBuildAbortTerminalizationRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub owner_number: u64,
+    pub reason: String,
+    pub observation: AgentRuntimeObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,53 +309,6 @@ pub fn prepare_resume_producing_authority(
             None
         }
     }
-}
-
-/// Recover the execution binding for an exact persisted-Session relaunch.
-///
-/// Unlike [`continue_authenticated_execution`], this operation is identity
-/// recovery rather than an execution lifecycle transition. It never creates a
-/// continuation attempt or successor generation, and it accepts terminal
-/// lifecycle heads only when the durable Session is still the exact current
-/// writer for that owner.
-pub fn prepare_exact_relaunch_execution_authority(
-    project_root: &Path,
-    predecessor_session_id: &str,
-) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
-    let authority =
-        evaluate_authenticated_execution_continuation(project_root, predecessor_session_id)?;
-    if authority.exact_unbound {
-        return Err(execution_binding_error(
-            "exact_relaunch_requires_existing_binding",
-        ));
-    }
-
-    let expected_generation_id = authority.current_binding.generation_id.clone();
-    let binding = rebind_session_to_current_execution(
-        &authority.worktree,
-        authority.owner,
-        &authority.session,
-        Some(&expected_generation_id),
-    )?;
-
-    let revalidated =
-        evaluate_authenticated_execution_continuation(project_root, predecessor_session_id)?;
-    if revalidated.exact_unbound
-        || revalidated.session.execution_binding.as_ref() != Some(&binding)
-        || revalidated.current_binding != binding.identity
-    {
-        return Err(execution_binding_error(
-            "exact_relaunch_binding_readback_mismatch",
-        ));
-    }
-
-    tracing::info!(
-        session_id = predecessor_session_id,
-        generation_id = %binding.identity.generation_id,
-        status = ?revalidated.record.status,
-        "exact relaunch recovered current execution authority"
-    );
-    Ok(binding)
 }
 
 struct ExecutionContinuationAuthority {
@@ -752,7 +716,6 @@ pub fn continue_authenticated_execution(
         exact_unbound,
         current_binding,
     } = authority;
-
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
         &worktree,
         owner,
@@ -1115,6 +1078,63 @@ fn validate_current_execution_binding_authority(
         ));
     }
     Ok(validated)
+}
+
+fn validate_blocked_build_abort_execution_binding_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    terminal_kind: AgentWorkTerminalKind,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    let (validated, worktree, owner) = validate_execution_binding_authority_structure(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+    let blocked_build_abort = terminal_kind == AgentWorkTerminalKind::Discarded
+        && crate::cli::execution_state::blocked_build_abort_execution_binding_matches(
+            &worktree,
+            owner,
+            authenticated_session_id,
+            &validated.identity,
+        )
+        .map_err(|_| execution_binding_error("blocked_build_abort_state_unreadable"))?;
+    if !blocked_build_abort {
+        return Err(execution_binding_error(
+            "active_execution_binding_not_current",
+        ));
+    }
+    Ok(validated)
+}
+
+#[derive(Clone, Copy)]
+enum BoundWorkTerminalizationAuthority {
+    Active,
+    BlockedBuildAbort,
+}
+
+fn validate_bound_work_terminalization_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    terminal_kind: AgentWorkTerminalKind,
+    authority: BoundWorkTerminalizationAuthority,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    match authority {
+        BoundWorkTerminalizationAuthority::Active => validate_current_execution_binding_authority(
+            authenticated_project_root,
+            authenticated_session_id,
+            authenticated_binding,
+        ),
+        BoundWorkTerminalizationAuthority::BlockedBuildAbort => {
+            validate_blocked_build_abort_execution_binding_authority(
+                authenticated_project_root,
+                authenticated_session_id,
+                authenticated_binding,
+                terminal_kind,
+            )
+        }
+    }
 }
 
 fn validate_prepared_execution_binding_authority(
@@ -1665,8 +1685,69 @@ pub fn apply_bound_authenticated_work_terminalization(
         authenticated_binding,
         None,
         request,
+        BoundWorkTerminalizationAuthority::Active,
         |_| {},
     )
+}
+
+pub fn apply_bound_authenticated_blocked_build_abort_terminalization(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    request: AgentBuildAbortTerminalizationRequest,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION
+        || request.owner_number == 0
+        || request.reason.trim().is_empty()
+        || request.reason.trim() != request.reason
+        || request.reason.len() > 4096
+        || request.reason.chars().any(char::is_control)
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "Blocked build abort request is invalid",
+        ));
+    }
+    validate_mutation_session_id(authenticated_session_id)?;
+    if request.claimed_session_id != authenticated_session_id
+        || request.owner_number != authenticated_binding.owner_number
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
+            "Blocked build abort claim does not match the authenticated launch",
+        ));
+    }
+    let session_path =
+        gwt_core::paths::gwt_sessions_dir().join(format!("{authenticated_session_id}.toml"));
+    let session = Session::load(&session_path)
+        .map_err(|_| execution_binding_error("blocked_build_abort_session_unreadable"))?;
+    let expected = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|_| execution_binding_error("blocked_build_abort_identity_unreadable"))?
+        .filter(|identity| identity.execution_binding == *authenticated_binding)
+        .ok_or_else(|| execution_binding_error("blocked_build_abort_identity_mismatch"))?;
+    let terminal_request = AgentWorkTerminalizationRequest {
+        schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+        claimed_session_id: request.claimed_session_id,
+        observation: request.observation,
+        terminal_kind: AgentWorkTerminalKind::Discarded,
+    };
+    crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &expected,
+        |_| {
+            apply_bound_authenticated_work_terminalization_inner(
+                authenticated_project_root,
+                authenticated_session_id,
+                authenticated_binding,
+                None,
+                terminal_request,
+                BoundWorkTerminalizationAuthority::BlockedBuildAbort,
+                |_| {},
+            )
+        },
+    )
+    .map_err(|_| execution_binding_error("blocked_build_abort_lease_unavailable"))?
+    .ok_or_else(|| execution_binding_error("blocked_build_abort_authority_changed"))?
 }
 
 pub(crate) fn apply_bound_authenticated_work_terminalization_for_exact_work(
@@ -1683,6 +1764,26 @@ pub(crate) fn apply_bound_authenticated_work_terminalization_for_exact_work(
         authenticated_binding,
         Some((expected_work_id, policy)),
         request,
+        BoundWorkTerminalizationAuthority::Active,
+        |_| {},
+    )
+}
+
+fn apply_bound_authenticated_blocked_build_abort_for_exact_work(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    expected_work_id: &str,
+    policy: gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
+    request: AgentWorkTerminalizationRequest,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
+    apply_bound_authenticated_work_terminalization_inner(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+        Some((expected_work_id, policy)),
+        request,
+        BoundWorkTerminalizationAuthority::BlockedBuildAbort,
         |_| {},
     )
 }
@@ -1699,6 +1800,7 @@ fn apply_authenticated_work_terminalization_inner(
         None,
         None,
         request,
+        BoundWorkTerminalizationAuthority::Active,
         after_resolve,
     )
 }
@@ -1712,6 +1814,7 @@ fn apply_bound_authenticated_work_terminalization_inner(
         gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
     )>,
     request: AgentWorkTerminalizationRequest,
+    authority: BoundWorkTerminalizationAuthority,
     after_resolve: impl FnOnce(&SessionBoundWorkspaceTerminalTarget),
 ) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
     apply_authenticated_work_terminalization_with_binding(
@@ -1720,6 +1823,7 @@ fn apply_bound_authenticated_work_terminalization_inner(
         Some(authenticated_binding),
         exact_work,
         request,
+        authority,
         after_resolve,
     )
 }
@@ -1733,6 +1837,7 @@ fn apply_authenticated_work_terminalization_with_binding(
         gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
     )>,
     request: AgentWorkTerminalizationRequest,
+    authority: BoundWorkTerminalizationAuthority,
     after_resolve: impl FnOnce(&SessionBoundWorkspaceTerminalTarget),
 ) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
     if request.schema_version != AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION {
@@ -1749,10 +1854,12 @@ fn apply_authenticated_work_terminalization_with_binding(
         ));
     }
     if let Some(binding) = authenticated_binding {
-        validate_current_execution_binding_authority(
+        validate_bound_work_terminalization_authority(
             authenticated_project_root,
             authenticated_session_id,
             binding,
+            request.terminal_kind,
+            authority,
         )?;
     }
 
@@ -1768,16 +1875,19 @@ fn apply_authenticated_work_terminalization_with_binding(
             gwt_core::workspace_projection::WorkCloseKind::Discarded
         }
     };
+    let terminal_kind = request.terminal_kind;
     let observation = request.observation;
     let mut revalidation_error_code = None;
     let revalidate =
         |_: &gwt_core::workspace_projection::WorkspaceProjection,
          _: &gwt_core::workspace_projection::WorkItemsProjection| {
             if let Some(binding) = authenticated_binding {
-                validate_current_execution_binding_authority(
+                validate_bound_work_terminalization_authority(
                     authenticated_project_root,
                     authenticated_session_id,
                     binding,
+                    terminal_kind,
+                    authority,
                 )
                 .map_err(|error| {
                     revalidation_error_code = Some(error.code);
@@ -2193,6 +2303,37 @@ pub(crate) struct BoundTerminalCompatibilityAuthority {
     disposition: BoundTerminalCompatibilityDisposition,
 }
 
+impl BoundTerminalCompatibilityAuthority {
+    pub(crate) fn requires_blocked_build_abort_bridge(&self) -> Result<bool> {
+        if self.requested_terminal != AgentWorkTerminalKind::Discarded {
+            return Ok(false);
+        }
+        let owner = execution_owner_from_session_binding(&self.identity.execution_binding)
+            .map_err(mutation_error)?;
+        crate::cli::execution_state::blocked_build_abort_execution_binding_matches(
+            &self.identity.worktree_path,
+            owner,
+            &self.identity.session_id,
+            &self.identity.execution_binding.identity,
+        )
+        .map_err(|error| mutation_error(error.to_string()))
+    }
+}
+
+fn execution_owner_from_session_binding(
+    binding: &SessionExecutionBinding,
+) -> std::result::Result<crate::cli::execution_state::ExecutionOwnerKey, String> {
+    let kind = match binding.owner_kind.as_str() {
+        "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => return Err("terminal compatibility authority has an invalid owner".to_string()),
+    };
+    Ok(crate::cli::execution_state::ExecutionOwnerKey {
+        kind,
+        number: binding.owner_number,
+    })
+}
+
 /// Snapshot the exact canonical Work authority before an authenticated Host
 /// terminalization request. Only a nonterminal Work or the already-requested
 /// terminal is eligible; opposite and ambiguous canonical terminals fail
@@ -2202,7 +2343,12 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
     session_id: &str,
     requested_terminal: AgentWorkTerminalKind,
 ) -> Result<Option<BoundTerminalCompatibilityAuthority>> {
-    let Some(recovery) = validated_workspace_recovery_session(invocation_cwd, session_id)? else {
+    let Some(recovery) = validated_workspace_recovery_session_with_terminal_kind(
+        invocation_cwd,
+        session_id,
+        Some(requested_terminal),
+    )?
+    else {
         return Ok(None);
     };
     let ValidatedWorkspaceEnsureSession::Host(recovery) = recovery else {
@@ -2307,42 +2453,47 @@ pub(crate) fn continue_bound_terminal_compatibility(
     };
     let session_path =
         gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", expected_identity.session_id));
-    let result =
-        crate::cli::execution_state::with_current_active_session_execution_identity_global_lease(
+    let use_blocked_build_abort =
+        authority
+            .requires_blocked_build_abort_bridge()
+            .map_err(|_| {
+                "terminal compatibility continuation could not inspect Blocked abort authority"
+                    .to_string()
+            })?;
+    let result = if use_blocked_build_abort {
+        crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &expected_identity,
-            |_| -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
-                let current = Session::load(&session_path).map_err(|_| {
-                    "terminal compatibility continuation could not reload the durable Session"
-                        .to_string()
-                })?;
-                if current.runtime_target != LaunchRuntimeTarget::Host
-                    || current.docker_runtime_binding.is_some()
-                    || gwt_agent::SessionExecutionIdentity::from_session(&current)
-                        .ok()
-                        .flatten()
-                        .as_ref()
-                        != Some(&expected_identity)
-                {
-                    return Err(
-                        "terminal compatibility continuation authority changed before commit"
-                            .to_string(),
-                    );
-                }
-                apply_bound_authenticated_work_terminalization_for_exact_work(
+            |_| {
+                apply_terminal_compatibility_under_lease(
+                    &session_path,
+                    &expected_identity,
                     &project_state_root,
-                    &current.id,
-                    &expected_identity.execution_binding,
                     &work_id,
                     policy,
                     request,
+                    true,
                 )
-                .map_err(|error| {
-                    format!("terminal compatibility continuation was refused: {error}")
-                })
             },
         )
-        .map_err(|_| {
+    } else {
+        crate::cli::execution_state::with_current_active_session_execution_identity_global_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected_identity,
+            |_| {
+                apply_terminal_compatibility_under_lease(
+                    &session_path,
+                    &expected_identity,
+                    &project_state_root,
+                    &work_id,
+                    policy,
+                    request,
+                    false,
+                )
+            },
+        )
+    }
+    .map_err(|_| {
             "terminal compatibility continuation could not validate the durable authority"
                 .to_string()
         })?;
@@ -2359,6 +2510,52 @@ pub(crate) fn continue_bound_terminal_compatibility(
     }
 }
 
+fn apply_terminal_compatibility_under_lease(
+    session_path: &Path,
+    expected_identity: &gwt_agent::SessionExecutionIdentity,
+    project_state_root: &Path,
+    work_id: &str,
+    policy: gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
+    request: AgentWorkTerminalizationRequest,
+    blocked_build_abort: bool,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+    let current = Session::load(session_path).map_err(|_| {
+        "terminal compatibility continuation could not reload the durable Session".to_string()
+    })?;
+    if current.runtime_target != LaunchRuntimeTarget::Host
+        || current.docker_runtime_binding.is_some()
+        || gwt_agent::SessionExecutionIdentity::from_session(&current)
+            .ok()
+            .flatten()
+            .as_ref()
+            != Some(expected_identity)
+    {
+        return Err(
+            "terminal compatibility continuation authority changed before commit".to_string(),
+        );
+    }
+    let result = if blocked_build_abort {
+        apply_bound_authenticated_blocked_build_abort_for_exact_work(
+            project_state_root,
+            &current.id,
+            &expected_identity.execution_binding,
+            work_id,
+            policy,
+            request,
+        )
+    } else {
+        apply_bound_authenticated_work_terminalization_for_exact_work(
+            project_state_root,
+            &current.id,
+            &expected_identity.execution_binding,
+            work_id,
+            policy,
+            request,
+        )
+    };
+    result.map_err(|error| format!("terminal compatibility continuation was refused: {error}"))
+}
+
 /// Load the exact durable Session identity used to recover a missing Work
 /// projection registration. Recovery intentionally stops before resolving a
 /// Work id: `workspace.ensure` is the operation that materializes that missing
@@ -2367,6 +2564,14 @@ pub(crate) fn continue_bound_terminal_compatibility(
 pub(crate) fn validated_workspace_recovery_session(
     invocation_cwd: &Path,
     session_id: &str,
+) -> Result<Option<ValidatedWorkspaceEnsureSession>> {
+    validated_workspace_recovery_session_with_terminal_kind(invocation_cwd, session_id, None)
+}
+
+fn validated_workspace_recovery_session_with_terminal_kind(
+    invocation_cwd: &Path,
+    session_id: &str,
+    terminal_kind: Option<AgentWorkTerminalKind>,
 ) -> Result<Option<ValidatedWorkspaceEnsureSession>> {
     gwt_agent::validate_session_id_path_component(session_id)
         .map_err(|error| mutation_error(format!("invalid or unsafe Session id: {error}")))?;
@@ -2404,12 +2609,38 @@ pub(crate) fn validated_workspace_recovery_session(
         ))
     })?;
     let identity = validate_host_session_identity(recovery_context.worktree(), &session)?;
-    validate_current_execution_binding_authority(&identity.project_state_root, session_id, binding)
-        .map_err(|error| {
-            mutation_error(format!(
+    let binding_validation = terminal_kind.map_or_else(
+        || {
+            validate_current_execution_binding_authority(
+                &identity.project_state_root,
+                session_id,
+                binding,
+            )
+        },
+        |terminal_kind| {
+            validate_current_execution_binding_authority(
+                &identity.project_state_root,
+                session_id,
+                binding,
+            )
+            .or_else(|active_error| {
+                if terminal_kind != AgentWorkTerminalKind::Discarded {
+                    return Err(active_error);
+                }
+                validate_blocked_build_abort_execution_binding_authority(
+                    &identity.project_state_root,
+                    session_id,
+                    binding,
+                    terminal_kind,
+                )
+            })
+        },
+    );
+    binding_validation.map_err(|error| {
+        mutation_error(format!(
             "durable Session execution binding is not current for Session {session_id}: {error}"
         ))
-        })?;
+    })?;
     if session.runtime_target == LaunchRuntimeTarget::Docker {
         return Ok(Some(ValidatedWorkspaceEnsureSession::Docker(
             ValidatedWorkspaceRecoverySession {
@@ -4110,6 +4341,59 @@ mod tests {
         }
     }
 
+    fn blocked_build_abort_request(
+        session: &Session,
+        owner_number: u64,
+    ) -> AgentBuildAbortTerminalizationRequest {
+        AgentBuildAbortTerminalizationRequest {
+            schema_version: AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+            claimed_session_id: session.id.clone(),
+            owner_number,
+            reason: "canonical verification cannot proceed".to_string(),
+            observation: observe_agent_runtime(&session.worktree_path)
+                .expect("runtime observation"),
+        }
+    }
+
+    fn prepare_terminal_build_abort_authority(
+        repo: &Path,
+        session: &Session,
+        completed: bool,
+        save_build_state: bool,
+    ) -> (Session, SessionExecutionBinding) {
+        let (session, binding) = bind_session_to_current_execution(repo, session);
+        seed_work_mutation_surfaces(repo, repo);
+        seed_unique_mutation_target(repo, repo, &session, "work-blocked-abort-negative");
+        if save_build_state {
+            gwt_core::skill_state::save(
+                repo,
+                "build-spec",
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(binding.owner_number),
+                    started_at: Utc::now(),
+                    phase: Some("verify".to_string()),
+                    session_id: session.id.clone(),
+                },
+            )
+            .expect("save build lifecycle");
+        }
+        let settlement = if completed {
+            crate::cli::execution_state::ExecutionSettlement::Completed
+        } else {
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "canonical verification is externally blocked".to_string(),
+                missing_verification: Some("full matrix".to_string()),
+            }
+        };
+        assert!(matches!(
+            crate::cli::execution_state::settle(repo, &session.id, settlement)
+                .expect("settle execution"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        (session, binding)
+    }
+
     fn assert_execution_binding_denial(error: &AgentWorkspaceUpdateError) {
         assert_eq!(
             error.code,
@@ -5684,285 +5968,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_relaunch_recovers_current_binding_without_changing_execution_history() {
-        for (lifecycle, settlement, expected_status) in [
-            (
-                "active",
-                None,
-                crate::cli::execution_state::ExecutionControlStatus::Active,
-            ),
-            (
-                "blocked",
-                Some(crate::cli::execution_state::ExecutionSettlement::Blocked {
-                    reason: "exact relaunch terminal fixture".to_string(),
-                    missing_verification: Some(
-                        "exact relaunch must preserve recovery requirements".to_string(),
-                    ),
-                }),
-                crate::cli::execution_state::ExecutionControlStatus::Blocked,
-            ),
-            (
-                "completed",
-                Some(crate::cli::execution_state::ExecutionSettlement::Completed),
-                crate::cli::execution_state::ExecutionControlStatus::Completed,
-            ),
-        ] {
-            with_strict_target_fixture(|repo, session| {
-                let (session, launch_binding) = bind_session_to_current_execution(repo, session);
-                if let Some(settlement) = settlement {
-                    assert!(matches!(
-                        crate::cli::execution_state::settle(repo, &session.id, settlement)
-                            .expect("settle exact relaunch fixture"),
-                        crate::cli::execution_state::SettleResult::Settled(_)
-                    ));
-                }
-
-                let owner = crate::cli::execution_state::ExecutionOwnerKey {
-                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
-                    number: launch_binding.owner_number,
-                };
-                let expected_identity =
-                    crate::cli::execution_state::current_execution_binding(repo, owner)
-                        .expect("read current exact relaunch binding")
-                        .expect("exact relaunch fixture has a current binding");
-                let record_before = crate::cli::execution_state::load(repo)
-                    .expect("read execution record before exact relaunch")
-                    .expect("exact relaunch fixture has an execution record");
-                let ledger_before =
-                    crate::cli::execution_state::load_generation_ledger(repo, owner)
-                        .expect("read generation ledger before exact relaunch")
-                        .expect("exact relaunch fixture has a generation ledger");
-                let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
-                    .expect("exact relaunch fixture has a trusted-store directory");
-                let trusted_root = trusted_dir
-                    .parent()
-                    .expect("worktree trusted directory has a repository trusted root");
-                let trusted_files_before = snapshot_regular_files(trusted_root);
-
-                let recovered = prepare_exact_relaunch_execution_authority(repo, &session.id)
-                    .unwrap_or_else(|error| {
-                        panic!("{lifecycle} exact relaunch must recover authority: {error}")
-                    });
-
-                assert_eq!(recovered.session_id, session.id);
-                assert_eq!(recovered.repo_hash, launch_binding.repo_hash);
-                assert_eq!(recovered.owner_kind, owner.kind.as_str());
-                assert_eq!(recovered.owner_number, owner.number);
-                assert_eq!(
-                    recovered.identity, expected_identity,
-                    "{lifecycle} exact relaunch must reuse the current generation and binding"
-                );
-
-                let record_after = crate::cli::execution_state::load(repo)
-                    .expect("read execution record after exact relaunch")
-                    .expect("execution record must remain present");
-                let ledger_after = crate::cli::execution_state::load_generation_ledger(repo, owner)
-                    .expect("read generation ledger after exact relaunch")
-                    .expect("generation ledger must remain present");
-                assert_eq!(record_after.status, expected_status);
-                assert_eq!(record_after, record_before, "{lifecycle} ECR changed");
-                assert_eq!(
-                    ledger_after.continuation_attempts, ledger_before.continuation_attempts,
-                    "{lifecycle} exact relaunch must not append a continuation attempt"
-                );
-                assert_eq!(
-                    ledger_after.takeover_attempts, ledger_before.takeover_attempts,
-                    "{lifecycle} exact relaunch must not append a takeover attempt"
-                );
-                assert_eq!(
-                    ledger_after.takeovers, ledger_before.takeovers,
-                    "{lifecycle} exact relaunch must not append a transfer audit"
-                );
-                assert_eq!(
-                    ledger_after.lifecycle_events, ledger_before.lifecycle_events,
-                    "{lifecycle} exact relaunch must not change generation lifecycle"
-                );
-                assert_eq!(
-                    ledger_after.continuation_validations, ledger_before.continuation_validations,
-                    "{lifecycle} exact relaunch must not masquerade as continuation validation"
-                );
-                assert_eq!(
-                    ledger_after, ledger_before,
-                    "{lifecycle} exact relaunch must leave the generation ledger byte-equivalent"
-                );
-                assert_eq!(
-                    snapshot_regular_files(trusted_root),
-                    trusted_files_before,
-                    "{lifecycle} exact relaunch must not mutate trusted execution history"
-                );
-            });
-        }
-    }
-
-    #[test]
-    fn exact_relaunch_rejects_unbound_and_stale_bindings_without_side_effects() {
-        for authority_case in [
-            "linked-unbound",
-            "legacy-unbound",
-            "foreign-generation",
-            "owner-mismatch",
-            "tampered-ledger-head",
-            "repo-mismatch",
-        ] {
-            with_strict_target_fixture(|repo, session| {
-                let (mut session, binding) = bind_session_to_current_execution(repo, session);
-                match authority_case {
-                    "linked-unbound" => session
-                        .set_execution_binding(None)
-                        .expect("clear exact relaunch binding"),
-                    "legacy-unbound" => {
-                        session.linked_issue_number = None;
-                        session
-                            .set_execution_binding(None)
-                            .expect("clear legacy exact relaunch binding");
-                    }
-                    "foreign-generation" => {
-                        let mut stale = binding.clone();
-                        stale.identity.generation_id =
-                            "foreign-exact-relaunch-generation".to_string();
-                        stale.capability_generation = stale.capability_generation.saturating_add(1);
-                        session
-                            .set_execution_binding(Some(stale))
-                            .expect("install well-formed stale exact relaunch binding");
-                    }
-                    "owner-mismatch" => {
-                        let mut foreign = binding.clone();
-                        foreign.owner_number = binding.owner_number + 1;
-                        foreign.capability_generation =
-                            foreign.capability_generation.saturating_add(1);
-                        session.linked_issue_number = Some(foreign.owner_number);
-                        session
-                            .set_execution_binding(Some(foreign))
-                            .expect("install foreign-owner exact relaunch binding");
-                    }
-                    "tampered-ledger-head" => {
-                        let mut tampered = binding.clone();
-                        tampered.identity.ledger_head_hash =
-                            "tampered-exact-relaunch-ledger-head".to_string();
-                        tampered.capability_generation =
-                            tampered.capability_generation.saturating_add(1);
-                        session
-                            .set_execution_binding(Some(tampered))
-                            .expect("install tampered-head exact relaunch binding");
-                    }
-                    "repo-mismatch" => {
-                        let mut foreign = binding.clone();
-                        foreign.repo_hash = "foreign-exact-relaunch-repo".to_string();
-                        foreign.capability_generation =
-                            foreign.capability_generation.saturating_add(1);
-                        session.repo_hash = Some(foreign.repo_hash.clone());
-                        session
-                            .set_execution_binding(Some(foreign))
-                            .expect("install foreign-repository exact relaunch binding");
-                    }
-                    _ => unreachable!("covered exact relaunch authority case"),
-                }
-                save_session_fixture(&session);
-
-                let owner = crate::cli::execution_state::ExecutionOwnerKey {
-                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
-                    number: binding.owner_number,
-                };
-                let session_path =
-                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
-                let session_before =
-                    std::fs::read(&session_path).expect("read rejected exact relaunch Session");
-                let record_before = crate::cli::execution_state::load(repo)
-                    .expect("read rejected exact relaunch ECR")
-                    .expect("rejected exact relaunch fixture has an ECR");
-                let ledger_before =
-                    crate::cli::execution_state::load_generation_ledger(repo, owner)
-                        .expect("read rejected exact relaunch generation ledger")
-                        .expect("rejected exact relaunch fixture has a generation ledger");
-                let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
-                    .expect("rejected exact relaunch fixture has a trusted-store directory");
-                let trusted_root = trusted_dir
-                    .parent()
-                    .expect("worktree trusted directory has a repository trusted root");
-                let trusted_files_before = snapshot_regular_files(trusted_root);
-
-                let error = prepare_exact_relaunch_execution_authority(repo, &session.id)
-                    .expect_err("unbound or stale exact relaunch authority must fail closed");
-                assert!(
-                    matches!(
-                        error.code,
-                        AgentWorkspaceUpdateErrorCode::RelaunchRequired
-                            | AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
-                            | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
-                            | AgentWorkspaceUpdateErrorCode::IdentityConflict
-                    ),
-                    "{authority_case} must fail as an authority error, got {error:?}"
-                );
-                assert_eq!(
-                    std::fs::read(&session_path).expect("reread rejected exact relaunch Session"),
-                    session_before,
-                    "{authority_case} rejection must not synthesize or repair a Session binding"
-                );
-                assert_eq!(
-                    crate::cli::execution_state::load(repo)
-                        .expect("reread rejected exact relaunch ECR")
-                        .expect("rejected exact relaunch ECR remains present"),
-                    record_before,
-                    "{authority_case} rejection must not mutate lifecycle or transfers"
-                );
-                assert_eq!(
-                    crate::cli::execution_state::load_generation_ledger(repo, owner)
-                        .expect("reread rejected exact relaunch generation ledger")
-                        .expect("rejected exact relaunch generation ledger remains present"),
-                    ledger_before,
-                    "{authority_case} rejection must not append attempts, transfers, or lifecycle"
-                );
-                assert_eq!(
-                    snapshot_regular_files(trusted_root),
-                    trusted_files_before,
-                    "{authority_case} rejection must not mutate trusted execution history"
-                );
-            });
-        }
-    }
-
-    #[test]
-    fn blocked_exact_relaunch_does_not_turn_explicit_continue_into_a_successor() {
-        with_strict_target_fixture(|repo, session| {
-            let (session, _) = bind_session_to_current_execution(repo, session);
-            seed_work_mutation_surfaces(repo, repo);
-            assert!(matches!(
-                crate::cli::execution_state::settle(
-                    repo,
-                    &session.id,
-                    crate::cli::execution_state::ExecutionSettlement::Blocked {
-                        reason: "exact relaunch requires recovery".to_string(),
-                        missing_verification: Some("verify.run".to_string()),
-                    },
-                )
-                .expect("settle blocked exact relaunch fixture"),
-                crate::cli::execution_state::SettleResult::Settled(_)
-            ));
-            prepare_exact_relaunch_execution_authority(repo, &session.id)
-                .expect("recover blocked exact relaunch identity");
-            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
-
-            let error = continue_authenticated_execution(
-                repo,
-                &session.id,
-                AgentExecutionContinuationRequest {
-                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
-                    operation_id: "blocked-exact-relaunch-explicit-continue".to_string(),
-                },
-            )
-            .expect_err("Blocked exact relaunch must require reopen before explicit Continue");
-
-            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::RelaunchRequired);
-            assert!(error.message.contains("execution.reopen"), "{error:?}");
-            assert_eq!(
-                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
-                before,
-                "refused explicit Continue must preserve exact relaunch authority"
-            );
-        });
-    }
-
-    #[test]
     fn execution_continuation_retries_validation_write_without_double_rebind() {
         with_strict_target_fixture(|repo, session| {
             let (session, _) = bind_session_to_current_execution(repo, session);
@@ -6645,7 +6650,8 @@ mod tests {
     fn execution_binding_terminal_generation_cannot_authorize_probe_or_work_mutation() {
         for (terminal_label, completed) in [("completed", true), ("blocked", false)] {
             with_strict_target_fixture(|repo, session| {
-                let (session, _) = bind_session_to_current_execution(repo, session);
+                let (mut session, mut terminal_binding) =
+                    bind_session_to_current_execution(repo, session);
                 seed_work_mutation_surfaces(repo, repo);
                 seed_unique_mutation_target(
                     repo,
@@ -6667,9 +6673,33 @@ mod tests {
                         .expect("settle producing generation"),
                     crate::cli::execution_state::SettleResult::Settled(_)
                 ));
-                let terminal_binding =
-                    prepare_exact_relaunch_execution_authority(repo, &session.id)
-                        .expect("exact relaunch recovers terminal generation identity");
+                let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: terminal_binding.owner_number,
+                };
+                terminal_binding.identity =
+                    crate::cli::execution_state::current_execution_binding(repo, owner)
+                        .expect("read terminal generation identity")
+                        .expect("terminal generation identity");
+                terminal_binding.capability_generation += 1;
+                session
+                    .set_execution_binding(Some(terminal_binding.clone()))
+                    .expect("project terminal generation into durable Session");
+                save_session_fixture(&session);
+                if !completed {
+                    gwt_core::skill_state::save(
+                        repo,
+                        "build-spec",
+                        &gwt_core::skill_state::SkillState {
+                            active: true,
+                            owner_spec: Some(terminal_binding.owner_number),
+                            started_at: Utc::now(),
+                            phase: Some("verify".to_string()),
+                            session_id: session.id.clone(),
+                        },
+                    )
+                    .expect("save matching active build lifecycle");
+                }
                 let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
 
                 let probe_error = probe_authenticated_execution_binding(
@@ -6691,19 +6721,173 @@ mod tests {
                 .expect_err("terminal generation must not authorize workspace mutation");
                 assert_execution_binding_denial(&update_error);
 
+                let mut terminalization_request = bound_work_terminalization_request(&session);
+                if !completed {
+                    terminalization_request.terminal_kind = AgentWorkTerminalKind::Discarded;
+                }
                 let terminalization_error = apply_bound_authenticated_work_terminalization(
                     repo,
                     &session.id,
                     &terminal_binding,
-                    bound_work_terminalization_request(&session),
+                    terminalization_request,
                 )
-                .expect_err("terminal generation must not authorize Work terminalization");
+                .expect_err(
+                    "general Work terminalization must not inherit Blocked build.abort authority",
+                );
                 assert_execution_binding_denial(&terminalization_error);
 
                 assert_eq!(
                     ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
                     before,
                     "{terminal_label} generation denial must preserve authority and Work bytes"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_uses_dedicated_leased_authority() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, mut binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            let work_id = "work-blocked-build-abort";
+            seed_unique_mutation_target(repo, repo, &session, work_id);
+            gwt_core::skill_state::save(
+                repo,
+                "build-spec",
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(binding.owner_number),
+                    started_at: Utc::now(),
+                    phase: Some("verify".to_string()),
+                    session_id: session.id.clone(),
+                },
+            )
+            .expect("save matching active build lifecycle");
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    repo,
+                    &session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                )
+                .expect("settle producing generation"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: binding.owner_number,
+            };
+            binding.identity = crate::cli::execution_state::current_execution_binding(repo, owner)
+                .expect("read Blocked generation identity")
+                .expect("Blocked generation identity");
+            binding.capability_generation += 1;
+            session
+                .set_execution_binding(Some(binding.clone()))
+                .expect("project Blocked generation into durable Session");
+            save_session_fixture(&session);
+
+            let receipt = apply_bound_authenticated_blocked_build_abort_terminalization(
+                repo,
+                &session.id,
+                &binding,
+                blocked_build_abort_request(&session, owner.number),
+            )
+            .expect("dedicated Blocked build abort authority");
+
+            assert_eq!(receipt.outcome, AgentWorkTerminalizationOutcome::Emitted);
+            let work_items = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .expect("load WorkItems")
+                .expect("WorkItems");
+            let work = work_items
+                .work_items
+                .iter()
+                .find(|work| work.id == work_id)
+                .expect("terminal Work");
+            assert!(work.is_terminal());
+            assert!(work.discarded);
+        });
+    }
+
+    #[test]
+    fn blocked_build_abort_refuses_foreign_or_invalid_authority_without_mutation() {
+        for case in [
+            "no-build",
+            "owner-mismatch",
+            "foreign-build-session",
+            "completed",
+            "corrupt-execution",
+            "claimed-owner-mismatch",
+            "claimed-session-mismatch",
+            "invalid-reason",
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let (session, binding) = prepare_terminal_build_abort_authority(
+                    repo,
+                    session,
+                    case == "completed",
+                    case != "no-build",
+                );
+                if matches!(case, "owner-mismatch" | "foreign-build-session") {
+                    gwt_core::skill_state::save(
+                        repo,
+                        "build-spec",
+                        &gwt_core::skill_state::SkillState {
+                            active: true,
+                            owner_spec: Some(if case == "owner-mismatch" {
+                                binding.owner_number + 1
+                            } else {
+                                binding.owner_number
+                            }),
+                            started_at: Utc::now(),
+                            phase: Some("verify".to_string()),
+                            session_id: if case == "foreign-build-session" {
+                                "foreign-session".to_string()
+                            } else {
+                                session.id.clone()
+                            },
+                        },
+                    )
+                    .expect("replace build lifecycle with mismatched authority");
+                }
+                if case == "corrupt-execution" {
+                    let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
+                        .expect("trusted execution directory");
+                    std::fs::write(trusted_dir.join("execution-control.json"), b"{corrupt")
+                        .expect("corrupt execution projection");
+                }
+                let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+                let mut request = blocked_build_abort_request(&session, binding.owner_number);
+                match case {
+                    "claimed-owner-mismatch" => request.owner_number += 1,
+                    "claimed-session-mismatch" => {
+                        request.claimed_session_id = "foreign-session".to_string()
+                    }
+                    "invalid-reason" => request.reason.clear(),
+                    _ => {}
+                }
+
+                let error = apply_bound_authenticated_blocked_build_abort_terminalization(
+                    repo,
+                    &session.id,
+                    &binding,
+                    request,
+                )
+                .err()
+                .unwrap_or_else(|| panic!("{case} must not gain Blocked build abort authority"));
+
+                assert!(matches!(
+                    error.code,
+                    AgentWorkspaceUpdateErrorCode::InvalidRequest
+                        | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
+                        | AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                ));
+                assert_eq!(
+                    ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                    before,
+                    "{case} refusal must preserve authority and Work bytes"
                 );
             });
         }
@@ -6831,6 +7015,7 @@ mod tests {
                 &binding,
                 None,
                 bound_work_terminalization_request(&session),
+                BoundWorkTerminalizationAuthority::Active,
                 |_| {
                     gwt_agent::rotate_session_execution_capability(&sessions_dir, &session_id)
                         .expect("rotate capability between resolve and commit");

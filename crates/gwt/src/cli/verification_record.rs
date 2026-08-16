@@ -3851,12 +3851,7 @@ pub(crate) mod tests {
         let terminal = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
             .expect("load completed generation binding")
             .expect("completed generation binding exists");
-        let recovered = crate::agent_project_state::prepare_exact_relaunch_execution_authority(
-            dir.path(),
-            session_id,
-        )
-        .expect("recover completed exact-relaunch authority");
-        assert_eq!(recovered.identity, terminal);
+        advance_generation_scoped_session_binding(session_id, terminal);
 
         let artifacts_before = verification_artifact_bytes(dir.path());
         let plan_error = run_verify_cli_as(
@@ -3921,12 +3916,6 @@ pub(crate) mod tests {
         let blocked = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
             .expect("load blocked generation binding")
             .expect("blocked generation binding exists");
-        let recovered = crate::agent_project_state::prepare_exact_relaunch_execution_authority(
-            dir.path(),
-            session_id,
-        )
-        .expect("recover blocked exact-relaunch authority");
-        assert_eq!(recovered.identity, blocked);
         let commands = vec!["git --version".to_string()];
 
         let (plan_code, _) = run_verify_cli_as(

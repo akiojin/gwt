@@ -107,10 +107,10 @@ fn memory_add_writes_to_machine_local_work_notes() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let envelope: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("parse memory.add envelope");
+        serde_json::from_slice(&output.stdout).expect("parse gwtd response envelope");
     let normalized_stdout = envelope["output"]
         .as_str()
-        .expect("memory.add output string")
+        .expect("gwtd response output")
         .replace('\\', "/");
     assert!(
         normalized_stdout.contains("work-notes/memory.md"),

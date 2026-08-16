@@ -668,6 +668,7 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
 
 /// Walk up from the gwt crate dir to the repository root that owns the
 /// committed managed-hook settings (`.claude/settings.json`).
+#[cfg(unix)]
 fn repo_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -678,6 +679,7 @@ fn repo_root() -> std::path::PathBuf {
 
 /// Collect every committed managed-hook `command` string that invokes the
 /// repo-owned `gwt-self-improvement-stop` hook (Claude + Codex transports).
+#[cfg(unix)]
 fn committed_self_improvement_stop_commands() -> Vec<String> {
     let root = repo_root();
     let mut commands = Vec::new();
@@ -738,6 +740,7 @@ fn posix_shell_fixture(path: &Path) -> (&'static str, String) {
 /// (stderr/exit ignored). A `HookOutput::StopBlock` from a current binary exits 0
 /// and writes its decision JSON to stdout, so a graceful wrapper that drops
 /// stderr and forces exit 0 still surfaces a real block.
+#[cfg(unix)]
 #[test]
 fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
     let commands = committed_self_improvement_stop_commands();

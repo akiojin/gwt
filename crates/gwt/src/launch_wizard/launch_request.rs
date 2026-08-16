@@ -195,6 +195,20 @@ impl LaunchWizardState {
         }
 
         let mut config = builder.build();
+        // A saved Session owns the exact tool-runtime provenance only when the
+        // launch continues that Session. StartNew and the interactive picker
+        // intentionally have no source so `latest` is resolved again.
+        let reuses_saved_session = match config.session_mode {
+            gwt_agent::SessionMode::Continue => true,
+            gwt_agent::SessionMode::Resume => config.resume_session_id.is_some(),
+            gwt_agent::SessionMode::Normal => false,
+        };
+        if self.launch_path == LaunchWizardLaunchPath::QuickStart && reuses_saved_session {
+            config.tool_runtime_source_session_id = self
+                .selected_quick_start_index
+                .and_then(|index| self.quick_start_entries.get(index))
+                .map(|entry| entry.session_id.clone());
+        }
         if !self.version.is_empty() {
             config.tool_version = Some(self.version.clone());
         }
@@ -355,16 +369,14 @@ mod tests {
         assert_eq!(config.reasoning_level.as_deref(), Some("high"));
         assert_eq!(config.tool_version.as_deref(), Some("0.110.0"));
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
+        // Issue #3462: Resume inherits the Skip Permissions preference.
         assert!(
-            !config.skip_permissions,
-            "a Resume launch must never inherit a permission bypass"
+            config.skip_permissions,
+            "a Resume launch must inherit the Skip Permissions preference"
         );
         assert!(
-            !config
-                .args
-                .iter()
-                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
-            "a Resume launch must not carry Codex's dangerous bypass flag"
+            config.args.contains(&"--yolo".to_string()),
+            "a Resume launch must carry Codex's skip-permissions flag"
         );
         assert!(config.codex_fast_mode);
     }
@@ -528,6 +540,61 @@ mod tests {
         assert!(error.contains("owner mismatch"), "{error}");
         assert!(error.contains("#9999"), "{error}");
         assert!(error.contains("#3457"), "{error}");
+    }
+
+    // Issue #3462: Resume / Continue launches must inherit the Skip
+    // Permissions preference from the same source as Normal launches.
+    // Dropping the flag on resume left restored agents stuck at permission
+    // prompts and persisted `skip_permissions = false`, poisoning every
+    // later restore of the same session lineage.
+    #[test]
+    fn build_launch_config_resume_inherits_skip_permissions_for_claude() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "claude".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("session-123".to_string());
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(
+            config.skip_permissions,
+            "a Resume launch must inherit the Skip Permissions preference"
+        );
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(
+            config
+                .args
+                .contains(&"--dangerously-skip-permissions".to_string()),
+            "a Resume launch must carry Claude's skip-permissions flag"
+        );
+    }
+
+    #[test]
+    fn build_launch_config_continue_inherits_skip_permissions_for_codex() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.mode = "continue".to_string();
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+        assert!(
+            config.skip_permissions,
+            "a Continue launch must inherit the Skip Permissions preference"
+        );
+        assert!(
+            config.args.contains(&"--yolo".to_string()),
+            "a Continue launch must carry Codex's skip-permissions flag"
+        );
     }
 
     // SPEC-2014 2026-05-18 amendment FR-A / SC-A / SC-B:
@@ -1146,10 +1213,11 @@ mod tests {
         assert_eq!(config.display_name, "Claude Proxy");
         assert!(config.args.contains(&"--serve".to_string()));
         assert!(config.args.contains(&"--resume".to_string()));
-        assert!(!config.skip_permissions);
+        // Issue #3462: Resume inherits the Skip Permissions preference.
+        assert!(config.skip_permissions);
         assert!(
-            !config.args.contains(&"--unsafe".to_string()),
-            "a Resume launch must not carry the custom agent permission bypass"
+            config.args.contains(&"--unsafe".to_string()),
+            "a Resume launch must carry the custom agent skip-permissions args"
         );
         assert_eq!(
             config.env_vars.get("API_KEY").map(String::as_str),

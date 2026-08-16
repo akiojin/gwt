@@ -35,6 +35,7 @@ impl LaunchWizardState {
                 _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
+            holder_decision: self.holder_decision.clone(),
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
             open_branch_candidates: self.open_branch_candidates.clone(),
@@ -98,9 +99,9 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
             show_execution_mode: false,
-            show_skip_permissions: show_manual_setup
-                && self.launch_target_is_agent()
-                && self.mode == "normal",
+            // Issue #3462: the toggle stays visible for Resume / Continue so
+            // the inherited preference is both editable and honored.
+            show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
             show_fast_mode,
             show_codex_fast_mode: show_manual_setup
                 && self.launch_target_is_agent()
@@ -631,6 +632,7 @@ impl LaunchWizardState {
             || self.runtime_resolution_pending
             || self.launch_materialization_pending
             || self.show_start_methods()
+            || self.holder_decision.is_some()
         {
             return false;
         }
@@ -906,6 +908,81 @@ mod tests {
     use super::super::profiles::load_launch_sessions;
     use super::super::test_support::*;
     use super::*;
+
+    #[test]
+    fn normal_wizard_view_has_no_holder_decision() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let view = state.view();
+
+        assert!(view.holder_decision.is_none());
+        assert_eq!(
+            serde_json::to_value(&view).expect("serialize normal wizard view")["holder_decision"],
+            serde_json::Value::Null,
+        );
+    }
+
+    #[test]
+    fn holder_decision_state_is_projected_into_the_view() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1:agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: false,
+            move_unavailable_reason: Some("The holder is in another runtime".to_string()),
+        });
+
+        let view = state.view();
+        let decision = view.holder_decision.expect("holder decision view");
+
+        assert_eq!(decision.fingerprint, "repo:/tmp/gwt:work/issue-3547");
+        assert_eq!(decision.holder_session_id, "session-holder");
+        assert_eq!(
+            decision.holder_window_id.as_deref(),
+            Some("tab-1:agent-holder")
+        );
+        assert_eq!(decision.holder_summary, "Codex · work/issue-3547");
+        assert!(decision.stop_available);
+        assert!(decision.stop_unavailable_reason.is_none());
+        assert!(!decision.move_available);
+        assert_eq!(
+            decision.move_unavailable_reason.as_deref(),
+            Some("The holder is in another runtime")
+        );
+    }
+
+    #[test]
+    fn holder_decision_disables_legacy_primary_launch_action() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "exact-holder".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1::agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: true,
+            move_unavailable_reason: None,
+        });
+
+        assert!(!state.view().primary_action_enabled);
+    }
 
     #[test]
     fn start_methods_view_exposes_direct_methods() {
@@ -2194,9 +2271,10 @@ mod tests {
         });
 
         let view = state.view();
+        // Issue #3462: Quick Start Resume inherits the entry's preference.
         assert!(
-            !view.skip_permissions,
-            "a Resume launch must not advertise a permission bypass"
+            view.skip_permissions,
+            "Quick Start Resume must advertise the inherited Skip Permissions preference"
         );
 
         match state.completion.as_ref() {
@@ -2205,10 +2283,10 @@ mod tests {
                     assert_eq!(config.command, custom_path.display().to_string());
                     assert_eq!(config.display_name, "Claude Proxy");
                     assert!(config.args.contains(&"--resume".to_string()));
-                    assert!(!config.skip_permissions);
+                    assert!(config.skip_permissions);
                     assert!(
-                        !config.args.contains(&"--unsafe".to_string()),
-                        "Quick Start Resume must suppress permission bypass"
+                        config.args.contains(&"--unsafe".to_string()),
+                        "Quick Start Resume must carry the custom agent skip-permissions args"
                     );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),

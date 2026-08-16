@@ -25,26 +25,8 @@ use gwt_github::{
     IssueNumber, SpecListFilter,
 };
 
-fn executable_fixture_path(path: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.with_extension("exe")
-    }
-    #[cfg(not(windows))]
-    {
-        path
-    }
-}
-
-fn write_executable_fixture(path: &Path, _contents: &str) {
-    #[cfg(windows)]
-    fs::copy(
-        std::env::current_exe().expect("current test executable"),
-        path,
-    )
-    .expect("copy executable fixture");
-    #[cfg(not(windows))]
-    fs::write(path, _contents).expect("write executable fixture");
+fn write_executable_fixture(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write executable fixture");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -374,9 +356,7 @@ fn lazy_owner_client_rejects_an_expired_deadline_before_factory_resolution() {
 
 #[test]
 fn owner_runtime_override_requires_complete_explicit_loopback_environment() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     const KEYS: [&str; 4] = [
         "GWT_OWNER_GITHUB_TEST_MODE",
         "GWT_OWNER_GITHUB_REST_BASE",
@@ -429,9 +409,7 @@ fn test_env_uses_a_distinct_owner_repository_client() {
 
 #[test]
 fn new_for_hooks_keeps_detached_cache_root() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let env = DefaultCliEnv::new_for_hooks();
 
     assert_eq!(
@@ -462,6 +440,7 @@ fn test_env_records_io_and_pr_side_effects() {
             state: "OPEN".to_string(),
             url: "https://example.test/pr/128".to_string(),
             will_close_target: true,
+            merged_at: None,
         }],
     );
     assert_eq!(
@@ -603,9 +582,7 @@ fn test_env_records_io_and_pr_side_effects() {
 
 #[test]
 fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let _forward_url =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
     let _forward_token =
@@ -661,11 +638,11 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 
 #[test]
 fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
-    let stable_hook_bin = executable_fixture_path(temp.path().join("stable-gwtd"));
+    let stable_hook_bin = temp
+        .path()
+        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
@@ -723,13 +700,13 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 
 #[test]
 fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
-    let stable_hook_bin = executable_fixture_path(temp.path().join("stable-gwtd"));
+    let stable_hook_bin = temp
+        .path()
+        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
@@ -764,9 +741,7 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
 
 #[test]
 fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
-    let _env_lock = crate::env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
     let git_status = gwt_core::process::hidden_command("git")
         .args(["init", "-q"])
@@ -774,7 +749,9 @@ fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
         .status()
         .expect("git init");
     assert!(git_status.success());
-    let local_bin = executable_fixture_path(temp.path().join("target/debug/gwtd"));
+    let local_bin = temp
+        .path()
+        .join(format!("target/debug/gwtd{}", std::env::consts::EXE_SUFFIX));
     fs::create_dir_all(local_bin.parent().expect("bin parent")).expect("bin dir");
     write_executable_fixture(&local_bin, "local");
     fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");

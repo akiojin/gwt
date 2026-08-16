@@ -766,8 +766,8 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         let address = listener.local_addr().expect("loopback address");
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
-        let transport_stall_until = Arc::new(OnceLock::<Instant>::new());
-        let server_transport_stall_until = Arc::clone(&transport_stall_until);
+        let stall_until = Arc::new(OnceLock::<Instant>::new());
+        let server_stall_until = Arc::clone(&stall_until);
         let server = std::thread::spawn(move || {
             let mut first = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             server_requests.fetch_add(1, Ordering::SeqCst);
@@ -789,7 +789,7 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
             stalled
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .expect("stall read timeout");
-            let until = *server_transport_stall_until
+            let until = *server_stall_until
                 .get()
                 .expect("absolute transport stall deadline");
             let mut byte = [0_u8; 1];
@@ -816,7 +816,7 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
             DIRECT_STOP_TEST_TOTAL_BUDGET,
         );
         let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
-        transport_stall_until
+        stall_until
             .set(resolution_deadline.expires_at() + Duration::from_millis(25))
             .expect("set absolute transport stall deadline");
         let started = Instant::now();
@@ -830,7 +830,9 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         let elapsed = started.elapsed();
 
         let HookOutput::StopBlock { reason } = output else {
-            panic!("stalled direct Stop owner search must block after {elapsed:?}: {output:?}");
+            panic!(
+                "stalled direct Stop owner search must block; output={output:?}; elapsed={elapsed:?}"
+            );
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
         assert!(
@@ -933,7 +935,9 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
 
         server.join().expect("loopback server");
         let HookOutput::StopBlock { reason } = output else {
-            panic!("post-attempt store contention must block Stop");
+            panic!(
+                "post-attempt store contention must block Stop; output={output:?}; elapsed={elapsed:?}"
+            );
         };
         assert!(reason.contains("state=blocked"), "{reason}");
         assert!(reason.contains("reason=timeout"), "{reason}");
@@ -1659,6 +1663,9 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         ),
         ("pane.list", json!({})),
         ("pane.read", json!({ "id": "pane-1" })),
+        // SPEC-3431: PM diagnostics must stay diagnosable before an owner is
+        // linked (ownerless-safe, read-only).
+        ("pm.status", json!({})),
     ] {
         let event = event(
             "Bash",

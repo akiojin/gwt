@@ -241,6 +241,26 @@ impl BroadcastHub {
             .clone()
     }
 
+    /// Wait until worker startup resolves before serving an agent status
+    /// request. The daemon socket can accept connections while the Issue
+    /// Monitor worker is still loading its durable state; exposing `None` in
+    /// that window makes a healthy live daemon look unavailable.
+    pub(crate) async fn wait_for_issue_monitor_status(&self) -> Option<Value> {
+        let mut state = self.issue_monitor_controls.state.subscribe();
+        loop {
+            match *state.borrow() {
+                IssueMonitorControlState::Starting => {}
+                IssueMonitorControlState::Ready => return self.issue_monitor_status(),
+                IssueMonitorControlState::RecoveryBlocked | IssueMonitorControlState::Closed => {
+                    return None;
+                }
+            }
+            if state.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
     /// Admit one command and await its durable completion receipt. Successful
     /// return is the ACK boundary: the worker has committed the exact control
     /// transaction. Full admission rejects immediately instead of retaining an
@@ -353,7 +373,7 @@ impl BroadcastHub {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{future::Future, task::Poll, time::Duration};
 
     use gwt_core::daemon::DaemonFrame;
     use serde_json::json;
@@ -649,6 +669,29 @@ mod tests {
         request.commit();
 
         assert!(publish.await.expect("publisher joins").is_ok());
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_status_starting_waits_for_the_ready_projection() {
+        let hub = BroadcastHub::new();
+        let mut status = Box::pin(hub.wait_for_issue_monitor_status());
+
+        let was_pending = std::future::poll_fn(|context| {
+            Poll::Ready(matches!(status.as_mut().poll(context), Poll::Pending))
+        })
+        .await;
+        assert!(
+            was_pending,
+            "a connectable daemon is not status-ready while its worker is Starting"
+        );
+
+        let projection = json!({"queue": []});
+        hub.set_issue_monitor_status(projection.clone());
+        let _receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("projection publication precedes the Ready transition");
+
+        assert_eq!(status.await, Some(projection));
     }
 
     #[tokio::test]

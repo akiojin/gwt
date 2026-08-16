@@ -87,10 +87,10 @@ fn discussion_update_creates_single_canonical_discussions_file() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let envelope: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("parse discussion.update envelope");
+        serde_json::from_slice(&output.stdout).expect("parse gwtd response");
     let normalized_stdout = envelope["output"]
         .as_str()
-        .expect("discussion.update output string")
+        .expect("discussion.update output")
         .replace('\\', "/");
     assert!(
         normalized_stdout.contains("work-notes/discussions.md"),

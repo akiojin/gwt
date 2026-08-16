@@ -221,6 +221,29 @@ pub enum FrontendEvent {
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
+    /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
+    /// resident PM pane if it is not running, then frames it in the viewport.
+    OpenPmAgent {
+        #[serde(default)]
+        bounds: Option<WindowGeometry>,
+    },
+    /// SPEC-3431 FR-026: opt the active project in or out of PM auto-start.
+    /// Governs the next project open only — it never stops a live PM.
+    SetPmAutoStart {
+        enabled: bool,
+    },
+    /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
+    /// pane is untouched; applying the change is the explicit restart below.
+    SetPmLaunchProfile {
+        agent_id: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        reasoning: Option<String>,
+    },
+    /// SPEC-3431 FR-026: stop the live PM and bring it back on the configured
+    /// profile. Starts a NEW conversation — a history cannot cross agents.
+    RestartPmAgent,
     OpenProjectDialog,
     SelectCloneProjectParent,
     GithubRepositorySearch {
@@ -339,6 +362,23 @@ pub enum FrontendEvent {
     PaneSendInput {
         session_id: String,
         text: String,
+    },
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
+    /// agent pane of the same project. Caller identity comes only from the
+    /// authenticated WebSocket principal; the general self-only contract of
+    /// [`FrontendEvent::PaneSendInput`] is unchanged for every other caller.
+    PmPaneSendInput {
+        operation_id: String,
+        window_id: String,
+        text: String,
+    },
+    /// SPEC-3431 FR-124: narrow request accepted only on the authenticated
+    /// agent listener. Project identity is supplied by the server-side
+    /// capability principal, never by this payload.
+    AgentIssueMonitorScanNow {
+        /// Non-secret guard that binds the caller's persisted prefs target to
+        /// the server-derived capability scope. It is never routing authority.
+        expected_project_scope: String,
     },
     PasteImage {
         id: String,
@@ -1544,6 +1584,18 @@ pub struct RuntimeHealthProcessView {
     pub focus_window_id: Option<String>,
 }
 
+/// SPEC-3431 FR-026: one agent the PM may be configured to run as.
+///
+/// Deliberately a two-field view rather than the Launch Wizard's `AgentOption`:
+/// the PM picker offers no version pinning, no custom agents, and no Docker
+/// target, because the only agents that can resolve the `$gwt-pm` bootstrap
+/// prompt are the ones with a managed skills mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PmAgentOption {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -1607,11 +1659,42 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    /// Origin-connection-only terminal result for one privileged PM message.
+    /// `queued` is reserved for a future durable payload queue; this slice
+    /// emits only `delivered` after exact acknowledgement or `failed`.
+    PmMessageSendResult {
+        operation_id: String,
+        status: String,
+        window_id: Option<String>,
+        reason: Option<String>,
+    },
+    /// Origin-client-only acknowledgement for one authenticated Monitor scan
+    /// request. `accepted` means one new project worker was enqueued; it does
+    /// not claim that a candidate was found or launched.
+    IssueMonitorScanRequestResult {
+        accepted: bool,
+        reason: Option<String>,
+    },
     /// Direct, origin-connection-only acceptance for an authenticated
     /// self-close. The internal close ticket never crosses the wire.
     PaneCloseAccepted {
         request_id: String,
         window_id: String,
+    },
+    /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
+    /// active project tab.
+    ///
+    /// `configured_*` is what the NEXT PM start will use; `running_*` is what
+    /// the live conversation actually is. They are separate fields on purpose —
+    /// the panel's "restart to apply" affordance exists precisely because a
+    /// profile change cannot migrate a running conversation.
+    PmStatus {
+        auto_start: bool,
+        configured_agent_id: String,
+        configured_model: Option<String>,
+        running_agent_id: Option<String>,
+        is_running: bool,
+        agent_options: Vec<PmAgentOption>,
     },
     IssueMonitorStatus {
         status: IssueMonitorStatusView,
@@ -2348,9 +2431,26 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pm_message_send_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_scan_request_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
+    // the newest one matters.
+    BackendEventPolicy::new(
+        "pm_status",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
         "issue_monitor_status",
@@ -2783,7 +2883,12 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
+            BackendEvent::IssueMonitorScanRequestResult { .. } => {
+                "issue_monitor_scan_request_result"
+            }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
+            BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
@@ -4808,6 +4913,39 @@ mod tests {
         let value = serde_json::to_value(&action).expect("serialize goto_step");
         assert_eq!(value["kind"], "goto_step");
         assert_eq!(value["phase"], "confirm");
+    }
+
+    #[test]
+    fn launch_wizard_holder_decision_actions_round_trip() {
+        use crate::launch_wizard::LaunchWizardAction;
+
+        let actions = [
+            (
+                LaunchWizardAction::StopAndStartSuccessor {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:successor".to_string(),
+                },
+                "stop_and_start_successor",
+            ),
+            (
+                LaunchWizardAction::MoveExistingPane {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:destination".to_string(),
+                },
+                "move_existing_pane",
+            ),
+        ];
+
+        for (action, expected_kind) in actions {
+            let value = serde_json::to_value(&action).expect("serialize holder decision action");
+            assert_eq!(value["kind"], expected_kind);
+            assert_eq!(value["fingerprint"], "repo:/tmp/gwt:work/issue-3547");
+            assert!(value["window_id"].as_str().is_some());
+
+            let round_tripped: LaunchWizardAction =
+                serde_json::from_value(value).expect("deserialize holder decision action");
+            assert_eq!(round_tripped, action);
+        }
     }
 
     #[test]
