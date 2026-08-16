@@ -256,6 +256,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
 #[test]
 fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -325,6 +326,7 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
 #[test]
 fn deregistering_pty_writer_invalidates_the_removed_generation() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
@@ -354,6 +356,7 @@ fn deregistering_pty_writer_invalidates_the_removed_generation() {
 #[test]
 fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
@@ -712,6 +715,7 @@ fn blocking_task_spawner_returns_before_a_stalled_task_finishes() {
 #[test]
 fn improvement_snapshot_epoch_drops_stale_or_failed_loads_without_clearing_ui() {
     let temp = tempdir().expect("runtime root");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project root");
     let tab = sample_project_tab("tab-1", "Repo", project.clone(), ProjectKind::Git, &[]);
@@ -749,6 +753,7 @@ fn improvement_snapshot_epoch_drops_stale_or_failed_loads_without_clearing_ui() 
 #[test]
 fn frontend_ready_replaces_pending_improvement_epoch_without_sync_snapshot() {
     let temp = tempdir().expect("runtime root");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project root");
     let tab = sample_project_tab("tab-1", "Repo", project.clone(), ProjectKind::Git, &[]);
@@ -1376,6 +1381,7 @@ fn sample_project_tab(
 #[test]
 fn app_runtime_rejects_removed_legacy_memo_window_creation() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
@@ -1467,6 +1473,7 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
 #[test]
 fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
@@ -1503,6 +1510,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
 #[test]
 fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -1614,6 +1622,7 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
 #[test]
 fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
@@ -2284,6 +2293,7 @@ fn image_paste_prepare_rejects_unsupported_mime_and_empty_payload() {
 #[test]
 fn image_paste_event_saves_file_under_worktree() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -2348,6 +2358,7 @@ fn image_paste_event_saves_file_under_worktree() {
 #[test]
 fn uploaded_image_paste_event_saves_file_under_drop_files() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let uploaded_path = temp.path().join("image-upload.tmp");
@@ -2425,6 +2436,7 @@ fn uploaded_image_paste_event_saves_file_under_drop_files() {
 #[test]
 fn image_paste_event_ignores_non_agent_terminal_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -2691,6 +2703,7 @@ fn file_attachment_prompt_formats_single_and_multiple_paths_without_newlines() {
 #[test]
 fn file_attachment_event_saves_inline_file_under_worktree() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -2752,6 +2765,7 @@ fn file_attachment_event_saves_inline_file_under_worktree() {
 #[test]
 fn file_attachment_event_saves_native_path_under_drop_files() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let source = temp.path().join("large-host-file.bin");
@@ -2818,6 +2832,7 @@ fn file_attachment_event_saves_native_path_under_drop_files() {
 #[test]
 fn file_attachment_event_saves_uploaded_file_under_drop_files() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let uploaded_path = temp.path().join("upload.tmp");
@@ -2896,6 +2911,7 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
 #[test]
 fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -3029,6 +3045,7 @@ fn file_attachment_copy_reports_byte_progress() {
 #[test]
 fn file_attachment_event_saves_prepared_files_incrementally() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -3104,6 +3121,7 @@ fn file_attachment_event_saves_prepared_files_incrementally() {
 #[test]
 fn file_attachment_event_ignores_non_agent_terminal_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -3419,6 +3437,7 @@ fn sample_runtime_with_events(
 #[test]
 fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let foreign_project = temp.path().join("foreign-project");
     let authenticated_project = temp.path().join("authenticated-project");
     fs::create_dir_all(&foreign_project).expect("foreign project");
@@ -3481,6 +3500,7 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
 #[test]
 fn agent_pane_close_rejects_window_from_foreign_project() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let foreign_project = temp.path().join("foreign-project");
     let authenticated_project = temp.path().join("authenticated-project");
     fs::create_dir_all(&foreign_project).expect("foreign project");
@@ -3543,6 +3563,7 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
 #[test]
 fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     let mut tab = sample_project_tab_with_window_at(
@@ -3722,6 +3743,7 @@ fn active_bound_agent_pane_runtime(
 #[test]
 fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dispatch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     let mut tab = sample_project_tab_with_window_at(
@@ -4139,6 +4161,7 @@ fn agent_self_close_disconnect_before_acceptance_rolls_back_the_grant() {
 #[test]
 fn correlated_agent_self_close_rejects_same_project_peer_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     let mut tab = sample_project_tab_with_window_at(
@@ -4197,6 +4220,7 @@ fn correlated_agent_self_close_rejects_same_project_peer_window() {
 #[test]
 fn correlated_agent_self_close_fails_closed_for_ambiguous_session_windows() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     let mut tab = sample_project_tab_with_window_at(
@@ -6850,6 +6874,7 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
 #[test]
 fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_workspace() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window(
@@ -6899,6 +6924,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_
 #[test]
 fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "shell-1",
@@ -6928,6 +6954,7 @@ fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
 #[test]
 fn app_runtime_apply_update_uses_pending_available_update_state() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -6970,6 +6997,7 @@ fn app_runtime_apply_update_uses_pending_available_update_state() {
 #[test]
 fn app_runtime_apply_update_without_applicable_pending_update_reports_error() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7001,6 +7029,7 @@ fn app_runtime_apply_update_without_applicable_pending_update_reports_error() {
 #[test]
 fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_client() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "shell-1",
@@ -7066,6 +7095,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
 #[test]
 fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "shell-1",
@@ -7147,6 +7177,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
 #[test]
 fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "shell-1",
@@ -7219,6 +7250,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
 #[test]
 fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7310,6 +7342,7 @@ fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
 #[test]
 fn app_runtime_detach_window_tab_preserves_real_fit_pty_size() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7379,6 +7412,7 @@ fn app_runtime_detach_window_tab_preserves_real_fit_pty_size() {
 #[test]
 fn app_runtime_places_agent_window_in_kanban_from_frontend_event() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7594,6 +7628,7 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_boar
 #[test]
 fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7639,6 +7674,7 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
     // is what desyncs the child's grid from xterm and corrupts the
     // rendered terminal (recovers on manual resize).
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let bounds = canvas_bounds();
     let tab = sample_project_tab(
         "tab-1",
@@ -7716,6 +7752,7 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
     // group geometry, because the frontend's visible xterm fit owns the real
     // cols/rows for the revealed tab.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7800,6 +7837,7 @@ fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
     // geometry_revision bump) is the single source of truth for PTY
     // size; the backend must not revert PTYs to the approximation here.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let bounds = canvas_bounds();
     let tab = sample_project_tab(
         "tab-1",
@@ -7854,6 +7892,7 @@ fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
 #[test]
 fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_workspace() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -7923,6 +7962,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
 #[test]
 fn app_runtime_geometry_focus_dock_and_activate_never_build_disk_projection() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let first = temp.path().join("first");
     let second = temp.path().join("second");
     fs::create_dir_all(&first).expect("create first project");
@@ -7971,6 +8011,7 @@ fn app_runtime_geometry_focus_dock_and_activate_never_build_disk_projection() {
 #[test]
 fn app_runtime_full_projection_miss_invalidates_stale_replay_cache() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -8020,6 +8061,7 @@ fn app_runtime_full_projection_miss_invalidates_stale_replay_cache() {
 #[test]
 fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8066,6 +8108,7 @@ fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() 
 #[test]
 fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_tab() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8094,6 +8137,7 @@ fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_ta
 #[test]
 fn app_runtime_select_project_tab_refreshes_project_scoped_improvement_snapshot() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8144,6 +8188,7 @@ fn app_runtime_select_project_tab_refreshes_project_scoped_improvement_snapshot(
 #[test]
 fn set_active_tab_refreshes_improvement_snapshot_only_when_project_changes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8166,6 +8211,7 @@ fn set_active_tab_refreshes_improvement_snapshot_only_when_project_changes() {
 #[test]
 fn app_runtime_close_project_tab_emits_active_work_projection_when_active_changes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8194,6 +8240,7 @@ fn app_runtime_close_project_tab_emits_active_work_projection_when_active_change
 #[test]
 fn app_runtime_close_active_project_tab_refreshes_the_new_project_snapshot() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8214,6 +8261,7 @@ fn app_runtime_close_active_project_tab_refreshes_the_new_project_snapshot() {
 #[test]
 fn app_runtime_close_inactive_project_tab_does_not_refresh_the_active_snapshot() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8232,6 +8280,7 @@ fn app_runtime_close_inactive_project_tab_does_not_refresh_the_active_snapshot()
 #[test]
 fn app_runtime_cross_project_window_focus_refreshes_the_new_project_snapshot() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let other = temp.path().join("other");
     fs::create_dir_all(&repo).expect("create repo");
@@ -8278,6 +8327,7 @@ fn app_runtime_cross_project_window_focus_refreshes_the_new_project_snapshot() {
 #[test]
 fn app_runtime_open_project_path_emits_active_work_projection_for_new_tab() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tabs = vec![sample_project_tab(
@@ -8358,6 +8408,7 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
 #[test]
 fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let sessions_dir = temp.path().join("sessions");
@@ -8407,6 +8458,7 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
 #[test]
 fn app_runtime_open_launch_wizard_does_not_probe_branch_worktree_for_docker_context() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     run_git(&repo, &["init", "-q", "-b", "develop"]);
@@ -8460,6 +8512,7 @@ fn app_runtime_open_launch_wizard_does_not_probe_branch_worktree_for_docker_cont
 #[test]
 fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     run_git(&repo, &["init", "-q", "-b", "develop"]);
@@ -8645,6 +8698,7 @@ fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
 #[test]
 fn app_runtime_start_work_parent_root_uses_develop_checkout_for_docker_context() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let workspace_home = temp.path().join("workspace");
     let (bare_repo, develop_worktree) =
         init_managed_workspace_with_develop_worktree(&workspace_home);
@@ -8707,6 +8761,7 @@ fn app_runtime_start_work_parent_root_uses_develop_checkout_for_docker_context()
 #[test]
 fn app_runtime_start_work_parent_root_preserves_saved_host_while_showing_runtime_target() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let workspace_home = temp.path().join("workspace");
     let (_bare_repo, develop_worktree) =
         init_managed_workspace_with_develop_worktree(&workspace_home);
@@ -8765,6 +8820,7 @@ fn app_runtime_start_work_parent_root_preserves_saved_host_while_showing_runtime
 #[test]
 fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker_context() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     run_git(&repo, &["init", "-q", "-b", "develop"]);
@@ -8851,6 +8907,7 @@ fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker
 #[test]
 fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -8923,6 +8980,7 @@ fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window()
 #[test]
 fn app_runtime_live_sessions_report_composed_idle_runtime_status() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -8956,6 +9014,7 @@ fn app_runtime_live_sessions_report_composed_idle_runtime_status() {
 #[test]
 fn app_runtime_live_sessions_report_idle_after_launch_before_first_hook() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -8997,6 +9056,7 @@ fn app_runtime_live_sessions_report_idle_after_launch_before_first_hook() {
 #[test]
 fn app_runtime_workspace_state_reports_idle_for_launched_agent_without_hook_state() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -9035,6 +9095,7 @@ fn app_runtime_workspace_state_reports_idle_for_launched_agent_without_hook_stat
 #[test]
 fn app_runtime_workspace_state_normalizes_pre_lifecycle_agent_windows() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -9060,6 +9121,7 @@ fn app_runtime_workspace_state_normalizes_pre_lifecycle_agent_windows() {
 #[test]
 fn app_runtime_workspace_state_normalizes_agent_kanban_board_ids() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -9099,6 +9161,7 @@ fn app_runtime_workspace_state_normalizes_agent_kanban_board_ids() {
 #[test]
 fn app_runtime_window_list_normalizes_pre_lifecycle_agent_windows() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -9124,6 +9187,7 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
     // from every project tab, not just the active one, so the list matches the
     // cross-tab open-window badge.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab_a = sample_project_tab_with_window(
         "tab-a",
         "win-a1",
@@ -9156,6 +9220,7 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
 #[test]
 fn app_runtime_open_intake_session_without_active_project_uses_intake_error_copy() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
 
     let events =
@@ -9209,6 +9274,7 @@ fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
 #[test]
 fn app_runtime_open_launch_wizard_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -9242,6 +9308,7 @@ fn app_runtime_open_launch_wizard_failure_surfaces_launch_wizard_open_error() {
 #[test]
 fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -9278,6 +9345,7 @@ fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
 #[test]
 fn app_runtime_resume_branch_latest_agent_accepts_work_window_preset() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -9320,6 +9388,7 @@ fn app_runtime_resume_workspace_failure_surfaces_launch_wizard_open_error() {
     // 旧経路は `ProjectOpenError` を broadcast していたが、project 開放中は
     // `renderProjectPicker` が hidden なので silent failure になっていた。
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -9361,6 +9430,7 @@ fn app_runtime_resume_workspace_failure_surfaces_launch_wizard_open_error() {
 fn app_runtime_resume_workspace_without_active_tab_returns_launch_wizard_open_error() {
     // Same contract for the `Open a project before resuming work` early return.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
 
     let events = runtime.handle_frontend_event(
@@ -9386,6 +9456,7 @@ fn app_runtime_resume_workspace_without_active_tab_returns_launch_wizard_open_er
 #[test]
 fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -9412,6 +9483,7 @@ fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
 #[test]
 fn app_runtime_launch_wizard_submit_failure_emits_structured_error_log() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -9469,6 +9541,7 @@ fn app_runtime_launch_wizard_submit_failure_emits_structured_error_log() {
 #[test]
 fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -9541,6 +9614,7 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
 #[test]
 fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -9593,6 +9667,7 @@ fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
 #[test]
 fn app_runtime_agent_launch_completion_failure_emits_structured_error_log() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -9634,6 +9709,7 @@ fn app_runtime_agent_launch_completion_failure_emits_structured_error_log() {
 #[test]
 fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -11580,6 +11656,7 @@ fn legacy_tool_runtime_migration_commits_only_from_authenticated_session_start()
 #[test]
 fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_authority() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -11669,6 +11746,7 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
 #[test]
 fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     runtime.continue_work_outcomes.insert(
         "immutable-operation".to_string(),
@@ -13968,6 +14046,7 @@ fn projection_only_continue_rejects_conflicting_agent_without_mutation() {
 #[test]
 fn continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
     let session_id = "owner-session";
     let live_sidecar = gwt_agent::runtime_state_path_for_pid(
@@ -20558,6 +20637,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
 #[test]
 fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -20596,6 +20676,7 @@ fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
 #[test]
 fn app_runtime_antigravity_missing_binary_launch_error_is_actionable() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -20648,6 +20729,7 @@ No viable candidates found in PATH \
 #[test]
 fn app_runtime_antigravity_missing_binary_launch_wizard_error_is_actionable() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let raw_error = "PTY creation failed: Unable to spawn agy because: \
 No viable candidates found in PATH \
@@ -20688,6 +20770,7 @@ No viable candidates found in PATH \
 #[test]
 fn app_runtime_opencode_missing_binary_launch_error_is_actionable() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -20723,6 +20806,7 @@ No viable candidates found in PATH \
 #[test]
 fn app_runtime_opencode_missing_binary_launch_wizard_error_is_actionable() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let raw_error = "PTY creation failed: Unable to spawn opencode because: \
 No viable candidates found in PATH \
@@ -21335,6 +21419,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
 #[test]
 fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_runtime() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -24651,6 +24736,7 @@ fn app_runtime_active_work_projection_resolves_branch_known_unassigned_agents_as
 #[test]
 fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -24686,6 +24772,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
 fn app_runtime_live_work_agent_lookup_ignores_stopped_or_error_windows() {
     for status in [WindowProcessStatus::Stopped, WindowProcessStatus::Error] {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab_with_window_at(
@@ -24752,6 +24839,7 @@ fn app_runtime_active_work_projection_promotes_branch_known_unassigned_agents_to
 #[test]
 fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -24790,6 +24878,7 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
 #[test]
 fn stale_runtime_events_cannot_mutate_same_window_successor() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -26911,6 +27000,7 @@ fn app_runtime_resume_workspace_agent_errors_when_live_window_runs_other_convers
 #[test]
 fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let sessions_dir = temp.path().join("sessions");
@@ -26962,6 +27052,7 @@ fn app_runtime_latest_branch_resume_reflects_sessions_refreshed_after_cache_load
     // make such a session resumable without a full process restart — the
     // gwt daemon/tray process otherwise keeps the stale cache alive.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let sessions_dir = temp.path().join("sessions");
@@ -27003,6 +27094,7 @@ fn app_runtime_latest_branch_resume_reflects_sessions_refreshed_after_cache_load
 #[test]
 fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let sessions_dir = temp.path().join("sessions");
@@ -27113,6 +27205,7 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
 #[test]
 fn app_runtime_resume_branch_latest_returns_branch_error_when_no_resumable_session_exists() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -27993,6 +28086,7 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
 #[test]
 fn app_runtime_startup_recovery_preserves_unchanged_session_file_identity() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -28046,6 +28140,7 @@ fn app_runtime_startup_recovery_preserves_unchanged_session_file_identity() {
 #[test]
 fn app_runtime_startup_recovery_preserves_already_interrupted_session_file_identity() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -28096,6 +28191,7 @@ fn app_runtime_startup_recovery_preserves_already_interrupted_session_file_ident
 #[test]
 fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -28196,6 +28292,7 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
 #[test]
 fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab_id = "tab-1";
@@ -29535,6 +29632,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
 #[test]
 fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "shell-1",
@@ -29662,6 +29760,7 @@ fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
 #[test]
 fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_events() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29692,6 +29791,7 @@ fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_
 #[test]
 fn app_runtime_runtime_hook_stopped_without_active_session_keeps_window_open() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29711,6 +29811,7 @@ fn app_runtime_runtime_hook_stopped_without_active_session_keeps_window_open() {
 #[test]
 fn app_runtime_runtime_state_hooks_use_status_events_without_browser_hook_event() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29743,6 +29844,7 @@ fn app_runtime_runtime_state_hooks_use_status_events_without_browser_hook_event(
 #[test]
 fn app_runtime_non_session_start_hook_keeps_agent_session_id_fallback() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29769,6 +29871,7 @@ fn app_runtime_non_session_start_hook_keeps_agent_session_id_fallback() {
 #[test]
 fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "board-1",
@@ -29789,6 +29892,7 @@ fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
 #[test]
 fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "board-1",
@@ -29815,6 +29919,7 @@ fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
 #[test]
 fn app_runtime_runtime_state_bursts_emit_no_browser_hook_events() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29839,6 +29944,7 @@ fn app_runtime_runtime_state_bursts_emit_no_browser_hook_events() {
 #[test]
 fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29882,6 +29988,7 @@ fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
 #[test]
 fn app_runtime_approval_wait_overlay_enters_once_and_restores_hook_state() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -29929,6 +30036,7 @@ fn app_runtime_approval_wait_overlay_enters_once_and_restores_hook_state() {
 #[test]
 fn app_runtime_remote_approval_overlay_enters_clears_and_reenters() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -29978,6 +30086,7 @@ fn app_runtime_remote_approval_overlay_enters_clears_and_reenters() {
 #[test]
 fn app_runtime_approval_overlay_dedupes_when_hook_state_is_already_waiting() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -30006,6 +30115,7 @@ fn app_runtime_approval_overlay_dedupes_when_hook_state_is_already_waiting() {
 #[test]
 fn app_runtime_persistence_excludes_only_the_approval_overlay_state() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -30047,6 +30157,7 @@ fn app_runtime_persistence_excludes_only_the_approval_overlay_state() {
 #[test]
 fn app_runtime_persistence_keeps_hook_native_waiting_without_approval_overlay() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -30076,6 +30187,7 @@ fn app_runtime_persistence_keeps_hook_native_waiting_without_approval_overlay() 
 #[test]
 fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30114,6 +30226,7 @@ fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
 #[test]
 fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -30153,6 +30266,7 @@ fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt(
 #[test]
 fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30400,6 +30514,7 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
 #[test]
 fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30456,6 +30571,7 @@ fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() 
 #[test]
 fn app_runtime_pane_send_marks_resolution_before_delayed_submit() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30493,6 +30609,7 @@ fn app_runtime_pane_send_marks_resolution_before_delayed_submit() {
 #[test]
 fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30530,6 +30647,7 @@ fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
 #[test]
 fn app_runtime_custom_agent_name_containing_codex_is_not_classified_as_codex() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window(
         "tab-1",
         "agent-1",
@@ -30569,6 +30687,7 @@ fn app_runtime_custom_agent_name_containing_codex_is_not_classified_as_codex() {
 #[test]
 fn app_runtime_approval_error_beats_live_hook_and_redacts_prompt_tail_everywhere() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30622,6 +30741,7 @@ fn app_runtime_approval_error_beats_live_hook_and_redacts_prompt_tail_everywhere
 #[test]
 fn app_runtime_approval_error_redacts_screen_before_output_event_sets_latch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30668,6 +30788,7 @@ fn app_runtime_approval_error_redacts_screen_before_output_event_sets_latch() {
 #[test]
 fn app_runtime_progress_hook_clears_approval_wait_even_when_hook_state_is_unchanged() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30700,6 +30821,7 @@ fn app_runtime_progress_hook_clears_approval_wait_even_when_hook_state_is_unchan
 #[test]
 fn app_runtime_terminal_state_clears_approval_wait_tracking() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30730,6 +30852,7 @@ fn app_runtime_terminal_state_clears_approval_wait_tracking() {
 #[test]
 fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30776,6 +30899,7 @@ fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() 
 #[test]
 fn app_runtime_stopped_runtime_state_after_prior_state_still_auto_closes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -30804,6 +30928,7 @@ fn app_runtime_stopped_runtime_state_after_prior_state_still_auto_closes() {
 #[test]
 fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -30851,6 +30976,7 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
 #[test]
 fn stop_window_events_keeps_window_and_marks_stopped() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -30895,6 +31021,7 @@ fn stop_window_events_keeps_window_and_marks_stopped() {
 #[test]
 fn stop_window_events_is_idempotent_when_already_stopped() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -30927,6 +31054,7 @@ fn stop_window_events_is_idempotent_when_already_stopped() {
 #[test]
 fn close_window_removes_while_stop_window_keeps() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -30974,6 +31102,7 @@ fn close_window_removes_while_stop_window_keeps() {
 #[test]
 fn process_line_events_drop_stream_without_console_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     // A Logs window alone must not subscribe the raw process stream.
@@ -31002,6 +31131,7 @@ fn process_line_events_drop_stream_without_console_window() {
 #[test]
 fn process_line_events_broadcast_while_console_window_open_on_inactive_tab() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
     let repo_b = temp.path().join("repo-b");
     fs::create_dir_all(&repo_a).expect("create repo-a");
@@ -31046,6 +31176,7 @@ fn process_line_events_broadcast_while_console_window_open_on_inactive_tab() {
 #[test]
 fn log_entry_events_drop_stream_without_logs_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     // A Console window alone must not subscribe the tracing log stream.
@@ -31073,6 +31204,7 @@ fn log_entry_events_drop_stream_without_logs_window() {
 #[test]
 fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
     let repo_b = temp.path().join("repo-b");
     fs::create_dir_all(&repo_a).expect("create repo-a");
@@ -31112,6 +31244,7 @@ fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
 #[test]
 fn stop_all_windows_events_stops_every_runtime_keeping_windows() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -31162,6 +31295,7 @@ fn stop_all_windows_events_stops_every_runtime_keeping_windows() {
 #[test]
 fn restart_window_events_relaunches_stopped_process_window_in_place() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -31200,6 +31334,7 @@ fn restart_window_events_relaunches_stopped_process_window_in_place() {
 #[test]
 fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -31243,6 +31378,7 @@ fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
 #[test]
 fn restart_window_events_is_noop_when_window_already_running() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -31723,6 +31859,7 @@ fn app_runtime_load_board_history_replies_with_older_page() {
 #[test]
 fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -31780,6 +31917,7 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
 #[test]
 fn board_origin_agent_resume_config_uses_exact_saved_session() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -31830,6 +31968,7 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
 #[test]
 fn board_origin_agent_resume_config_supports_builtin_agent_descriptors() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
@@ -31862,6 +32001,7 @@ fn board_origin_agent_resume_config_supports_builtin_agent_descriptors() {
 #[test]
 fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -32890,6 +33030,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
 #[test]
 fn app_runtime_knowledge_search_errors_for_wrong_surface() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -33908,6 +34049,7 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
 #[test]
 fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_support_exists() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -33960,6 +34102,7 @@ fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_suppo
 #[test]
 fn app_runtime_load_profile_replies_with_config_backed_snapshot() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let config_path = temp.path().join("profile-config.toml");
     let mut settings = Settings::default();
     settings
@@ -34015,6 +34158,7 @@ fn app_runtime_load_profile_replies_with_config_backed_snapshot() {
 #[test]
 fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let config_path = temp.path().join("profile-config.toml");
     let mut settings = Settings::default();
     settings
@@ -34122,6 +34266,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
 #[test]
 fn app_runtime_logs_profile_save_user_action_without_env_values() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let _config_home = ScopedEnvVar::set("GWT_CONFIG_HOME", temp.path());
     Settings::default()
         .save(&temp.path().join("config.toml"))
@@ -34255,6 +34400,7 @@ fn frontend_user_action_logs_issue_monitor_global_profile_configure() {
 #[test]
 fn app_runtime_load_logs_replies_with_current_log_snapshot() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -34309,6 +34455,7 @@ fn app_runtime_load_logs_replies_with_current_log_snapshot() {
 #[test]
 fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab_with_window_at(
@@ -34378,6 +34525,7 @@ fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
 #[test]
 fn app_runtime_save_ui_trace_replies_with_artifact_path() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), vec![], None);
 
     let events = runtime.handle_frontend_event(
@@ -42024,6 +42172,7 @@ fn sync_agent_window_titles_worktree_fallback_refuses_when_multiple_sessions_mat
 #[test]
 fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -42366,6 +42515,7 @@ fn project_tab_runtime_main_worktree_root_caches_resolution() {
 #[test]
 fn migration_detected_broadcasts_only_for_pending_tabs() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
     let repo_b = temp.path().join("repo-b");
     fs::create_dir_all(&repo_a).expect("repo-a");
@@ -42392,6 +42542,7 @@ fn migration_detected_broadcasts_only_for_pending_tabs() {
 #[test]
 fn handle_migration_done_repoints_tab_and_emits_broadcast() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     let new_worktree = project.join("develop");
     fs::create_dir_all(&new_worktree).expect("new worktree");
@@ -42426,6 +42577,7 @@ fn handle_migration_done_repoints_tab_and_emits_broadcast() {
 #[test]
 fn handle_migration_done_does_not_refresh_an_inactive_project() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     let new_worktree = project.join("develop");
     let active = temp.path().join("active");
@@ -42444,6 +42596,7 @@ fn handle_migration_done_does_not_refresh_an_inactive_project() {
 fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
     use gwt_core::migration::{MigrationPhase, RecoveryState};
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
 
@@ -42537,6 +42690,7 @@ fn open_intake_session_refuses_while_migration_pending() {
     // `origin/work/<branch>` on a single-branch refspec and dies with
     // `fatal: invalid reference: origin/work/<branch>`.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
 
@@ -42592,6 +42746,7 @@ fn github_repository_search_parser_maps_gh_json_fields() {
 #[test]
 fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let workspace_home = temp.path().join("sample");
     let bare_repo = workspace_home.join("sample.git");
     fs::create_dir_all(&workspace_home).expect("workspace home");
@@ -42649,6 +42804,7 @@ fn open_project_path_for_worktree_remembers_workspace_home_only() {
     // (bare repo の親) に正規化されて 1 件だけ残る。同じ workspace の
     // 別 worktree を続けて開いても recent_projects は増えない。
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let workspace_home = temp.path().join("workspace");
     let bare_repo = workspace_home.join("repo.git");
     fs::create_dir_all(&workspace_home).expect("workspace home");
@@ -42776,6 +42932,7 @@ fn open_project_path_for_worktree_remembers_workspace_home_only() {
 #[test]
 fn clone_project_start_validation_uses_clone_project_error_event() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
 
     let events = runtime.handle_frontend_event(
@@ -42806,6 +42963,7 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
 #[test]
 fn skip_migration_events_clears_pending_flag_without_broadcast() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
 
@@ -42820,6 +42978,7 @@ fn skip_migration_events_clears_pending_flag_without_broadcast() {
 #[test]
 fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
@@ -42866,6 +43025,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
 #[test]
 fn quit_migration_events_requests_app_quit_without_repository_changes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
@@ -42896,6 +43056,7 @@ fn quit_migration_events_requests_app_quit_without_repository_changes() {
 #[test]
 fn open_project_with_existing_migration_backup_emits_recovery_error() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
     init_repo(&project);
@@ -43052,6 +43213,7 @@ fn validate_server_url_rejects_external_origin() {
 #[test]
 fn open_server_url_events_rejects_mismatched_origin() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
     runtime.set_server_url("http://127.0.0.1:54321/".to_string());
     let outbound = runtime.open_server_url_events("client-1", "http://evil.example/".to_string());
@@ -43064,6 +43226,7 @@ fn open_server_url_events_rejects_mismatched_origin() {
 #[test]
 fn open_server_url_events_rejects_when_server_url_unset() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (runtime, _events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
     let outbound =
         runtime.open_server_url_events("client-1", "http://127.0.0.1:54321/".to_string());
@@ -45942,6 +46105,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
 #[test]
 fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -46160,6 +46324,7 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
 #[test]
 fn work_events_ingest_attempt_is_throttled_per_project() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
     let root = temp.path().join("repo");
 

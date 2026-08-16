@@ -103,6 +103,19 @@ const SCAN_WORKER_TRIGGERS: &[&str] = &[
     "wait_for_scheduled_scan_completion",
 ];
 
+/// Fixtures that build an `AppRuntime` and therefore let the test drive
+/// production code.
+///
+/// Issue #3609 AC-6: production entry points reached this way resolve the gwt
+/// home several hops in — `handle_frontend_event(OpenIntakeSession)` reaches
+/// `reserve_start_work_branch_name_for_project`, which calls
+/// `gwt_project_dir_for_repo_path`. Following those hops by name is not
+/// workable (it lands on generic entry points such as `handle_frontend_event`
+/// and `new`), so the rule is applied at the door instead: a test that can
+/// drive production code must own its home first. The runtime fixture already
+/// takes that root as its first argument, so the pin is always available.
+const RUNTIME_FIXTURES: &[&str] = &["sample_runtime", "sample_runtime_with_events"];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -489,6 +502,27 @@ fn every_scan_worker_test_holds_the_process_env_lock() {
         "Issue #3609: {} test(s) enqueue the Issue Monitor scan worker without holding \
          `env_test_lock()`. The worker re-resolves the prefs path from the process-global \
          `HOME` on its own thread, where a `ScopedGwtHome` thread-local pin is invisible:\n{}",
+        violations.len(),
+        report(&violations)
+    );
+}
+
+#[test]
+fn every_test_that_builds_a_runtime_owns_its_gwt_home() {
+    let root = repo_root();
+    let watched: BTreeSet<String> = RUNTIME_FIXTURES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let violations = violations_for(&root, &watched, ParsedFn::guarded);
+    assert!(
+        violations.is_empty(),
+        "Issue #3609 AC-6: {} test(s) build an `AppRuntime` without owning a gwt home. \
+         Driving production code from there resolves the process-global `HOME` several \
+         hops in, so the fixture root a parallel test installed decides where this test \
+         writes. Add `let _gwt_home = ScopedGwtHome::set(<the root passed to the \
+         fixture>);` before the fixture call, or take `env_test_lock()` and repoint \
+         `HOME`:\n{}",
         violations.len(),
         report(&violations)
     );
