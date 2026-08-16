@@ -742,6 +742,19 @@ pub struct ProjectOpenTarget {
 /// scan, bounding both the git calls and the AI prompt size for large repos.
 const AI_SUMMARY_BRANCH_CAP: usize = 40;
 
+/// Issue #3604: minimum spacing between two repository-wide PR-title
+/// enumerations for the same project.
+///
+/// Each enumeration is a `gh pr list --state all --limit 999` — up to ten
+/// GraphQL requests out of a 5000-point hourly budget — and it used to ride the
+/// 30s ingest throttle, so a GUI in ordinary use re-enumerated every PR in the
+/// repository twice a minute. Bounded staleness is the right trade here: the
+/// rail falls back to the branch's tip commit subject until the title arrives,
+/// and a project-open refresh bypasses the window entirely
+/// ([`AppRuntime::spawn_work_events_ingest`]).
+pub(crate) const WORK_PR_TITLES_SCAN_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
 /// SPEC-3075 FR-006: a tip commit subject that carries no real purpose — merge
 /// commits and release-version bumps. These are the cases the AI polish targets
 /// (it reads the underlying feature commits instead).
@@ -966,6 +979,10 @@ pub struct AppRuntime {
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
+    /// Issue #3604: last full PR-title enumeration per project. Kept separate
+    /// from `last_work_events_ingest` because the local part of that ingest is
+    /// cheap while this one costs a repository-wide `gh pr list`.
+    pub(crate) last_work_pr_titles_scan: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
     /// SPEC-2359 W16-3 (FR-390): normalized branch names that currently have
     /// a LOCAL worktree, per project — refreshed by the worktree reconcile.
     /// The view marks `remote_only` by cache lookup alone (no git spawn on
@@ -2064,6 +2081,7 @@ impl AppRuntime {
             ),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
@@ -2151,6 +2169,12 @@ impl AppRuntime {
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
         if !self.note_work_events_ingest_attempt(&project_root, force) {
             return;
+        }
+        // Issue #3604: bootstrap and project-open are the moments a stale rail
+        // summary would actually be noticed, so they reopen the PR-title window
+        // that the frequent triggers (tab switch, every launch) must respect.
+        if force {
+            self.reopen_work_pr_titles_window(&project_root);
         }
         let proxy = self.proxy.clone();
         // Resolve the home-projection paths on the calling thread: HOME is
@@ -2367,7 +2391,37 @@ impl AppRuntime {
     /// "what work was running" signal. Network-dependent: an empty map (offline
     /// / `gh` absent / unauthenticated) leaves the commit-subject fallback in
     /// place. Runs once per project-open, after the events ingest.
+    ///
+    /// Issue #3604: this is the only *network* leg of the ingest continuation,
+    /// and `gh pr list --state all --limit 999` costs up to ten GraphQL
+    /// requests. Riding the 30s ingest throttle meant an ordinary GUI session
+    /// re-enumerated every PR in the repository twice a minute against a
+    /// 5000-point hourly budget, so it now has its own window
+    /// ([`WORK_PR_TITLES_SCAN_WINDOW`]).
+    /// Let the next PR-title enumeration for `project_root` run immediately,
+    /// regardless of when the last one happened.
+    pub(crate) fn reopen_work_pr_titles_window(&self, project_root: &Path) {
+        self.last_work_pr_titles_scan
+            .borrow_mut()
+            .remove(project_root);
+    }
+
+    pub(crate) fn note_work_pr_titles_scan_attempt(&self, project_root: &Path) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last_work_pr_titles_scan.borrow_mut();
+        if let Some(previous) = last.get(project_root) {
+            if now.duration_since(*previous) < WORK_PR_TITLES_SCAN_WINDOW {
+                return false;
+            }
+        }
+        last.insert(project_root.to_path_buf(), now);
+        true
+    }
+
     pub(crate) fn spawn_work_pr_titles_scan(&self, project_root: PathBuf) {
+        if !self.note_work_pr_titles_scan_attempt(&project_root) {
+            return;
+        }
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let pr_titles =
