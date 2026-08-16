@@ -1048,6 +1048,24 @@ fn issue_cache_root(repo_path: &Path) -> PathBuf {
     gwt_cache_dir().join("issues").join(repo_hash.as_str())
 }
 
+/// Issue #3609: the issue-link cache handed to `AppRuntime`, derived from the
+/// caller's temp root the way `sessions_dir` / `log_dir` / `session_state_path`
+/// already are.
+///
+/// Resolving `gwt_cache_dir()` here instead made the shared runtime fixture
+/// read the process-global `HOME` at construction time, so the 200+ tests that
+/// build a runtime without owning the home inherited whatever tempdir a
+/// parallel test had installed — the mechanism behind #3411 / #3414 / #3601.
+///
+/// The layout mirrors an isolated gwt home (`<home>/.gwt/cache`) on purpose:
+/// tests that seed the store through [`write_issue_link_store`] reach it via
+/// `gwt_cache_dir()`, because `knowledge_bridge::load_linked_branches` still
+/// resolves that path itself rather than taking the runtime's field. Callers
+/// that pin their home to the same root therefore see one cache, not two.
+fn issue_link_cache_dir_for(temp_root: &Path) -> PathBuf {
+    temp_root.join(".gwt").join("cache")
+}
+
 fn write_issue_link_store(repo_path: &Path, branches: HashMap<String, u64>) {
     let repo_hash = detect_repo_hash(repo_path).expect("repo hash");
     let path = gwt_cache_dir()
@@ -3377,6 +3395,7 @@ fn sample_runtime_with_events(
         ),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
@@ -3388,7 +3407,7 @@ fn sample_runtime_with_events(
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
-        issue_link_cache_dir: gwt_cache_dir(),
+        issue_link_cache_dir: issue_link_cache_dir_for(temp_root),
         knowledge_related_snapshot: Default::default(),
         knowledge_monitor_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
@@ -9171,6 +9190,10 @@ fn app_runtime_open_intake_session_without_active_project_uses_intake_error_copy
 #[test]
 fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
+    // Issue #3609: the reservation directory this path creates must land in
+    // this test's tempdir, not in whichever one a parallel test installed as
+    // the process-global `HOME`.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -22744,7 +22767,12 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 /// so this still cannot loop.
 #[test]
 fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    // Issue #3609: the other 387 acquisitions in this binary recover from a
+    // poisoned mutex. `expect` here turned any unrelated panic under the lock
+    // into a second, misleading failure in the same run.
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let missing_pin = root.path().join("missing/gwtd");
@@ -42666,6 +42694,14 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
 #[test]
 fn open_intake_session_opens_ephemeral_branchless_wizard() {
     let temp = tempdir().expect("tempdir");
+    // Issue #3609: `OpenIntakeSession` reaches
+    // `reserve_start_work_branch_name_for_project`, which resolves
+    // `gwt_project_dir_for_repo_path` from the process-global `HOME`. Without
+    // this pin the reservation directory is created inside whichever tempdir a
+    // parallel test installed, and this test fails with
+    // "Failed to reserve Start Work branch name: Invalid argument (os error 22)"
+    // once that tempdir is gone. Observed under parallel load on 2026-08-16.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -46427,6 +46463,54 @@ fn work_events_ingest_attempt_is_throttled_per_project() {
     assert!(
         runtime.note_work_events_ingest_attempt(&other, false),
         "throttle is per project root"
+    );
+}
+
+/// Issue #3604: the rail's PR-title lookup is a single
+/// `gh pr list --state all --limit 999` — up to ten GraphQL requests. It rode
+/// the 30s ingest throttle, so a GUI in ordinary use re-enumerated every PR in
+/// the repository twice a minute. It now has its own, far longer window.
+#[test]
+fn work_pr_titles_scan_has_its_own_long_window_and_is_per_project() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_pr_titles_scan_attempt(&root));
+    assert!(
+        !runtime.note_work_pr_titles_scan_attempt(&root),
+        "a second PR-title enumeration inside the window is suppressed"
+    );
+
+    let other = temp.path().join("other");
+    assert!(
+        runtime.note_work_pr_titles_scan_attempt(&other),
+        "the window is per project root"
+    );
+
+    assert!(
+        super::WORK_PR_TITLES_SCAN_WINDOW >= Duration::from_secs(300),
+        "the window must be an order of magnitude wider than the 30s ingest throttle"
+    );
+}
+
+/// Issue #3604: bounded staleness must not become unbounded staleness. Opening
+/// a project is the moment a stale rail summary would be noticed, so the forced
+/// ingest reopens the PR-title window.
+#[test]
+fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_pr_titles_scan_attempt(&root));
+    assert!(!runtime.note_work_pr_titles_scan_attempt(&root));
+
+    runtime.reopen_work_pr_titles_window(&root);
+
+    assert!(
+        runtime.note_work_pr_titles_scan_attempt(&root),
+        "reopening the window must allow the next enumeration through"
     );
 }
 
