@@ -9176,6 +9176,10 @@ fn app_runtime_open_intake_session_without_active_project_uses_intake_error_copy
 #[test]
 fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
+    // Issue #3609: the reservation directory this path creates must land in
+    // this test's tempdir, not in whichever one a parallel test installed as
+    // the process-global `HOME`.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -42476,6 +42480,14 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
 #[test]
 fn open_intake_session_opens_ephemeral_branchless_wizard() {
     let temp = tempdir().expect("tempdir");
+    // Issue #3609: `OpenIntakeSession` reaches
+    // `reserve_start_work_branch_name_for_project`, which resolves
+    // `gwt_project_dir_for_repo_path` from the process-global `HOME`. Without
+    // this pin the reservation directory is created inside whichever tempdir a
+    // parallel test installed, and this test fails with
+    // "Failed to reserve Start Work branch name: Invalid argument (os error 22)"
+    // once that tempdir is gone. Observed under parallel load on 2026-08-16.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);

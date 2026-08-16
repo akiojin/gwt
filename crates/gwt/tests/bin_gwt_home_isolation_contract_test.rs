@@ -36,6 +36,19 @@
 //! processes and do not share this `HOME`; several of them pin the home from
 //! a fixture struct rather than the test body, which this simple body-level
 //! detector cannot see.
+//!
+//! Known gap, stated so nobody reads a pass here as full coverage: the rules
+//! below follow calls a test makes *directly*, plus fixtures declared in
+//! [`SHARED_FIXTURE_SOURCE`]. They do not follow a test into production code.
+//! A test that drives, say, `handle_frontend_event(OpenIntakeSession)` reaches
+//! `reserve_start_work_branch_name_for_project`, which resolves
+//! `gwt_project_dir_for_repo_path` two hops away — and this detector stays
+//! silent. Name-based propagation through production code was measured and
+//! rejected: it reaches generic entry points such as `handle_frontend_event`
+//! and `new`, and would flag roughly 260 tests without distinguishing the ones
+//! that actually resolve a home. Closing that class needs either per-test home
+//! pinning across the binary or a runtime guard inside `gwt_home()`, not a
+//! wider static rule.
 
 use std::{
     collections::BTreeSet,
