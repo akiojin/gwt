@@ -463,10 +463,54 @@ where
     })
 }
 
+/// Issue #3524 (folded into #3606): rebuild without taking the projection lock,
+/// for a caller that already holds it across a wider transaction.
+///
+/// The store consolidation has to hold the `works.lock` of the canonical store
+/// *and* of every store it quarantines for the whole move-then-rebuild
+/// sequence. Re-entering [`crate::workspace_projection::with_workspace_work_items_lock`]
+/// from inside that transaction would deadlock against the lock the caller
+/// already owns, so this entry point is lock-free by contract.
+///
+/// `extra_legacy_items` are eventless rows from another store's projection.
+/// They merge exactly like this store's own eventless rows, which is what keeps
+/// a legacy Work that never had a durable event from disappearing in the fold.
+pub(crate) fn rebuild_work_events_contents_locked<'a>(
+    work_items_path: &Path,
+    shared_contents: impl IntoIterator<Item = &'a str>,
+    close_content: Option<&str>,
+    extra_legacy_items: Vec<WorkItem>,
+) -> Result<WorkEventsIntakeReport> {
+    let shared_sources = shared_contents
+        .into_iter()
+        .map(|content| SharedWorkEventsSource::new(content, None))
+        .collect::<Vec<_>>();
+    rebuild_work_event_sources_locked_with_legacy(
+        work_items_path,
+        shared_sources,
+        close_content,
+        extra_legacy_items,
+    )
+}
+
 fn rebuild_work_event_sources_locked(
     work_items_path: &Path,
     shared_sources: Vec<SharedWorkEventsSource>,
     close_content: Option<&str>,
+) -> Result<WorkEventsIntakeReport> {
+    rebuild_work_event_sources_locked_with_legacy(
+        work_items_path,
+        shared_sources,
+        close_content,
+        Vec::new(),
+    )
+}
+
+fn rebuild_work_event_sources_locked_with_legacy(
+    work_items_path: &Path,
+    shared_sources: Vec<SharedWorkEventsSource>,
+    close_content: Option<&str>,
+    extra_legacy_items: Vec<WorkItem>,
 ) -> Result<WorkEventsIntakeReport> {
     let previous = match load_workspace_work_items_from_path(work_items_path) {
         Ok(previous) => previous,
@@ -485,11 +529,15 @@ fn rebuild_work_event_sources_locked(
         Err(error) => return Err(error),
     };
     let previous_updated_at = previous.as_ref().map(|projection| projection.updated_at);
-    let eventless_items = previous
+    let mut eventless_items = previous
         .into_iter()
         .flat_map(|projection| projection.work_items)
         .filter(|item| item.events.is_empty() || item.legacy_metadata_authoritative)
         .collect::<Vec<_>>();
+    // This store's own eventless rows go first, so when a consolidation carries
+    // a row for the same id from another store the local snapshot is the one
+    // that establishes the legacy base and the foreign row merges into it.
+    eventless_items.extend(extra_legacy_items);
 
     let mut report = WorkEventsIntakeReport::default();
     let mut incoming = collect_shared_work_event_sources(shared_sources, &mut report)?;
