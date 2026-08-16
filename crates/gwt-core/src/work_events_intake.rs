@@ -28,9 +28,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, JsonDecodeKind, Result};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
-    save_workspace_work_items_projection_to_path, DecodedWorkspaceWorkEvent,
-    DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem,
-    WorkItemsProjection, WorkspaceExecutionContainerRef,
+    save_workspace_work_items_projection_to_path, workspace_execution_container_same,
+    DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
+    WorkEventKind, WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -339,7 +339,7 @@ fn refold_work_events_projection_with_keys(
         if !item
             .execution_containers
             .iter()
-            .any(|existing| execution_container_same(existing, &container))
+            .any(|existing| workspace_execution_container_same(existing, &container))
         {
             item.execution_containers.push(container.clone());
         }
@@ -771,7 +771,7 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
         if !legacy
             .execution_containers
             .iter()
-            .any(|existing| execution_container_same(existing, &container))
+            .any(|existing| workspace_execution_container_same(existing, &container))
         {
             legacy.execution_containers.push(container);
         }
@@ -847,7 +847,7 @@ fn repair_duplicate_event_container(
     if !item
         .execution_containers
         .iter()
-        .any(|existing| execution_container_same(existing, container))
+        .any(|existing| workspace_execution_container_same(existing, container))
     {
         item.execution_containers.push(container.clone());
         changed = true;
@@ -862,16 +862,6 @@ fn repair_duplicate_event_container(
         changed = true;
     }
     changed
-}
-
-fn execution_container_same(
-    left: &WorkspaceExecutionContainerRef,
-    right: &WorkspaceExecutionContainerRef,
-) -> bool {
-    (left.branch.is_some() && left.branch == right.branch)
-        || (left.worktree_path.is_some() && left.worktree_path == right.worktree_path)
-        || (left.pr_number.is_some() && left.pr_number == right.pr_number)
-        || (left.pr_url.is_some() && left.pr_url == right.pr_url)
 }
 
 /// Fingerprint cache mapping a source key (worktree path / ref name) to the
@@ -2665,7 +2655,7 @@ mod tests {
         assert!(target
             .execution_containers
             .iter()
-            .any(|container| execution_container_same(container, &duplicate_container)));
+            .any(|container| workspace_execution_container_same(container, &duplicate_container)));
     }
 
     #[test]
@@ -2707,7 +2697,7 @@ mod tests {
         assert!(projection.work_items[0]
             .execution_containers
             .iter()
-            .any(|container| execution_container_same(container, &duplicate_container)));
+            .any(|container| workspace_execution_container_same(container, &duplicate_container)));
     }
 
     #[test]
@@ -2770,6 +2760,78 @@ mod tests {
         assert!(
             !legacy.duplicate_event_containers.is_empty(),
             "legacy merge must carry duplicate provenance into the next refold"
+        );
+    }
+
+    fn worktree_container(branch: &str, worktree_path: &str) -> WorkspaceExecutionContainerRef {
+        WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(std::path::PathBuf::from(worktree_path)),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }
+    }
+
+    /// Issue #3524 (folded into #3606): the legacy-metadata merge decides for
+    /// itself which containers are already present. Consolidating a pre-#3466
+    /// store split is exactly when two views of one origin, each holding a
+    /// worktree on the same branch name, first meet in one projection — so this
+    /// path must key on the worktree path too, or the legacy row silently
+    /// absorbs and erases the rebuilt row's worktree.
+    #[test]
+    fn eventless_legacy_merge_keeps_two_worktrees_on_one_branch() {
+        let at = Utc.with_ymd_and_hms(2026, 8, 16, 0, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(at);
+        let mut rebuilt = WorkEvent::new(WorkEventKind::Start, "work-two-worktrees", at);
+        rebuilt.status_category = Some(WorkspaceStatusCategory::Active);
+        rebuilt.execution_container =
+            Some(worktree_container("work/shared", "/layout-b/work/shared"));
+        projection.apply_event(rebuilt);
+
+        let legacy = WorkItem {
+            id: "work-two-worktrees".to_string(),
+            title: "work/shared".to_string(),
+            intent: None,
+            summary: None,
+            progress_summary: None,
+            status_category: WorkspaceStatusCategory::Idle,
+            owner: None,
+            created_at: at,
+            updated_at: at,
+            completed_at: None,
+            agents: Vec::new(),
+            execution_containers: vec![worktree_container("work/shared", "/layout-a/work/shared")],
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+            legacy_metadata_snapshot: None,
+            legacy_metadata_authoritative: false,
+            legacy_metadata_snapshot_at: None,
+            duplicate_event_containers: BTreeMap::new(),
+            discarded: false,
+            discarded_at: None,
+        };
+        merge_eventless_legacy_item(&mut projection, legacy);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-two-worktrees")
+            .expect("merged item");
+        let mut paths: Vec<_> = item
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.worktree_path.clone())
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                std::path::PathBuf::from("/layout-a/work/shared"),
+                std::path::PathBuf::from("/layout-b/work/shared"),
+            ],
+            "distinct worktrees on one branch survive the legacy merge"
         );
     }
 }

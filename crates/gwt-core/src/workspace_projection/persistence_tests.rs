@@ -8686,6 +8686,98 @@ fn record_workspace_work_paused_event_retains_incomplete_history_item() {
         .any(|event| event.kind == WorkEventKind::Pause));
 }
 
+/// Issue #3524 (folded into #3606): two views of the same origin can each hold a
+/// worktree on the same branch name. A pre-#3466 store split kept them in
+/// separate stores, so they never met; consolidating the stores makes both
+/// containers reach one Work item. Container identity therefore has to key on
+/// the worktree path whenever both sides carry one — a bare branch match drops
+/// the second worktree, and nothing (prune, UI, launch) can reach it again.
+#[test]
+fn same_branch_in_two_worktrees_keeps_both_execution_containers() {
+    let now = Utc::now();
+    let mut projection = super::WorkItemsProjection::empty(now);
+
+    let mut first = sample_work_event("work-shared-branch", now);
+    first.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/shared".to_string()),
+        worktree_path: Some(PathBuf::from("/layout-a/work/shared")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(first);
+
+    let mut second = WorkEvent::new(WorkEventKind::Update, "work-shared-branch", now);
+    second.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/shared".to_string()),
+        worktree_path: Some(PathBuf::from("/layout-b/work/shared")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(second);
+
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-shared-branch")
+        .expect("work item");
+    let paths: Vec<_> = item
+        .execution_containers
+        .iter()
+        .filter_map(|container| container.worktree_path.as_deref())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            Path::new("/layout-a/work/shared"),
+            Path::new("/layout-b/work/shared")
+        ],
+        "distinct worktrees on one branch are distinct execution containers"
+    );
+}
+
+/// Issue #3524 (folded into #3606): a container that carries no worktree path
+/// still merges into the branch it names. Only two *known and different* paths
+/// prove two containers, so an identity-less event must not fan a Work item out
+/// into duplicate rows.
+#[test]
+fn branch_only_container_still_merges_into_the_worktree_container() {
+    let now = Utc::now();
+    let mut projection = super::WorkItemsProjection::empty(now);
+
+    let mut first = sample_work_event("work-branch-merge", now);
+    first.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/merge".to_string()),
+        worktree_path: Some(PathBuf::from("/layout-a/work/merge")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(first);
+
+    let mut second = WorkEvent::new(WorkEventKind::Update, "work-branch-merge", now);
+    second.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/merge".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(second);
+
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-branch-merge")
+        .expect("work item");
+    assert_eq!(
+        item.execution_containers.len(),
+        1,
+        "a path-less container carries no evidence of a second worktree"
+    );
+}
+
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a Pause event carries no explicit
 /// status, so the Done-preservation in `apply_event` keeps an already-closed
 /// (Done) Work terminal — agent stop must never reopen a closed Work.

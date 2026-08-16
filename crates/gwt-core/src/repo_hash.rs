@@ -234,6 +234,49 @@ pub fn child_bare_repositories(repo_path: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+/// The shared git directory backing `repo_root`.
+///
+/// A repository or linked worktree resolves through its own git dir's
+/// `commondir`; a Nested Bare + Worktree layout root has no git dir of its own,
+/// so the first direct-child bare repository that names an `origin` stands in
+/// for it. Returns `None` when neither applies.
+pub fn resolve_repository_common_dir(repo_root: &Path) -> Option<PathBuf> {
+    if let Some(git_dir) = resolve_git_dir(repo_root) {
+        return Some(resolve_common_git_dir(&git_dir));
+    }
+    child_bare_repositories(repo_root)
+        .into_iter()
+        .find(|bare| detect_repo_hash(bare).is_some())
+}
+
+/// Working-tree roots of every linked worktree registered under `common_dir`.
+///
+/// Each `worktrees/<name>/gitdir` records the path of that worktree's `.git`
+/// file, so its parent is the worktree root. Sorted and deduplicated so callers
+/// that key on discovery order stay deterministic.
+pub fn linked_worktree_roots(common_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(common_dir.join("worktrees")) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.path().join("gitdir")).ok())
+        .filter_map(|contents| {
+            let raw = contents
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            (!raw.is_empty()).then(|| PathBuf::from(raw))
+        })
+        .filter_map(|git_file| git_file.parent().map(Path::to_path_buf))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 /// A bare repository has no working tree, so recognise it by its git layout.
 fn is_bare_repository(path: &Path) -> bool {
     path.is_dir()

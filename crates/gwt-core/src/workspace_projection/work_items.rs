@@ -590,12 +590,22 @@ fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
     })
 }
 
-fn workspace_execution_container_same(
+pub(crate) fn workspace_execution_container_same(
     left: &WorkspaceExecutionContainerRef,
     right: &WorkspaceExecutionContainerRef,
 ) -> bool {
+    // Issue #3524 (folded into #3606): a checked-out path is the strongest
+    // identity a container has. Two views of one origin can each hold a
+    // worktree on the same branch name, and matching on the branch alone
+    // collapses them into one row — the second worktree then has no container
+    // anywhere, so prune / UI / launch can never reach it. Before #3466 the
+    // split project stores hid this; consolidating them makes it reachable.
+    // Only two *known and different* paths prove two containers, so a
+    // path-less container still merges into the branch it names.
+    if let (Some(left_path), Some(right_path)) = (&left.worktree_path, &right.worktree_path) {
+        return left_path == right_path;
+    }
     (left.branch.is_some() && left.branch == right.branch)
-        || (left.worktree_path.is_some() && left.worktree_path == right.worktree_path)
         || (left.pr_number.is_some() && left.pr_number == right.pr_number)
         || (left.pr_url.is_some() && left.pr_url == right.pr_url)
 }

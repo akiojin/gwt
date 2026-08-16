@@ -99,6 +99,7 @@ pub use projection::{
     WorkspaceCleanupReason, WorkspaceJournalEntry, WorkspaceLaunchUpdate, WorkspaceProjection,
     WorkspaceProjectionUpdate, WorkspaceStartUpdate,
 };
+pub(crate) use work_items::workspace_execution_container_same;
 pub use work_items::{
     DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
     WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,
