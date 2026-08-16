@@ -28996,11 +28996,15 @@ fn active_work_projection_source_has_no_live_process_scan_helper() {
 /// Issue #3611 AC-1/AC-2/AC-3: a Session whose worktree was deleted used to
 /// fall through `session_exact_resume_materializable` into
 /// `git rev-parse --git-common-dir` + `git show-ref` **per Session**, on the
-/// GUI event-loop thread. With one Session per Work row the projection build
-/// spawned hundreds of short-lived Git processes and stalled the event loop for
-/// seconds, which is what starved the `pane.*` route (#3510). The projection
-/// must answer resumability from the background ref snapshot instead, so the
-/// spawn count stays at zero however many Sessions exist.
+/// GUI event-loop thread. `pane.*` is served from that same single-threaded
+/// loop, so its response latency *is* the projection's occupancy (#3510: 6ms
+/// idle, >2s during a scan). At this fixture's scale the old path meant ~384
+/// short-lived Git processes (~6s) per build.
+///
+/// Both assertions target that cost: the spawn count must stay flat at zero
+/// however many Sessions exist, and the build must finish inside a budget well
+/// below the pre-fix cost while leaving ~40x headroom over the measured
+/// process-free build (~45ms), so a loaded machine cannot flake it.
 #[test]
 fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session() {
     let _env_lock = env_test_lock()
@@ -29015,7 +29019,7 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
-    for index in 0..64 {
+    for index in 0..128 {
         let branch = format!("work/missing-worktree-{index}");
         // Deliberately never created: this is the historical Session whose
         // worktree is gone but whose branch may still exist.
@@ -29065,10 +29069,13 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
     let _path = prepend_tool_parent_to_path(&fake_git);
     let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
 
+    let started = Instant::now();
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
         .expect("projection view");
+    let elapsed = started.elapsed();
 
+    assert_eq!(view.active_works.len(), 128);
     assert!(
         view.active_works
             .iter()
@@ -29081,91 +29088,6 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
         invocations.trim().is_empty(),
         "Session resumability must resolve from the background ref snapshot, \
          never from a per-Session Git spawn on the event loop; invocations:\n{invocations}"
-    );
-}
-
-/// Issue #3611 AC-3: `pane.*` is served from the same single-threaded event
-/// loop as the Workspace projection, so its response latency is exactly the
-/// projection's event-loop occupancy (#3510: 6ms idle, >2s during a scan).
-/// This pins the occupancy at a scale that used to be pathological — 128
-/// Sessions once meant ~384 short-lived Git processes (~6s) on the GUI thread.
-/// Both assertions target that cost: the spawn count must stay flat at zero,
-/// and the build must finish inside a budget well below the pre-fix cost while
-/// leaving ~40x headroom over the measured process-free build (~45ms), so a
-/// loaded machine cannot flake it.
-#[test]
-fn active_work_projection_event_loop_occupancy_does_not_scale_with_session_count() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let sessions_dir = temp.path().join("sessions");
-    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
-
-    for index in 0..128 {
-        let branch = format!("work/occupancy-{index}");
-        let worktree_path = repo.join("work").join(index.to_string());
-        let session_id = format!("session-occupancy-{index}");
-        let mut event = gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Update,
-            format!("work-occupancy-{index}"),
-            chrono::Utc::now(),
-        );
-        event.title = Some(format!("Occupancy work {index}"));
-        event.agent_session_id = Some(session_id.clone());
-        event.agent_id = Some("codex".to_string());
-        let mut session =
-            gwt_agent::Session::new(&worktree_path, &branch, gwt_agent::AgentId::Codex);
-        session.id = session_id;
-        session.agent_session_id = Some(format!("conv-occupancy-{index}"));
-        session.project_state_root = Some(repo.clone());
-        session
-            .save(&sessions_dir)
-            .expect("save projection Session fixture");
-        event.execution_container = Some(
-            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-                branch: Some(branch),
-                worktree_path: Some(worktree_path),
-                pr_number: None,
-                pr_url: None,
-                pr_state: None,
-            },
-        );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
-    }
-
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime
-        .work_dirty_branches
-        .insert(repo.clone(), HashSet::new());
-    runtime
-        .work_live_process_branches
-        .insert(repo.clone(), HashSet::new());
-    let fake_bin = temp.path().join("fake-bin");
-    fs::create_dir_all(&fake_bin).expect("create fake bin");
-    let fake_git = write_fake_git_recorder(&fake_bin);
-    let git_log = temp.path().join("git-invocations.log");
-    let _path = prepend_tool_parent_to_path(&fake_git);
-    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
-
-    let started = Instant::now();
-    let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
-        .expect("projection view");
-    let elapsed = started.elapsed();
-
-    assert_eq!(view.active_works.len(), 128);
-    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
-    assert!(
-        invocations.trim().is_empty(),
-        "projection occupancy must not scale with Session count; invocations:\n{invocations}"
     );
     assert!(
         elapsed < Duration::from_secs(2),
