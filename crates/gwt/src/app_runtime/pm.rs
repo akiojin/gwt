@@ -192,6 +192,25 @@ impl AppRuntime {
             );
             return Vec::new();
         }
+        if let Some(window_id) = prefs
+            .registration
+            .as_ref()
+            .and_then(|registration| self.live_pm_window_id(&registration.session_id))
+        {
+            // FR-019: the PM launcher must always land the user on the PM, so
+            // focusing frames it in the viewport rather than only raising it.
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+        }
+        // Issue #3607 AC-1/AC-2: the singleton is per *repository*, not per
+        // project store. One repository can own two stores after a scope split
+        // (#3466), and each store's `pm.json` — `auto_start` included — is
+        // invisible to the other, so both auto-started and two PMs ended up
+        // rewriting one repository's Issue Monitor order and launch orders.
+        // Refusing here rather than at registration keeps the second store from
+        // ever spawning the pane.
+        if let Some(window_id) = self.live_pm_window_id_in_another_store(&project_root) {
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+        }
         let Some(registration) = prefs.registration else {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -199,11 +218,6 @@ impl AppRuntime {
             );
             return self.spawn_pm_agent(tab_id, &project_root);
         };
-        if let Some(window_id) = self.live_pm_window_id(&registration.session_id) {
-            // FR-019: the PM launcher must always land the user on the PM, so
-            // focusing frames it in the viewport rather than only raising it.
-            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
-        }
         // FR-003 crash-loop damper: while the backoff floor is in the future
         // the automatic ladder must not respawn. Scoped to `Automatic` for the
         // same reason as the auto_start opt-out above — FR-021 requires the
@@ -1292,6 +1306,30 @@ impl AppRuntime {
                     Some(WindowProcessStatus::Stopped) | Some(WindowProcessStatus::Error) => None,
                     _ => Some(window_id.clone()),
                 }
+            })
+    }
+
+    /// Issue #3607 AC-1: window id of a live PM registered by *another* project
+    /// store of the same repository.
+    ///
+    /// Only a live one blocks. A dead registration in a split store must never
+    /// leave the repository without a PM — the gate exists to stop duplicates,
+    /// not to stop recovery.
+    pub(crate) fn live_pm_window_id_in_another_store(&self, project_root: &Path) -> Option<String> {
+        let repository_key = pm_registry::pm_repository_key(project_root)?;
+        let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root);
+        pm_registry::pm_registrations_for_repository(&repository_key)
+            .into_iter()
+            .filter(|record| record.project_dir != own_project_dir)
+            .find_map(|record| {
+                let window_id = self.live_pm_window_id(&record.registration.session_id)?;
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    other_store = %record.project_dir.display(),
+                    session_id = %record.registration.session_id,
+                    "PM ensure refused: this repository already has a live PM in another project store"
+                );
+                Some(window_id)
             })
     }
 

@@ -482,6 +482,9 @@ impl AppRuntime {
         workspace_resume_context: Option<WorkspaceResumeContext>,
         fallback_geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
+            return Vec::new();
+        }
         let config = launch_config_from_persisted_session(&session);
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id)
@@ -522,6 +525,42 @@ impl AppRuntime {
                 Vec::new()
             }
         }
+    }
+
+    /// Issue #3607 AC-3: refuse to restore a Session rooted in *another*
+    /// project store's `pm/worktree`.
+    ///
+    /// The stopped store in the incident was not open in the app at all, yet
+    /// its PM came back: the current store's `workspace.json` still held a
+    /// window whose Session pointed at that store's PM worktree, and restore
+    /// resolves a window purely by its recorded session id. Nothing on the path
+    /// compared the two stores, and `auto_start` cannot close it because
+    /// restore never consults a registration.
+    ///
+    /// Guarding the shared spawn primitive covers every restore entry point at
+    /// once (startup auto-resume, Open Project restore, in-place restart) while
+    /// leaving a store's own PM resume — which goes through the same primitive
+    /// — untouched.
+    fn restore_would_resurrect_a_foreign_pm(
+        &self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+    ) -> bool {
+        let Some(tab) = self.tab(tab_id) else {
+            return false;
+        };
+        let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root);
+        if !gwt::pm_registry::is_foreign_pm_worktree(&session.worktree_path, &own_project_dir) {
+            return false;
+        }
+        tracing::warn!(
+            tab_id,
+            session_id = %session.id,
+            worktree_path = %session.worktree_path.display(),
+            own_project_dir = %own_project_dir.display(),
+            "restore refused: the session belongs to another project store's PM worktree"
+        );
+        true
     }
 
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a stopped/errored `Agent`
