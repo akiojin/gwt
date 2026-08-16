@@ -47925,6 +47925,301 @@ fn pm_ensure_focuses_live_pm_instead_of_spawning() {
     assert!(runtime.pending_pm_launches.is_empty());
 }
 
+/// Issue #3607 fixture: one repository whose stores split.
+///
+/// A repository with no `origin` falls back to a path hash, so its main
+/// worktree and a linked worktree land in *different* project stores while
+/// sharing one git common dir — the exact `b19aac…` / `99a866…` shape from the
+/// incident, reproduced without depending on a stale on-disk store.
+struct SplitStoreRepo {
+    main: PathBuf,
+    linked: PathBuf,
+}
+
+fn split_store_repo(root: &Path) -> SplitStoreRepo {
+    let main = root.join("repo");
+    fs::create_dir_all(&main).expect("create repo");
+    init_repo_without_origin(&main);
+    run_git(&main, &["config", "user.name", "Test User"]);
+    run_git(&main, &["config", "user.email", "test@example.com"]);
+    run_git(&main, &["commit", "--allow-empty", "-m", "init"]);
+    let linked = root.join("linked");
+    run_git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/split",
+            linked.to_str().expect("linked path"),
+        ],
+    );
+    assert_ne!(
+        gwt_core::paths::project_scope_hash(&main).as_str(),
+        gwt_core::paths::project_scope_hash(&linked).as_str(),
+        "fixture must reproduce a split: the two roots need different stores"
+    );
+    SplitStoreRepo { main, linked }
+}
+
+/// Materialize `<gwt projects dir>/<hash>/pm/worktree` for a store that is not
+/// the one under test, so restore has a real foreign PM worktree to refuse.
+fn foreign_pm_worktree(store_hash: &str) -> PathBuf {
+    let worktree = gwt_core::paths::gwt_projects_dir()
+        .join(store_hash)
+        .join("pm/worktree");
+    fs::create_dir_all(&worktree).expect("create foreign PM worktree");
+    worktree
+}
+
+/// Issue #3607 AC-1 / AC-2 / AC-4: the second store of a split repository must
+/// not start its own PM. Store-scoped uniqueness cannot see the first one, so
+/// before this gate both stores auto-started and two PMs supervised one
+/// repository.
+#[test]
+fn pm_ensure_refuses_a_second_pm_for_the_same_repository_across_split_stores() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = split_store_repo(temp.path());
+
+    let live_tab = sample_project_tab_with_window_at(
+        "tab-live",
+        "agent-1",
+        repo.main.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Linked",
+        repo.linked.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![live_tab, second_tab], Some("tab-second"));
+    let window_id = "tab-live::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-live", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime.active_agent_sessions.insert(window_id, session);
+
+    // The live PM registered in the *first* store, whose PM worktree is a
+    // linked worktree of the same repository.
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
+    fs::create_dir_all(&pm_worktree).expect("pm worktree");
+    run_git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "--force",
+            "-b",
+            "pm/live",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.main),
+        pm_registration_fixture("pm-session-live", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    let events =
+        runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime
+            .tab("tab-second")
+            .expect("second tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "the second store must not spawn a PM pane for a repository that already has one"
+    );
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "no PM launch may be queued for the second store"
+    );
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(
+            &repo.linked
+        ))
+        .expect("second store prefs")
+        .registration
+        .is_none(),
+        "the second store must not acquire its own registration"
+    );
+    assert!(
+        !events.is_empty(),
+        "AC-2: the refusal focuses the existing PM instead of failing silently"
+    );
+}
+
+/// A repository whose only PM is dead must still get one: repository-scoped
+/// uniqueness blocks duplicates, never recovery.
+#[test]
+fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = split_store_repo(temp.path());
+
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Linked",
+        repo.linked.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![second_tab], Some("tab-second"));
+
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
+    run_git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "pm/dead",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.main),
+        pm_registration_fixture("pm-session-dead", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed dead registration");
+
+    runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "a dead PM elsewhere must not leave the repository without one"
+    );
+}
+
+/// Issue #3607 AC-3: the stopped store was not even open, yet its PM came back
+/// because the current store's `workspace.json` still held a window whose
+/// Session pointed at that store's `pm/worktree`.
+#[test]
+fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let orphan_pm_worktree = foreign_pm_worktree("b19aac38305901f5");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-foreign-pm".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+
+    let mut session =
+        gwt_agent::Session::new(&orphan_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-foreign-pm".to_string();
+    session.agent_session_id = Some("native-foreign-pm".to_string());
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.restore_open_project_windows("tab-current");
+
+    assert!(
+        events.is_empty(),
+        "restoring another store's PM worktree must not spawn anything"
+    );
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "no resume may be tracked for a foreign PM session"
+    );
+}
+
+/// The same gate must leave the store's *own* PM restorable — the stale-PM
+/// resume path (FR-003) goes through the same primitive.
+#[test]
+fn restore_still_resumes_the_stores_own_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let own_pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&own_pm_worktree).expect("own PM worktree");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-own-pm".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+
+    let mut session =
+        gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-own-pm".to_string();
+    session.agent_session_id = Some("native-own-pm".to_string());
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.restore_open_project_windows("tab-current");
+
+    assert!(
+        !events.is_empty(),
+        "the store's own PM must still restore through the shared primitive"
+    );
+    assert!(runtime
+        .pending_auto_resume_sources
+        .values()
+        .any(|source| source == "session-own-pm"));
+}
+
 #[test]
 fn pm_ensure_respects_auto_start_opt_out() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
