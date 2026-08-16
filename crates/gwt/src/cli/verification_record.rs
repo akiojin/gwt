@@ -1052,6 +1052,37 @@ pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementSta
     }
 }
 
+/// Whether this worktree's canonical Work has already reached a terminal
+/// lifecycle, which makes a settlement receipt unmintable: the receipt is
+/// written only by a terminal `workspace.update`, that update resolves its
+/// target with `allow_terminal: false`, `workspace.ensure` hard-refuses a
+/// terminal canonical Work, and no operation reopens one.
+///
+/// An unreadable branch, Work id, or WorkItems projection answers `false` so an
+/// infrastructure failure keeps the ordinary receipt requirement rather than
+/// silently waiving it.
+fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
+    let branch = gwt_git::Repository::open(worktree)
+        .ok()
+        .and_then(|repository| repository.current_branch().ok().flatten());
+    let Some(work_id) = gwt_core::workspace_projection::canonical_work_id(
+        worktree,
+        branch.as_deref(),
+        Some(worktree),
+    ) else {
+        return false;
+    };
+    gwt_core::workspace_projection::load_workspace_work_items(worktree)
+        .ok()
+        .flatten()
+        .is_some_and(|items| {
+            items
+                .work_items
+                .iter()
+                .any(|item| item.id == work_id && item.is_terminal())
+        })
+}
+
 /// Return an actionable refusal when this worktree has entered the tracked
 /// Work-event lifecycle and its exact event log is not durably contained by
 /// the configured upstream. Repositories that have never materialized the
@@ -1107,7 +1138,14 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
                 return None;
             }
         },
-        None if current_binding.is_some() => {
+        // #3459: demanding the receipt is only honest while the terminal Work
+        // update that mints it is still reachable. A terminal canonical Work
+        // can never accept one — `workspace.update` resolves its target with
+        // `allow_terminal: false` and `workspace.ensure` refuses outright — so
+        // this branch would otherwise close completion for good. Fall through
+        // to the delivery evaluation below, which still fails closed on an
+        // undelivered event log.
+        None if current_binding.is_some() && !canonical_work_for_worktree_is_terminal(worktree) => {
             return Some(
                 "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying."
                     .to_string(),
@@ -4439,6 +4477,135 @@ pub(crate) mod tests {
         assert!(
             refusal.contains("generation") && refusal.contains("predecessor"),
             "generation mismatch must be actionable without leaking secrets: {refusal}"
+        );
+    }
+
+    /// Drive this worktree's canonical Work to the requested lifecycle so the
+    /// missing-receipt tests can distinguish "the terminal update is still
+    /// reachable" from "it can never happen again".
+    fn seed_canonical_work(fixture: &WorkEventGitFixture, session_id: &str, terminal: bool) {
+        let work_id = gwt_core::workspace_projection::canonical_work_id(
+            &fixture.repo,
+            Some("main"),
+            Some(fixture.repo.as_path()),
+        )
+        .expect("canonical Work id");
+        let now = Utc::now();
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            &work_id,
+            now,
+        );
+        start.title = Some("Settlement escape".to_string());
+        start.agent_session_id = Some(session_id.to_string());
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start)
+            .expect("record the live canonical Work");
+        if terminal {
+            // `build.abort` terminalizes through Discard, which never mints a
+            // settlement receipt.
+            let mut discard = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Discard,
+                &work_id,
+                now + chrono::Duration::seconds(1),
+            );
+            discard.agent_session_id = Some(session_id.to_string());
+            gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, discard)
+                .expect("terminalize the canonical Work");
+        }
+        assert_eq!(
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
+                .expect("load seeded WorkItems")
+                .expect("seeded WorkItems")
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .expect("seeded canonical Work")
+                .is_terminal(),
+            terminal,
+        );
+    }
+
+    // #3459: the settlement receipt is minted only by a terminal
+    // `workspace.update`, and `workspace.update` resolves its target with
+    // `allow_terminal: false`. Once the canonical Work is terminal the demanded
+    // receipt can never exist, so refusing on its absence closes completion for
+    // good. The delivered tracked event log is the only fact still worth
+    // checking there.
+    #[test]
+    fn terminal_canonical_work_without_a_receipt_does_not_refuse_delivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-terminal-work-escape";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        seed_canonical_work(&fixture, session_id, true);
+        fixture.stage_events();
+        fixture.commit("chore(work): deliver the terminalized Work events");
+        fixture.push();
+
+        assert!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("read settlement receipt")
+                .is_none(),
+            "the fixture must model a generation that never minted a receipt"
+        );
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "a terminal canonical Work can never mint the demanded receipt, so its \
+             absence must not refuse a delivered event log",
+        );
+    }
+
+    #[test]
+    fn terminal_canonical_work_without_a_receipt_still_refuses_undelivered_events() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-terminal-work-undelivered";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        seed_canonical_work(&fixture, session_id, true);
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("undelivered Work events must still fail closed");
+        assert!(
+            refusal.contains("dirty") && refusal.contains("push"),
+            "the refusal must name the delivery step the agent can still perform: {refusal}"
+        );
+    }
+
+    #[test]
+    fn live_canonical_work_without_a_receipt_still_requires_its_terminal_update() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-live-work-still-gated";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        seed_canonical_work(&fixture, session_id, false);
+        fixture.stage_events();
+        fixture.commit("chore(work): deliver the live Work events");
+        fixture.push();
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a reachable terminal Work update must stay required");
+        assert!(
+            refusal.contains("terminal Work update"),
+            "a live canonical Work keeps the ordinary instruction: {refusal}"
         );
     }
 
