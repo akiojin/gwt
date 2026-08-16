@@ -38,6 +38,61 @@ use super::{
 
 const PM_DELIVERY_MAX_BODY_BYTES: usize = 16 * 1024;
 
+/// Reserved before the operation deadline for terminalizing the operation.
+/// The receipt commit takes a file lock and an fsync under the same scoped
+/// deadline, and the reply still has to reach the origin socket before the
+/// server's acceptance deadline — spending the budget down to the last
+/// millisecond would turn a clean `unverified` answer back into a timeout.
+const PM_DELIVERY_TERMINAL_MARGIN: Duration = Duration::from_millis(500);
+
+/// How often the durable receipt is re-read while waiting for the target's
+/// acknowledgement.
+const PM_DELIVERY_ACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The one reason text for a delivery whose acknowledgement never arrived.
+/// Both the body and its submit terminator reached the pane on this path, so
+/// it must not claim the body is staged (Issue #3608 AC-3); the durable
+/// receipt stays the authority, which is why a fresh operation is the wrong
+/// response.
+const PM_DELIVERY_UNVERIFIED_REASON: &str =
+    "PM pane submit was not acknowledged within the delivery window; the prompt was written and \
+     submitted to the pane, and the durable receipt records the final outcome — do not retry with \
+     a new operation";
+
+/// Wait for the target Session's acknowledgement to reach the durable receipt,
+/// and report the operation's latest durable status.
+///
+/// Verification is asynchronous and out-of-process: the acknowledgement is
+/// written by the target's own `UserPromptSubmit` hook, which has to start,
+/// run its steps, and commit — routinely far longer than the submit-retry
+/// budget. Issue #3608 recorded the consequence live (`prepared 02:40:38 →
+/// ambiguous 02:40:39 → verified 02:40:40`): a delivery that had already been
+/// submitted was terminalized as unverified one second before its
+/// acknowledgement landed, with most of the operation's budget still unspent.
+/// So the wait runs to the deadline and returns early only once the operation
+/// is durably terminal.
+fn await_pm_delivery_status(
+    receipt_path: &Path,
+    operation_id: &str,
+    poll_deadline: Instant,
+) -> Result<pm_registry::PmDeliveryReceiptStatus, String> {
+    loop {
+        let status = pm_registry::pm_delivery_receipt_for_operation(receipt_path, operation_id)
+            .map_err(|error| format!("PM delivery receipt is unavailable: {error}"))?
+            .map(|receipt| receipt.status)
+            .unwrap_or(pm_registry::PmDeliveryReceiptStatus::Prepared);
+        if status != pm_registry::PmDeliveryReceiptStatus::Prepared
+            || Instant::now() >= poll_deadline
+        {
+            return Ok(status);
+        }
+        thread::sleep(
+            PM_DELIVERY_ACK_POLL_INTERVAL
+                .min(poll_deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
     x: 96.0,
@@ -897,6 +952,11 @@ impl AppRuntime {
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(2));
             let _operation_deadline =
                 gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            // The whole budget is available for the acknowledgement; only the
+            // terminal receipt commit and the reply are held back.
+            let ack_deadline = deadline
+                .checked_sub(PM_DELIVERY_TERMINAL_MARGIN)
+                .unwrap_or(deadline);
             let mut body_attempted = false;
             let mut receipt_prepared = false;
             let mut receipt_terminalized = false;
@@ -1093,33 +1153,11 @@ impl AppRuntime {
                     let target_session_id = durable_target_session_id
                         .as_ref()
                         .expect("existing Prepared has a target Session");
-                    let replay_poll_deadline = deadline
-                        .checked_sub(Duration::from_millis(250))
-                        .unwrap_or(deadline);
-                    let replay_status = (|| -> Result<_, String> {
-                        loop {
-                            let current = pm_registry::pm_delivery_receipt_for_operation(
-                                &receipt_path,
-                                &worker_operation_id,
-                            )
-                            .map_err(|error| {
-                                format!("PM delivery replay receipt is unavailable: {error}")
-                            })?;
-                            let status = current
-                                .map(|receipt| receipt.status)
-                                .unwrap_or(pm_registry::PmDeliveryReceiptStatus::Prepared);
-                            if status != pm_registry::PmDeliveryReceiptStatus::Prepared
-                                || Instant::now() >= replay_poll_deadline
-                            {
-                                return Ok(status);
-                            }
-                            thread::sleep(
-                                Duration::from_millis(25)
-                                    .min(replay_poll_deadline.saturating_duration_since(Instant::now())),
-                            );
-                        }
-                    })();
-                    match replay_status {
+                    match await_pm_delivery_status(
+                        &receipt_path,
+                        &worker_operation_id,
+                        ack_deadline,
+                    ) {
                         Err(error) => Err(error),
                         Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
                             receipt_terminalized = true;
@@ -1129,7 +1167,9 @@ impl AppRuntime {
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Ambiguous) => {
                             receipt_terminalized = true;
-                            Err("PM delivery may already have staged its prompt body".to_string())
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                                submit_attempts: 0,
+                            })
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Refused) => {
                             receipt_terminalized = true;
@@ -1154,7 +1194,9 @@ impl AppRuntime {
                         }
                         Ok(_) => {
                             receipt_terminalized = true;
-                            Err("PM delivery may already have staged its prompt body".to_string())
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                                submit_attempts: 0,
+                            })
                         }
                         Err(error) => Err(error),
                     },
@@ -1164,7 +1206,9 @@ impl AppRuntime {
                     pm_registry::PmDeliveryReceiptStatus::Ambiguous,
                 )) => {
                     receipt_terminalized = true;
-                    Err("PM delivery may already have staged its prompt body".to_string())
+                    Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                        submit_attempts: 0,
+                    })
                 }
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
                     pm_registry::PmDeliveryReceiptStatus::Refused,
@@ -1183,6 +1227,15 @@ impl AppRuntime {
                     let target_session_id = durable_target_session_id
                         .as_deref()
                         .expect("Prepared PM delivery has a target Session");
+                    // Issue #3608: exhausting the submit retries is not the end
+                    // of the operation. The acknowledgement crosses a process
+                    // boundary and regularly lands after them, so spend the
+                    // rest of the budget waiting for it before terminalizing.
+                    let _ = await_pm_delivery_status(
+                        &receipt_path,
+                        &worker_operation_id,
+                        ack_deadline,
+                    );
                     match pm_registry::finish_pm_delivery_receipt(
                         &receipt_path,
                         &worker_operation_id,
@@ -1195,11 +1248,8 @@ impl AppRuntime {
                             send_terminal("delivered", None)
                         }
                         _ => send_terminal(
-                            "failed",
-                            Some(
-                                "PM pane submit was not verified; prompt body may be staged — do not retry with a new operation"
-                                    .to_string(),
-                            ),
+                            "unverified",
+                            Some(PM_DELIVERY_UNVERIFIED_REASON.to_string()),
                         ),
                     }
                 }
