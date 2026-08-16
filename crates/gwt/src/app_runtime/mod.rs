@@ -224,12 +224,13 @@ use workspace::{
 use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, agent_launch_purpose_title,
-    linked_issue_workspace_context, non_empty_workspace_text, save_resumed_workspace_projection,
-    save_start_work_workspace_projection, session_exact_resume_materializable, work_session_index,
+    linked_issue_workspace_context, non_empty_workspace_text, resume_branch_refs_snapshot,
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    session_exact_resume_materializable, work_session_index,
     workspace_journal_entry_view_from_entry, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
-    workspace_resume_owner_issue_number, workspace_work_item_view_from_item,
+    workspace_resume_owner_issue_number, workspace_work_item_view_from_item, ResumeBranchIndex,
     WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 #[cfg(test)]
@@ -928,6 +929,13 @@ pub struct AppRuntime {
     /// process cwd according to the latest background merge scan. Projection
     /// consumes only this cache and never enumerates OS processes.
     pub(crate) work_live_process_branches: HashMap<PathBuf, HashSet<String>>,
+    /// Issue #3611: short branch names (`work/x`, `origin/work/x`) present in
+    /// the latest background ref snapshot, per project. The projection resolves
+    /// Session resumability from this set instead of spawning
+    /// `git rev-parse --git-common-dir` + `git show-ref` per Session on the
+    /// event loop. Absent until the first scan lands; see
+    /// [`workspace_views::ResumeBranchIndex`] for the unscanned semantics.
+    pub(crate) work_known_branch_refs: HashMap<PathBuf, HashSet<String>>,
     /// SPEC-2359 US-84: per-project cleanup-ready branches and their reason.
     /// This includes merged branches and branches with no effective tree diff
     /// from the canonical base. Runtime-only; never persisted.
@@ -2044,6 +2052,7 @@ impl AppRuntime {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
@@ -2103,9 +2112,18 @@ impl AppRuntime {
         cleanup_ready_branches: HashMap<String, String>,
         dirty_branches: HashSet<String>,
         live_process_branches: HashSet<String>,
+        known_branch_refs: Option<HashSet<String>>,
     ) -> Vec<OutboundEvent> {
         self.work_merged_branches
             .insert(project_root.to_path_buf(), merged_branches);
+        // Issue #3611: the same ref snapshot the scan already needed answers
+        // Session resumability, keeping Git off the projection hot path. A
+        // failed snapshot (`None`) leaves the previous answer in place rather
+        // than declaring every branch gone.
+        if let Some(known_branch_refs) = known_branch_refs {
+            self.work_known_branch_refs
+                .insert(project_root.to_path_buf(), known_branch_refs);
+        }
         self.work_cleanup_ready_branches
             .insert(project_root.to_path_buf(), cleanup_ready_branches);
         self.work_dirty_branches
@@ -2216,6 +2234,21 @@ impl AppRuntime {
             };
             let mut targets = work_branch_scan_targets(&projection);
             append_workspace_projection_scan_target(&project_root, &mut targets);
+            // One ref snapshot replaces the former per-target `rev-parse`
+            // probes. Historical Work rows routinely outlive their branches;
+            // rejecting those rows in memory prevents hundreds of short-lived
+            // Git processes from competing with the GUI and agent PTYs.
+            // Issue #3611: it is resolved before the empty-target exit because
+            // the projection also consumes it, as the process-free answer to
+            // "can this Session's worktree be re-materialized?".
+            let tip_times = gwt_git::refs::branch_tip_committer_times(&project_root);
+            // A failed snapshot publishes `None`, not an empty set: an empty
+            // set would claim every branch is gone and silently strip working
+            // Resume controls.
+            let known_branch_refs: Option<HashSet<String>> = tip_times
+                .as_ref()
+                .ok()
+                .map(|tip_times| tip_times.keys().cloned().collect());
             if targets.is_empty() {
                 proxy.send(UserEvent::WorkMergeStatus {
                     project_root,
@@ -2223,15 +2256,12 @@ impl AppRuntime {
                     cleanup_ready_branches: HashMap::new(),
                     dirty_branches: HashSet::new(),
                     live_process_branches: HashSet::new(),
+                    known_branch_refs,
                 });
                 return;
             }
             let live_process_branches = work_branches_with_live_processes(&targets);
-            // One ref snapshot replaces the former per-target `rev-parse`
-            // probes. Historical Work rows routinely outlive their branches;
-            // rejecting those rows in memory prevents hundreds of short-lived
-            // Git processes from competing with the GUI and agent PTYs.
-            let tip_times = match gwt_git::refs::branch_tip_committer_times(&project_root) {
+            let tip_times = match tip_times {
                 Ok(tip_times) => tip_times,
                 Err(error) => {
                     tracing::warn!(
@@ -2249,6 +2279,7 @@ impl AppRuntime {
                             .map(|target| target.branch.clone())
                             .collect(),
                         live_process_branches,
+                        known_branch_refs,
                     });
                     return;
                 }
@@ -2305,6 +2336,7 @@ impl AppRuntime {
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
+                known_branch_refs,
             });
         });
     }

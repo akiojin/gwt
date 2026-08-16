@@ -1207,6 +1207,14 @@ fn write_fake_codex(temp_root: &Path) -> PathBuf {
     write_fake_agent_command(temp_root, "codex")
 }
 
+/// Issue #3611: a scanned-but-empty branch snapshot. Fixtures that used to
+/// pass a non-repository path (where every `git show-ref` failed) get the same
+/// verdict — "no branch survives" — without any Git process.
+fn scanned_without_branches() -> super::ResumeBranchIndex<'static> {
+    static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    super::ResumeBranchIndex::scanned(Some(EMPTY.get_or_init(HashSet::new)))
+}
+
 fn write_fake_git_recorder(temp_root: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -1649,7 +1657,8 @@ fn workspace_work_agent_view_attaches_session_history() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
 
     let ids: Vec<&str> = view
         .sessions
@@ -1662,8 +1671,11 @@ fn workspace_work_agent_view_attaches_session_history() {
 
     // A Work with no persisted Session yields an empty Session list, not a panic.
     let empty_index = super::work_session_index(&[]);
-    let empty_view =
-        super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index, Path::new("/"));
+    let empty_view = super::workspace_work_agent_view_from_ref(
+        &agent_ref,
+        &empty_index,
+        scanned_without_branches(),
+    );
     assert!(empty_view.sessions.is_empty());
 }
 
@@ -3350,6 +3362,7 @@ fn sample_runtime_with_events(
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         work_merged_branches: HashMap::new(),
+        work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
         work_cleanup_ready_branches: HashMap::new(),
@@ -24282,7 +24295,7 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        &repo,
+        scanned_without_branches(),
     );
 
     assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
@@ -24377,7 +24390,7 @@ fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        &repo,
+        scanned_without_branches(),
     );
 
     assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
@@ -28977,6 +28990,284 @@ fn active_work_projection_source_has_no_live_process_scan_helper() {
     assert!(
         !source.contains("fn live_process_worktree_paths_for_cleanup("),
         "all-OS-process enumeration must run in the background merge scan, not projection"
+    );
+}
+
+/// Issue #3611 AC-1/AC-2/AC-3: a Session whose worktree was deleted used to
+/// fall through `session_exact_resume_materializable` into
+/// `git rev-parse --git-common-dir` + `git show-ref` **per Session**, on the
+/// GUI event-loop thread. With one Session per Work row the projection build
+/// spawned hundreds of short-lived Git processes and stalled the event loop for
+/// seconds, which is what starved the `pane.*` route (#3510). The projection
+/// must answer resumability from the background ref snapshot instead, so the
+/// spawn count stays at zero however many Sessions exist.
+#[test]
+fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    for index in 0..64 {
+        let branch = format!("work/missing-worktree-{index}");
+        // Deliberately never created: this is the historical Session whose
+        // worktree is gone but whose branch may still exist.
+        let worktree_path = repo.join("work").join(index.to_string());
+        let session_id = format!("session-missing-worktree-{index}");
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            format!("work-missing-worktree-{index}"),
+            chrono::Utc::now(),
+        );
+        event.title = Some(format!("Missing worktree work {index}"));
+        event.agent_session_id = Some(session_id.clone());
+        event.agent_id = Some("codex".to_string());
+        let mut session =
+            gwt_agent::Session::new(&worktree_path, &branch, gwt_agent::AgentId::Codex);
+        session.id = session_id;
+        session.agent_session_id = Some(format!("conv-missing-worktree-{index}"));
+        session.project_state_root = Some(repo.clone());
+        session
+            .save(&sessions_dir)
+            .expect("save projection Session fixture");
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch),
+                worktree_path: Some(worktree_path),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work");
+    }
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .work_dirty_branches
+        .insert(repo.clone(), HashSet::new());
+    runtime
+        .work_live_process_branches
+        .insert(repo.clone(), HashSet::new());
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+
+    assert!(
+        view.active_works
+            .iter()
+            .flat_map(|workspace| workspace.agents.iter())
+            .any(|agent| !agent.sessions.is_empty()),
+        "fixture must actually render Session rows, otherwise the probe is untested"
+    );
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "Session resumability must resolve from the background ref snapshot, \
+         never from a per-Session Git spawn on the event loop; invocations:\n{invocations}"
+    );
+}
+
+/// Issue #3611 AC-3: `pane.*` is served from the same single-threaded event
+/// loop as the Workspace projection, so its response latency is exactly the
+/// projection's event-loop occupancy (#3510: 6ms idle, >2s during a scan).
+/// This pins the occupancy at a scale that used to be pathological — 128
+/// Sessions once meant ~384 short-lived Git processes (~6s) on the GUI thread.
+/// Both assertions target that cost: the spawn count must stay flat at zero,
+/// and the build must finish inside a budget well below the pre-fix cost while
+/// leaving ~40x headroom over the measured process-free build (~45ms), so a
+/// loaded machine cannot flake it.
+#[test]
+fn active_work_projection_event_loop_occupancy_does_not_scale_with_session_count() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    for index in 0..128 {
+        let branch = format!("work/occupancy-{index}");
+        let worktree_path = repo.join("work").join(index.to_string());
+        let session_id = format!("session-occupancy-{index}");
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            format!("work-occupancy-{index}"),
+            chrono::Utc::now(),
+        );
+        event.title = Some(format!("Occupancy work {index}"));
+        event.agent_session_id = Some(session_id.clone());
+        event.agent_id = Some("codex".to_string());
+        let mut session =
+            gwt_agent::Session::new(&worktree_path, &branch, gwt_agent::AgentId::Codex);
+        session.id = session_id;
+        session.agent_session_id = Some(format!("conv-occupancy-{index}"));
+        session.project_state_root = Some(repo.clone());
+        session
+            .save(&sessions_dir)
+            .expect("save projection Session fixture");
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch),
+                worktree_path: Some(worktree_path),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work");
+    }
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .work_dirty_branches
+        .insert(repo.clone(), HashSet::new());
+    runtime
+        .work_live_process_branches
+        .insert(repo.clone(), HashSet::new());
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let started = Instant::now();
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let elapsed = started.elapsed();
+
+    assert_eq!(view.active_works.len(), 128);
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "projection occupancy must not scale with Session count; invocations:\n{invocations}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "128 Sessions held the event loop for {elapsed:?}; \
+         `pane.*` cannot answer while this runs"
+    );
+}
+
+/// Issue #3611 AC-2: resumability answers come from the published branch-ref
+/// snapshot, so the verdict is exact once the background scan has run — a
+/// Session whose branch survives stays resumable, one whose branch is gone does
+/// not — without either case touching a Git process.
+#[test]
+fn active_work_projection_resumability_follows_published_branch_refs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let live_branch = "work/ref-snapshot-live";
+    let gone_branch = "work/ref-snapshot-gone";
+    for (index, branch) in [live_branch, gone_branch].into_iter().enumerate() {
+        let session_id = format!("session-ref-snapshot-{index}");
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            format!("work-ref-snapshot-{index}"),
+            chrono::Utc::now(),
+        );
+        event.title = Some(format!("Ref snapshot work {index}"));
+        event.agent_session_id = Some(session_id.clone());
+        event.agent_id = Some("codex".to_string());
+        let worktree_path = repo.join("work").join(format!("ref-snapshot-{index}"));
+        let mut session =
+            gwt_agent::Session::new(&worktree_path, branch, gwt_agent::AgentId::Codex);
+        session.id = session_id;
+        session.agent_session_id = Some(format!("conv-ref-snapshot-{index}"));
+        session.project_state_root = Some(repo.clone());
+        session
+            .save(&sessions_dir)
+            .expect("save projection Session fixture");
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree_path),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work");
+    }
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.apply_work_merge_status(
+        &repo,
+        HashMap::new(),
+        HashMap::new(),
+        HashSet::new(),
+        HashSet::new(),
+        Some(HashSet::from([
+            live_branch.to_string(),
+            format!("origin/{live_branch}"),
+            "main".to_string(),
+        ])),
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+
+    let resumable_by_branch: HashMap<String, bool> = view
+        .active_works
+        .iter()
+        .filter_map(|workspace| {
+            let branch = workspace.branch.clone()?;
+            let resumable = workspace
+                .agents
+                .iter()
+                .flat_map(|agent| agent.sessions.iter())
+                .any(|session| session.resumable);
+            Some((branch, resumable))
+        })
+        .collect();
+
+    assert_eq!(
+        resumable_by_branch.get(live_branch),
+        Some(&true),
+        "a Session whose branch is in the snapshot can re-materialize its worktree"
+    );
+    assert_eq!(
+        resumable_by_branch.get(gone_branch),
+        Some(&false),
+        "a Session with neither worktree nor branch is history-only"
     );
 }
 
@@ -43991,7 +44282,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(works[0].session_agent_total, 12, "uncapped count reported");
@@ -44113,7 +44404,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let agents = &works[0].agents;
@@ -44321,7 +44612,7 @@ fn attach_registry_sessions_preserves_same_identity_agent_per_child_work() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44377,7 +44668,7 @@ fn attach_registry_sessions_keeps_usable_agent_only_within_one_child_work() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44429,7 +44720,7 @@ fn attach_registry_sessions_preserves_punctuation_distinct_custom_agent_identiti
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44476,7 +44767,7 @@ fn attach_registry_sessions_collapses_same_conversation_across_child_works() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert!(
@@ -44515,7 +44806,7 @@ fn attach_registry_sessions_caps_agents_across_all_child_works() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44558,7 +44849,7 @@ fn attach_registry_sessions_assigns_shared_session_to_one_canonical_child_work()
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44602,7 +44893,7 @@ fn attach_registry_sessions_assigns_shared_session_to_latest_legacy_child_work()
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert!(works[0].works[0].agents.is_empty());
@@ -44697,7 +44988,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let ids: Vec<&str> = works[0]
@@ -44782,7 +45073,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let agents = &works[0].agents;
@@ -44818,7 +45109,8 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
     assert!(view.agent_id.is_some(), "agent_id borrowed from the ledger");
 }
@@ -44916,7 +45208,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let agents = &works[0].agents;
@@ -44976,7 +45268,6 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
     }
 
     let temp = tempdir().expect("tempdir");
-    let repo = temp.path().join("unity-cli");
     let issue_worktree = temp.path().join("unity-cli/work/issue-206");
     let other_worktree = temp.path().join("unity-cli/work/20260616-1102");
     fs::create_dir_all(&issue_worktree).expect("issue worktree");
@@ -45046,7 +45337,13 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         updated_at: "2026-06-19T13:49:00Z".to_string(),
     }];
 
-    super::attach_registry_sessions_to_active_works(&mut works, &[], None, &session_index, &repo);
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &session_index,
+        scanned_without_branches(),
+    );
 
     let agents = &works[0].agents;
     assert_eq!(agents.len(), 1, "only sessions owned by this row stay");
@@ -45090,7 +45387,8 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
 
     assert_eq!(
         view.sessions.len(),
@@ -45128,7 +45426,8 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
 
     assert_eq!(view.sessions.len(), 1);
     assert!(
@@ -45165,13 +45464,72 @@ fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+    let known_branch_refs = super::resume_branch_refs_snapshot(&repo);
+    let view = super::workspace_work_agent_view_from_ref(
+        &agent_ref,
+        &index,
+        super::ResumeBranchIndex::scanned(Some(&known_branch_refs)),
+    );
 
     assert_eq!(view.sessions.len(), 1);
     assert!(
         view.sessions[0].resumable,
         "available branch lets exact Session Resume re-materialize the worktree"
     );
+}
+
+/// Issue #3611: the snapshot is keyed by short ref name, so both the local
+/// (`work/x`) and the remote-tracking (`origin/work/x`) form must satisfy the
+/// same check the retired `git show-ref refs/heads` + `refs/remotes/origin`
+/// pair performed.
+#[test]
+fn resume_branch_index_matches_local_and_origin_ref_names() {
+    let refs = HashSet::from([
+        "work/local-only".to_string(),
+        "origin/work/remote-only".to_string(),
+    ]);
+    let index = super::ResumeBranchIndex::scanned(Some(&refs));
+
+    assert!(index.branch_exists("work/local-only"));
+    assert!(index.branch_exists("work/remote-only"));
+    assert!(index.branch_exists("origin/work/remote-only"));
+    assert!(index.branch_exists("refs/remotes/origin/work/remote-only"));
+    assert!(!index.branch_exists("work/deleted"));
+    assert!(!index.branch_exists("   "));
+}
+
+/// Issue #3611: before the first background scan there is no snapshot to
+/// consult. Answering "not resumable" would hide a working Resume control on
+/// every project open, so an unscanned project stays optimistic — the Launch
+/// Wizard re-verifies branch existence before it materializes anything.
+#[test]
+fn resume_branch_index_stays_optimistic_until_the_project_is_scanned() {
+    let unscanned = super::ResumeBranchIndex::scanned(None);
+    assert!(unscanned.branch_exists("work/not-yet-scanned"));
+    assert!(
+        !unscanned.branch_exists(""),
+        "an empty branch name is never materializable"
+    );
+
+    let no_branches = HashSet::new();
+    let scanned_empty = super::ResumeBranchIndex::scanned(Some(&no_branches));
+    assert!(
+        !scanned_empty.branch_exists("work/not-yet-scanned"),
+        "a completed scan that found nothing is a real negative verdict"
+    );
+}
+
+/// Issue #3611: a live worktree is decided by a filesystem stat alone — no
+/// snapshot needed and no process, even when the branch is unknown.
+#[test]
+fn resume_branch_index_accepts_existing_worktree_without_branch_evidence() {
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("live-worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let session = gwt_agent::Session::new(&worktree, "work/unknown", gwt_agent::AgentId::Codex);
+
+    assert!(super::ResumeBranchIndex::scanned(Some(&HashSet::new()))
+        .session_exact_resume_materializable(&session));
 }
 
 /// SPEC-2359 Phase W-16 (FR-403): the Workspace list is ordered by last
@@ -45242,7 +45600,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let order: Vec<&str> = works.iter().map(|work| work.id.as_str()).collect();
@@ -45456,6 +45814,7 @@ fn apply_work_merge_status_caches_and_flags_rows() {
         HashMap::new(),
         HashSet::new(),
         HashSet::new(),
+        None,
     );
 
     let view = runtime
@@ -45548,6 +45907,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
                     cleanup_ready_branches,
                     dirty_branches,
                     live_process_branches,
+                    ..
                 } if project_root == &repo => Some((
                     project_root,
                     merged_branches,
@@ -45664,16 +46024,18 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
+                known_branch_refs,
             } if project_root == &repo => Some((
                 merged_branches.clone(),
                 cleanup_ready_branches.clone(),
                 dirty_branches.clone(),
                 live_process_branches.clone(),
+                known_branch_refs.clone(),
             )),
             _ => None,
         })
         .expect("historical work merge status");
-    let _ = runtime.apply_work_merge_status(&repo, event.0, event.1, event.2, event.3);
+    let _ = runtime.apply_work_merge_status(&repo, event.0, event.1, event.2, event.3, event.4);
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -45862,6 +46224,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
         cleanup_ready,
         HashSet::new(),
         HashSet::new(),
+        None,
     );
 
     let view = runtime
@@ -45886,6 +46249,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
         HashMap::new(),
         HashSet::new(),
         HashSet::new(),
+        None,
     );
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
