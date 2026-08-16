@@ -719,13 +719,24 @@ mod store_consolidation {
     };
     use gwt_core::repo_hash::{compute_path_hash, detect_repo_identity};
     use gwt_core::workspace_projection::store_migration::{
-        apply_store_consolidation, plan_store_consolidation, QuarantineManifest,
-        StoreConsolidationOutcome, StoreConsolidationRefusal, QUARANTINE_MANIFEST_VERSION,
+        apply_store_consolidation, issue_store_consolidation_plan, plan_store_consolidation,
+        QuarantineManifest, StoreConsolidationOutcome, StoreConsolidationPlan,
+        StoreConsolidationRefusal, QUARANTINE_MANIFEST_VERSION,
     };
     use gwt_core::workspace_projection::{
         save_workspace_work_items_projection_to_path, WorkEvent, WorkEventKind, WorkItem,
         WorkItemsProjection, WorkspaceStatusCategory,
     };
+
+    /// The Session that reviews and applies every plan in these tests.
+    const TEST_SESSION: Option<&str> = Some("session-store-consolidation");
+
+    /// Review a dry run the way an operator does, and return the manifest hash
+    /// that authorizes applying it.
+    fn review(plan: &StoreConsolidationPlan) -> String {
+        issue_store_consolidation_plan(plan, TEST_SESSION).expect("issue reviewed plan");
+        plan.manifest_hash.clone()
+    }
 
     /// The lock a live Work writer takes for one project store's projection.
     fn works_lock_path(store_dir: &Path) -> PathBuf {
@@ -982,7 +993,7 @@ mod store_consolidation {
             std::fs::read(fixture.orphan_store.join("project-state/works.json")).expect("source");
         let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
 
-        let outcome = apply_store_consolidation(&fixture.layout_root, &plan.manifest_hash)
+        let outcome = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
             .expect("consolidate");
 
         let StoreConsolidationOutcome::Consolidated {
@@ -1032,7 +1043,8 @@ mod store_consolidation {
         let fixture =
             SplitStoreFixture::new("https://example.invalid/acme/consolidate-idempotent.git");
         let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
-        apply_store_consolidation(&fixture.layout_root, &plan.manifest_hash).expect("first apply");
+        apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .expect("first apply");
         let after_first = std::fs::read(&fixture.canonical_works).expect("canonical works");
 
         let replan = plan_store_consolidation(&fixture.layout_root).expect("re-plan");
@@ -1040,8 +1052,9 @@ mod store_consolidation {
             replan.is_empty(),
             "the quarantined store must not be replanned"
         );
-        let outcome = apply_store_consolidation(&fixture.layout_root, &replan.manifest_hash)
-            .expect("re-apply");
+        let outcome =
+            apply_store_consolidation(&fixture.layout_root, &review(&replan), TEST_SESSION)
+                .expect("re-apply");
 
         assert_eq!(outcome, StoreConsolidationOutcome::NothingToDo);
         assert_eq!(
@@ -1060,7 +1073,7 @@ mod store_consolidation {
         let before = std::fs::read(fixture.orphan_store.join("project-state/works.json"))
             .expect("source before");
 
-        let error = apply_store_consolidation(&fixture.layout_root, "0000deadbeef")
+        let error = apply_store_consolidation(&fixture.layout_root, "0000deadbeef", TEST_SESSION)
             .expect_err("a stale manifest must fail closed");
 
         assert_eq!(error.refusal, StoreConsolidationRefusal::ManifestChanged);
@@ -1087,7 +1100,7 @@ mod store_consolidation {
         let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
         let held = hold_exclusive(&works_lock_path(&fixture.orphan_store));
 
-        let error = apply_store_consolidation(&fixture.layout_root, &plan.manifest_hash)
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
             .expect_err("a live Work writer in the split store must fail the migration closed");
 
         assert_eq!(error.refusal, StoreConsolidationRefusal::WriterBusy);
@@ -1111,10 +1124,12 @@ mod store_consolidation {
         let held = hold_exclusive(&works_lock_path(&canonical_store));
 
         let layout_root = fixture.layout_root.clone();
-        let manifest_hash = plan.manifest_hash.clone();
+        let manifest_hash = review(&plan);
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = sender.send(apply_store_consolidation(&layout_root, &manifest_hash).is_err());
+            let _ = sender.send(
+                apply_store_consolidation(&layout_root, &manifest_hash, TEST_SESSION).is_err(),
+            );
         });
         let refused = receiver
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -1126,6 +1141,69 @@ mod store_consolidation {
             "a refusal must be zero-mutation"
         );
         fs2::FileExt::unlock(&held).expect("release lock");
+    }
+
+    /// Issue #3524 (folded into #3606): the review gate used to be a bare hash
+    /// comparison, so a caller that never read the plan could still apply it.
+    /// A matching hash is not evidence of review — an issued dry run is.
+    #[test]
+    fn apply_refuses_a_manifest_hash_that_no_dry_run_issued() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/consolidate-unreviewed.git");
+        let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
+
+        let error = apply_store_consolidation(&fixture.layout_root, &plan.manifest_hash, None)
+            .expect_err("an unreviewed plan must fail closed");
+
+        assert_eq!(error.refusal, StoreConsolidationRefusal::PlanNotIssued);
+        assert!(error.refusal.retryable(), "reviewing the plan clears this");
+        assert!(
+            fixture.orphan_store.is_dir(),
+            "a refusal must be zero-mutation"
+        );
+    }
+
+    /// Issue #3524 (folded into #3606): the refusal text used to quote the
+    /// current manifest hash, which turned "apply without review" into a
+    /// two-call loop. No refusal may hand out a hash that authorizes an apply.
+    #[test]
+    fn a_stale_manifest_refusal_never_leaks_the_current_hash() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/consolidate-no-leak.git");
+        let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
+
+        let error = apply_store_consolidation(&fixture.layout_root, "0000deadbeef", TEST_SESSION)
+            .expect_err("a stale manifest must fail closed");
+
+        assert_eq!(error.refusal, StoreConsolidationRefusal::ManifestChanged);
+        assert!(
+            !error.detail.contains(&plan.manifest_hash),
+            "the refusal must not disclose the hash that would authorize an apply: {}",
+            error.detail
+        );
+    }
+
+    /// Issue #3524 (folded into #3606): a plan reviewed in one Session does not
+    /// authorize an apply from another.
+    #[test]
+    fn apply_refuses_a_plan_reviewed_by_a_different_session() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/consolidate-other-session.git");
+        let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
+        let manifest_hash = review(&plan);
+
+        let error = apply_store_consolidation(
+            &fixture.layout_root,
+            &manifest_hash,
+            Some("session-somebody-else"),
+        )
+        .expect_err("another Session's review must not authorize this apply");
+
+        assert_eq!(error.refusal, StoreConsolidationRefusal::PlanNotIssued);
+        assert!(
+            fixture.orphan_store.is_dir(),
+            "a refusal must be zero-mutation"
+        );
     }
 
     /// Issue #3524 (folded into #3606): the real split store held 796 Work rows
@@ -1140,7 +1218,8 @@ mod store_consolidation {
         fixture.seed_orphan_eventless_work("work-eventless", "Legacy Work with no event");
         let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
 
-        apply_store_consolidation(&fixture.layout_root, &plan.manifest_hash).expect("consolidate");
+        apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .expect("consolidate");
 
         assert_eq!(
             fixture.canonical_work_ids(),

@@ -51,7 +51,11 @@ use crate::{
 /// Schema version of [`QuarantineManifest`].
 pub const QUARANTINE_MANIFEST_VERSION: u32 = 1;
 
+/// Schema version of [`IssuedConsolidationPlan`].
+pub const ISSUED_PLAN_VERSION: u32 = 1;
+
 const QUARANTINE_DIR: &str = "quarantine";
+const ISSUED_PLAN_FILE: &str = "store-consolidation-plan.json";
 
 /// Why a consolidation stopped. Every variant needs a human decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,10 +63,13 @@ pub enum StoreConsolidationRefusal {
     /// No repository identity could be resolved, so there is no canonical
     /// store to consolidate into.
     UnknownRemote,
-    /// Another process holds the consolidation lease.
+    /// A live Work writer holds the projection lock of a store this
+    /// consolidation needs.
     WriterBusy,
     /// The disk no longer matches the plan the caller approved.
     ManifestChanged,
+    /// No reviewed dry run issued the plan this apply claims to have approved.
+    PlanNotIssued,
     /// A store could not be read or parsed.
     CorruptInput,
     /// The rebuilt projection did not read back intact; changes were rolled
@@ -71,13 +78,27 @@ pub enum StoreConsolidationRefusal {
 }
 
 impl StoreConsolidationRefusal {
+    /// Stable machine-readable reason code. Callers key on this, never on the
+    /// human-readable detail.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::UnknownRemote => "unknown_remote",
             Self::WriterBusy => "writer_busy",
             Self::ManifestChanged => "manifest_changed",
+            Self::PlanNotIssued => "plan_not_issued",
             Self::CorruptInput => "corrupt_input",
             Self::ReadbackFailed => "readback_failed",
+        }
+    }
+
+    /// Whether repeating the same request could succeed without a human first
+    /// changing something. A busy writer clears on its own; a plan the disk no
+    /// longer matches needs a fresh reviewed dry run, which the caller can do.
+    /// Corrupt input and a failed readback need a person to look.
+    pub fn retryable(self) -> bool {
+        match self {
+            Self::WriterBusy | Self::ManifestChanged | Self::PlanNotIssued => true,
+            Self::UnknownRemote | Self::CorruptInput | Self::ReadbackFailed => false,
         }
     }
 }
@@ -122,6 +143,26 @@ pub struct OrphanedStore {
     /// Content revision of the store's `works.json`, so a manifest identifies
     /// exactly which bytes were quarantined.
     pub revision: String,
+}
+
+/// The record a reviewed dry run leaves behind so an apply can prove it was
+/// preceded by one.
+///
+/// Issue #3524 (folded into #3606): the review gate used to be nothing but a
+/// hash comparison, and the refusal text handed the caller the current hash —
+/// so "apply without reading the plan" was a two-call loop. Apply now requires
+/// a hash that a dry run actually issued, and no refusal ever quotes a valid
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuedConsolidationPlan {
+    pub version: u32,
+    pub manifest_hash: String,
+    pub canonical_hash: String,
+    pub project_root: PathBuf,
+    pub issued_at: DateTime<Utc>,
+    /// The Session that reviewed the plan, when the issuer had one. An apply
+    /// from a different Session is refused.
+    pub issued_by_session: Option<String>,
 }
 
 /// The read-only record left beside a quarantined store.
@@ -209,27 +250,96 @@ pub fn plan_store_consolidation(
     })
 }
 
+/// Record that `plan` was reviewed, so [`apply_store_consolidation`] can prove
+/// the apply was preceded by a dry run.
+///
+/// Writing this is the reviewing caller's deliberate act; planning itself stays
+/// side-effect free so a dry run never materializes the canonical store.
+pub fn issue_store_consolidation_plan(
+    plan: &StoreConsolidationPlan,
+    issued_by_session: Option<&str>,
+) -> ConsolidationResult<IssuedConsolidationPlan> {
+    let issued = IssuedConsolidationPlan {
+        version: ISSUED_PLAN_VERSION,
+        manifest_hash: plan.manifest_hash.clone(),
+        canonical_hash: plan.canonical_hash.as_str().to_string(),
+        project_root: plan.project_root.clone(),
+        issued_at: Utc::now(),
+        issued_by_session: issued_by_session
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .map(str::to_string),
+    };
+    let path = issued_plan_path(&plan.canonical_store);
+    let parent = path.parent().expect("issued plan parent");
+    fs::create_dir_all(parent).map_err(|error| {
+        NeedsHuman::new(
+            StoreConsolidationRefusal::CorruptInput,
+            format!("{}: {error}", parent.display()),
+        )
+    })?;
+    let encoded = serde_json::to_vec_pretty(&issued).map_err(|error| {
+        NeedsHuman::new(
+            StoreConsolidationRefusal::CorruptInput,
+            format!("could not encode the issued plan: {error}"),
+        )
+    })?;
+    fs::write(&path, encoded).map_err(|error| {
+        NeedsHuman::new(
+            StoreConsolidationRefusal::CorruptInput,
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    Ok(issued)
+}
+
+/// The plan a dry run last issued for `canonical_store`, if any.
+pub fn issued_store_consolidation_plan(
+    canonical_store: &Path,
+) -> ConsolidationResult<Option<IssuedConsolidationPlan>> {
+    let path = issued_plan_path(canonical_store);
+    let Some(bytes) = read_optional_bytes(&path)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        NeedsHuman::new(
+            StoreConsolidationRefusal::CorruptInput,
+            format!("{} is not a readable issued plan: {error}", path.display()),
+        )
+    })
+}
+
+fn issued_plan_path(canonical_store: &Path) -> PathBuf {
+    canonical_store.join("project-state").join(ISSUED_PLAN_FILE)
+}
+
 /// Quarantine every orphaned store and rebuild the canonical projection.
 ///
 /// `expected_manifest_hash` is the [`StoreConsolidationPlan::manifest_hash`]
-/// the caller reviewed. Applying the same plan twice is a no-op.
+/// the caller reviewed, and a dry run must have issued it through
+/// [`issue_store_consolidation_plan`]. `session_id` is the Session applying the
+/// plan; it must match the one that reviewed it. Applying the same plan twice
+/// is a no-op.
 pub fn apply_store_consolidation(
     project_root: &Path,
     expected_manifest_hash: &str,
+    session_id: Option<&str>,
 ) -> ConsolidationResult<StoreConsolidationOutcome> {
     let plan = plan_store_consolidation(project_root)?;
     if plan.manifest_hash != expected_manifest_hash {
+        // Deliberately silent about the current hash: quoting it here is what
+        // let a caller apply a plan it never read (#3524).
         return Err(NeedsHuman::new(
             StoreConsolidationRefusal::ManifestChanged,
-            format!(
-                "plan {} no longer matches the approved manifest {expected_manifest_hash}",
-                plan.manifest_hash
-            ),
+            "the store changed since the approved plan; re-run the dry run and \
+             review the new plan before applying"
+                .to_string(),
         ));
     }
     if plan.is_empty() {
         return Ok(StoreConsolidationOutcome::NothingToDo);
     }
+    verify_plan_was_issued(&plan, expected_manifest_hash, session_id)?;
 
     // Issue #3524 (folded into #3606): contend on the lock the Work
     // persistence itself takes, for the canonical store *and* every store about
@@ -251,10 +361,9 @@ pub fn apply_store_consolidation(
     if confirmed.manifest_hash != expected_manifest_hash {
         return Err(NeedsHuman::new(
             StoreConsolidationRefusal::ManifestChanged,
-            format!(
-                "store changed while acquiring the lease: {} != {expected_manifest_hash}",
-                confirmed.manifest_hash
-            ),
+            "the store changed while the projection locks were being acquired; \
+             re-run the dry run and review the new plan before applying"
+                .to_string(),
         ));
     }
 
@@ -279,6 +388,58 @@ pub fn apply_store_consolidation(
             Err(error)
         }
     }
+}
+
+/// Refuse an apply that no reviewed dry run stands behind.
+///
+/// The hash alone is not enough evidence: a caller can obtain a matching hash
+/// without ever reading what it authorizes. The issued record is what proves a
+/// human-visible dry run produced this exact plan, for this project, in this
+/// Session.
+fn verify_plan_was_issued(
+    plan: &StoreConsolidationPlan,
+    expected_manifest_hash: &str,
+    session_id: Option<&str>,
+) -> ConsolidationResult<()> {
+    let Some(issued) = issued_store_consolidation_plan(&plan.canonical_store)? else {
+        return Err(NeedsHuman::new(
+            StoreConsolidationRefusal::PlanNotIssued,
+            "no reviewed dry run has been recorded for this project; run \
+             workspace.store_consolidate with dry_run true and review the plan first"
+                .to_string(),
+        ));
+    };
+    if issued.version != ISSUED_PLAN_VERSION {
+        return Err(NeedsHuman::new(
+            StoreConsolidationRefusal::PlanNotIssued,
+            format!(
+                "the recorded dry run uses schema version {} instead of {ISSUED_PLAN_VERSION}; \
+                 re-run the dry run",
+                issued.version
+            ),
+        ));
+    }
+    if issued.manifest_hash != expected_manifest_hash
+        || issued.canonical_hash != plan.canonical_hash.as_str()
+    {
+        return Err(NeedsHuman::new(
+            StoreConsolidationRefusal::PlanNotIssued,
+            "the approved manifest does not match the plan the last dry run issued; \
+             re-run the dry run and review the new plan"
+                .to_string(),
+        ));
+    }
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|session| !session.is_empty());
+    if issued.issued_by_session.as_deref() != session_id {
+        return Err(NeedsHuman::new(
+            StoreConsolidationRefusal::PlanNotIssued,
+            "the plan was reviewed by a different Session; re-run the dry run in this Session"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// The paths whose hashes could have keyed a split store for this repository:

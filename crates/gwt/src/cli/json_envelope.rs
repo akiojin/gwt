@@ -107,6 +107,24 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 project_root: optional_string(params, "project_root")?,
             })
         }
+        "workspace.store_consolidate" | "workspace.store-consolidate" => {
+            // Issue #3524 (folded into #3606): this operation moves durable
+            // state, so a parameter it does not understand is a refusal rather
+            // than something to ignore. A silently-dropped `project_root` used
+            // to leave the apply targeting whatever cwd it happened to run in.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "manifest_hash"],
+                "workspace.store_consolidate",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::StoreConsolidate {
+                project_root: optional_path(params, "project_root")?,
+                // Consolidation moves durable state, so it dry-runs unless the
+                // caller explicitly opts out (#3466 AC-8).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
+            })
+        }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
         "board.config.show" | "board.config-show" => {
@@ -1156,6 +1174,27 @@ fn optional_path(
     key: &'static str,
 ) -> Result<Option<std::path::PathBuf>, CliParseError> {
     Ok(optional_string(params, key)?.map(std::path::PathBuf::from))
+}
+
+/// Refuse a parameter this operation does not understand.
+///
+/// Only for operations where ignoring an unrecognised key would change what
+/// the caller believes it authorized — a mistyped `project_root` that silently
+/// falls back to the process cwd is exactly the failure #3524 recorded.
+fn reject_unknown_params(
+    params: &Map<String, Value>,
+    allowed: &[&str],
+    operation: &str,
+) -> Result<(), CliParseError> {
+    for key in params.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(CliParseError::InvalidJson(format!(
+                "{operation} does not accept the parameter {key}; accepted: {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {

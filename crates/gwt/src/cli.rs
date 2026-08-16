@@ -269,6 +269,19 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
+    /// fold project stores that a pre-#3466 build split apart back into the
+    /// repository's canonical store.
+    ///
+    /// The dry run reports the plan and issues its `manifest_hash`; applying
+    /// requires that hash back *and* the recorded dry run that issued it, so a
+    /// store nobody reviewed can never be moved. `project_root` names the
+    /// project explicitly; authority still comes from the ambient Session.
+    StoreConsolidate {
+        project_root: Option<PathBuf>,
+        dry_run: bool,
+        manifest_hash: Option<String>,
+    },
     /// Issue #3448: settle incomplete Works whose owner Issue is already
     /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
     /// reports the plan without emitting close events. `project_root` targets

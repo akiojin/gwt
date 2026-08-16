@@ -1230,7 +1230,193 @@ pub(super) fn run<E: CliEnv>(
                 .unwrap_or_else(|| env.repo_path());
             run_work_prune(target, dry_run, &ids, out)
         }
+        WorkspaceCommand::StoreConsolidate {
+            project_root,
+            dry_run,
+            manifest_hash,
+        } => {
+            let target = project_root.as_deref().unwrap_or_else(|| env.repo_path());
+            run_store_consolidate(target, dry_run, manifest_hash.as_deref(), out)
+        }
     }
+}
+
+/// Issue #3466 / #3524 (folded into #3606): report or apply project store
+/// consolidation.
+///
+/// The dry run is the review step. It prints the orphaned stores and issues the
+/// `manifest_hash` that pins them; applying requires that hash back *and* the
+/// recorded dry run that issued it, so a plan nobody read can never authorize a
+/// move. Every refusal is a structured `needs_human` payload with a stable
+/// reason code, the identity it concerns, and whether retrying can help.
+fn run_store_consolidate(
+    project_root: &Path,
+    dry_run: bool,
+    manifest_hash: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    use gwt_core::workspace_projection::store_migration::{
+        apply_store_consolidation, issue_store_consolidation_plan, plan_store_consolidation,
+        StoreConsolidationOutcome,
+    };
+
+    let session_id = ambient_session_id();
+    let plan = match plan_store_consolidation(project_root) {
+        Ok(plan) => plan,
+        Err(error) => return emit_consolidation_refusal(project_root, &error, out),
+    };
+
+    if dry_run {
+        if let Err(error) = issue_store_consolidation_plan(&plan, session_id.as_deref()) {
+            return emit_consolidation_refusal(project_root, &error, out);
+        }
+        let payload = serde_json::json!({
+            "dry_run": true,
+            "project_root": plan.project_root,
+            "canonical_hash": plan.canonical_hash.as_str(),
+            "canonical_store": plan.canonical_store,
+            "manifest_hash": plan.manifest_hash,
+            "orphans": plan.orphans,
+        });
+        out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
+            string_error(format!("could not encode the consolidation plan: {error}"))
+        })?);
+        out.push('\n');
+        return Ok(0);
+    }
+
+    let Some(expected) = manifest_hash else {
+        // Deliberately no hash here: quoting the current one is what let a
+        // caller apply a plan it never read (#3524).
+        return emit_needs_human(
+            project_root,
+            "manifest_hash_required",
+            true,
+            "workspace.store_consolidate requires the manifest_hash issued by a dry run; \
+             run it with dry_run true and review the plan first",
+            out,
+        );
+    };
+
+    if let Err(reason) = session_authorizes_project(session_id.as_deref(), project_root) {
+        return emit_needs_human(project_root, "unauthorized_session", false, &reason, out);
+    }
+
+    let outcome = match apply_store_consolidation(project_root, expected, session_id.as_deref()) {
+        Ok(outcome) => outcome,
+        Err(error) => return emit_consolidation_refusal(project_root, &error, out),
+    };
+    let payload = match &outcome {
+        StoreConsolidationOutcome::NothingToDo => serde_json::json!({
+            "dry_run": false,
+            "outcome": "nothing_to_do",
+        }),
+        StoreConsolidationOutcome::Consolidated {
+            quarantined,
+            work_item_count,
+        } => serde_json::json!({
+            "dry_run": false,
+            "outcome": "consolidated",
+            "quarantined": quarantined,
+            "work_item_count": work_item_count,
+        }),
+    };
+    out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
+        string_error(format!(
+            "could not encode the consolidation outcome: {error}"
+        ))
+    })?);
+    out.push('\n');
+    Ok(0)
+}
+
+/// The Session this process is running as, from the ambient environment only.
+///
+/// Params may name the project, never the subject: a caller must not be able to
+/// claim an authority it does not hold by putting a Session id in its request.
+fn ambient_session_id() -> Option<String> {
+    std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Issue #3524 (folded into #3606): apply authority is the Session's, not the
+/// process cwd's.
+///
+/// Moving durable project state is only ever authorized for the project the
+/// calling Session actually belongs to, established from the persisted Session
+/// record rather than from environment paths the caller controls. An unmanaged
+/// invocation has no authority at all.
+fn session_authorizes_project(session_id: Option<&str>, project_root: &Path) -> Result<(), String> {
+    let Some(session_id) = session_id else {
+        return Err(
+            "workspace.store_consolidate moves durable project state and requires a gwt-managed \
+             Session; relaunch this work from gwt and retry"
+                .to_string(),
+        );
+    };
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let session = match gwt_agent::session::Session::load(&path) {
+        Ok(session) => session,
+        Err(error) => {
+            return Err(format!(
+                "Session {session_id} has no readable record, so it cannot authorize a store \
+                 consolidation: {error}"
+            ));
+        }
+    };
+    let session_project = gwt_core::paths::project_scope_hash(&session.worktree_path);
+    let target_project = gwt_core::paths::project_scope_hash(project_root);
+    if session_project != target_project {
+        return Err(format!(
+            "Session {session_id} belongs to project {session_project}, not to {target_project}; \
+             a Session may only consolidate its own project's stores"
+        ));
+    }
+    Ok(())
+}
+
+/// Render a fail-closed refusal as the structured `needs_human` payload the
+/// operator tooling keys on, and exit non-zero.
+fn emit_consolidation_refusal(
+    project_root: &Path,
+    error: &gwt_core::workspace_projection::store_migration::NeedsHuman,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    emit_needs_human(
+        project_root,
+        error.refusal.as_str(),
+        error.refusal.retryable(),
+        &error.detail,
+        out,
+    )
+}
+
+fn emit_needs_human(
+    project_root: &Path,
+    reason_code: &str,
+    retryable: bool,
+    detail: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let payload = serde_json::json!({
+        "needs_human": true,
+        "reason_code": reason_code,
+        "retryable": retryable,
+        "target": {
+            "project_root": project_root,
+            "project_hash": gwt_core::paths::project_scope_hash(project_root).as_str(),
+        },
+        "detail": detail,
+    });
+    out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
+        string_error(format!(
+            "could not encode the consolidation refusal: {error}"
+        ))
+    })?);
+    out.push('\n');
+    Ok(3)
 }
 
 /// Issue #3448 AC-1: settle incomplete Works whose owner Issue is already
