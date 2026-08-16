@@ -216,6 +216,8 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         color: AgentColor::Green,
         model: None,
         tool_version: None,
+        tool_runtime_provenance: None,
+        tool_runtime_source_session_id: None,
         reasoning_level: None,
         session_mode: SessionMode::Normal,
         resume_session_id: None,

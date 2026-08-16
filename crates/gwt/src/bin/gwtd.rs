@@ -64,6 +64,7 @@ fn print_help() {
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
+    println!("  pm          PM agent diagnostics (SPEC-3431)");
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
@@ -89,6 +90,7 @@ fn family_help(family: &str) -> Option<String> {
         "verify" => Some(format_verify_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
+        "pm" => Some(format_pm_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
@@ -135,6 +137,8 @@ fn format_daemon_help() -> String {
         "",
         "Key params:",
         "  channels                                Required for daemon.subscribe",
+        "  timeout_seconds                         Optional for daemon.subscribe; ends the",
+        "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
@@ -165,6 +169,9 @@ fn format_issue_help() -> String {
         "  issue.spec.repair | issue.spec.rename",
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
+        "  issue.monitor.launch_now | issue.monitor.stop",
+        "  issue.monitor.failover",
+        "  issue.monitor.questions | issue.monitor.question.answer",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -173,9 +180,11 @@ fn format_issue_help() -> String {
         "  all, numbers                           Controls issue.spec.pull",
         "  project_root                          Optional Issue Monitor project scope",
         "  number, position                      Move one priority (head or numeric index)",
+        "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
+        "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
     ]
@@ -431,6 +440,8 @@ fn format_verify_help() -> String {
         "",
         "Operations:",
         "  verify.plan | verify.run",
+        "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
+        "  verify.lease.status",
         "",
         "Notes:",
         "  Register the derived matrix with verify.plan first; a run must cover it.",
@@ -438,6 +449,14 @@ fn format_verify_help() -> String {
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
         "  evidence. execution.complete and Ready PR handoffs require a fresh,",
         "  all-passing record.",
+        "",
+        "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
+        "  take the lease before cargo test --all-features / cargo llvm-cov /",
+        "  headed Playwright, then release it. acquire answers immediately —",
+        "  granted, or unavailable with the current holder and its remaining",
+        "  TTL, so no agent polls another agent's process. Default TTL is 45",
+        "  minutes (params.ttl_minutes); the holder self-releases when it",
+        "  lapses, and a killed holder releases at once.",
         "",
     ]
     .join("
@@ -459,6 +478,26 @@ fn format_register_help() -> String {
         "Key params:",
         "  spec, label, reason",
         "",
+    ]
+    .join("\n")
+}
+
+fn format_pm_help() -> String {
+    [
+        "pm.* — PM agent diagnostics via JSON envelope (SPEC-3431).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  pm.status    Report the per-project PM registration, auto-start setting,",
+        "               and a stale hint from the durable session store (read-only,",
+        "               ownerless-safe).",
+        "",
+        "Key params:",
+        "  project_root (optional; defaults to the current repository path)",
     ]
     .join("\n")
 }
@@ -867,6 +906,9 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            "issue.monitor.launch_now",
+            "issue.monitor.stop",
+            "issue.monitor.failover",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",

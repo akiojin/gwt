@@ -440,6 +440,7 @@ fn test_env_records_io_and_pr_side_effects() {
             state: "OPEN".to_string(),
             url: "https://example.test/pr/128".to_string(),
             will_close_target: true,
+            merged_at: None,
         }],
     );
     assert_eq!(
@@ -639,7 +640,9 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
     let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
-    let stable_hook_bin = temp.path().join("stable-gwtd");
+    let stable_hook_bin = temp
+        .path()
+        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
@@ -701,7 +704,9 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
-    let stable_hook_bin = temp.path().join("stable-gwtd");
+    let stable_hook_bin = temp
+        .path()
+        .join(format!("stable-gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
@@ -744,7 +749,9 @@ fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
         .status()
         .expect("git init");
     assert!(git_status.success());
-    let local_bin = temp.path().join("target/debug/gwtd");
+    let local_bin = temp
+        .path()
+        .join(format!("target/debug/gwtd{}", std::env::consts::EXE_SUFFIX));
     fs::create_dir_all(local_bin.parent().expect("bin parent")).expect("bin dir");
     write_executable_fixture(&local_bin, "local");
     fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");

@@ -3,6 +3,8 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use fs2::FileExt;
+
 #[cfg(test)]
 type DurableLaunchRecoveryDirectorySyncHook = Box<dyn Fn(&Path) -> std::io::Result<()> + 'static>;
 
@@ -117,9 +119,11 @@ use super::workspace::{
     apply_workspace_launch_transition, WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
 };
 use super::{
-    launch_config_from_persisted_session, non_empty_workspace_text, AppRuntime, BackendEvent,
-    CachedContinueWorkOutcome, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
-    PendingFreshExecutionLaunch, WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
+    continue_work_readiness_decision, launch_config_from_persisted_session,
+    non_empty_workspace_text, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
+    PendingFreshExecutionLaunch, ReadinessDeadlineDecision, WindowGeometry, WindowProcessStatus,
+    WorkspaceResumeContext,
 };
 use regex::Regex;
 
@@ -1281,6 +1285,14 @@ fn durable_launch_recovery_path(sessions_dir: &Path, session_id: &str) -> Result
     Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
 }
 
+fn durable_launch_recovery_lock_path(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    gwt_agent::validate_session_id_path_component(session_id)?;
+    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.lock")))
+}
+
 #[cfg(test)]
 // Only the `#[cfg(unix)]` directory-sync tests install this hook.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -1435,6 +1447,54 @@ pub(super) fn persist_durable_launch_recovery_with_identity(
         .parent()
         .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     create_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())?;
+    let lock_path = durable_launch_recovery_lock_path(sessions_dir, session_id)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<DurableLaunchRecoveryRecord>(&bytes).map_err(|error| {
+                format!("existing launch recovery receipt is malformed: {error}")
+            })?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Some(existing) = existing.as_ref() {
+        existing.owner()?;
+        let same_operation = existing.kind == record.kind
+            && existing.session_id == record.session_id
+            && existing.project_root == record.project_root
+            && existing.worktree_path == record.worktree_path
+            && existing.repo_hash == record.repo_hash
+            && existing.owner_kind == record.owner_kind
+            && existing.owner_number == record.owner_number;
+        let monotonic = existing == &record
+            || (same_operation
+                && existing.expected_binding.is_none()
+                && record.expected_binding.is_some());
+        if same_operation
+            && existing.expected_binding.is_some()
+            && record.expected_binding.is_none()
+        {
+            // A retry begins from the base receipt even when a previous
+            // response-loss attempt already advanced this same operation to
+            // an exact bound receipt. Keep the stronger evidence byte-for-byte
+            // and let the coordinator replay its Prepared attempt.
+            return Ok(());
+        }
+        if !monotonic {
+            return Err("launch recovery receipt cannot be downgraded or retargeted".to_string());
+        }
+        if existing == &record {
+            return Ok(());
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
     gwt_github::cache::write_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     sync_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())
@@ -1445,14 +1505,25 @@ pub(super) fn clear_durable_launch_recovery(
     session_id: &str,
 ) -> Result<(), String> {
     let path = durable_launch_recovery_path(sessions_dir, session_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
+    if !parent.exists() {
+        return Ok(());
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(durable_launch_recovery_lock_path(sessions_dir, session_id)?)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     let durability_barrier = if parent.exists() {
         Some(parent)
     } else {
@@ -1481,6 +1552,43 @@ pub(super) fn durable_launch_recovery_session_identity(
         return Err("launch recovery Session id changed".to_string());
     }
     Ok(record.expected_session_identity)
+}
+
+pub(super) fn bind_durable_launch_recovery_session_identity(
+    sessions_dir: &Path,
+    session: &gwt_agent::Session,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let path = durable_launch_recovery_path(sessions_dir, &session.id)?;
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    let record: DurableLaunchRecoveryRecord =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let owner = record.owner()?;
+    if record.session_id != session.id
+        || record.worktree_path != session.worktree_path
+        || session.project_state_root.as_deref() != Some(record.project_root.as_path())
+        || session.repo_hash.as_deref() != Some(record.repo_hash.as_str())
+        || session.linked_issue_number != Some(owner.number)
+        || binding.owner_kind != owner.kind.as_str()
+        || binding.owner_number != owner.number
+    {
+        return Err(
+            "launch recovery candidate does not match its durable base receipt".to_string(),
+        );
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::for_binding(session, binding)?;
+    persist_durable_launch_recovery_with_identity(
+        sessions_dir,
+        record.kind,
+        &record.session_id,
+        &record.project_root,
+        &record.worktree_path,
+        owner,
+        Some(binding),
+        Some(&session.agent_id),
+        Some(&identity),
+    )?;
+    Ok(identity)
 }
 
 pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
@@ -2878,10 +2986,7 @@ impl AppRuntime {
             }
             return;
         };
-        if attempt.predecessor_status
-            != gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked
-            || attempt.request.source != gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE
-            || attempt.request.work_id.is_some()
+        if !gwt::cli::execution_state::is_owner_launch_successor_attempt(&attempt)
             || attempt.request.initial_session_id != receipt.session_id
             || attempt.request.operation_id != operation_id
         {
@@ -3702,7 +3807,7 @@ impl AppRuntime {
                 Ok(true) => {}
                 Err(_) => return ActiveOwnerLiveness::Unknown,
             }
-            if gwt::process::is_process_alive(pid) {
+            if gwt::process::is_host_process_alive(pid) {
                 match gwt_agent::SessionRuntimeState::load(&sidecar) {
                     Ok(state)
                         if matches!(
@@ -6015,39 +6120,59 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #3475: a fired readiness deadline is a checkpoint, not an expiry.
+    /// It aborts the prepared successor only once the pane stops showing that
+    /// the agent is still coming up, and always within a bounded number of
+    /// extensions. The `operation_id` correlation is unchanged, so a timer that
+    /// fires after its launch already succeeded (or was superseded) is still a
+    /// no-op.
     pub(crate) fn handle_continue_work_ready_timeout(
         &mut self,
         window_id: &str,
-        operation_id: &str,
+        watch: &ContinueWorkReadinessWatch,
     ) -> Vec<OutboundEvent> {
-        if self
+        let operation_id = watch.operation_id.as_str();
+        let is_pending_continue_work = self
             .pending_continue_work
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id)
-        {
-            return self.continue_work_launch_failed_events(
-                window_id,
-                "authenticated SessionStart readiness timed out",
-            );
-        }
-        let feedback = self
+            .is_some_and(|pending| pending.operation_id == operation_id);
+        let is_pending_fresh_execution = self
             .pending_fresh_execution_launches
             .get(window_id)
-            .filter(|pending| pending.operation_id == operation_id)
-            .and_then(|pending| pending.launch_feedback_context.clone());
-        if feedback.is_some()
-            || self
-                .pending_fresh_execution_launches
-                .get(window_id)
-                .is_some_and(|pending| pending.operation_id == operation_id)
-        {
-            return self.launch_error_events_with_continue_work(
-                window_id.to_string(),
-                "authenticated SessionStart readiness timed out".to_string(),
-                feedback,
-            );
+            .is_some_and(|pending| pending.operation_id == operation_id);
+        if !is_pending_continue_work && !is_pending_fresh_execution {
+            return Vec::new();
         }
-        Vec::new()
+        let pane_alive = self.readiness_pane_is_alive(window_id);
+        let output_bytes = self.observed_window_output_bytes(window_id);
+        match continue_work_readiness_decision(watch, pane_alive, output_bytes) {
+            ReadinessDeadlineDecision::Extend(next) => {
+                tracing::info!(
+                    window_id = %window_id,
+                    operation_id = %operation_id,
+                    extensions = next.extensions,
+                    silent_extensions = next.silent_extensions,
+                    "extended authenticated SessionStart readiness deadline"
+                );
+                self.rearm_continue_work_readiness_deadline(window_id, next);
+                Vec::new()
+            }
+            ReadinessDeadlineDecision::Abort { detail } => {
+                if is_pending_continue_work {
+                    self.continue_work_launch_failed_events(window_id, &detail)
+                } else {
+                    let feedback = self
+                        .pending_fresh_execution_launches
+                        .get(window_id)
+                        .and_then(|pending| pending.launch_feedback_context.clone());
+                    self.launch_error_events_with_continue_work(
+                        window_id.to_string(),
+                        detail,
+                        feedback,
+                    )
+                }
+            }
+        }
     }
 
     pub(crate) fn finalize_fresh_execution_launch_session_start(
