@@ -215,6 +215,99 @@ fn detached_worktree_shares_the_layout_root_project_store() {
     );
 }
 
+/// Issue #3606 AC-5: the PM lane materializes its worktree *inside* a project
+/// store directory (`~/.gwt/projects/<hash>/pm/worktree`), so its path is
+/// keyed by whichever hash was canonical when it was created. Resolution must
+/// still follow the repository's origin: keying on the enclosing directory
+/// would pin the PM to a store that an upgrade can move out from under it,
+/// which is exactly how #3606 stranded the PM's whole observation surface.
+#[test]
+fn pm_worktree_inside_a_project_store_resolves_to_the_repository_identity() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workbench");
+    let (bare, _worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
+
+    // The directory name is the *legacy* path hash, the way a store created
+    // before the identity convergence would have been named.
+    let legacy_hash = compute_path_hash(&root);
+    let pm_worktree = gwt_core::paths::gwt_projects_dir()
+        .join(legacy_hash.as_str())
+        .join("pm")
+        .join("worktree");
+    std::fs::create_dir_all(pm_worktree.parent().expect("pm dir")).expect("pm dir");
+    run_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            pm_worktree.to_str().expect("pm worktree path"),
+            "develop",
+        ],
+    );
+
+    let expected = compute_repo_hash(LAYOUT_ORIGIN);
+    assert_eq!(
+        project_scope_hash(&pm_worktree).as_str(),
+        expected.as_str(),
+        "a PM worktree must resolve by origin, not by the store directory it sits in"
+    );
+    assert_ne!(
+        project_scope_hash(&pm_worktree).as_str(),
+        legacy_hash.as_str(),
+        "the enclosing store's hash must not capture the identity"
+    );
+    assert_eq!(
+        project_scope_hash(&pm_worktree).as_str(),
+        project_scope_hash(&root).as_str(),
+        "PM and the layout root must observe one store"
+    );
+}
+
+/// Issue #3606 AC-4: which stores already exist on disk must never influence
+/// where a project root resolves. #3606 was an upgrade silently changing the
+/// answer for an unchanged project root; pinning resolution to the repository
+/// alone is what makes the answer stable across restarts and versions, and
+/// leaves the stranded store a migration problem rather than an ambiguity.
+#[test]
+fn existing_stores_never_change_where_a_project_root_resolves() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workbench");
+    let (_bare, worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
+    let expected = compute_repo_hash(LAYOUT_ORIGIN);
+
+    let before_root = project_scope_hash(&root);
+    let before_worktree = project_scope_hash(&worktree);
+    assert_eq!(before_root.as_str(), expected.as_str());
+
+    // Materialize the legacy path-hash store a pre-#3466 build would have
+    // written, and the identity store beside it.
+    for hash in [compute_path_hash(&root), expected.clone()] {
+        std::fs::create_dir_all(
+            gwt_core::paths::gwt_projects_dir()
+                .join(hash.as_str())
+                .join("project-state"),
+        )
+        .expect("materialize store");
+    }
+
+    assert_eq!(
+        project_scope_hash(&root).as_str(),
+        before_root.as_str(),
+        "an existing legacy store must not pull the project root back to it"
+    );
+    assert_eq!(
+        project_scope_hash(&worktree).as_str(),
+        before_worktree.as_str(),
+        "nor may it change where a linked worktree resolves"
+    );
+    assert_eq!(
+        project_scope_hash(&root).as_str(),
+        project_scope_hash(&worktree).as_str(),
+        "both entry points stay on one store"
+    );
+}
+
 /// AC-3: the resolution source is observable, so a path-hash fallback can be
 /// diagnosed instead of silently splitting the store.
 #[test]

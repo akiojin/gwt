@@ -3415,6 +3415,54 @@ fn store_consolidate_refuses_to_apply_without_the_dry_run_manifest_hash() {
     );
 }
 
+/// Issue #3606 AC-4: an application restart must not change where a project
+/// root resolves, and a store stranded by an earlier resolution rule must stay
+/// *visible* rather than silently ignored. v9.81.0 changed the answer for an
+/// unchanged project root and shipped no way to see or move what was left
+/// behind, so the whole observation surface moved to an empty store.
+#[test]
+fn store_consolidate_resolves_to_one_store_across_separate_processes() {
+    let fixture = layout_fixture();
+    let projects = fixture.home.path().join(".gwt").join("projects");
+
+    // The store a pre-#3466 build keyed by the layout root's path.
+    let legacy_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
+    fs::create_dir_all(projects.join(legacy_hash.as_str()).join("project-state"))
+        .expect("legacy store");
+
+    let dry_run = r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{}}"#;
+    let first = envelope_payload(&run_layout_ws(&fixture, dry_run));
+    // A second gwtd process is the restart: same project root, no shared state
+    // beyond the filesystem.
+    let second = envelope_payload(&run_layout_ws(&fixture, dry_run));
+
+    let identity = gwt_core::repo_hash::compute_repo_hash(CONSOLIDATE_ORIGIN);
+    assert_eq!(
+        first["canonical_hash"].as_str(),
+        Some(identity.as_str()),
+        "the canonical store must be the repository identity: {first}"
+    );
+    assert_eq!(
+        first["canonical_hash"], second["canonical_hash"],
+        "a restart must not move the canonical store"
+    );
+    assert_ne!(
+        first["canonical_hash"].as_str(),
+        Some(legacy_hash.as_str()),
+        "the fixture must actually reproduce the post-upgrade split"
+    );
+
+    for payload in [&first, &second] {
+        let orphans = payload["orphans"].as_array().expect("orphans");
+        assert!(
+            orphans
+                .iter()
+                .any(|orphan| orphan["source_hash"].as_str() == Some(legacy_hash.as_str())),
+            "the stranded legacy store must stay visible, not silently ignored: {payload}"
+        );
+    }
+}
+
 /// Issue #3524 (folded into #3606): apply authority used to be whatever
 /// directory the process happened to run in. Moving durable project state is
 /// only ever authorized for the project the calling Session belongs to, and an
