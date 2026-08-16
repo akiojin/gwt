@@ -1030,15 +1030,31 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 .ok_or_else(|| {
                     "the current execution binding has no integrity-valid owner ledger".to_string()
                 })?;
-            if ledger.current_effective_status()
-                != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+            // Issue #3457: a non-Blocked generation only legitimately blocks a
+            // fresh launch while its holder can still return. Once the holder's
+            // Host is gone it can never settle, so the launch supersedes it
+            // through the exact-terminal successor transaction instead of
+            // refusing forever.
+            let unreachable_holder = if ledger.current_effective_status()
+                == Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
             {
-                return Err(existing_generation_conflict_detail(
+                None
+            } else {
+                let holder = gwt::cli::execution_state::unreachable_current_generation_holder(
                     sessions_dir,
+                    worktree,
                     owner,
-                    &ledger,
-                ));
-            }
+                )
+                .map_err(|error| error.to_string())?;
+                if holder.is_none() {
+                    return Err(existing_generation_conflict_detail(
+                        sessions_dir,
+                        owner,
+                        &ledger,
+                    ));
+                }
+                holder
+            };
 
             let repo_hash = session
                 .repo_hash
@@ -1069,11 +1085,23 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 None,
                 None,
             )?;
-            if let Err(error) =
-                gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+            let prepared = match unreachable_holder.as_ref() {
+                Some(holder) => gwt::cli::execution_state::prepare_exact_terminal_active_successor(
+                    worktree,
+                    owner,
+                    &request,
+                    sessions_dir,
+                    holder,
+                    gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+                    "holder Host exited without settling its execution generation",
+                )
+                .map(|_| ()),
+                None => gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
                     worktree, owner, &request,
                 )
-            {
+                .map(|_| ()),
+            };
+            if let Err(error) = prepared {
                 if gwt::cli::execution_state::continuation_attempt_for_operation(
                     worktree,
                     owner,
@@ -5505,6 +5533,101 @@ mod agent_endpoint_env_tests {
         assert!(
             !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
             "a refused genesis launch must not issue a capability"
+        );
+    }
+
+    /// Issue #3457: the refusal above is only correct while the holder can
+    /// still come back. Once its Host is gone the durable `.toml` is an orphan
+    /// with no runtime sidecar in any namespace, so nothing can ever settle
+    /// that generation and every later launch — Issue Monitor retries and
+    /// Start Work included — collides with a Session that no longer exists.
+    /// An unreachable holder must release its generation to a successor
+    /// instead of blocking the owner forever.
+    #[test]
+    fn fresh_launch_supersedes_a_generation_whose_holder_is_unreachable() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut genesis_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut genesis_env)
+        .expect("materialize the first producing generation");
+
+        // The Host process that owned the holder is gone: its runtime
+        // namespace was cleared and the durable record still reads Running.
+        let holder_id = launch.session.id.clone();
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &launch.sessions_dir,
+            &holder_id,
+        ))
+        .expect("clear the holder runtime sidecar");
+
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.update_status(gwt_agent::AgentStatus::Running);
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut relaunch,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("a fresh launch must supersede an unreachable holder");
+
+        assert!(
+            env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "the superseding launch must receive its producing capability"
+        );
+        let binding = relaunch
+            .execution_binding
+            .clone()
+            .expect("the superseding launch must be bound");
+        assert_eq!(binding.session_id, relaunch.id);
+        assert_ne!(
+            binding.identity.generation_id,
+            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+                .expect("reload holder Session")
+                .execution_binding
+                .expect("holder binding")
+                .identity
+                .generation_id,
+            "the successor must own a new generation, not the holder's"
         );
     }
 

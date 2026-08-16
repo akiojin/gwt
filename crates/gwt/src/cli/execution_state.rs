@@ -839,6 +839,47 @@ pub fn classify_exact_session_runtime(
     })
 }
 
+/// Issue #3457: identify the current generation's holder when no Host can be
+/// running it, so a fresh launch can supersede it instead of colliding with a
+/// Session that will never settle.
+///
+/// Deliberately conservative: only a holder whose runtime evidence is
+/// [`ExactSessionRuntimeDisposition::Absent`] qualifies. A reachable holder, an
+/// unreadable durable record, a holder that no longer owns the current binding,
+/// and merely ambiguous runtime evidence all return `None` so the caller keeps
+/// refusing rather than taking a generation away from a live Session.
+pub fn unreachable_current_generation_holder(
+    sessions_dir: &Path,
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<Option<gwt_agent::SessionExecutionIdentity>> {
+    let Some(record) = load(worktree)? else {
+        return Ok(None);
+    };
+    if record.owner_kind != owner.kind || record.owner_number != owner.number {
+        return Ok(None);
+    }
+    let Some(current) = current_execution_binding(worktree, owner)? else {
+        return Ok(None);
+    };
+    let holder_path = sessions_dir.join(format!("{}.toml", record.primary_session_id));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&holder_path)
+    else {
+        return Ok(None);
+    };
+    let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+        .ok()
+        .flatten()
+        .filter(|identity| identity.execution_binding.identity == current)
+    else {
+        return Ok(None);
+    };
+    Ok((classify_exact_session_runtime(sessions_dir, &identity)?
+        == ExactSessionRuntimeDisposition::Absent)
+        .then_some(identity))
+}
+
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
     attempt.request.work_id.is_none()
         && matches!(
