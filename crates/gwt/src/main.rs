@@ -409,6 +409,15 @@ impl Drop for EventLoopDispatchTimer {
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 
+/// Issue #3633: how often the GUI re-checks that a runtime daemon is serving
+/// each enabled project, and therefore the worst-case gap after one dies.
+///
+/// Deliberately independent of `IssueMonitorConfig::poll_interval_secs` (300s
+/// by default, and user-tunable). Inheriting the scan cadence would mean a
+/// crashed daemon leaves `scan_now` and `daemon.subscribe` unavailable for
+/// minutes, which is the state Issue #3633 was filed about.
+const RUNTIME_DAEMON_ENSURE_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GuiShutdownReason {
     /// SPEC #2920: retained for the unit tests that still exercise
@@ -1267,6 +1276,13 @@ enum UserEvent {
     /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
     /// tick — drives local scans and the PM periodic wake.
     IssueMonitorScheduledTick,
+    /// Issue #3633: keep a runtime daemon alive for every enabled project.
+    ///
+    /// Separate from the scan tick because the two cadences answer different
+    /// questions. The scan cadence is a user-tunable poll interval (300s by
+    /// default); daemon supervision is a liveness check that must not inherit
+    /// it, or a crashed daemon would leave the control lane dead for minutes.
+    RuntimeDaemonEnsureTick,
     IssueMonitorScheduledScanComplete {
         project_root: PathBuf,
         prefs_path: PathBuf,
@@ -1435,6 +1451,56 @@ mod tests {
         sync::{Arc, Mutex, RwLock},
         time::{Duration, Instant},
     };
+
+    /// Issue #3633 AC-1/AC-2/AC-7: the GUI must drive daemon supervision on a
+    /// timer of its own.
+    ///
+    /// The supervisor is idempotent by design, which means the whole
+    /// supervision contract is "somebody keeps calling it". #3505 shipped a
+    /// working scan path that nothing drove; this asserts the timer, the
+    /// immediate first tick (so the control lane is up at launch rather than
+    /// an interval later), and that the cadence is not the user-tunable scan
+    /// poll interval.
+    #[test]
+    fn the_gui_drives_daemon_supervision_on_its_own_timer() {
+        let source = include_str!("main.rs");
+        let supervision = source
+            .split_once("runtime-daemon-ensure-tick")
+            .expect("the GUI must own a daemon supervision thread")
+            .1
+            .split_once("}\n    }")
+            .expect("supervision thread body must be delimited")
+            .0;
+
+        assert!(
+            supervision.contains("UserEvent::RuntimeDaemonEnsureTick"),
+            "the supervision thread must emit the ensure tick"
+        );
+        assert!(
+            supervision.contains("RUNTIME_DAEMON_ENSURE_INTERVAL"),
+            "supervision must not inherit the scan poll interval"
+        );
+        let send_at = supervision
+            .find("send_event")
+            .expect("the supervision thread must send its tick");
+        let sleep_at = supervision
+            .find("thread::sleep")
+            .expect("the supervision thread must have a cadence");
+        assert!(
+            send_at < sleep_at,
+            "the first ensure must run at launch, not one interval later"
+        );
+
+        assert!(
+            source.contains("app.ensure_runtime_daemons_for_enabled_projects()"),
+            "the ensure tick must reach the supervisor"
+        );
+        assert!(
+            crate::RUNTIME_DAEMON_ENSURE_INTERVAL
+                < Duration::from_secs(gwt::IssueMonitorConfig::default().poll_interval_secs),
+            "a crashed daemon must not stay dead for a whole scan interval"
+        );
+    }
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use base64::Engine;
@@ -2912,6 +2978,7 @@ mod tests {
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
+            daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
@@ -8124,6 +8191,31 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
         }
     }
+    // Issue #3633: the GUI is the subject that keeps a runtime daemon alive.
+    // Nothing in production used to start one, so the daemon-only control
+    // lane (`scan_now`, `daemon.subscribe`) was permanently unavailable.
+    //
+    // This fires immediately and then on its own short cadence, deliberately
+    // not the scan poll interval: the first tick is what makes the control
+    // lane available at launch instead of minutes later, and the cadence is
+    // the worst-case gap after a daemon crash.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        if let Err(error) = std::thread::Builder::new()
+            .name("runtime-daemon-ensure-tick".to_string())
+            .spawn(move || loop {
+                if tick_proxy
+                    .send_event(UserEvent::RuntimeDaemonEnsureTick)
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(RUNTIME_DAEMON_ENSURE_INTERVAL);
+            })
+        {
+            tracing::error!(%error, "failed to start the runtime daemon supervision thread");
+        }
+    }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
@@ -8380,6 +8472,11 @@ fn main() -> std::io::Result<()> {
                         workspace_projection_watchers.shutdown();
                         #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
+                        // Issue #3633: stop the daemons this GUI started. The
+                        // endpoint contract does not compare `daemon_version`,
+                        // so a survivor would be reused by the next launch even
+                        // after an update.
+                        app.daemon_supervisor.shutdown();
                         server.shutdown();
                     },
                 );
@@ -8587,6 +8684,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
                 let events = app.issue_monitor_scheduled_tick_events();
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
+                app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,
@@ -9077,6 +9177,7 @@ fn main() -> std::io::Result<()> {
                         workspace_projection_watchers.shutdown();
                         #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
+                        app.daemon_supervisor.shutdown();
                         server.shutdown();
                     },
                 );
