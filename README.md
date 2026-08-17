@@ -367,6 +367,11 @@ unchanged.
 - Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
   from the CLI; every other agent session must use the GUI. Merges are
   unaffected — the strong automated gate above still decides every merge.
+- There is one PM per **repository**, not per project store, so a repository
+  whose state resolved into two stores still gets exactly one. JSON operation
+  `pm.status` lists every registration in the repository, and `pm.stop` retires
+  one from the CLI — a registered PM can retire an orphan or stand down itself
+  without a GUI click.
 
 The design lives in SPEC
 [#3431](https://github.com/akiojin/gwt/issues/3431).

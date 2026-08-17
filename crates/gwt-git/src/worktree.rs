@@ -1024,9 +1024,17 @@ fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix("./").unwrap_or(entry);
 
+    // Fail closed for the tracked Work history contract even when a stale or
+    // user-authored exclude file reports a durable path as ignored. New event
+    // shards use a deterministic two-hex bucket; W-33 flat shards remain
+    // durable read compatibility. Writer temp residue is hidden and has a
+    // `.create-*` suffix, so it deliberately does not match either form.
+    if is_durable_gwt_work_entry(entry) {
+        return false;
+    }
+
     // `.gwt/` is a gwt-owned namespace and is excluded by managed worktrees.
-    // Only ignored entries are disposable: a tracked `.gwt/work/events.jsonl`
-    // modification carries durable Work history and must remain fail-closed.
+    // Only ignored non-durable entries are disposable.
     if status == "!!" && (entry == ".gwt" || entry.starts_with(".gwt/")) {
         return true;
     }
@@ -1041,6 +1049,50 @@ fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
     }
 
     entry == ".DS_Store" || entry.ends_with("/.DS_Store")
+}
+
+fn is_durable_gwt_work_entry(entry: &str) -> bool {
+    if matches!(
+        entry,
+        ".gwt/work/events.jsonl" | ".gwt/work/board-remote-roots.jsonl"
+    ) {
+        return true;
+    }
+
+    let Some(relative) = entry.strip_prefix(".gwt/work/events/") else {
+        return false;
+    };
+    if !relative.contains('/') {
+        return is_lowercase_sha256_jsonl(relative);
+    }
+    let Some((bucket, file_name)) = relative.split_once('/') else {
+        return false;
+    };
+    if file_name.contains('/')
+        || bucket.len() != 2
+        || !bucket
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return false;
+    }
+    let Some(digest) = file_name.strip_suffix(".jsonl") else {
+        return false;
+    };
+    is_lowercase_sha256_hex(digest) && digest.starts_with(bucket)
+}
+
+fn is_lowercase_sha256_jsonl(file_name: &str) -> bool {
+    file_name
+        .strip_suffix(".jsonl")
+        .is_some_and(is_lowercase_sha256_hex)
+}
+
+fn is_lowercase_sha256_hex(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
@@ -1611,6 +1663,21 @@ prunable gitdir file points to non-existent location
             "the startup reaper can remove an intake containing only ignored .gwt output"
         );
 
+        let ignored_shard = tmp.path().join(".intake-gwt-ignored-shard");
+        manager.create_detached("develop", &ignored_shard).unwrap();
+        let shard = ignored_shard
+            .join(".gwt/work/events")
+            .join("aa")
+            .join(format!("{}.jsonl", "a".repeat(64)));
+        std::fs::create_dir_all(shard.parent().expect("shard parent")).unwrap();
+        std::fs::write(&shard, "{\"id\":\"durable-shard\"}\n").unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&ignored_shard)
+                .unwrap(),
+            "a canonical Work event shard remains durable even under a stale broad ignore"
+        );
+
         let tracked = tmp.path().join(".intake-gwt-tracked");
         manager.create_detached("develop", &tracked).unwrap();
         std::fs::write(
@@ -1622,6 +1689,43 @@ prunable gitdir file points to non-existent location
             manager.ephemeral_worktree_has_local_work(&tracked).unwrap(),
             "a tracked .gwt Work event change is durable local work"
         );
+    }
+
+    #[test]
+    fn cleanup_keeps_canonical_work_event_shards_but_discards_writer_temp_residue() {
+        let bucketed_shard = format!(".gwt/work/events/aa/{}.jsonl", "a".repeat(64));
+        let flat_compat_shard = format!(".gwt/work/events/{}.jsonl", "b".repeat(64));
+        let bucketed_writer_temp = format!(
+            ".gwt/work/events/cc/.{}.jsonl.create-123-test",
+            "c".repeat(64)
+        );
+        let flat_writer_temp =
+            format!(".gwt/work/events/.{}.jsonl.create-123-test", "d".repeat(64));
+
+        for durable in [&bucketed_shard, &flat_compat_shard] {
+            assert!(
+                !is_disposable_worktree_entry("!!", durable),
+                "canonical bucketed and compatible flat shards remain durable even under a stale broad ignore: {durable}"
+            );
+        }
+        for disposable in [&bucketed_writer_temp, &flat_writer_temp] {
+            assert!(
+                is_disposable_worktree_entry("!!", disposable),
+                "an uncommitted writer temp file is disposable residue: {disposable}"
+            );
+        }
+        for non_canonical in [
+            ".gwt/work/events/not-a-hash.jsonl".to_string(),
+            format!(".gwt/work/events/{}.jsonl", "A".repeat(64)),
+            format!(".gwt/work/events/ff/{}.jsonl", "e".repeat(64)),
+            format!(".gwt/work/events/nested/{}.jsonl", "f".repeat(64)),
+        ] {
+            assert!(
+                is_disposable_worktree_entry("!!", &non_canonical),
+                "only exact lowercase sha256 shard names are durable: {non_canonical}"
+            );
+        }
+        assert!(is_disposable_worktree_entry("!!", ".gwt/state.json"));
     }
 
     #[test]
