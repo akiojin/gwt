@@ -26356,6 +26356,122 @@ fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
     );
 }
 
+/// Issue #3616: the whole chain against a real PTY, from bytes on a vt100
+/// screen to the pane state a client renders.
+///
+/// Every other test in this group injects the screen as a string, so the one
+/// seam they cannot cover is the one that failed in production: reading the
+/// provider's words off a live pane. The notice is written by a real child
+/// process through a real pty, wrapped by the terminal exactly as a provider
+/// CLI's output would be.
+#[cfg(unix)]
+#[test]
+fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+
+    // The exact Claude wording observed on 2026-08-17, printed by a child that
+    // then stays alive and unresponsive — the shape the exit path cannot see.
+    let script = "printf '\\n> read the file\\n\\n'; \
+         printf \"You've hit your weekly limit \\302\\267 resets Aug 20 at 6am (Asia/Tokyo)\\n\"; \
+         printf '/usage-credits to finish what you are working on.\\n'; \
+         sleep 30";
+    let pane = Pane::new(
+        window_id.clone(),
+        "/bin/sh".to_string(),
+        vec!["-c".to_string(), script.to_string()],
+        80,
+        24,
+        HashMap::new(),
+        test_pane_cwd(),
+    )
+    .expect("quota notice pane");
+    let pane = Arc::new(Mutex::new(pane));
+    runtime.runtimes.insert(
+        window_id.clone(),
+        WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
+            pane: pane.clone(),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+
+    // Pump the pty into the vt100 parser the way the production output thread
+    // does, until the child's notice is on screen.
+    let mut reader = pane
+        .lock()
+        .expect("pane lock")
+        .reader()
+        .expect("pty reader");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut rendered = false;
+    let mut buffer = [0_u8; 4096];
+    while std::time::Instant::now() < deadline {
+        let read = std::io::Read::read(&mut reader, &mut buffer).expect("pty read");
+        if read == 0 {
+            break;
+        }
+        let mut locked = pane.lock().expect("pane lock");
+        locked.process_bytes(&buffer[..read]);
+        if locked.screen().contents().contains("weekly limit") {
+            rendered = true;
+            break;
+        }
+    }
+    assert!(
+        rendered,
+        "precondition: the child's notice must reach the vt100 screen"
+    );
+
+    let first = instant("2026-08-17T09:20:00Z");
+    let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "the settle window still applies to a real pane"
+    );
+
+    let settled = first + chrono::Duration::seconds(300);
+    let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, settled);
+
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Waiting),
+        "a real pane showing a real notice must render as waiting, not idle"
+    );
+    let hold = runtime
+        .provider_quota_holds
+        .get(&window_id)
+        .expect("the hold was recorded");
+    let gwt::IssueMonitorFailure::ProviderUsageLimit {
+        provider,
+        resets_at,
+    } = hold
+    else {
+        panic!("expected a provider usage limit hold, got {hold:?}");
+    };
+    assert_eq!(provider, "claude");
+    assert_eq!(
+        resets_at.as_deref(),
+        Some("2026-08-19T21:00:00Z"),
+        "the reset instant survives the pty round trip"
+    );
+    assert!(
+        runtime
+            .window_details
+            .get(&window_id)
+            .is_some_and(|detail| detail.contains("usage limit")),
+        "the pane must say why it is waiting"
+    );
+
+    runtime.stop_window_runtime(&window_id);
+}
+
 /// Issue #3616: an ordinary clean exit is untouched by the quota path.
 #[test]
 fn an_ordinary_clean_agent_exit_still_reaches_the_stopped_state() {

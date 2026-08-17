@@ -327,12 +327,9 @@ impl AppRuntime {
             // Issue #3616: the only place a still-running quota-blocked pane can
             // be recognized. Claude keeps its process alive and reports `idle`,
             // so no exit or status event ever arrives to classify.
-            let screen = self.screen_tail(&output_id, QUOTA_NOTICE_TAIL_LINES, "\n");
-            events.extend(self.observe_provider_quota_notice(
-                &output_id,
-                screen.as_deref(),
-                chrono::Utc::now(),
-            ));
+            events.extend(
+                self.observe_provider_quota_notice_from_screen(&output_id, chrono::Utc::now()),
+            );
         }
         events
     }
@@ -1076,6 +1073,18 @@ impl AppRuntime {
         events
     }
 
+    /// Issue #3616: classify this pane's own live screen. The production entry
+    /// point — the output path and the poller sweep both go through here, so a
+    /// test can exercise the same read a real pty feeds.
+    pub(crate) fn observe_provider_quota_notice_from_screen(
+        &mut self,
+        window_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let screen = self.screen_tail(window_id, QUOTA_NOTICE_TAIL_LINES, "\n");
+        self.observe_provider_quota_notice(window_id, screen.as_deref(), now)
+    }
+
     /// Issue #3616: re-check every pending candidate against its pane's current
     /// screen.
     ///
@@ -1089,8 +1098,7 @@ impl AppRuntime {
         let pending: Vec<String> = self.provider_quota_candidates.keys().cloned().collect();
         let mut events = Vec::new();
         for window_id in pending {
-            let screen = self.screen_tail(&window_id, QUOTA_NOTICE_TAIL_LINES, "\n");
-            events.extend(self.observe_provider_quota_notice(&window_id, screen.as_deref(), now));
+            events.extend(self.observe_provider_quota_notice_from_screen(&window_id, now));
         }
         events
     }
