@@ -414,6 +414,9 @@ mod tests {
 
     #[test]
     fn exact_target_user_prompt_submit_verifies_the_delivery_receipt() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
@@ -452,6 +455,9 @@ mod tests {
 
     #[test]
     fn wrong_session_or_body_hash_cannot_verify_a_delivery_receipt() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
