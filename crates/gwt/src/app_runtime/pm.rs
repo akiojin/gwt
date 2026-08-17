@@ -26,7 +26,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
-use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
+// Issue #3632: every prompt this module injects closes with the one canonical
+// reporting clause the Stop-gate continuation also uses; see
+// `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
+use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE};
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
@@ -545,8 +548,8 @@ impl AppRuntime {
             window_id,
             prompt: format!(
                 "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
-                 Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot, \
-                 triage the new items, and report the milestone digest.\r",
+                 Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
+                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}\r",
                 reasons.join(", ")
             ),
         })
@@ -612,11 +615,11 @@ impl AppRuntime {
         }
         Some(PmWakeDecision {
             window_id,
-            prompt: "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
-                     fresh `issue.monitor.status` snapshot, check the running agents' \
-                     `last_activity_at` and any NeedsHuman rows, and report the milestone \
-                     digest.\r"
-                .to_string(),
+            prompt: format!(
+                "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
+                 fresh `issue.monitor.status` snapshot, check the running agents' \
+                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}\r"
+            ),
         })
     }
 
