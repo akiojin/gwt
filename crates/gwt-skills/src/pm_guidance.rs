@@ -152,6 +152,13 @@ drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
+- A `pm.message.send` that reports the delivery as **unverified** is not a
+  message that failed to arrive. The line was written into the pane and
+  submitted; only the target's acknowledgement did not land inside the
+  operation's window, which is ordinary when that pane is mid-turn. Do not
+  resend it, do not look for another way to reach the pane, and do not tell
+  the user the instruction was not delivered. Observe the pane instead. Only
+  a **failed** result means the input never reached it.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -376,6 +383,10 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
+            // Issue #3608: an unverified delivery is not an undelivered one.
+            "reports the delivery as **unverified**",
+            "message that failed to arrive",
+            "resend it, do not look for another way to reach the pane",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
