@@ -484,7 +484,7 @@ fn format_register_help() -> String {
 
 fn format_pm_help() -> String {
     [
-        "pm.* — PM agent diagnostics via JSON envelope (SPEC-3431).",
+        "pm.* — PM agent diagnostics and control via JSON envelope (SPEC-3431).",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -493,11 +493,21 @@ fn format_pm_help() -> String {
         "",
         "Operations:",
         "  pm.status    Report the per-project PM registration, auto-start setting,",
-        "               and a stale hint from the durable session store (read-only,",
-        "               ownerless-safe).",
+        "               a stale hint from the durable session store, and every PM",
+        "               registration in this repository including other project",
+        "               stores (read-only, ownerless-safe).",
+        "  pm.stop      Clear a PM registration in this repository and mark its",
+        "               Session unrestorable. Only a registered PM of the same",
+        "               repository may call it; `session_id` defaults to the",
+        "               caller's own registration (Issue #3607).",
         "",
         "Key params:",
         "  project_root (optional; defaults to the current repository path)",
+        "  session_id   (pm.stop; defaults to the calling PM's own Session)",
+        "",
+        "Notes:",
+        "  - pm.stop ends PM authority and the resident loop; it does not close",
+        "    the pane. Take the session_id from pm.status repository_registrations.",
     ]
     .join("\n")
 }

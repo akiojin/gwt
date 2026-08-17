@@ -548,6 +548,35 @@ pub fn gwt_repo_local_work_events_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("events.jsonl")
 }
 
+/// Return the repo-local immutable Work event shard directory
+/// (`<repo_root>/.gwt/work/events/`).
+///
+/// The legacy sibling `events.jsonl` remains a read-only compatibility
+/// source. New tracked events are stored below this directory so independent
+/// branches add different paths and merge with Git's default driver.
+pub fn gwt_repo_local_work_events_dir(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("events")
+}
+
+/// Return the deterministic shard path for the exact Work event identity.
+///
+/// Hashing the complete identifier, rather than embedding it in the path,
+/// supports arbitrary legacy-compatible IDs without permitting path escape.
+pub fn gwt_repo_local_work_event_shard_path(repo_root: &Path, event_id: &str) -> PathBuf {
+    gwt_work_event_shard_path(&gwt_repo_local_work_events_dir(repo_root), event_id)
+}
+
+/// Return the deterministic shard path below an already-resolved canonical
+/// Work event store directory.
+pub fn gwt_work_event_shard_path(events_dir: &Path, event_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let digest = format!("{:x}", Sha256::digest(event_id.as_bytes()));
+    events_dir
+        .join(&digest[..2])
+        .join(format!("{digest}.jsonl"))
+}
+
 /// Return the repo-local project memory path
 /// (`<repo_root>/.gwt/work/memory.md`).
 ///
@@ -1234,6 +1263,31 @@ mod tests {
         assert_eq!(
             comparable_path(&events),
             comparable_path(&root.join(".gwt").join("work").join("events.jsonl"))
+        );
+    }
+
+    #[test]
+    fn gwt_repo_local_work_event_shard_path_hashes_the_exact_compatible_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let shard = gwt_repo_local_work_event_shard_path(&repo, "../../legacy:event?ID");
+
+        assert_eq!(
+            comparable_path(&shard),
+            comparable_path(
+                &resolve_main_worktree_root(&repo)
+                    .join(".gwt")
+                    .join("work")
+                    .join("events")
+                    .join("76")
+                    .join("768f7de390c732dd9558b3ccfa251ee9b5f5e6e51ed898a005accdabc48a1caf.jsonl")
+            )
+        );
+        assert_eq!(
+            shard.parent(),
+            Some(gwt_repo_local_work_events_dir(&repo).join("76").as_path())
         );
     }
 

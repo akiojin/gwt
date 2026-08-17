@@ -1246,7 +1246,7 @@ pub(super) fn work_session_index(
 pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkItem,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
-    project_root: &Path,
+    resume_branches: ResumeBranchIndex<'_>,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
         id: item.id.clone(),
@@ -1275,7 +1275,7 @@ pub(crate) fn workspace_work_item_view_from_item(
         agents: item
             .agents
             .iter()
-            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index, project_root))
+            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index, resume_branches))
             .collect(),
         execution_containers: item
             .execution_containers
@@ -1300,7 +1300,7 @@ pub(crate) fn workspace_work_item_view_from_item(
 pub(super) fn workspace_work_agent_view_from_ref(
     agent: &gwt_core::workspace_projection::WorkAgentRef,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
-    project_root: &Path,
+    resume_branches: ResumeBranchIndex<'_>,
 ) -> gwt::WorkspaceHistoryAgentView {
     // A Work's `session_id` is the gwt session id (the launch). It keys into the
     // persisted Session whose forward-only `session_history` is the Session list
@@ -1310,7 +1310,8 @@ pub(super) fn workspace_work_agent_view_from_ref(
         .get(agent.session_id.as_str())
         .map(|session| {
             let latest = session.agent_session_id.as_deref();
-            let exact_resume_available = session_exact_resume_materializable(project_root, session);
+            let exact_resume_available =
+                resume_branches.session_exact_resume_materializable(session);
             // Render Sessions in stable chronological order (oldest first) so
             // clock skew or delayed persistence cannot scramble the timeline;
             // the append order alone is not guaranteed monotonic.
@@ -1709,6 +1710,60 @@ pub(super) fn session_exact_resume_materializable(
     workspace_resume_branch_exists(project_root, &session.branch)
 }
 
+/// Issue #3611: every short branch name (`work/x`, `origin/work/x`) that exists
+/// in `project_root`, resolved in ONE `for-each-ref` spawn.
+///
+/// This is the same inventory [`workspace_resume_branch_exists`] derives with a
+/// `git rev-parse --git-common-dir` plus two `git show-ref --verify` spawns
+/// **per branch**. Resolving it once is what keeps the Git process count flat
+/// as the Session count grows (AC-2); the GUI event loop never calls it — it
+/// consumes the snapshot published by the background merge scan instead.
+pub(crate) fn resume_branch_refs_snapshot(project_root: &Path) -> HashSet<String> {
+    gwt_git::refs::branch_tip_committer_times(project_root)
+        .map(|tips| tips.into_keys().collect())
+        .unwrap_or_default()
+}
+
+/// Issue #3611: resolves "can this Session's exact worktree be re-materialized?"
+/// for the projection view builders without spawning Git per Session.
+///
+/// The GUI event loop is single-threaded, so the former per-Session
+/// `rev-parse` + `show-ref` pair stalled it for seconds on repositories with
+/// many historical Sessions and starved the `pane.*` route (#3510). Every
+/// builder now answers from a branch-ref snapshot: the background merge scan
+/// publishes it for the event-loop path, and blocking-task builders resolve
+/// their own with [`resume_branch_refs_snapshot`].
+#[derive(Clone, Copy)]
+pub(crate) struct ResumeBranchIndex<'a> {
+    /// `None` means "this project has not been scanned yet". A Session is then
+    /// left optimistically resumable: the Launch Wizard re-verifies branch
+    /// existence before materializing, so an unnecessary Resume control is
+    /// recoverable while a missing one hides a working Resume.
+    known_branch_refs: Option<&'a HashSet<String>>,
+}
+
+impl<'a> ResumeBranchIndex<'a> {
+    pub(crate) fn scanned(known_branch_refs: Option<&'a HashSet<String>>) -> Self {
+        Self { known_branch_refs }
+    }
+
+    pub(crate) fn branch_exists(&self, branch_name: &str) -> bool {
+        let branch_name = normalize_branch_name(branch_name.trim());
+        if branch_name.is_empty() {
+            return false;
+        }
+        let Some(known_branch_refs) = self.known_branch_refs else {
+            return true;
+        };
+        known_branch_refs.contains(&branch_name)
+            || known_branch_refs.contains(&origin_remote_ref(&branch_name))
+    }
+
+    pub(crate) fn session_exact_resume_materializable(&self, session: &gwt_agent::Session) -> bool {
+        session.worktree_path.as_path().exists() || self.branch_exists(&session.branch)
+    }
+}
+
 fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
     match agent.status_category.as_str() {
         "blocked" => 0,
@@ -2004,7 +2059,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
     agent_sessions: &[gwt_agent::Session],
     project_repo_hash: Option<gwt_core::repo_hash::RepoHash>,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
-    project_root: &Path,
+    resume_branches: ResumeBranchIndex<'_>,
 ) {
     let registry = crate::workspace_session_registry::branch_session_registry(
         agent_sessions,
@@ -2044,7 +2099,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
                 attached_by: None,
             };
             let history_view =
-                workspace_work_agent_view_from_ref(&agent_ref, session_index, project_root);
+                workspace_work_agent_view_from_ref(&agent_ref, session_index, resume_branches);
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
         }
@@ -2835,6 +2890,11 @@ impl AppRuntime {
                 .borrow_mut()
                 .load(&self.sessions_dir);
             let session_index = work_session_index(&agent_sessions);
+            // Issue #3611: resumability is answered from the background merge
+            // scan's branch snapshot. Probing branches here would spawn Git
+            // once per Session on the event-loop thread.
+            let resume_branches =
+                ResumeBranchIndex::scanned(self.work_known_branch_refs.get(&tab.project_root));
             // Current and WorkItems share the stable Project State identity.
             // The exact worktree is an event destination, never a second
             // WorkItems discovery root.
@@ -2847,7 +2907,7 @@ impl AppRuntime {
             let workspaces = work_items
                 .iter()
                 .map(|item| {
-                    workspace_work_item_view_from_item(item, &session_index, &tab.project_root)
+                    workspace_work_item_view_from_item(item, &session_index, resume_branches)
                 })
                 .collect::<Vec<_>>();
             let mut view = active_work_projection_from_saved_with_journal(
@@ -2873,7 +2933,7 @@ impl AppRuntime {
                 &agent_sessions,
                 gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
                 &session_index,
-                &tab.project_root,
+                resume_branches,
             );
             attach_managed_hook_health_to_active_works(
                 &mut view.active_works,
