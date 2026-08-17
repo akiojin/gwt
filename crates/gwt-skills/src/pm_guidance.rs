@@ -152,6 +152,13 @@ drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
+- A `pm.message.send` that reports the delivery as **unverified** is not a
+  message that failed to arrive. The line was written into the pane and
+  submitted; only the target's acknowledgement did not land inside the
+  operation's window, which is ordinary when that pane is mid-turn. Do not
+  resend it, do not look for another way to reach the pane, and do not tell
+  the user the instruction was not delivered. Observe the pane instead. Only
+  a **failed** result means the input never reached it.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -196,6 +203,23 @@ things:
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
+
+## A repository has exactly one PM
+
+- `pm.status` reports `repository_registrations`: every PM registration
+  in this repository, including ones held by a different project store.
+  A row with `is_current_store` false is a PM your own project state
+  cannot see. Two live rows means two PMs are supervising one
+  repository, and they will overwrite each other's priority order and
+  launch instructions.
+- `pm.stop` with `params.session_id` from one of those rows retires that
+  PM: it clears the registration and marks the Session unrestorable, so
+  the resident loop releases and startup will not bring it back. Only a
+  registered PM of the same repository may call it. With no
+  `session_id` it retires you, which is how an orphaned PM stands down
+  on its own.
+- `pm.stop` does not close the pane. It ends PM authority and the loop;
+  the window is left for the user to close.
 
 Hard limits, no exceptions:
 
@@ -359,6 +383,10 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
+            // Issue #3608: an unverified delivery is not an undelivered one.
+            "reports the delivery as **unverified**",
+            "message that failed to arrive",
+            "resend it, do not look for another way to reach the pane",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
@@ -397,6 +425,15 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3607: the PM singleton is per repository, and an orphan
+            // PM has a CLI route out. Without these the contract leaves the
+            // PM believing GUI clicks are the only way to stop one.
+            "`repository_registrations`",
+            "is_current_store` false",
+            "`pm.stop`",
+            "clears the registration and marks the Session unrestorable",
+            "Only a registered PM of the same repository may call it",
+            "`pm.stop` does not close the pane",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",

@@ -3623,6 +3623,119 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+#[test]
+fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
+    let temp = tempdir().expect("tempdir");
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let window_id = "tab-authenticated::agent-authenticated";
+    let mut pane = long_running_test_pane(window_id);
+    pane.process_bytes(b"pane list must not serialize this snapshot\n");
+    let pane = Arc::new(Mutex::new(pane));
+    runtime.runtimes.insert(
+        window_id.to_string(),
+        WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
+            pane: pane.clone(),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+    let intake_worktree = temp.path().join(".intake-pane-list");
+    fs::create_dir(&intake_worktree).expect("intake-shaped worktree");
+    let mut active_session = sample_active_agent_session("tab-authenticated", window_id);
+    active_session.worktree_path = intake_worktree;
+    runtime
+        .active_agent_sessions
+        .insert(window_id.to_string(), active_session);
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let holder = thread::spawn(move || {
+        let _pane = pane.lock().expect("hold terminal snapshot mutex");
+        held_tx.send(()).expect("announce held snapshot mutex");
+        release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+    });
+    held_rx.recv().expect("snapshot mutex must be held");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::ListWindows,
+    );
+    release_tx
+        .send(())
+        .expect("list response must not wait for the snapshot mutex");
+    assert!(
+        holder.join().expect("snapshot mutex holder"),
+        "list response waited for the terminal snapshot mutex"
+    );
+
+    let [OutboundEvent {
+        target: DispatchTarget::Client(client_id),
+        event: BackendEvent::WindowCanvasState { workspace },
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("pane list must return exactly one workspace_state reply");
+    };
+    assert_eq!(client_id, "pane-client");
+    assert_eq!(workspace.tabs.len(), 1);
+    assert_eq!(
+        workspace.tabs[0].project_root,
+        authenticated_project.to_string_lossy()
+    );
+    assert_eq!(workspace.tabs[0].workspace.windows.len(), 1);
+    assert_eq!(workspace.tabs[0].workspace.windows[0].id, window_id);
+    assert_eq!(
+        workspace.tabs[0].workspace.windows[0].worktree_form,
+        gwt::WindowWorktreeForm::Unknown,
+        "pane list must use the persisted no-I/O projection instead of resolving Git worktree form"
+    );
+
+    let ready_events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal"),
+        AgentFrontendRequest::Ready,
+    );
+    let ready_workspace = ready_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("frontend_ready workspace state");
+    assert_eq!(
+        ready_workspace.tabs[0].workspace.windows[0].worktree_form,
+        gwt::WindowWorktreeForm::BranchBacked,
+        "existing frontend_ready payload must retain resolved worktree-form semantics"
+    );
+}
+
 fn materialize_active_agent_pane_binding(
     project: &Path,
     session_id: &str,
@@ -47925,6 +48038,301 @@ fn pm_ensure_focuses_live_pm_instead_of_spawning() {
     assert!(runtime.pending_pm_launches.is_empty());
 }
 
+/// Issue #3607 fixture: one repository whose stores split.
+///
+/// A repository with no `origin` falls back to a path hash, so its main
+/// worktree and a linked worktree land in *different* project stores while
+/// sharing one git common dir — the exact `b19aac…` / `99a866…` shape from the
+/// incident, reproduced without depending on a stale on-disk store.
+struct SplitStoreRepo {
+    main: PathBuf,
+    linked: PathBuf,
+}
+
+fn split_store_repo(root: &Path) -> SplitStoreRepo {
+    let main = root.join("repo");
+    fs::create_dir_all(&main).expect("create repo");
+    init_repo_without_origin(&main);
+    run_git(&main, &["config", "user.name", "Test User"]);
+    run_git(&main, &["config", "user.email", "test@example.com"]);
+    run_git(&main, &["commit", "--allow-empty", "-m", "init"]);
+    let linked = root.join("linked");
+    run_git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/split",
+            linked.to_str().expect("linked path"),
+        ],
+    );
+    assert_ne!(
+        gwt_core::paths::project_scope_hash(&main).as_str(),
+        gwt_core::paths::project_scope_hash(&linked).as_str(),
+        "fixture must reproduce a split: the two roots need different stores"
+    );
+    SplitStoreRepo { main, linked }
+}
+
+/// Materialize `<gwt projects dir>/<hash>/pm/worktree` for a store that is not
+/// the one under test, so restore has a real foreign PM worktree to refuse.
+fn foreign_pm_worktree(store_hash: &str) -> PathBuf {
+    let worktree = gwt_core::paths::gwt_projects_dir()
+        .join(store_hash)
+        .join("pm/worktree");
+    fs::create_dir_all(&worktree).expect("create foreign PM worktree");
+    worktree
+}
+
+/// Issue #3607 AC-1 / AC-2 / AC-4: the second store of a split repository must
+/// not start its own PM. Store-scoped uniqueness cannot see the first one, so
+/// before this gate both stores auto-started and two PMs supervised one
+/// repository.
+#[test]
+fn pm_ensure_refuses_a_second_pm_for_the_same_repository_across_split_stores() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = split_store_repo(temp.path());
+
+    let live_tab = sample_project_tab_with_window_at(
+        "tab-live",
+        "agent-1",
+        repo.main.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Linked",
+        repo.linked.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![live_tab, second_tab], Some("tab-second"));
+    let window_id = "tab-live::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-live", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime.active_agent_sessions.insert(window_id, session);
+
+    // The live PM registered in the *first* store, whose PM worktree is a
+    // linked worktree of the same repository.
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
+    fs::create_dir_all(&pm_worktree).expect("pm worktree");
+    run_git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "--force",
+            "-b",
+            "pm/live",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.main),
+        pm_registration_fixture("pm-session-live", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    let events =
+        runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime
+            .tab("tab-second")
+            .expect("second tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "the second store must not spawn a PM pane for a repository that already has one"
+    );
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "no PM launch may be queued for the second store"
+    );
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(
+            &repo.linked
+        ))
+        .expect("second store prefs")
+        .registration
+        .is_none(),
+        "the second store must not acquire its own registration"
+    );
+    assert!(
+        !events.is_empty(),
+        "AC-2: the refusal focuses the existing PM instead of failing silently"
+    );
+}
+
+/// A repository whose only PM is dead must still get one: repository-scoped
+/// uniqueness blocks duplicates, never recovery.
+#[test]
+fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = split_store_repo(temp.path());
+
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Linked",
+        repo.linked.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![second_tab], Some("tab-second"));
+
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
+    run_git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "pm/dead",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.main),
+        pm_registration_fixture("pm-session-dead", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed dead registration");
+
+    runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "a dead PM elsewhere must not leave the repository without one"
+    );
+}
+
+/// Issue #3607 AC-3: the stopped store was not even open, yet its PM came back
+/// because the current store's `workspace.json` still held a window whose
+/// Session pointed at that store's `pm/worktree`.
+#[test]
+fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let orphan_pm_worktree = foreign_pm_worktree("b19aac38305901f5");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-foreign-pm".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+
+    let mut session =
+        gwt_agent::Session::new(&orphan_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-foreign-pm".to_string();
+    session.agent_session_id = Some("native-foreign-pm".to_string());
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.restore_open_project_windows("tab-current");
+
+    assert!(
+        events.is_empty(),
+        "restoring another store's PM worktree must not spawn anything"
+    );
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "no resume may be tracked for a foreign PM session"
+    );
+}
+
+/// The same gate must leave the store's *own* PM restorable — the stale-PM
+/// resume path (FR-003) goes through the same primitive.
+#[test]
+fn restore_still_resumes_the_stores_own_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let own_pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&own_pm_worktree).expect("own PM worktree");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-own-pm".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+
+    let mut session =
+        gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-own-pm".to_string();
+    session.agent_session_id = Some("native-own-pm".to_string());
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.restore_open_project_windows("tab-current");
+
+    assert!(
+        !events.is_empty(),
+        "the store's own PM must still restore through the shared primitive"
+    );
+    assert!(runtime
+        .pending_auto_resume_sources
+        .values()
+        .any(|source| source == "session-own-pm"));
+}
+
 #[test]
 fn pm_ensure_respects_auto_start_opt_out() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
@@ -50550,8 +50958,138 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     );
 }
 
+/// Issue #3608 (AC-1/AC-4/AC-5): the acknowledgement is written by the target
+/// Session's own UserPromptSubmit hook, so it routinely lands after the submit
+/// retries are exhausted — the live incident recorded `prepared 02:40:38 →
+/// ambiguous 02:40:39 → verified 02:40:40`, a delivery that succeeded but was
+/// reported as a failure. The operation must spend its whole remaining budget
+/// waiting for that acknowledgement, and the durable log must not carry an
+/// Ambiguous row for a delivery it reports as delivered.
 #[test]
-fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
+fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retries() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b6";
+    let body = "acknowledged after the submit retries";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let ack_receipt_path = receipt_path.clone();
+    let ack_body_sha256 = body_sha256.clone();
+    let ack = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let prepared = gwt::pm_registry::load_pm_delivery_receipts(&ack_receipt_path)
+                .unwrap_or_default()
+                .iter()
+                .any(|receipt| {
+                    receipt.operation_id == operation_id
+                        && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+                });
+            if prepared {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Prepared receipt was not committed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Past the two-attempt submit budget (2 x PANE_SUBMIT_SETTLE), still
+        // well inside the operation deadline: exactly the observed incident.
+        thread::sleep(Duration::from_millis(1_500));
+        gwt::pm_registry::finish_pm_delivery_receipt(
+            &ack_receipt_path,
+            operation_id,
+            "other-session",
+            &ack_body_sha256,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .expect("late target hook acknowledgement");
+    });
+    // Long enough for the late acknowledgement, short enough that the test
+    // does not sit on the production acceptance window.
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            &format!("{body}\r"),
+            Some(responder),
+        )
+        .is_empty());
+    let result = result.blocking_recv().expect("terminal delivery result");
+    ack.join().expect("ack thread");
+
+    assert!(
+        matches!(
+            &result,
+            BackendEvent::PmMessageSendResult {
+                status,
+                reason: None,
+                ..
+            } if status == "delivered"
+        ),
+        "a delivery acknowledged inside the operation deadline is delivered, not failed: {result:?}"
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("delivery receipts")
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .map(|receipt| receipt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        ],
+        "the durable log must agree with the reported outcome"
+    );
+}
+
+/// Issue #3608 (AC-2/AC-3): a delivery whose acknowledgement never arrives is
+/// reported as its own outcome, distinct from a submit that failed, and it
+/// never claims the body is staged — both the body and its submit terminator
+/// were written to the pane on this path.
+#[test]
+fn authenticated_pm_send_reports_unverified_without_target_hook_ack() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -50587,7 +51125,10 @@ fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
     let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643af";
     let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
-    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+    // This delivery waits out its whole acceptance window; keep that window the
+    // test's own rather than the production one.
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
 
     assert!(runtime
         .authenticated_pm_pane_send_input_events(
@@ -50602,16 +51143,20 @@ fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
         .is_empty());
     let result = result.blocking_recv().expect("terminal delivery result");
 
-    assert!(matches!(
-        result,
-        BackendEvent::PmMessageSendResult {
-            status,
-            reason: Some(reason),
-            ..
-        } if status == "failed"
-            && reason.contains("not verified")
-            && reason.contains("do not retry")
-    ));
+    assert!(
+        matches!(
+            &result,
+            BackendEvent::PmMessageSendResult {
+                status,
+                reason: Some(reason),
+                ..
+            } if status == "unverified"
+                && reason.contains("not acknowledged")
+                && reason.contains("do not retry")
+                && !reason.contains("staged")
+        ),
+        "an unacknowledged submit is its own outcome and was never staged: {result:?}"
+    );
     assert!(gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
         .expect("delivery receipts")
         .iter()

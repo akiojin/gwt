@@ -58,7 +58,18 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             let _ = writeln!(env.stdout(), "{}", payload);
             code
         }
+        // Issue #3510: a failure still answers on the JSON-only operation
+        // surface. Without this, stdout stayed empty and a machine caller
+        // could not distinguish "the operation failed at stage X" from "the
+        // process never answered". The stderr line stays for humans.
         Err(err) => {
+            let payload = serde_json::json!({
+                "ok": false,
+                "operation": operation,
+                "exit_code": 1,
+                "error": err.to_string(),
+            });
+            let _ = writeln!(env.stdout(), "{payload}");
             let _ = writeln!(env.stderr(), "{prog} {operation}: {err}");
             1
         }
@@ -505,6 +516,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
+        }),
+        "pm.stop" | "pm.deregister" => CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
+            project_root: optional_string(params, "project_root")?,
+            session_id: optional_string(params, "session_id")?,
         }),
         "workflow.bypass" => CliCommand::Workflow(WorkflowCommand::Bypass {
             mode: WorkflowBypassMode::parse(&required_string(params, "mode")?).ok_or(
@@ -1353,6 +1368,7 @@ mod tests {
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
+    use crate::cli::TestEnv;
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -1380,6 +1396,38 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    /// Issue #3510: a failed operation used to leave stdout empty and report
+    /// only a bare stderr line, so a machine caller could not tell an
+    /// operation failure apart from a crashed process — let alone which stage
+    /// failed. The JSON-only operation surface answers with an `ok:false`
+    /// envelope carrying the same stage-qualified message.
+    #[test]
+    fn operation_failures_answer_with_an_ok_false_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = envelope("issue.view", json!({ "number": 4242 }));
+
+        let code = super::dispatch(&mut env, "gwtd");
+
+        assert_eq!(code, 1);
+        let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+        let payload: Value = serde_json::from_str(stdout.trim()).expect("error envelope JSON");
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["operation"], json!("issue.view"));
+        assert_eq!(payload["exit_code"], json!(1));
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error| !error.trim().is_empty()),
+            "error envelope must carry the failure reason: {payload}"
+        );
+        let stderr = String::from_utf8(env.stderr.clone()).expect("stderr utf8");
+        assert!(
+            stderr.contains("gwtd issue.view:"),
+            "the human-readable stderr line must stay: {stderr}"
+        );
     }
 
     #[test]
@@ -2349,6 +2397,45 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    // Issue #3607: PM stop/deregister parse variants.
+    #[test]
+    fn pm_stop_variants() {
+        assert!(matches!(
+            ok("pm.stop", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
+                project_root: None,
+                session_id: None,
+            })
+        ));
+        match ok(
+            "pm.deregister",
+            json!({"project_root": "/tmp/elsewhere", "session_id": "b0801016-orphan"}),
+        ) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
+                project_root,
+                session_id,
+            }) => {
+                assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
+                assert_eq!(session_id.as_deref(), Some("b0801016-orphan"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// The stop side must never be mistaken for a read-only diagnostic: it
+    /// clears a durable registration.
+    #[test]
+    fn pm_stop_is_not_a_read_only_operation() {
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation("pm.status"),
+            "pm.status stays read-only"
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation("pm.stop"),
+            "pm.stop writes durable PM state"
+        );
     }
 
     // SPEC-3248 P8a: execution settlement parse variants.
