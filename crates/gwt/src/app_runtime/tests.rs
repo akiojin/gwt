@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
@@ -1812,7 +1812,19 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         .agents
         .iter()
         .any(|agent| agent.session_id == session.session_id));
-    assert!(gwt_core::paths::gwt_repo_local_work_events_path(&worktree).exists());
+    let launch_events = load_tracked_work_events(&worktree);
+    assert_eq!(
+        launch_events
+            .iter()
+            .filter(|event| {
+                event.work_item_id == work_id
+                    && event.agent_session_id.as_deref() == Some(session.session_id.as_str())
+                    && event.kind == gwt_core::workspace_projection::WorkEventKind::Start
+            })
+            .count(),
+        1,
+        "launch must persist exactly one matching Start event",
+    );
     assert_eq!(
         materialized_project_state_sots("works.json"),
         vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
@@ -10333,11 +10345,9 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
         vec![gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root)],
         "terminalization must leave exactly one repository WorkItems SOT"
     );
-    assert!(
-        std::fs::read_to_string(gwt_core::paths::gwt_repo_local_work_events_path(&worktree))
-            .expect("read worktree events")
-            .contains(session_id)
-    );
+    assert!(load_tracked_work_events(&worktree)
+        .iter()
+        .any(|event| event.agent_session_id.as_deref() == Some(session_id)));
 }
 
 #[test]
@@ -10867,10 +10877,7 @@ fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
     let receipt_before = fs::read(&receipt_path).expect("read recovery receipt");
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&repo);
 
     runtime.reconcile_durable_fresh_execution_launches();
 
@@ -10881,7 +10888,7 @@ fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
     assert_eq!(fs::read_link(&session_path).unwrap(), dangling_target);
     assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
 
     fs::remove_file(&session_path).expect("restore genuinely missing genesis Session");
     let sessions_dir = runtime.sessions_dir.clone();
@@ -10907,7 +10914,7 @@ fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
     );
     assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
 
     fs::remove_file(&session_path).expect("restore true Missing genesis state");
     runtime.reconcile_durable_fresh_execution_launches();
@@ -10997,10 +11004,7 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
     let replacement_before = fs::read(&session_path).expect("read replacement Session");
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&repo);
 
     runtime.reconcile_durable_fresh_execution_launches();
 
@@ -11013,7 +11017,7 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         session_id,
     ));
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     session
         .save(&runtime.sessions_dir)
         .expect("restore exact genesis Session");
@@ -11224,9 +11228,8 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         .expect("replace candidate after launch validation");
     let replacement_before = fs::read(&candidate_path).expect("read replacement before callback");
     let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
-    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
     let work_items_before = fs::read(&work_items_path).expect("read Work projection before race");
-    let work_events_before = fs::read(&work_events_path).expect("read Work events before race");
+    let work_events_before = tracked_work_event_store_snapshot(&repo);
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
@@ -11252,10 +11255,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         fs::read(&work_items_path).expect("read Work projection after race"),
         work_items_before,
     );
-    assert_eq!(
-        fs::read(&work_events_path).expect("read Work events after race"),
-        work_events_before,
-    );
+    assert_eq!(tracked_work_event_store_snapshot(&repo), work_events_before,);
     assert_optional_files_unchanged(&authority_before);
 
     #[cfg(unix)]
@@ -11293,10 +11293,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
             fs::read(&work_items_path).expect("read Work projection after dangling race"),
             work_items_before,
         );
-        assert_eq!(
-            fs::read(&work_events_path).expect("read Work events after dangling race"),
-            work_events_before,
-        );
+        assert_eq!(tracked_work_event_store_snapshot(&repo), work_events_before,);
         assert_optional_files_unchanged(&authority_before);
         fs::remove_file(&candidate_path).expect("remove dangling Continue candidate");
     }
@@ -12860,9 +12857,8 @@ fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_se
         let session_before = fs::read(&session_path).expect("read Session before");
         let work_items_path =
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-        let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
         let work_items_before = fs::read(&work_items_path).expect("read Work projection before");
-        let work_events_before = fs::read(&work_events_path).expect("read Work events before");
+        let work_events_before = tracked_work_event_store_snapshot(&project_root);
         let ledger_before = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
             .expect("read authority before")
             .expect("authority ledger before");
@@ -12909,7 +12905,7 @@ fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_se
             work_items_before,
         );
         assert_eq!(
-            fs::read(&work_events_path).expect("read Work events after"),
+            tracked_work_event_store_snapshot(&project_root),
             work_events_before,
         );
         assert_eq!(
@@ -12950,9 +12946,8 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
     let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
     let work_items_path =
         gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
     let work_items_before = fs::read(&work_items_path).expect("read Work projection before");
-    let work_events_before = fs::read(&work_events_path).expect("read Work events before");
+    let work_events_before = tracked_work_event_store_snapshot(&project_root);
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
     let workspace_before =
@@ -12988,7 +12983,7 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
         work_items_before
     );
     assert_eq!(
-        fs::read(&work_events_path).expect("read Work events after"),
+        tracked_work_event_store_snapshot(&project_root),
         work_events_before
     );
     assert_optional_files_unchanged(&authority_before);
@@ -13603,9 +13598,8 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
     let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
     let work_items_path =
         gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
     let before_work_items = fs::read(&work_items_path).expect("read Work projection before");
-    let before_work_events = fs::read(&work_events_path).expect("read Work events before");
+    let before_work_events = tracked_work_event_store_snapshot(&project_root);
     let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
         .expect("read ledger before")
         .expect("ledger before");
@@ -13655,7 +13649,7 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
         before_work_items
     );
     assert_eq!(
-        fs::read(&work_events_path).expect("read Work events after"),
+        tracked_work_event_store_snapshot(&project_root),
         before_work_events
     );
     assert!(
@@ -13766,10 +13760,7 @@ fn projection_only_continue_owner_change_before_activation_aborts_without_commit
     owner_change.owner = Some("SPEC #3248".to_string());
     gwt_core::workspace_projection::record_workspace_work_event(&project_root, owner_change)
         .expect("change Work owner before activation");
-    let work_before_finalize = fs::read(gwt_core::paths::gwt_repo_local_work_events_path(
-        &project_root,
-    ))
-    .expect("read Work events before finalization");
+    let work_before_finalize = tracked_work_event_store_snapshot(&project_root);
 
     let events = runtime
         .finalize_continue_work_session_start(&window_id, Some(pending.readiness_nonce.as_str()));
@@ -13791,10 +13782,7 @@ fn projection_only_continue_owner_change_before_activation_aborts_without_commit
         .join(format!("{}.toml", pending.binding.session_id))
         .exists());
     assert_eq!(
-        fs::read(gwt_core::paths::gwt_repo_local_work_events_path(
-            &project_root
-        ))
-        .expect("read Work events after rejection"),
+        tracked_work_event_store_snapshot(&project_root),
         work_before_finalize,
         "rejected activation must not overwrite the changed Work authority",
     );
@@ -13830,9 +13818,8 @@ fn assert_projection_only_continue_rejection(
     let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
     let work_items_path =
         gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
     let before_work_items = fs::read(&work_items_path).expect("read Work projection before");
-    let before_work_events = fs::read(&work_events_path).expect("read Work events before");
+    let before_work_events = tracked_work_event_store_snapshot(&project_root);
     let before_workspace =
         serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted())
             .expect("serialize Workspace before");
@@ -13883,7 +13870,7 @@ fn assert_projection_only_continue_rejection(
         "{case_name} Work projection changed"
     );
     assert_eq!(
-        fs::read(&work_events_path).expect("read Work events after"),
+        tracked_work_event_store_snapshot(&project_root),
         before_work_events,
         "{case_name} Work event log changed"
     );
@@ -14802,10 +14789,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             .expect("create dangling Aborted candidate Session");
         let authority_before =
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
-        let work_before = snapshot_optional_files(&[
-            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
-            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
-        ]);
+        let work_before = tracked_workspace_work_store_snapshot(&repo);
 
         let retained = runtime.continue_work_events(
             "client-retry-dangling",
@@ -14831,7 +14815,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             .is_symlink());
         assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
         assert_optional_files_unchanged(&authority_before);
-        assert_optional_files_unchanged(&work_before);
+        assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
         fs::remove_file(&candidate_path).expect("restore genuinely missing candidate state");
     }
 
@@ -14840,10 +14824,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         .join(format!("{candidate_session_id}.toml"));
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&repo);
     let sessions_dir = runtime.sessions_dir.clone();
     let replacement_repo = repo.clone();
     set_missing_session_cleanup_hook_for_test(Box::new(move |observed_session_id| {
@@ -14879,7 +14860,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
     );
     assert!(candidate_path.exists(), "replacement candidate must remain");
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     fs::remove_file(&candidate_path).expect("restore true Missing state for successful cleanup");
 
     let events = runtime.continue_work_events(
@@ -15156,9 +15137,8 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
             .join(format!("{candidate_session_id}.toml"));
         let candidate_before = fs::read(&candidate_path).expect("read replacement before retry");
         let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
-        let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
         let work_items_before = fs::read(&work_items_path).expect("read Work projection before");
-        let work_events_before = fs::read(&work_events_path).expect("read Work events before");
+        let work_events_before = tracked_work_event_store_snapshot(&repo);
         let authority_before =
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
         let workspace_before = serde_json::to_vec(
@@ -15195,7 +15175,7 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
             "{case_name} must not mutate Work projection",
         );
         assert_eq!(
-            fs::read(&work_events_path).expect("read Work events after"),
+            tracked_work_event_store_snapshot(&repo),
             work_events_before,
             "{case_name} must not mutate Work events",
         );
@@ -15546,9 +15526,8 @@ fn continue_work_activated_successor_recovery_case(
     let project_root = repo.clone();
     let work_items_path =
         gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
     let work_items_before = fs::read(&work_items_path).expect("read Work projection before retry");
-    let work_events_before = fs::read(&work_events_path).expect("read Work events before retry");
+    let work_events_before = tracked_work_event_store_snapshot(&project_root);
     let authority_paths = exact_continue_authority_artifacts(&repo, owner);
     let authority_before = snapshot_optional_files(&authority_paths);
     let session_before = fs::read(&candidate_path).expect("read candidate Session before retry");
@@ -15651,7 +15630,7 @@ fn continue_work_activated_successor_recovery_case(
             work_items_before,
         );
         assert_eq!(
-            fs::read(&work_events_path).expect("read Work events after retry"),
+            tracked_work_event_store_snapshot(&project_root),
             work_events_before,
         );
         assert_optional_files_unchanged(&authority_before);
@@ -16491,6 +16470,118 @@ fn assert_optional_files_unchanged(snapshot: &[(PathBuf, Option<Vec<u8>>)]) {
         };
         assert_eq!(actual, *expected, "unexpected mutation: {}", path.display());
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedWorkEventStoreSnapshot {
+    legacy: Option<Vec<u8>>,
+    shards: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedWorkspaceWorkStoreSnapshot {
+    work_items: Option<Vec<u8>>,
+    events: TrackedWorkEventStoreSnapshot,
+}
+
+fn tracked_work_event_store_snapshot(repo: &Path) -> TrackedWorkEventStoreSnapshot {
+    let legacy = fs::read(gwt_core::paths::gwt_repo_local_work_events_path(repo)).ok();
+    let events_dir = gwt_core::paths::gwt_repo_local_work_events_dir(repo);
+    let mut shards = BTreeMap::new();
+    match fs::read_dir(&events_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.expect("read tracked Work event shard entry");
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 tracked Work event shard name");
+                let file_type = entry
+                    .file_type()
+                    .expect("read tracked Work event shard entry type");
+                if file_type.is_file() {
+                    shards.insert(
+                        name,
+                        fs::read(entry.path()).expect("read tracked Work event shard"),
+                    );
+                } else if file_type.is_dir() {
+                    for bucket_entry in
+                        fs::read_dir(entry.path()).expect("read Work event shard bucket")
+                    {
+                        let bucket_entry =
+                            bucket_entry.expect("read bucketed Work event shard entry");
+                        let bucket_name = bucket_entry
+                            .file_name()
+                            .into_string()
+                            .expect("UTF-8 bucketed Work event shard name");
+                        assert!(
+                            bucket_entry
+                                .file_type()
+                                .expect("read bucketed Work event shard entry type")
+                                .is_file(),
+                            "tracked Work event bucket entries must be files: {}",
+                            bucket_entry.path().display()
+                        );
+                        shards.insert(
+                            format!("{name}/{bucket_name}"),
+                            fs::read(bucket_entry.path()).expect("read bucketed Work event shard"),
+                        );
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read {}: {error}", events_dir.display()),
+    }
+    TrackedWorkEventStoreSnapshot { legacy, shards }
+}
+
+fn tracked_workspace_work_store_snapshot(repo: &Path) -> TrackedWorkspaceWorkStoreSnapshot {
+    TrackedWorkspaceWorkStoreSnapshot {
+        work_items: fs::read(gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo))
+            .ok(),
+        events: tracked_work_event_store_snapshot(repo),
+    }
+}
+
+fn assert_tracked_workspace_work_store_unchanged(
+    repo: &Path,
+    expected: &TrackedWorkspaceWorkStoreSnapshot,
+) {
+    assert_eq!(
+        tracked_workspace_work_store_snapshot(repo),
+        *expected,
+        "unexpected Work store mutation under {}",
+        repo.display(),
+    );
+}
+
+fn load_tracked_work_events(repo: &Path) -> Vec<gwt_core::workspace_projection::WorkEvent> {
+    let snapshot = tracked_work_event_store_snapshot(repo);
+    let mut by_id = BTreeMap::<String, gwt_core::workspace_projection::WorkEvent>::new();
+    let sources = snapshot
+        .legacy
+        .iter()
+        .chain(snapshot.shards.values())
+        .flat_map(|bytes| bytes.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
+    for line in sources {
+        let event = serde_json::from_slice::<gwt_core::workspace_projection::WorkEvent>(line)
+            .expect("tracked Work event JSON");
+        if let Some(existing) = by_id.insert(event.id.clone(), event.clone()) {
+            assert_eq!(
+                existing, event,
+                "duplicate tracked Work event identity must be semantic equivalent"
+            );
+        }
+    }
+    let mut events = by_id.into_values().collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    events
 }
 
 fn pending_fresh_execution_fixture(
@@ -18169,10 +18260,7 @@ fn fresh_execution_launch_failure_retains_dangling_session_without_mutation() {
         &fixture.repo,
         fixture.owner,
     ));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
 
     let _events = fixture
         .runtime
@@ -18189,7 +18277,7 @@ fn fresh_execution_launch_failure_retains_dangling_session_without_mutation() {
     assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
     assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &fixture.repo,
@@ -19424,10 +19512,7 @@ fn aborted_fresh_execution_cleanup_rejects_agent_substitution_without_mutation()
         &fixture.repo,
         fixture.owner,
     ));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
 
     let _events = fixture
         .runtime
@@ -19446,7 +19531,7 @@ fn aborted_fresh_execution_cleanup_rejects_agent_substitution_without_mutation()
         "strict cleanup must retain the replacement Session byte-identically",
     );
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
@@ -19492,10 +19577,7 @@ fn startup_aborted_cleanup_retains_same_binding_agent_with_replaced_branch() {
         &fixture.repo,
         fixture.owner,
     ));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
     let mut restarted = fixture.runtime;
 
     restarted.reconcile_durable_fresh_execution_launches();
@@ -19513,7 +19595,7 @@ fn startup_aborted_cleanup_retains_same_binding_agent_with_replaced_branch() {
         replacement_before,
     );
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
 }
 
 #[cfg(unix)]
@@ -19547,10 +19629,7 @@ fn startup_retains_dangling_fresh_session_without_mutation() {
         &fixture.repo,
         fixture.owner,
     ));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
 
     fixture.runtime.reconcile_durable_fresh_execution_launches();
 
@@ -19561,7 +19640,7 @@ fn startup_retains_dangling_fresh_session_without_mutation() {
     assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
     assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &fixture.repo,
@@ -19592,10 +19671,7 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
         &fixture.repo,
         fixture.owner,
     ));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
     let sessions_dir = fixture.runtime.sessions_dir.clone();
     let repo = fixture.repo.clone();
     let expected_session_id = fixture.candidate_session_id.clone();
@@ -19620,7 +19696,7 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
         &fixture.candidate_session_id,
     ));
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &fixture.repo,
@@ -19704,17 +19780,14 @@ fn startup_retains_schema_v2_recovery_receipt_without_full_session_identity() {
         &fixture.repo,
         fixture.owner,
     ));
-    let work_before = snapshot_optional_files(&[
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
-        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
-    ]);
+    let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
 
     fixture.runtime.reconcile_durable_fresh_execution_launches();
 
     assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
     assert_eq!(fs::read(&candidate_path).unwrap(), candidate_before);
     assert_optional_files_unchanged(&authority_before);
-    assert_optional_files_unchanged(&work_before);
+    assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
 }
 
 #[test]
@@ -43987,12 +44060,10 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
     assert_eq!(foo_count, 1, "repeated reconcile must not duplicate items");
     let _ = expected_main;
 
-    let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
-    let events_text = fs::read_to_string(&events_path).expect("worktree events log");
     assert_eq!(
-        events_text.lines().count(),
+        load_tracked_work_events(&worktree).len(),
         1,
-        "exactly one backfill event line after two reconciles"
+        "exactly one backfill event after two reconciles"
     );
 
     let view = runtime
