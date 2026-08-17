@@ -1,4 +1,4 @@
-const COMPLETION_STATES = new Set(["idle", "waiting"]);
+const COMPLETION_STATES = new Set(["idle"]);
 const STOP_STATES = new Set(["stopped", "exited"]);
 
 function normalizeState(value) {

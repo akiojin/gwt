@@ -45,6 +45,8 @@ The operation names and state file remain compatibility surfaces.
   satisfied for a releaseable slice.
 - `build.abort` with a concrete reason when implementation cannot proceed.
 
+If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`.
+
 Linked-owner Execution launches also carry an Execution Control Record
 (SPEC-3248 P8a) written at launch, and Stop stays blocked until the record is
 settled — even when `build.start` was never called (plain-Issue fixes

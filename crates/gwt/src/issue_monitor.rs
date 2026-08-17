@@ -41,6 +41,7 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
 /// version 0; fresh projects start at this current version and never replay a
 /// historical migration.
 pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
+pub const ISSUE_COMPLETION_MIGRATION_VERSION: u32 = 1;
 const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
@@ -458,6 +459,56 @@ pub struct IssueMonitorControlReceipt {
     pub authority_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueCompletionState {
+    #[default]
+    Completed,
+    Reopened,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueCompletionEvidence {
+    #[default]
+    Legacy,
+    LinkedPr,
+    WorkBranch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueCompletionDecision {
+    Complete,
+    Incomplete,
+    Unknown,
+}
+
+/// Durable Issue-wide completion state. `generation` is local to one Issue;
+/// higher generations win cross-process rebase, and a same-generation
+/// `Reopened` record wins fail-closed over `Completed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueCompletionRecord {
+    pub issue_number: u64,
+    pub generation: u64,
+    pub state: IssueCompletionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_updated_at: Option<String>,
+    #[serde(default)]
+    pub evidence: IssueCompletionEvidence,
+}
+
+impl IssueCompletionRecord {
+    fn legacy(issue_number: u64) -> Self {
+        Self {
+            issue_number,
+            generation: 0,
+            state: IssueCompletionState::Completed,
+            issue_updated_at: None,
+            evidence: IssueCompletionEvidence::Legacy,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -486,12 +537,26 @@ pub struct IssueMonitorPrefs {
     /// returns the matching delivery id in a Launched/LaunchFailed ACK.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_launch_deliveries: Vec<PendingIssueMonitorLaunchDelivery>,
+    /// SPEC #3165 FR-100/FR-101: one-shot strategy for an issue's next launch.
+    /// The marker is removed only after it has been copied into a durable
+    /// delivery (or the legacy direct request path), making failover/retry
+    /// intent survive reload without leaking into later launches.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
-    /// Issues whose work PR merged. Persisted so completed work is not
-    /// auto-relaunched while its GitHub Issue remains open until release.
+    /// Compatibility projection of Issue-wide completed records. Kept for old
+    /// readers; `completion_records` is the current source of truth.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_issues: Vec<u64>,
+    /// Versioned migration away from bare `merged_issues`. Fresh projects use
+    /// the current version; pre-Phase-12 JSON deserializes as zero.
+    #[serde(default)]
+    pub issue_completion_migration_version: u32,
+    /// Issue-generation-bound completion/reopen records. `merged_issues`
+    /// remains a compatibility projection for older readers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completion_records: Vec<IssueCompletionRecord>,
     /// SPEC #3200: opt-in autonomous (unattended) resolution mode. Default
     /// `false` preserves SPEC #3165 human-gated behavior exactly (FR-001).
     #[serde(default)]
@@ -537,8 +602,11 @@ impl Default for IssueMonitorPrefs {
             launched_issues: Vec::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
+            queued_launch_session_strategies: BTreeMap::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
+            issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
+            completion_records: Vec::new(),
             autonomous_mode: false,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
@@ -598,6 +666,8 @@ impl IssueMonitorPrefs {
             .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
         self.pending_launch_deliveries
             .retain(|delivery| !adopted_failure_numbers.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue_number, _| !adopted_failure_numbers.contains(issue_number));
         true
     }
 
@@ -664,6 +734,36 @@ pub struct IssueMonitorLaunchingIssue {
     pub claimed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorLaunchSessionStrategy {
+    #[default]
+    ResumeIfSafe,
+    FreshRequired,
+}
+
+/// Typed failure metadata carried across the AppRuntime/daemon/Monitor
+/// boundary. Message-only legacy failures omit this value and retain their
+/// existing retry/terminal behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorFailure {
+    ResumeWriterConflict {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_window_id: Option<String>,
+    },
+}
+
+/// Result of applying a typed late-resume writer-conflict recovery. The
+/// authority-exhausted case is distinct from a stale source so callers can
+/// fail closed instead of acknowledging a transition that never committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorResumeWriterConflictOutcome {
+    Requeued,
+    Rejected,
+    AuthorityExhausted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingIssueMonitorLaunchDelivery {
     pub delivery_id: String,
@@ -683,6 +783,8 @@ pub struct PendingIssueMonitorLaunchDelivery {
     pub materialized_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_durable_window_id: Option<String>,
+    #[serde(default)]
+    pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
     pub created_at: String,
 }
 
@@ -837,9 +939,10 @@ impl Default for IssueMonitorConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueMonitorIssueState {
+    #[default]
     Open,
     Closed,
 }
@@ -875,7 +978,22 @@ pub enum IssueMonitorReadiness {
     #[default]
     NotApplicable,
     Ready,
+    /// Structured SPEC artifacts are launch-ready but at least one task is
+    /// still unchecked, so a work merge is not Issue-wide completion.
+    ReadyWithOpenTasks,
+    /// Structured SPEC artifacts are launch-ready and every task checkbox is
+    /// checked. This is the only SPEC readiness that permits completion.
+    ReadyWithCompletedTasks,
     NotReady,
+}
+
+impl IssueMonitorReadiness {
+    fn is_launch_ready(self) -> bool {
+        matches!(
+            self,
+            Self::Ready | Self::ReadyWithOpenTasks | Self::ReadyWithCompletedTasks
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,6 +1008,10 @@ pub struct IssueMonitorIssue {
     pub url: Option<String>,
     #[serde(default)]
     pub readiness: IssueMonitorReadiness,
+    /// GitHub's Issue revision used to bind completion evidence. Missing data
+    /// is fail-closed for ordinary linked-PR completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -904,9 +1026,8 @@ pub enum MonitorInboxState {
     HoldExcluded,
     Launching,
     Launched,
-    /// Work PR merged into the base branch — the agent's work is done and the
-    /// active slot is freed. The GitHub Issue may still be open (gwt closes
-    /// Issues at release time), so this is distinct from `Released`.
+    /// Current Issue generation is complete. The GitHub Issue may still be
+    /// open until release, so this is distinct from `Released`.
     Merged,
     /// The GitHub Issue was closed (e.g. at release). Final terminal state.
     Released,
@@ -1005,6 +1126,9 @@ pub enum IssueMonitorFailoverOutcome {
     Restarting {
         stopped_window_id: Option<String>,
     },
+    /// The exact source was current, but the durable effect authority could
+    /// not advance. No field was mutated and automation must remain denied.
+    AuthorityExhausted,
     Mismatch(IssueMonitorStopMismatch),
 }
 
@@ -1020,6 +1144,8 @@ pub struct IssueMonitorLaunchRequest {
     pub linked_issue_kind: LinkedIssueKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    #[serde(default)]
+    pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1116,6 +1242,16 @@ pub fn rate_limit_reset_for_agent(
 pub struct IssueMonitorInboxSummary {
     pub issue_number: u64,
     pub state: MonitorInboxState,
+    #[serde(default)]
+    pub github_state: IssueMonitorIssueState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_updated_at: Option<String>,
+    #[serde(default)]
+    pub readiness: IssueMonitorReadiness,
+    #[serde(default)]
+    pub recoverable_merged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_by_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1180,9 +1316,10 @@ pub struct IssueMonitorState {
     /// issue → work branch for currently launched Issues, used to look up the
     /// PR when checking whether the work has merged.
     launched_branches: BTreeMap<u64, String>,
-    /// Issues whose work PR merged (state `Merged`). Persisted so the monitor
-    /// does not auto-relaunch completed work even while the Issue stays open.
+    /// Compatibility projection of completed records (state `Merged`).
     merged_issues: BTreeSet<u64>,
+    issue_completion_migration_version: u32,
+    completion_records: BTreeMap<u64, IssueCompletionRecord>,
     /// SPEC #3200 FR-001: opt-in autonomous (unattended) resolution mode.
     autonomous_mode: bool,
     /// SPEC #3200 Phase 7: authority generation and durable remote-effect
@@ -1207,6 +1344,9 @@ pub struct IssueMonitorState {
     /// Durable ACK-driven deliveries. Unlike `pending_launches`, this queue is
     /// projected non-destructively and mirrored in prefs across restart.
     pending_launch_deliveries: VecDeque<PendingIssueMonitorLaunchDelivery>,
+    /// Durable one-shot policy for an issue's next launch. Once materialized,
+    /// the delivery/request carries the policy and this marker is consumed.
+    queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
@@ -1292,7 +1432,7 @@ fn issue_monitor_candidate_exclusion(
         .labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
-        && issue.readiness != IssueMonitorReadiness::Ready
+        && !issue.readiness.is_launch_ready()
     {
         return Some((
             MonitorInboxState::NotReady,
@@ -1950,6 +2090,14 @@ fn with_issue_monitor_prefs_lock<T>(
     path: &Path,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
+    with_issue_monitor_prefs_lock_observed(path, || {}, operation)
+}
+
+fn with_issue_monitor_prefs_lock_observed<T>(
+    path: &Path,
+    on_first_contention: impl FnMut(),
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -1965,7 +2113,7 @@ fn with_issue_monitor_prefs_lock<T>(
         .write(true)
         .truncate(false)
         .open(path.with_extension("lock"))?;
-    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    gwt_core::operation_deadline::lock_exclusive_with_observer(&lock, on_first_contention)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock);
     match (result, unlock_result) {
@@ -2061,7 +2209,16 @@ pub fn mutate_issue_monitor_prefs_recovering<T>(
     recovery_baseline: &IssueMonitorPrefs,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
-    with_issue_monitor_prefs_lock(path, || {
+    mutate_issue_monitor_prefs_recovering_observed(path, recovery_baseline, || {}, mutation)
+}
+
+pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
+    path: &Path,
+    recovery_baseline: &IssueMonitorPrefs,
+    on_first_contention: impl FnMut(),
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock_observed(path, on_first_contention, || {
         let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
             Ok(prefs) => (prefs, None),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -2198,6 +2355,8 @@ impl IssueMonitorState {
             launched_windows: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
+            issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
+            completion_records: BTreeMap::new(),
             autonomous_mode: false,
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
@@ -2209,6 +2368,7 @@ impl IssueMonitorState {
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_launch_deliveries: VecDeque::new(),
+            queued_launch_session_strategies: BTreeMap::new(),
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
@@ -2224,6 +2384,7 @@ impl IssueMonitorState {
             prefs.legacy_git_launch_failure_migration_version;
         state.priority_order = prefs.priority_order;
         state.launch_profile = prefs.launch_profile;
+        state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
                 continue;
@@ -2268,7 +2429,16 @@ impl IssueMonitorState {
                 state.failed_windows.insert(failed.issue_number, window_id);
             }
         }
-        state.merged_issues = prefs.merged_issues.into_iter().collect();
+        state.issue_completion_migration_version = prefs.issue_completion_migration_version;
+        for record in prefs.completion_records {
+            state.merge_completion_record(record);
+        }
+        for issue_number in prefs.merged_issues {
+            if !state.completion_records.contains_key(&issue_number) {
+                state.merge_completion_record(IssueCompletionRecord::legacy(issue_number));
+            }
+        }
+        state.refresh_merged_issue_projection();
         state.autonomous_mode = prefs.autonomous_mode;
         state.effect_authority_epoch = prefs.effect_authority_epoch;
         state.pending_effects = prefs.pending_effects;
@@ -2278,6 +2448,12 @@ impl IssueMonitorState {
             state.autonomous_records.insert(record.issue_number, record);
         }
         state.autonomous_handoffs = prefs.autonomous_handoffs;
+        state
+            .queued_launch_session_strategies
+            .retain(|issue_number, _| {
+                !state.failed_issues.contains_key(issue_number)
+                    && !state.merged_issues.contains(issue_number)
+            });
         state
     }
 
@@ -2307,6 +2483,7 @@ impl IssueMonitorState {
                 })
                 .collect(),
             pending_launch_deliveries: self.pending_launch_deliveries.iter().cloned().collect(),
+            queued_launch_session_strategies: self.queued_launch_session_strategies.clone(),
             failed_issues: self
                 .failed_issues
                 .iter()
@@ -2317,6 +2494,8 @@ impl IssueMonitorState {
                 })
                 .collect(),
             merged_issues: self.merged_issues.iter().copied().collect(),
+            issue_completion_migration_version: self.issue_completion_migration_version,
+            completion_records: self.completion_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
@@ -2325,6 +2504,238 @@ impl IssueMonitorState {
             autonomous_records: self.autonomous_records.values().cloned().collect(),
             autonomous_handoffs: self.autonomous_handoffs.clone(),
         }
+    }
+
+    fn merge_completion_record(&mut self, incoming: IssueCompletionRecord) {
+        let replace = self
+            .completion_records
+            .get(&incoming.issue_number)
+            .is_none_or(|current| {
+                incoming.generation > current.generation
+                    || (incoming.generation == current.generation
+                        && incoming.state == IssueCompletionState::Reopened
+                        && current.state == IssueCompletionState::Completed)
+            });
+        if replace {
+            self.completion_records
+                .insert(incoming.issue_number, incoming);
+        }
+    }
+
+    fn completion_records_from_prefs(
+        prefs: &IssueMonitorPrefs,
+    ) -> BTreeMap<u64, IssueCompletionRecord> {
+        let mut records = BTreeMap::new();
+        for record in &prefs.completion_records {
+            let replace =
+                records
+                    .get(&record.issue_number)
+                    .is_none_or(|current: &IssueCompletionRecord| {
+                        record.generation > current.generation
+                            || (record.generation == current.generation
+                                && record.state == IssueCompletionState::Reopened
+                                && current.state == IssueCompletionState::Completed)
+                    });
+            if replace {
+                records.insert(record.issue_number, record.clone());
+            }
+        }
+        for issue_number in &prefs.merged_issues {
+            records
+                .entry(*issue_number)
+                .or_insert_with(|| IssueCompletionRecord::legacy(*issue_number));
+        }
+        records
+    }
+
+    fn refresh_merged_issue_projection(&mut self) {
+        self.merged_issues = self
+            .completion_records
+            .values()
+            .filter(|record| record.state == IssueCompletionState::Completed)
+            .map(|record| record.issue_number)
+            .collect();
+    }
+
+    fn merge_completion_records_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        let disk_records = Self::completion_records_from_prefs(disk);
+        if disk.issue_completion_migration_version > self.issue_completion_migration_version {
+            self.completion_records = disk_records;
+            self.issue_completion_migration_version = disk.issue_completion_migration_version;
+        } else {
+            for record in disk_records.into_values() {
+                self.merge_completion_record(record);
+            }
+        }
+        self.refresh_merged_issue_projection();
+        let completed = self.merged_issues.iter().copied().collect::<Vec<_>>();
+        for issue_number in completed {
+            self.apply_merged_terminal_state(issue_number);
+        }
+        let reopened = self
+            .completion_records
+            .values()
+            .filter(|record| record.state == IssueCompletionState::Reopened)
+            .map(|record| record.issue_number)
+            .collect::<Vec<_>>();
+        for issue_number in reopened {
+            self.restore_reopened_candidate(issue_number);
+        }
+    }
+
+    /// Reopened records created by the current transaction fence only disk
+    /// companions that predate that record. Once the same Reopened generation
+    /// is durable on disk, a disk launch may be a legitimate successor and is
+    /// therefore absorbable again.
+    fn local_reopened_completion_fences(&self, disk: &IssueMonitorPrefs) -> BTreeSet<u64> {
+        let disk_records = Self::completion_records_from_prefs(disk);
+        self.completion_records
+            .values()
+            .filter(|local| local.state == IssueCompletionState::Reopened)
+            .filter(|local| {
+                disk_records.get(&local.issue_number).is_none_or(|disk| {
+                    local.generation > disk.generation
+                        || (local.generation == disk.generation
+                            && disk.state == IssueCompletionState::Completed)
+                })
+            })
+            .map(|record| record.issue_number)
+            .collect()
+    }
+
+    fn issue_completion_decision(issue: &IssueMonitorIssue) -> IssueCompletionDecision {
+        if issue
+            .updated_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_none()
+        {
+            return IssueCompletionDecision::Unknown;
+        }
+        let is_spec = issue
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+        if !is_spec {
+            return IssueCompletionDecision::Complete;
+        }
+        match issue.readiness {
+            IssueMonitorReadiness::ReadyWithCompletedTasks => IssueCompletionDecision::Complete,
+            IssueMonitorReadiness::ReadyWithOpenTasks => IssueCompletionDecision::Incomplete,
+            IssueMonitorReadiness::NotApplicable
+            | IssueMonitorReadiness::Ready
+            | IssueMonitorReadiness::NotReady => IssueCompletionDecision::Unknown,
+        }
+    }
+
+    fn transition_completion(
+        &mut self,
+        issue_number: u64,
+        state: IssueCompletionState,
+        issue_updated_at: Option<String>,
+        evidence: IssueCompletionEvidence,
+    ) {
+        if self
+            .completion_records
+            .get(&issue_number)
+            .is_some_and(|current| {
+                current.state == state
+                    && current.issue_updated_at == issue_updated_at
+                    && current.evidence == evidence
+            })
+        {
+            return;
+        }
+        let generation = self
+            .completion_records
+            .get(&issue_number)
+            .map(|record| record.generation.saturating_add(1))
+            .unwrap_or(1);
+        self.completion_records.insert(
+            issue_number,
+            IssueCompletionRecord {
+                issue_number,
+                generation,
+                state,
+                issue_updated_at,
+                evidence,
+            },
+        );
+        self.issue_completion_migration_version = ISSUE_COMPLETION_MIGRATION_VERSION;
+        self.refresh_merged_issue_projection();
+    }
+
+    fn restore_reopened_candidate(&mut self, issue_number: u64) {
+        self.merged_issues.remove(&issue_number);
+        let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
+            return;
+        };
+        if issue.state == IssueMonitorIssueState::Open {
+            self.record_candidate(issue);
+        }
+    }
+
+    fn reopen_completion(
+        &mut self,
+        issue_number: u64,
+        issue_updated_at: Option<String>,
+        live_candidate_present: bool,
+    ) {
+        self.transition_completion(
+            issue_number,
+            IssueCompletionState::Reopened,
+            issue_updated_at,
+            IssueCompletionEvidence::Legacy,
+        );
+        if !live_candidate_present {
+            self.clear_active_tracking(issue_number);
+            self.clear_autonomous_record(issue_number);
+            self.queue.retain(|queued| *queued != issue_number);
+            self.inbox.retain(|item| item.issue.number != issue_number);
+        }
+    }
+
+    fn reconcile_live_completion_records(&mut self, issues: &[IssueMonitorIssue]) {
+        let live = issues
+            .iter()
+            .map(|issue| (issue.number, issue))
+            .collect::<BTreeMap<_, _>>();
+        let records = self
+            .completion_records
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in records {
+            if record.state != IssueCompletionState::Completed {
+                continue;
+            }
+            let current = live.get(&record.issue_number).copied();
+            let invalid = if record.evidence == IssueCompletionEvidence::Legacy {
+                true
+            } else if let Some(issue) = current {
+                match Self::issue_completion_decision(issue) {
+                    IssueCompletionDecision::Incomplete => true,
+                    IssueCompletionDecision::Unknown => false,
+                    IssueCompletionDecision::Complete => {
+                        let is_spec = issue
+                            .labels
+                            .iter()
+                            .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+                        !is_spec && record.issue_updated_at != issue.updated_at
+                    }
+                }
+            } else {
+                false
+            };
+            if invalid {
+                self.reopen_completion(
+                    record.issue_number,
+                    current.and_then(|issue| issue.updated_at.clone()),
+                    current.is_some(),
+                );
+            }
+        }
+        self.issue_completion_migration_version = ISSUE_COMPLETION_MIGRATION_VERSION;
     }
 
     pub fn last_control_receipt(&self) -> Option<&IssueMonitorControlReceipt> {
@@ -2428,6 +2839,7 @@ impl IssueMonitorState {
                 format!("Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"),
             );
             self.clear_active_tracking(issue_number);
+            self.require_fresh_launch_session(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
             self.autonomous_record_mut(issue_number).retry_not_before =
@@ -2811,6 +3223,7 @@ impl IssueMonitorState {
         if !enabled {
             self.active_launches.clear();
             self.pending_launches.clear();
+            self.queued_launch_session_strategies.clear();
         }
     }
 
@@ -2857,6 +3270,7 @@ impl IssueMonitorState {
             self.active_launches.clear();
             self.pending_launches.clear();
             self.pending_launch_deliveries.clear();
+            self.queued_launch_session_strategies.clear();
         }
         Some(next_epoch)
     }
@@ -2929,6 +3343,7 @@ impl IssueMonitorState {
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
+        self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
         // Issue #3478: the hook (and the answer operation) write handoffs from
@@ -2962,10 +3377,9 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
-        self.merge_inflight_launches_from_disk(disk);
-        for issue_number in &disk.merged_issues {
-            self.apply_merged_terminal_state(*issue_number);
-        }
+        let reopened_completion_fences = self.local_reopened_completion_fences(disk);
+        self.merge_completion_records_from_prefs(disk);
+        self.merge_inflight_launches_from_disk_excluding(disk, &reopened_completion_fences);
         let rejected_terminal_companions = self.rejected_disk_terminal_failure_companions(disk);
         match autonomous_policy {
             AutonomousRecordRebasePolicy::DiskAuthoritative => {
@@ -2986,6 +3400,7 @@ impl IssueMonitorState {
                     .iter()
                     .filter(|record| {
                         !self.merged_issues.contains(&record.issue_number)
+                            && !reopened_completion_fences.contains(&record.issue_number)
                             && (record.phase != AutonomousPhase::NeedsHuman
                                 || !rejected_terminal_companions.contains(&record.issue_number))
                     })
@@ -2996,6 +3411,7 @@ impl IssueMonitorState {
             AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative => {
                 for record in &disk.autonomous_records {
                     if self.merged_issues.contains(&record.issue_number)
+                        || reopened_completion_fences.contains(&record.issue_number)
                         || (record.phase == AutonomousPhase::NeedsHuman
                             && rejected_terminal_companions.contains(&record.issue_number))
                     {
@@ -3024,6 +3440,7 @@ impl IssueMonitorState {
             .merged_issues
             .iter()
             .copied()
+            .chain(self.failed_issues.keys().copied())
             .chain(
                 self.inbox
                     .iter()
@@ -3031,8 +3448,14 @@ impl IssueMonitorState {
                     .map(|item| item.issue.number),
             )
             .collect::<BTreeSet<_>>();
+        let stale_disk_companions = terminal_issue_numbers
+            .union(&reopened_completion_fences)
+            .copied()
+            .collect::<BTreeSet<_>>();
         self.pending_launch_deliveries
-            .retain(|delivery| !terminal_issue_numbers.contains(&delivery.issue_number));
+            .retain(|delivery| !stale_disk_companions.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue_number, _| !stale_disk_companions.contains(issue_number));
 
         // SPEC-3431 FR-033: a stop another process committed is terminal for
         // this one too. Applied last, after the in-flight launch merge above,
@@ -3219,6 +3642,7 @@ impl IssueMonitorState {
                 .retain(|pending| pending.issue_number != issue_number);
             self.pending_launch_deliveries
                 .retain(|delivery| delivery.issue_number != issue_number);
+            self.queued_launch_session_strategies.remove(&issue_number);
             if !self.launched_windows.contains_key(&issue_number) {
                 self.active_launches
                     .retain(|active| *active != issue_number);
@@ -3318,6 +3742,7 @@ impl IssueMonitorState {
                 .retain(|pending| pending.issue_number != issue_number);
             self.pending_launch_deliveries
                 .retain(|delivery| delivery.issue_number != issue_number);
+            self.queued_launch_session_strategies.remove(&issue_number);
             if let Some(item) = self
                 .inbox
                 .iter_mut()
@@ -3413,8 +3838,19 @@ impl IssueMonitorState {
     /// and must win over the stale in-flight entry still present on disk until
     /// this transaction commits the new merged marker.
     pub fn merge_inflight_launches_from_disk(&mut self, disk: &IssueMonitorPrefs) {
+        let reopened_completion_fences = self.local_reopened_completion_fences(disk);
+        self.merge_inflight_launches_from_disk_excluding(disk, &reopened_completion_fences);
+    }
+
+    fn merge_inflight_launches_from_disk_excluding(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+        reopened_completion_fences: &BTreeSet<u64>,
+    ) {
         for launched in &disk.launched_issues {
-            if launched.window_id.is_empty() || self.merged_issues.contains(&launched.issue_number)
+            if launched.window_id.is_empty()
+                || self.merged_issues.contains(&launched.issue_number)
+                || reopened_completion_fences.contains(&launched.issue_number)
             {
                 continue;
             }
@@ -3426,7 +3862,9 @@ impl IssueMonitorState {
             }
         }
         for entry in &disk.launching_issues {
-            if self.merged_issues.contains(&entry.issue_number) {
+            if self.merged_issues.contains(&entry.issue_number)
+                || reopened_completion_fences.contains(&entry.issue_number)
+            {
                 continue;
             }
             if !self.active_launches.contains(&entry.issue_number) {
@@ -3579,6 +4017,32 @@ impl IssueMonitorState {
         }
     }
 
+    fn completion_anomaly(&self, item: &IssueMonitorInboxItem) -> (bool, Option<String>) {
+        if item.state != MonitorInboxState::Merged
+            || item.issue.state != IssueMonitorIssueState::Open
+        {
+            return (false, None);
+        }
+        let Some(record) = self.completion_records.get(&item.issue.number) else {
+            return (true, Some("legacy_unverified".to_string()));
+        };
+        if record.evidence == IssueCompletionEvidence::Legacy {
+            return (true, Some("legacy_unverified".to_string()));
+        }
+        if Self::issue_completion_decision(&item.issue) == IssueCompletionDecision::Incomplete {
+            return (true, Some("incomplete_spec_tasks".to_string()));
+        }
+        let is_spec = item
+            .issue
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+        if !is_spec && record.issue_updated_at != item.issue.updated_at {
+            return (true, Some("issue_revision_advanced".to_string()));
+        }
+        (false, None)
+    }
+
     pub fn agent_status(&self) -> IssueMonitorAgentStatus {
         let status = self.status_view();
         IssueMonitorAgentStatus {
@@ -3597,25 +4061,33 @@ impl IssueMonitorState {
             inbox: self
                 .inbox
                 .iter()
-                .map(|item| IssueMonitorInboxSummary {
-                    issue_number: item.issue.number,
-                    state: item.state,
-                    blocked_by_owner: item.blocked_by_owner.clone(),
-                    launched_window_id: item.launched_window_id.clone(),
-                    error_message: item.error_message.clone(),
-                    // SPEC-3431 FR-068: the autonomous record already carries
-                    // the heartbeat that hook arrivals refresh. Surfacing it here
-                    // rather than adding a parallel field keeps one clock, so
-                    // a reader and the stuck detector can never disagree.
-                    last_activity_at: self
-                        .autonomous_records
-                        .get(&item.issue.number)
-                        .and_then(|record| record.last_heartbeat.clone()),
-                    // SPEC-3431 FR-024/FR-033: the identity `stop_only` demands
-                    // has to be readable from the same snapshot, or the exact
-                    // match it enforces is unsatisfiable from the PM's side.
-                    claim_id: self.live_claim_id(item.issue.number),
-                    delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                .map(|item| {
+                    let (recoverable_merged, completion_reason) = self.completion_anomaly(item);
+                    IssueMonitorInboxSummary {
+                        issue_number: item.issue.number,
+                        state: item.state,
+                        github_state: item.issue.state,
+                        issue_updated_at: item.issue.updated_at.clone(),
+                        readiness: item.issue.readiness,
+                        recoverable_merged,
+                        completion_reason,
+                        blocked_by_owner: item.blocked_by_owner.clone(),
+                        launched_window_id: item.launched_window_id.clone(),
+                        error_message: item.error_message.clone(),
+                        // SPEC-3431 FR-068: the autonomous record already carries
+                        // the heartbeat that hook arrivals refresh. Surfacing it here
+                        // rather than adding a parallel field keeps one clock, so
+                        // a reader and the stuck detector can never disagree.
+                        last_activity_at: self
+                            .autonomous_records
+                            .get(&item.issue.number)
+                            .and_then(|record| record.last_heartbeat.clone()),
+                        // SPEC-3431 FR-024/FR-033: the identity `stop_only` demands
+                        // has to be readable from the same snapshot, or the exact
+                        // match it enforces is unsatisfiable from the PM's side.
+                        claim_id: self.live_claim_id(item.issue.number),
+                        delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                    }
                 })
                 .collect(),
             last_error: status.last_error,
@@ -4243,6 +4715,53 @@ impl IssueMonitorState {
         });
     }
 
+    fn require_fresh_launch_session(&mut self, issue_number: u64) {
+        self.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    }
+
+    fn take_launch_session_strategy(
+        &mut self,
+        issue_number: u64,
+    ) -> IssueMonitorLaunchSessionStrategy {
+        self.queued_launch_session_strategies
+            .remove(&issue_number)
+            .unwrap_or_default()
+    }
+
+    /// Restore one-shot launch policy produced by a scan clone after the
+    /// daemon rebases that clone on the latest disk-owned preferences.
+    ///
+    /// The rebase intentionally replaces the persisted policy map wholesale.
+    /// A transient autonomous failure discovered by the scan is newer than
+    /// that snapshot, however, so its `FreshRequired` decision must survive.
+    /// Newer terminal/disabled disk state remains authoritative and prevents a
+    /// stale scan from reviving the marker.
+    #[cfg(unix)]
+    pub(crate) fn restore_scanned_launch_session_strategies(
+        &mut self,
+        proposed: &BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
+    ) {
+        if !self.config.enabled || !self.autonomous_mode {
+            return;
+        }
+        for (&issue_number, &strategy) in proposed {
+            if strategy != IssueMonitorLaunchSessionStrategy::FreshRequired
+                || self.merged_issues.contains(&issue_number)
+                || self.failed_issues.contains_key(&issue_number)
+                || self
+                    .inbox_item(issue_number)
+                    .is_some_and(|item| item.state.is_terminal())
+                || !self.queue.contains(&issue_number)
+            {
+                continue;
+            }
+            self.require_fresh_launch_session(issue_number);
+        }
+    }
+
     pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected || self.active_launches.len() >= max_active {
@@ -4271,6 +4790,7 @@ impl IssueMonitorState {
             branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
             linked_issue_kind,
             delivery_id: None,
+            launch_session_strategy: self.take_launch_session_strategy(issue_number),
         })
     }
 
@@ -4367,8 +4887,7 @@ impl IssueMonitorState {
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
                 continue;
             };
-            if completed_probe(issue_number)? {
-                self.record_merged(issue_number);
+            if completed_probe(issue_number)? && self.record_linked_pr_completion(issue_number) {
                 continue;
             }
             let kind = issue_monitor_linked_issue_kind(&issue);
@@ -4407,14 +4926,12 @@ impl IssueMonitorState {
         self.claim_next_launch_requests_with_probe(client, owner, now, active_cap, |_| false)
     }
 
-    /// Issue #3225: claim queued candidates, skipping issues whose fix is
-    /// already completed. `completed_probe` answers "does this issue have a
-    /// merged linked PR?" from GitHub — the instance-local `merged_issues`
-    /// memory is not enough because a fresh monitor (new machine / isolated
-    /// HOME / wiped prefs) would otherwise re-launch already-finished work
-    /// that stays open until release. Positives are recorded `Merged`
-    /// (persisted) and the slot goes to the next queued candidate. The probe
-    /// fails open: an error/false keeps the issue launchable.
+    /// Issue #3225: claim queued candidates, skipping issues with fresh,
+    /// Issue-wide completion evidence from GitHub. Instance-local
+    /// `merged_issues` memory is not enough because a fresh monitor would
+    /// otherwise re-launch unchanged delivered work that stays open until
+    /// release. The shared domain policy requeues incomplete SPEC work even if
+    /// a caller reports a positive probe. Probe errors/false stay launchable.
     pub fn claim_next_launch_requests_with_probe<C: IssueClient>(
         &mut self,
         client: &C,
@@ -4436,12 +4953,11 @@ impl IssueMonitorState {
                 self.queue.pop_front();
                 continue;
             };
-            if completed_probe(issue.number) {
+            if completed_probe(issue.number) && self.record_linked_pr_completion(issue.number) {
                 tracing::info!(
                     issue = issue.number,
-                    "issue monitor: skipping candidate — a linked PR is already merged"
+                    "issue monitor: completion probe found current-generation evidence"
                 );
-                self.record_merged(issue.number);
                 continue;
             }
             let kind = issue_monitor_linked_issue_kind(&issue);
@@ -4481,6 +4997,7 @@ impl IssueMonitorState {
                                 branch_name: delivery.branch_name.clone(),
                                 linked_issue_kind: delivery.linked_issue_kind,
                                 delivery_id: Some(delivery.delivery_id.clone()),
+                                launch_session_strategy: delivery.launch_session_strategy,
                             })
                         {
                             launches.push(request);
@@ -4523,6 +5040,7 @@ impl IssueMonitorState {
                 branch_name: delivery.branch_name.clone(),
                 linked_issue_kind: delivery.linked_issue_kind,
                 delivery_id: Some(delivery.delivery_id.clone()),
+                launch_session_strategy: delivery.launch_session_strategy,
             }
         }));
         requests
@@ -4680,6 +5198,7 @@ impl IssueMonitorState {
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
+        let launch_session_strategy = self.take_launch_session_strategy(issue_number);
         self.record_claimed(issue, claim_id.clone());
         self.queue.retain(|queued| *queued != issue_number);
         if !self.active_launches.contains(&issue_number) {
@@ -4706,6 +5225,7 @@ impl IssueMonitorState {
                     materializer_window_id: None,
                     materialized_window_id: None,
                     workspace_durable_window_id: None,
+                    launch_session_strategy,
                     created_at: now.to_string(),
                 });
         }
@@ -4842,6 +5362,21 @@ impl IssueMonitorState {
         }
         // A fresh launch supersedes any prior Merged completion (e.g. manual
         // Launch Now of already-merged work).
+        if self
+            .completion_records
+            .get(&issue_number)
+            .is_some_and(|record| record.state == IssueCompletionState::Completed)
+        {
+            let updated_at = self
+                .inbox_item(issue_number)
+                .and_then(|item| item.issue.updated_at.clone());
+            self.transition_completion(
+                issue_number,
+                IssueCompletionState::Reopened,
+                updated_at,
+                IssueCompletionEvidence::WorkBranch,
+            );
+        }
         self.merged_issues.remove(&issue_number);
         self.failed_issues.remove(&issue_number);
         self.failed_windows.remove(&issue_number);
@@ -4971,6 +5506,7 @@ impl IssueMonitorState {
             .retain(|pending| pending.issue_number != issue_number);
         self.pending_launch_deliveries
             .retain(|pending| pending.issue_number != issue_number);
+        self.queued_launch_session_strategies.remove(&issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
     }
@@ -5052,11 +5588,49 @@ impl IssueMonitorState {
         }
     }
 
-    /// Record that the launched work for `issue_number` merged into the base
-    /// branch. Frees the active slot and marks the Issue `Merged` (persisted so
-    /// completed work is not auto-relaunched while the Issue stays open until
-    /// release).
+    /// Record one merged work delivery. Every merge frees its active slot, but
+    /// only evidence that completes the current Issue generation creates the
+    /// terminal `Merged` state. Incomplete work is re-queued, while unknown
+    /// completion evidence fails closed without minting a terminal marker.
     pub fn record_merged(&mut self, issue_number: u64) {
+        self.record_issue_completion(issue_number, IssueCompletionEvidence::WorkBranch);
+    }
+
+    fn record_linked_pr_completion(&mut self, issue_number: u64) -> bool {
+        self.record_issue_completion(issue_number, IssueCompletionEvidence::LinkedPr)
+    }
+
+    fn record_issue_completion(
+        &mut self,
+        issue_number: u64,
+        evidence: IssueCompletionEvidence,
+    ) -> bool {
+        let issue = self.inbox_item(issue_number).map(|item| item.issue.clone());
+        if issue
+            .as_ref()
+            .map(Self::issue_completion_decision)
+            .unwrap_or(IssueCompletionDecision::Unknown)
+            != IssueCompletionDecision::Complete
+        {
+            let updated_at = issue.as_ref().and_then(|issue| issue.updated_at.clone());
+            self.transition_completion(
+                issue_number,
+                IssueCompletionState::Reopened,
+                updated_at,
+                evidence,
+            );
+            self.clear_active_tracking(issue_number);
+            // The merged delivery finished this autonomous attempt even when
+            // the Issue still has more SPEC tasks. Leaving `Delivering` here
+            // would replay the same merged PR forever and prevent the queued
+            // successor attempt from starting.
+            self.clear_autonomous_record(issue_number);
+            if let Some(issue) = issue {
+                self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+                self.record_candidate(issue);
+            }
+            return false;
+        }
         // FR-034: notify the operator when an issue that went through the
         // autonomous loop completes (checked BEFORE the record is cleared).
         if self.autonomous_records.contains_key(&issue_number) {
@@ -5066,7 +5640,14 @@ impl IssueMonitorState {
                 format!("Issue #{issue_number} merged autonomously"),
             );
         }
+        self.transition_completion(
+            issue_number,
+            IssueCompletionState::Completed,
+            issue.and_then(|issue| issue.updated_at),
+            evidence,
+        );
         self.apply_merged_terminal_state(issue_number);
+        true
     }
 
     /// Apply persisted merge completion without emitting another autonomous
@@ -5115,8 +5696,9 @@ impl IssueMonitorState {
             .collect()
     }
 
-    /// Mark any active launched Issue whose work branch has a merged PR as
-    /// `Merged`, freeing the active slot. Returns the affected Issue numbers.
+    /// Reconcile active work branches that merged. Every match frees its slot;
+    /// the shared completion policy decides whether the Issue is terminal or
+    /// must return to the queue for remaining tasks.
     pub fn reconcile_merged_branches(&mut self, merged_branches: &BTreeSet<String>) -> Vec<u64> {
         let to_merge: Vec<u64> = self
             .active_launched_branches()
@@ -5371,8 +5953,11 @@ impl IssueMonitorState {
         // Revoke before requeueing: an effect still in flight for the old
         // provider must not be able to act once the issue belongs to the next
         // launch.
-        self.advance_effect_authority_epoch();
+        if self.advance_effect_authority_epoch().is_none() {
+            return IssueMonitorFailoverOutcome::AuthorityExhausted;
+        }
         self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
         self.set_active_launch_id(issue_number, None);
         self.record_autonomous_heartbeat(issue_number, now);
@@ -5408,6 +5993,135 @@ impl IssueMonitorState {
         IssueMonitorFailoverOutcome::Restarting {
             stopped_window_id: live_window,
         }
+    }
+
+    /// Recover an AgentFailed writer conflict only when the reporting window
+    /// is still the exact launched window for the hinted issue.
+    pub fn requeue_agent_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> bool {
+        self.try_requeue_agent_resume_writer_conflict(
+            issue_number,
+            source_window_id,
+            message,
+            holder_window_id,
+        ) == IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    pub fn try_requeue_agent_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        if !self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|stored_window_id| {
+                issue_monitor_window_ids_match(stored_window_id, source_window_id)
+            })
+        {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+        self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
+    }
+
+    /// Recover a LaunchFailed writer conflict only when the reporting
+    /// materializer still owns the exact pending delivery for this issue.
+    pub fn requeue_launch_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_delivery_id: &str,
+        source_materializer_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> bool {
+        self.try_requeue_launch_resume_writer_conflict(
+            issue_number,
+            source_delivery_id,
+            source_materializer_id,
+            message,
+            holder_window_id,
+        ) == IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    pub fn try_requeue_launch_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_delivery_id: &str,
+        source_materializer_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        let source_matches = self.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == issue_number
+                && delivery.delivery_id == source_delivery_id
+                && delivery.materializer_id.as_deref() == Some(source_materializer_id)
+        });
+        if !source_matches {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+        self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
+    }
+
+    /// Apply the shared mutation only after a public entry point validates the
+    /// exact source identity. Keeping this private prevents an issue hint alone
+    /// from revoking a newer successor launch.
+    fn requeue_resume_writer_conflict_core(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        let inbox_state = self.inbox_item(issue_number).map(|item| item.state);
+        if self.merged_issues.contains(&issue_number)
+            || self.failed_issues.contains_key(&issue_number)
+            || inbox_state.is_some_and(MonitorInboxState::is_terminal)
+        {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+
+        // Revoke before dropping the old delivery/tracking. If the epoch
+        // cannot advance, leave the complete transition unapplied.
+        if self.advance_effect_authority_epoch().is_none() {
+            return IssueMonitorResumeWriterConflictOutcome::AuthorityExhausted;
+        }
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.phase = AutonomousPhase::Idle;
+            record.active_launch_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        self.queue.push_back(issue_number);
+        self.apply_priority_order_to_queue();
+
+        let message = message.into();
+        let diagnostic = holder_window_id
+            .map(str::trim)
+            .filter(|holder| !holder.is_empty())
+            .map(|holder| format!("{message} (writer held by window {holder})"))
+            .unwrap_or(message);
+        self.last_error = Some(format!("issue #{issue_number}: {diagnostic}"));
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Queued;
+            item.claim_id = None;
+            item.blocked_by_owner = None;
+            item.claim_expires_at = None;
+            item.launched_window_id = None;
+            item.error_message = Some(diagnostic);
+            item.exclusion_reason = None;
+        }
+        IssueMonitorResumeWriterConflictOutcome::Requeued
     }
 
     /// SPEC-3431 FR-033: refuse a stop without mutating any launch state.
@@ -5522,6 +6236,7 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
+        self.queued_launch_session_strategies.remove(&issue_number);
         self.launch_auth_required = false;
         self.last_error = Some(format!("issue #{issue_number}: {message}"));
         if let Some(item) = self
@@ -5632,6 +6347,7 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
         monitor.apply_legacy_git_launch_failure_migration(project_root);
     }
     if source == IssueMonitorCandidateSource::Live {
+        monitor.reconcile_live_completion_records(issues);
         let live_issue_numbers = issues
             .iter()
             .map(|issue| issue.number)
@@ -5689,6 +6405,7 @@ mod tests {
             body: None,
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-01T00:00:00Z".to_string()),
         }
     }
 
@@ -5744,6 +6461,11 @@ mod tests {
                 inbox: vec![IssueMonitorInboxSummary {
                     issue_number: 42,
                     state: MonitorInboxState::BlockedByClaim,
+                    github_state: IssueMonitorIssueState::Open,
+                    issue_updated_at: Some("2026-08-01T00:00:00Z".to_string()),
+                    readiness: IssueMonitorReadiness::NotApplicable,
+                    recoverable_merged: false,
+                    completion_reason: None,
                     blocked_by_owner: Some("other-agent".to_string()),
                     launched_window_id: None,
                     error_message: None,
@@ -7568,6 +8290,271 @@ mod tests {
         );
     }
 
+    /// SPEC #3165 FR-100/FR-101 / T-224: an explicit failover must carry its
+    /// fresh-session origin through the queued state, a prefs reload, the
+    /// durable delivery, and every replay of the launch request.
+    #[test]
+    fn failover_launch_strategy_survives_reload_and_delivery_replay() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let attempts_before = monitor.attempt_count(42);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+
+        assert!(matches!(
+            monitor.failover_restart(&target, "switch provider", "2026-08-13T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(monitor.attempt_count(42), attempts_before);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_deref()),
+            None,
+            "provider failover must not schedule autonomous retry backoff"
+        );
+        assert_ne!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "provider failover must not spend the NeedsHuman budget"
+        );
+
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-08-13T00:00:01Z");
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-42-retry",
+            "host/session",
+            "effect-42-retry",
+            "2026-08-13T00:00:02Z",
+        ));
+
+        let durable = restored.prefs();
+        assert_eq!(
+            durable.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+            "the durable delivery must retain the failover origin"
+        );
+        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let first = replayed.take_pending_launch_requests();
+        let second = replayed.take_pending_launch_requests();
+        assert_eq!(first, second, "an unacked delivery remains replayable");
+        assert_eq!(
+            first[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+            "delivery replay must never downgrade failover to ResumeIfSafe"
+        );
+    }
+
+    #[test]
+    fn agent_writer_conflict_accepts_legacy_bare_and_qualified_window_ids() {
+        let mut legacy_stored = launched_monitor(42, "agent-old");
+        assert_eq!(
+            legacy_stored.try_requeue_agent_resume_writer_conflict(
+                42,
+                "tab-1::agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Requeued,
+            "a qualified runtime event must match a legacy bare persisted id"
+        );
+
+        let mut qualified_stored = launched_monitor(42, "tab-1::agent-old");
+        assert_eq!(
+            qualified_stored.try_requeue_agent_resume_writer_conflict(
+                42,
+                "agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Requeued,
+            "a legacy bare runtime event must match a qualified persisted id"
+        );
+
+        let mut foreign_tab = launched_monitor(42, "tab-1::agent-old");
+        let original = foreign_tab.prefs();
+        assert_eq!(
+            foreign_tab.try_requeue_agent_resume_writer_conflict(
+                42,
+                "tab-2::agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Rejected,
+            "two qualified ids from different project tabs must remain distinct"
+        );
+        assert_eq!(foreign_tab.prefs(), original, "foreign source is inert");
+    }
+
+    #[test]
+    fn agent_writer_conflict_requires_exact_launched_window_and_cannot_revoke_successor() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let original = monitor.prefs();
+
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            43,
+            "tab-1::agent-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-foreign",
+            "resume writer conflict",
+            None,
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-old",
+            "resume writer conflict",
+            Some("tab-1::agent-holder"),
+        ));
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor
+            .status_view()
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("tab-1::agent-holder")));
+
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-successor",
+            "host/session",
+            "effect-successor",
+            "2026-08-13T00:00:01Z",
+        ));
+        let successor = monitor.prefs();
+        assert_eq!(
+            successor.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-old",
+            "late duplicate",
+            Some("tab-1::agent-holder"),
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale source window cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn launch_writer_conflict_requires_exact_delivery_materializer_identity() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            101,
+            "tab-1::agent-old",
+            |_| false,
+        ));
+        let original = monitor.prefs();
+
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:foreign",
+            "gui-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-foreign",
+            "resume writer conflict",
+            None,
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-successor",
+            "host/session",
+            "effect-successor",
+            "2026-08-13T00:00:01Z",
+        ));
+        let successor = monitor.prefs();
+
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            "late duplicate",
+            None,
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale delivery/materializer cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn terminal_failures_clear_queued_fresh_launch_strategy_locally_and_from_disk() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.failover_restart(&target, "switch", "2026-08-13T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(
+            monitor.prefs().queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+
+        monitor.record_agent_issue_failed(42, "terminal agent failure");
+
+        assert!(monitor.prefs().queued_launch_session_strategies.is_empty());
+
+        let disk = IssueMonitorPrefs {
+            queued_launch_session_strategies: BTreeMap::from([(
+                42,
+                IssueMonitorLaunchSessionStrategy::FreshRequired,
+            )]),
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "terminal disk failure".to_string(),
+                window_id: None,
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        assert!(restored.prefs().queued_launch_session_strategies.is_empty());
+
+        let mut rebased = IssueMonitorState::new(IssueMonitorConfig::default());
+        rebased.record_candidate(issue(42));
+        rebased.rebase_gui_observer_prefs(&disk);
+        assert!(rebased.prefs().queued_launch_session_strategies.is_empty());
+    }
+
     /// SPEC-3431 FR-030 / T-080: the failover shares `stop_only`'s exact
     /// identity gate, so a stale request restarts nothing.
     #[test]
@@ -7873,6 +8860,411 @@ mod tests {
         let merged: BTreeSet<String> = ["work/some-other-branch".to_string()].into_iter().collect();
         assert!(monitor.reconcile_merged_branches(&merged).is_empty());
         assert_eq!(monitor.active_count(), 1, "unmerged work stays launched");
+    }
+
+    fn spec_issue(
+        number: u64,
+        readiness: IssueMonitorReadiness,
+        updated_at: &str,
+    ) -> IssueMonitorIssue {
+        IssueMonitorIssue {
+            number,
+            title: format!("SPEC {number}"),
+            labels: vec!["auto-improve".to_string(), "gwt-spec".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness,
+            updated_at: Some(updated_at.to_string()),
+        }
+    }
+
+    #[test]
+    fn incomplete_spec_work_merge_frees_the_slot_and_requeues_remaining_work() {
+        let candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-08-15T00:00:00Z",
+        );
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-08-15T00:00:01Z");
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        let branch = monitor.active_launched_branches()[0].1.clone();
+
+        assert_eq!(
+            monitor.reconcile_merged_branches(&BTreeSet::from([branch])),
+            vec![42]
+        );
+        assert_eq!(monitor.active_count(), 0, "work delivery frees the slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "one merged PR is not Issue completion while SPEC tasks remain"
+        );
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(!monitor.prefs().merged_issues.contains(&42));
+    }
+
+    #[test]
+    fn incomplete_spec_autonomous_delivery_clears_the_finished_attempt_before_requeue() {
+        let candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-08-15T00:00:00Z",
+        );
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-08-15T00:00:01Z");
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+
+        monitor.record_merged(42);
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(monitor.autonomous_record(42).is_none());
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    }
+
+    #[test]
+    fn reopened_delivery_settlement_fences_stale_disk_launch_and_autonomous_companions() {
+        let candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-08-15T00:00:00Z",
+        );
+        let mut settled = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut settled,
+            std::slice::from_ref(&candidate),
+            "2026-08-15T00:00:01Z",
+        );
+        settled.complete_active_launch(42, "tab-1::agent-1");
+        settled.record_attempt(42);
+        settled.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        let stale_disk = settled.prefs();
+        settled.record_merged(42);
+
+        let mut daemon = settled.clone();
+        daemon.rebase_daemon_driver_prefs(&stale_disk);
+        let mut gui = settled;
+        gui.rebase_gui_observer_prefs(&stale_disk);
+
+        for monitor in [&daemon, &gui] {
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.autonomous_record(42).is_none());
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::Queued)
+            );
+            let prefs = monitor.prefs();
+            assert!(prefs.launched_issues.is_empty());
+            assert!(prefs.launching_issues.is_empty());
+            assert!(prefs.pending_launch_deliveries.is_empty());
+            assert!(prefs.autonomous_records.is_empty());
+        }
+
+        let durable_reopen = daemon.prefs();
+        let mut successor_disk = durable_reopen.clone();
+        successor_disk.launched_issues = vec![IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-2".to_string(),
+        }];
+        successor_disk.autonomous_records = vec![AutonomousIssueRecord {
+            phase: AutonomousPhase::Implementing,
+            ..AutonomousIssueRecord::new(42)
+        }];
+        let mut observer =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable_reopen);
+        observer.rebase_gui_observer_prefs(&successor_disk);
+        assert_eq!(observer.active_issue_numbers(), vec![42]);
+        assert_eq!(
+            observer.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::Implementing),
+            "the same durable Reopened generation permits a fresh successor"
+        );
+    }
+
+    #[test]
+    fn completed_spec_work_merge_remains_terminal_for_the_same_issue_generation() {
+        let candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithCompletedTasks,
+            "2026-08-15T00:00:00Z",
+        );
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&candidate),
+            "2026-08-15T00:00:01Z",
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        let branch = monitor.active_launched_branches()[0].1.clone();
+        monitor.reconcile_merged_branches(&BTreeSet::from([branch]));
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut restored,
+            &[candidate],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:01:00Z",
+        );
+        assert_eq!(
+            restored.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged),
+            "a legitimate completed-open SPEC stays suppressed"
+        );
+        assert!(!restored.agent_status().inbox[0].recoverable_merged);
+    }
+
+    #[test]
+    fn complete_live_scan_recovers_all_reported_legacy_merged_markers() {
+        let numbers = [3164, 3165, 3200, 3206, 3248, 3273, 3426];
+        let legacy = format!(
+            r#"{{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":{:?}}}"#,
+            numbers
+        );
+        let prefs: IssueMonitorPrefs = serde_json::from_str(&legacy).expect("legacy prefs");
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let issues = numbers
+            .into_iter()
+            .map(|number| {
+                let mut issue = issue(number);
+                issue.labels.push("auto-improve".to_string());
+                issue.updated_at = Some("2026-08-15T00:00:00Z".to_string());
+                issue
+            })
+            .collect::<Vec<_>>();
+
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:00:01Z",
+        );
+
+        assert!(monitor.prefs().merged_issues.is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), numbers);
+        assert!(monitor
+            .agent_status()
+            .inbox
+            .iter()
+            .all(|row| row.state == MonitorInboxState::Queued));
+    }
+
+    #[test]
+    fn live_snapshot_does_not_requeue_an_absent_legacy_completion() {
+        let prefs: IssueMonitorPrefs = serde_json::from_str(
+            r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
+        )
+        .expect("legacy prefs");
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut cached = issue(42);
+        cached.labels.push("auto-improve".to_string());
+
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[cached],
+            IssueMonitorCandidateSource::Cache,
+            Path::new("."),
+            "2026-08-15T00:00:01Z",
+        );
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:00:02Z",
+        );
+
+        assert!(monitor.prefs().merged_issues.is_empty());
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.inbox_item(42).is_none());
+    }
+
+    #[test]
+    fn incomplete_snapshots_diagnose_legacy_completion_without_deleting_it() {
+        for source in [
+            IssueMonitorCandidateSource::Cache,
+            IssueMonitorCandidateSource::LiveIncomplete,
+        ] {
+            let prefs: IssueMonitorPrefs = serde_json::from_str(
+                r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
+            )
+            .expect("legacy prefs");
+            let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            let mut candidate = issue(42);
+            candidate.labels.push("auto-improve".to_string());
+            candidate.updated_at = Some("2026-08-15T00:00:00Z".to_string());
+
+            scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[candidate],
+                source,
+                Path::new("."),
+                "2026-08-15T00:00:01Z",
+            );
+
+            assert_eq!(monitor.prefs().merged_issues, vec![42]);
+            let row = &monitor.agent_status().inbox[0];
+            assert_eq!(row.github_state, IssueMonitorIssueState::Open);
+            assert_eq!(
+                row.issue_updated_at.as_deref(),
+                Some("2026-08-15T00:00:00Z")
+            );
+            assert!(row.recoverable_merged);
+            assert_eq!(row.completion_reason.as_deref(), Some("legacy_unverified"));
+        }
+    }
+
+    #[test]
+    fn reopened_generation_beats_a_stale_legacy_marker_during_rebase() {
+        let stale: IssueMonitorPrefs = serde_json::from_str(
+            r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
+        )
+        .expect("legacy prefs");
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale.clone());
+        let mut candidate = issue(42);
+        candidate.labels.push("auto-improve".to_string());
+        candidate.updated_at = Some("2026-08-15T00:00:00Z".to_string());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[candidate],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:00:01Z",
+        );
+
+        monitor.rebase_daemon_driver_prefs(&stale);
+
+        assert!(!monitor.prefs().merged_issues.contains(&42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+    }
+
+    #[test]
+    fn ordinary_issue_revision_advance_is_diagnosed_then_reopened_by_live_scan() {
+        let mut first = issue(42);
+        first.labels.push("auto-improve".to_string());
+        first.updated_at = Some("2026-08-10T00:00:00Z".to_string());
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[first.clone()], "2026-08-10T00:00:01Z");
+        monitor.record_merged(42);
+
+        let mut advanced = first;
+        advanced.updated_at = Some("2026-08-15T00:00:00Z".to_string());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[advanced.clone()],
+            IssueMonitorCandidateSource::Cache,
+            Path::new("."),
+            "2026-08-15T00:00:01Z",
+        );
+        let row = &monitor.agent_status().inbox[0];
+        assert!(row.recoverable_merged);
+        assert_eq!(
+            row.completion_reason.as_deref(),
+            Some("issue_revision_advanced")
+        );
+        assert_eq!(monitor.prefs().merged_issues, vec![42]);
+
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[advanced],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:00:02Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(monitor.prefs().merged_issues.is_empty());
+    }
+
+    #[test]
+    fn unknown_live_evidence_preserves_completion_but_cannot_create_a_new_one() {
+        let complete_spec = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithCompletedTasks,
+            "2026-08-10T00:00:00Z",
+        );
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&complete_spec),
+            "2026-08-10T00:00:01Z",
+        );
+        monitor.record_merged(42);
+
+        let unknown_spec = IssueMonitorIssue {
+            readiness: IssueMonitorReadiness::NotReady,
+            updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+            ..complete_spec
+        };
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[unknown_spec],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:00:01Z",
+        );
+        assert_eq!(monitor.prefs().merged_issues, vec![42]);
+
+        let mut missing_revision = issue(43);
+        missing_revision.labels.push("auto-improve".to_string());
+        missing_revision.updated_at = None;
+        scan_issue_monitor_candidates(&mut monitor, &[missing_revision], "2026-08-15T00:00:02Z");
+        monitor.record_merged(43);
+        assert!(!monitor.prefs().merged_issues.contains(&43));
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+
+        let mut ordinary = issue(44);
+        ordinary.labels.push("auto-improve".to_string());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&ordinary),
+            "2026-08-15T00:00:03Z",
+        );
+        monitor.record_merged(44);
+        ordinary.updated_at = None;
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[ordinary],
+            IssueMonitorCandidateSource::Live,
+            Path::new("."),
+            "2026-08-15T00:00:04Z",
+        );
+        assert!(monitor.prefs().merged_issues.contains(&44));
+    }
+
+    #[test]
+    fn explicit_fresh_launch_persists_a_reopen_tombstone() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_merged(42);
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+
+        let restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+
+        assert!(!restored.prefs().merged_issues.contains(&42));
+        assert_eq!(restored.active_issue_numbers(), vec![42]);
     }
 
     #[test]
@@ -8283,6 +9675,63 @@ mod tests {
         );
     }
 
+    /// SPEC #3165 FR-100 / T-224: pre-policy persisted delivery/request shapes
+    /// remain compatible and preserve the ordinary re-engage behavior.
+    #[test]
+    fn legacy_launch_session_strategy_defaults_to_resume_if_safe() {
+        let delivery: PendingIssueMonitorLaunchDelivery =
+            serde_json::from_value(serde_json::json!({
+                "delivery_id": "launch:legacy-effect",
+                "issue_number": 42,
+                "branch_name": "work/issue-42",
+                "linked_issue_kind": "issue",
+                "claim_id": "claim-42",
+                "claim_owner": "host/session",
+                "created_at": "2026-08-13T00:00:00Z"
+            }))
+            .expect("legacy delivery without launch_session_strategy");
+        assert_eq!(
+            delivery.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+
+        let request: IssueMonitorLaunchRequest = serde_json::from_value(serde_json::json!({
+            "issue_number": 42,
+            "branch_name": "work/issue-42",
+            "linked_issue_kind": "issue",
+            "delivery_id": "launch:legacy-effect"
+        }))
+        .expect("legacy request without launch_session_strategy");
+        assert_eq!(
+            request.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: a normal first delivery has no
+    /// failover/failure origin and therefore retains exact-resume continuity.
+    #[test]
+    fn ordinary_confirmed_claim_uses_resume_if_safe() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+        assert_eq!(
+            monitor.take_pending_launch_requests()[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+    }
+
     #[test]
     fn deduped_confirmed_claim_returns_its_exact_delivery_not_the_queue_tail() {
         use gwt_github::{
@@ -8657,6 +10106,100 @@ mod tests {
         assert!(
             monitor.prefs().pending_launch_deliveries.is_empty(),
             "a retryable issue cannot also replay its previous durable delivery"
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: a generic AgentFailed autonomous
+    /// retry still uses the existing attempt/backoff ladder, but its successor
+    /// delivery must be fresh and must retain that strategy across restart and
+    /// ACK-driven delivery replay.
+    #[test]
+    fn autonomous_agent_failed_retry_keeps_fresh_strategy_across_reload() {
+        let candidate = auto_issue(
+            42,
+            "## Acceptance Criteria\n- [ ] AC-1: replacement agent completes the work\n",
+        );
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(candidate.clone());
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+
+        monitor.record_agent_issue_failed(42, "agent process exited");
+
+        assert_eq!(
+            monitor.attempt_count(42),
+            1,
+            "generic AgentFailed keeps the existing autonomous retry budget contract"
+        );
+        assert!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_ref())
+                .is_some(),
+            "generic AgentFailed keeps the existing bounded backoff contract"
+        );
+        assert_ne!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "one retry below the cap remains retryable"
+        );
+
+        let retry_at = chrono::DateTime::parse_from_rfc3339(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_deref())
+                .expect("AgentFailed retry has a durable backoff floor"),
+        )
+        .expect("retry_not_before is RFC3339")
+            + chrono::Duration::seconds(1);
+        let retry_at = retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, std::slice::from_ref(&candidate), &retry_at);
+        let branch_protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &branch_protection, &retry_at),
+            EligibilityDecision::Eligible
+        );
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-42-retry",
+            "host/session",
+            "effect-42-retry",
+            &retry_at,
+        ));
+
+        let durable = restored.prefs();
+        assert_eq!(durable.autonomous_records[0].attempts, 1);
+        assert_eq!(
+            durable.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let first = replayed.take_pending_launch_requests();
+        let second = replayed.take_pending_launch_requests();
+        assert_eq!(
+            first, second,
+            "an unacked AgentFailed retry remains replayable"
+        );
+        assert_eq!(
+            first[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
         );
     }
 
@@ -10067,6 +11610,7 @@ mod tests {
             body: Some(body.to_string()),
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         }
     }
 
@@ -10896,6 +12440,30 @@ mod tests {
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman),
             "adopting a newer marker must not downgrade a terminal inbox row"
+        );
+    }
+
+    #[test]
+    fn failover_restart_at_authority_epoch_max_is_an_atomic_noop() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-max");
+        monitor.effect_authority_epoch = u64::MAX;
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        let before = monitor.clone();
+
+        let outcome = monitor.failover_restart(&target, "switch provider", "2026-08-13T00:00:00Z");
+
+        assert!(
+            !matches!(outcome, IssueMonitorFailoverOutcome::Restarting { .. }),
+            "an exact source cannot report successful failover when its authority epoch cannot advance"
+        );
+        assert_eq!(
+            monitor, before,
+            "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
         );
     }
 }

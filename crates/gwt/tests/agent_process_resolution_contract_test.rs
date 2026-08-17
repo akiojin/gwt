@@ -52,7 +52,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
     assert!(policy.contains("health_report"));
     assert!(policy.contains("version_output"));
 
-    let launch = function_source(&source, "spawn_agent_window_async");
+    let launch = function_source(&source, "spawn_agent_window_async_with_claim");
     assert_eq!(
         launch
             .matches("resolve_host_runner_health_checked(")
@@ -352,8 +352,18 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
         );
     }
     let placement = function_source(&launch, "spawn_agent_window_with_placement");
-    assert!(placement.contains("Self::spawn_agent_window_async("));
-    let asynchronous = function_source(&launch, "spawn_agent_window_async");
+    let claim = placement
+        .find("claim_prepared_manual_successor_launch(")
+        .expect("prepared manual successor is claimed before pane creation");
+    let pane = placement
+        .find(".add_window_with_title(")
+        .expect("shared placement transaction creates the pane");
+    assert!(
+        claim < pane,
+        "durable successor claim must precede pane creation"
+    );
+    assert!(placement.contains("Self::spawn_agent_window_async_with_claim("));
+    let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
     for boundary in [
         "hydrate_tool_runtime_provenance_from_source_session(",
         "resolve_host_runner_health_checked(&mut config)",
@@ -470,6 +480,57 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
             "Windows deterministic E2E matrix must contain {}/{}",
             shard.0,
             shard.1
+        );
+    }
+}
+
+#[test]
+fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
+    let workflow_path = repo_root().join(".github/workflows/test.yml");
+    let workflow = fs::read_to_string(&workflow_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
+
+    let windows_job = workflow
+        .split("\n  test-windows-rust:")
+        .nth(1)
+        .and_then(|tail| tail.split("\n  test-windows-agent-launch-e2e:").next())
+        .expect("test-windows-rust job body");
+    assert!(
+        windows_job
+            .lines()
+            .any(|line| line.trim() == "runs-on: windows-latest"),
+        "launch_now platform contracts must execute on a native Windows runner"
+    );
+    let marker = "      - name: Run Issue Monitor launch_now control-path contracts";
+    let (_, tail) = windows_job
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("missing Windows CI step `{marker}`"));
+    let step = tail
+        .split_once("\n      - name:")
+        .map_or(tail, |(step, _)| step);
+    assert!(
+        step.contains("\n        shell: bash\n"),
+        "the multi-command Windows control-path step must fail fast"
+    );
+    assert!(
+        !step.contains("--ignored"),
+        "the Windows launch_now contracts must run in ordinary CI"
+    );
+    let command_lines = step.lines().map(str::trim).collect::<Vec<_>>();
+    for command in [
+        "cargo test -p gwt --lib cli::issue::tests::windows_launch_now_ -- --test-threads=1",
+        "cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
+        "cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
+        "cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        "cargo test -p gwt --bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
+        "cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
+        "cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1",
+        "cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
+        "cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1",
+    ] {
+        assert!(
+            command_lines.contains(&command),
+            "Windows CI must exercise launch_now control-path command `{command}`"
         );
     }
 }

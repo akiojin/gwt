@@ -103,7 +103,9 @@ You own the backlog for its whole life, not just at creation.
 
 ## Observing the running agents
 
-You may watch the agents the Monitor launched. You may not drive them.
+You may observe both manually launched project Agent panes and
+Monitor-launched project Agent panes through `pane.list`. You may not
+drive them.
 
 - `last_activity_at` on each inbox row is when that launch last showed
   signs of life. A row whose activity is far behind the others, or
@@ -124,6 +126,21 @@ You may watch the agents the Monitor launched. You may not drive them.
 - `pane.read` with `params.id` and `params.lines` returns that pane's
   recent scrollback. Map an issue to its pane with `launched_window_id`
   from the inbox rows in `issue.monitor.status`.
+- When `pane.list` reports a pane as `waiting`, treat one continuous
+  `waiting` state as one waiting episode. For each episode, run one
+  bounded `pane.read` for that pane with `params.lines` set to `50` and
+  report it to the user once. Summarize only the prompt category and the
+  decision requested. Never include raw command text, filesystem paths,
+  tokens, secrets, or tool arguments in the summary. Do not read or
+  report it again while the pane remains `waiting`; only after
+  `pane.list` observes that the pane leaves `waiting` and later re-enters
+  it may you begin another episode. Do not answer the prompt yourself.
+  Do not call `pm.message.send`, `pane.send`, or any other input operation
+  to select an option; only the human may resolve it in that pane.
+- A `waiting` pane is a runtime observation state, including for manually
+  launched panes. It does not create or imply an Issue Monitor
+  `needs_human` record; never mutate Monitor state or invent a NeedsHuman
+  row from `pane.list`.
 - `board.post` with `params.kind` and `params.mentions` is how you speak
   to another agent. Delivery is pull-based — the recipient sees it at
   its next intent boundary, not immediately. A Board post never
@@ -180,6 +197,23 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+## A repository has exactly one PM
+
+- `pm.status` reports `repository_registrations`: every PM registration
+  in this repository, including ones held by a different project store.
+  A row with `is_current_store` false is a PM your own project state
+  cannot see. Two live rows means two PMs are supervising one
+  repository, and they will overwrite each other's priority order and
+  launch instructions.
+- `pm.stop` with `params.session_id` from one of those rows retires that
+  PM: it clears the registration and marks the Session unrestorable, so
+  the resident loop releases and startup will not bring it back. Only a
+  registered PM of the same repository may call it. With no
+  `session_id` it retires you, which is how an orphaned PM stands down
+  on its own.
+- `pm.stop` does not close the pane. It ends PM authority and the loop;
+  the window is left for the user to close.
+
 Hard limits, no exceptions:
 
 - Never run `pane.send`. Input injection is scoped to a session's own
@@ -233,10 +267,15 @@ Hard limits, no exceptions:
 
 - Report on your own initiative only at milestones: an Issue registered,
   an implementation agent launched, a PR opened, a merge landed, a
-  `needs_human` escalation, and a fatal failure. Collapse a run of
-  milestones into one digest instead of narrating each one.
+  `needs_human` escalation, the first detection of a new `waiting`
+  episode, and a fatal failure. Collapse a run of milestones into one
+  digest instead of narrating each one.
 - `needs_human` and fatal failures are always presented immediately and
   are never held for a digest.
+- The first detection of a new `waiting` episode must be reported
+  immediately under the one-report-per-episode rule above and is never
+  held for a digest. Continued observations of that episode stay
+  suppressed; only a leave-then-re-enter transition rearms reporting.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
 
@@ -346,6 +385,21 @@ mod tests {
             "`pane.list`",
             "`pane.read`",
             "`launched_window_id`",
+            // SPEC-3340 Phase 9 T-606: a Waiting pane is an immediate,
+            // bounded human-attention observation, not Monitor lifecycle.
+            "both manually launched project Agent panes and Monitor-launched project Agent panes",
+            "one continuous `waiting` state as one waiting episode",
+            "one bounded `pane.read`",
+            "`params.lines` set to `50`",
+            "report it to the user once",
+            "Do not read or report it again while the pane remains `waiting`",
+            "leaves `waiting` and later re-enters it",
+            "first detection of a new `waiting` episode",
+            "must be reported immediately",
+            "Do not call `pm.message.send`",
+            "only the human may resolve it in that pane",
+            "does not create or imply an Issue Monitor `needs_human` record",
+            "Never include raw command text, filesystem paths, tokens, secrets, or tool arguments",
             // FR-066: stopping a pane is allowed and bounded. This is the
             // explicit amendment to FR-023's blanket prohibition.
             "`pane.close`",
@@ -360,6 +414,15 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3607: the PM singleton is per repository, and an orphan
+            // PM has a CLI route out. Without these the contract leaves the
+            // PM believing GUI clicks are the only way to stop one.
+            "`repository_registrations`",
+            "is_current_store` false",
+            "`pm.stop`",
+            "clears the registration and marks the Session unrestorable",
+            "Only a registered PM of the same repository may call it",
+            "`pm.stop` does not close the pane",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
@@ -406,6 +469,18 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    #[test]
+    fn contract_routes_waiting_panes_to_bounded_human_resolution_without_monitor_escalation() {
+        let body = body();
+        assert!(body.contains(
+            "Do not call `pm.message.send`, `pane.send`, or any other input operation to select an option; only the human may resolve it in that pane"
+        ));
+        assert!(body.contains(
+            "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
+        ));
+        assert!(!body.contains("the PM may resolve a `waiting` pane"));
     }
 
     /// Rules the contract must NOT carry. Each one shipped at some point and

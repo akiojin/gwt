@@ -45,6 +45,7 @@ mod title_summary_guard;
 pub mod tray;
 pub mod trusted_store;
 pub mod update;
+pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
 mod workflow;
@@ -78,6 +79,10 @@ pub struct LinkedPrSummary {
     pub url: String,
     #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
     pub will_close_target: bool,
+    /// GitHub merge instant used to prove that an ordinary Issue has not
+    /// advanced since the closing work was delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -179,6 +184,8 @@ pub enum CliCommand {
     Update(UpdateCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
+    /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
+    VerifyLease(verification_lease::VerificationLeaseCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
@@ -350,10 +357,14 @@ pub enum PaneCommand {
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
     /// `pm.message.send` (SPEC-3431 FR-111 / T-206): PM-privileged delivery
-    /// into another agent pane of the same project. The live registered PM
-    /// principal is verified client-side and re-verified by the server
-    /// immediately before the injection.
-    PmSend { id: String, text: String },
+    /// into another agent pane of the same project. The authenticated server
+    /// principal is the sole caller authority; `project_root` only selects an
+    /// explicit project view with the same semantics as `pm.status`.
+    PmSend {
+        project_root: Option<String>,
+        id: String,
+        text: String,
+    },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -631,6 +642,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
+        CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
@@ -784,6 +796,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -852,6 +865,7 @@ mod tests {
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
             will_close_target: true,
+            merged_at: None,
         }];
 
         assert!(

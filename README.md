@@ -367,6 +367,11 @@ unchanged.
 - Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
   from the CLI; every other agent session must use the GUI. Merges are
   unaffected — the strong automated gate above still decides every merge.
+- There is one PM per **repository**, not per project store, so a repository
+  whose state resolved into two stores still gets exactly one. JSON operation
+  `pm.status` lists every registration in the repository, and `pm.stop` retires
+  one from the CLI — a registered PM can retire an orphan or stand down itself
+  without a GUI click.
 
 The design lives in SPEC
 [#3431](https://github.com/akiojin/gwt/issues/3431).
@@ -781,6 +786,44 @@ cargo bundle -p gwt --format osx
 ```bash
 cargo test -p gwt-core -p gwt --all-features
 ```
+
+### Serializing heavy verification
+
+Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
+Playwright, `verify.run`) contends for host CPU. Running two of them at once
+on the same machine makes wall-clock fixtures fail for no reason and pollutes
+coverage numbers, so gwt serializes them behind a host-wide lease — one
+holder per machine, across every repository and worktree.
+
+Take the lease before the heavy command and release it afterwards:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
+JSON
+```
+
+The answer is immediate. `verification lease: granted` returns a `lease_id`
+to release with; `verification lease: unavailable` returns the current holder
+and its remaining TTL, so nothing has to watch another process:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.status","params":{}}
+JSON
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
+JSON
+```
+
+Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
+TTL. The default TTL is 45 minutes; a lease that lapses is released
+automatically, and a holder that is killed releases immediately. Lease
+transitions are recorded in
+`~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
 ### Releasing
 

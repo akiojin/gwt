@@ -13473,7 +13473,7 @@ mod tests {
         let worker_a = thread::spawn(move || {
             let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home_a);
             let mut env = owner_status_worker_env(&source_a, "cache-worker-a");
-            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+            let deadline = readback_deadline();
             retry_pending_owner_status_with_deadline(&mut env, &candidate_a, &deadline)
         });
 
@@ -13497,7 +13497,7 @@ mod tests {
         let worker_b = thread::spawn(move || {
             let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home_b);
             let mut env = owner_status_worker_env(&source_b, "cache-worker-b");
-            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(2));
+            let deadline = readback_deadline();
             worker_b_tx
                 .send(
                     retry_pending_owner_status_with_deadline(&mut env, &candidate_b, &deadline)

@@ -476,6 +476,7 @@ mod monitor_snapshot_cache_tests {
                 body: None,
                 url: None,
                 readiness: gwt::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             state,
             claim_id: None,
@@ -632,9 +633,10 @@ mod monitor_snapshot_cache_tests {
 }
 
 use super::{
-    knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
-    workspace_resume_owner_issue_number, workspace_work_item_view_from_item, AppRuntime,
-    BackendEvent, IssueBranchLinkStore, OutboundEvent, UserEvent, WindowPreset,
+    knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name,
+    resume_branch_refs_snapshot, work_session_index, workspace_resume_owner_issue_number,
+    workspace_work_item_view_from_item, AppRuntime, BackendEvent, IssueBranchLinkStore,
+    OutboundEvent, ResumeBranchIndex, UserEvent, WindowPreset,
 };
 
 pub struct KnowledgeSearchRequest<'a> {
@@ -902,6 +904,11 @@ fn augment_knowledge_bridge_related_works(
     }
 
     let session_index = work_session_index(sessions);
+    // Issue #3611: the Knowledge augmentation runs on a blocking task, so one
+    // bulk ref snapshot is affordable — a per-Session Git probe inside the
+    // Work loop is not, at any repository size.
+    let known_branch_refs = resume_branch_refs_snapshot(project_root);
+    let resume_branches = ResumeBranchIndex::scanned(Some(&known_branch_refs));
     let mut related_by_number: HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> = HashMap::new();
     let mut represented_sessions_by_number: HashMap<u64, HashSet<String>> = HashMap::new();
 
@@ -913,7 +920,7 @@ fn augment_knowledge_bridge_related_works(
         if !relevant_numbers.contains(&issue_number) {
             continue;
         }
-        let work_view = workspace_work_item_view_from_item(item, &session_index, project_root);
+        let work_view = workspace_work_item_view_from_item(item, &session_index, resume_branches);
         represented_sessions_by_number
             .entry(issue_number)
             .or_default()

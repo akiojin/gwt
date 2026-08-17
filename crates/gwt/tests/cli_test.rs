@@ -1222,6 +1222,7 @@ fn red_102_dispatch_issue_linked_prs_is_cache_first() {
             state: "OPEN".to_string(),
             url: "https://example.com/pr/10".to_string(),
             will_close_target: true,
+            merged_at: None,
         }],
     );
 
@@ -1242,6 +1243,7 @@ fn red_102_dispatch_issue_linked_prs_is_cache_first() {
             state: "OPEN".to_string(),
             url: "https://example.com/pr/11".to_string(),
             will_close_target: true,
+            merged_at: None,
         }],
     );
 

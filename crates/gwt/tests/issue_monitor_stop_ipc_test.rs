@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use gwt::{
     scan_issue_monitor_candidates, IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorPrefs, IssueMonitorState, IssueMonitorStopOutcome, IssueMonitorStopTarget,
-    MonitorInboxState,
+    IssueMonitorLaunchSessionStrategy, IssueMonitorPrefs, IssueMonitorState,
+    IssueMonitorStopOutcome, IssueMonitorStopTarget, MonitorInboxState,
 };
 use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
 use gwt_core::test_support::ScopedEnvVar;
@@ -50,6 +50,7 @@ fn issue(number: u64) -> IssueMonitorIssue {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     }
 }
 
@@ -312,5 +313,71 @@ fn failover_requeue_is_durable_even_when_scan_publish_fails() {
     assert!(
         !observed.active_issue_numbers().contains(&42),
         "the stopped launch must not be resurrected by the reload"
+    );
+}
+
+/// SPEC #3165 FR-100/FR-101 / T-224: the disk transaction is the real
+/// failover durability boundary. A subsequent daemon process must project the
+/// requeued issue into a FreshRequired delivery and keep it fresh on replay,
+/// without charging failover to the autonomous retry/NeedsHuman budget.
+#[test]
+fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
+    let _env_lock = env_test_lock();
+    let temp = TempDir::new().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+
+    let monitor = launched_monitor();
+    let attempts_before = monitor.attempt_count(42);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut inner = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let outcome = inner.failover_restart(&stop_target(), "rate limited", NOW);
+        assert!(matches!(
+            outcome,
+            gwt::IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(inner.attempt_count(42), attempts_before);
+        assert_eq!(
+            inner
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_ref()),
+            None
+        );
+        assert_ne!(
+            inner.autonomous_record(42).map(|record| record.phase),
+            Some(gwt::AutonomousPhase::NeedsHuman)
+        );
+        *prefs = inner.prefs();
+        Ok(())
+    })
+    .expect("persist failover");
+
+    let reloaded = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload queued failover");
+    let mut next_daemon = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), reloaded);
+    scan_issue_monitor_candidates(&mut next_daemon, &[issue(42)], "2026-08-09T05:00:01Z");
+    assert!(next_daemon.apply_confirmed_claim(
+        42,
+        "claim-42-retry",
+        "host/session",
+        "effect-42-retry",
+        "2026-08-09T05:00:02Z",
+    ));
+    gwt::save_issue_monitor_prefs(&prefs_path, &next_daemon.prefs())
+        .expect("persist fresh delivery");
+
+    let delivery_prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload fresh delivery");
+    assert_eq!(
+        delivery_prefs.pending_launch_deliveries[0].launch_session_strategy,
+        IssueMonitorLaunchSessionStrategy::FreshRequired
+    );
+    let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), delivery_prefs);
+    let first = replayed.take_pending_launch_requests();
+    let second = replayed.take_pending_launch_requests();
+    assert_eq!(first, second, "delivery remains replayable until its ACK");
+    assert_eq!(
+        first[0].launch_session_strategy,
+        IssueMonitorLaunchSessionStrategy::FreshRequired,
+        "disk reload and replay must not downgrade failover to ResumeIfSafe"
     );
 }

@@ -30,6 +30,45 @@ use crate::pm_registry::{self, PmLoopState};
 /// revives a parked PM when new monitor activity arrives.
 const PM_LOOP_MAX_CONSECUTIVE: u32 = 12;
 
+/// Finalize a protected PM delivery only when the exact target Session's
+/// UserPromptSubmit hook observes the self-authenticating operation marker.
+/// Invalid or unrelated prompts are ordinary user input and remain silent.
+pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
+    let Some(prompt) = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("prompt")
+                .and_then(|prompt| prompt.as_str())
+                .map(str::to_string)
+        })
+    else {
+        return;
+    };
+    let Some((operation_id, body_sha256)) =
+        pm_registry::parse_protected_pm_delivery_prompt(&prompt)
+    else {
+        return;
+    };
+    let Some(target_session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|session_id| !session_id.trim().is_empty())
+    else {
+        return;
+    };
+    let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(worktree);
+    if let Err(error) = pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        &operation_id,
+        &target_session_id,
+        &body_sha256,
+        pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    ) {
+        tracing::warn!(%error, operation_id, "PM delivery acknowledgement was rejected");
+    }
+}
+
 /// UserPromptSubmit entry: real user contact re-arms the loop budget and
 /// stamps the conversation clock the T-093 wake path defers to.
 pub fn handle_user_prompt_submit(worktree: &Path) {
@@ -55,15 +94,30 @@ fn handle_user_prompt_submit_at(worktree: &Path, now: &str) {
     );
 }
 
-pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
+/// `current_session` is the caller's Session id, resolved once by the hook
+/// dispatcher. It is injected rather than read here so this gate stays a pure
+/// function of its inputs — the process-global environment is shared by every
+/// test in the binary, and reading it from inside made two tests race each
+/// other's `GWT_SESSION_ID` under CI parallelism.
+pub fn handle_with_input(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+) -> HookOutput {
     handle_at(
         worktree,
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         super::envelope::stop_hook_active_from(input),
+        current_session,
     )
 }
 
-fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
+fn handle_at(
+    worktree: &Path,
+    now: &str,
+    stop_hook_active: bool,
+    current_session: Option<&str>,
+) -> HookOutput {
     if !super::is_resident_pm_worktree(worktree) {
         return HookOutput::Silent;
     }
@@ -120,7 +174,32 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
         end_own_chain(&mut state);
         return HookOutput::Silent;
     }
-    let interval_secs = pm_registry::load_pm_prefs(&project_state.join("pm.json"))
+    // Issue #3607: the resident loop belongs to the *registered* PM. This gate
+    // keys on the worktree's path shape alone, so a PM that `pm.stop` retired —
+    // or that another PM superseded — otherwise kept forcing itself into the
+    // next cycle and kept rewriting Issue Monitor state a second PM was also
+    // writing. Deregistration is the durable, GUI-free way to end that, so it
+    // has to be observable here.
+    //
+    // A caller with no ambient identity is left alone: the loop cannot be
+    // attributed to anyone, and retiring a healthy PM over a missing
+    // environment variable would be worse than the duplicate this prevents.
+    let pm_prefs_path = project_state.join("pm.json");
+    if let Some(caller_session) = current_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !pm_registry::session_is_registered_pm(&pm_prefs_path, caller_session) {
+            tracing::info!(
+                session_id = caller_session,
+                worktree = %worktree.display(),
+                "resident PM loop released: this Session is no longer the registered PM"
+            );
+            end_own_chain(&mut state);
+            return HookOutput::Silent;
+        }
+    }
+    let interval_secs = pm_registry::load_pm_prefs(&pm_prefs_path)
         .map(|prefs| prefs.settings.loop_interval_secs_clamped())
         .unwrap_or(60);
     if !has_unconsumed_observations && state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
@@ -162,7 +241,15 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    /// The Session the fixture's PM is registered as.
+    ///
+    /// The caller identity is passed to `handle_at` directly, never through
+    /// `GWT_SESSION_ID`: that variable is process-global, so a fixture that
+    /// set it would race every other test in this binary that sets it too —
+    /// which is exactly how these tests first failed under CI parallelism.
+    const FIXTURE_PM_SESSION: &str = "pm-session-fixture";
 
     fn pm_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let home = tempfile::tempdir().expect("home");
@@ -176,16 +263,96 @@ mod tests {
                 enabled: true,
                 ..crate::IssueMonitorPrefs::default()
             };
-            let prefs_path = worktree
+            let project_state = worktree
                 .parent()
                 .and_then(Path::parent)
                 .expect("gwt project dir")
-                .join("project-state/issue-monitor.json");
-            std::fs::create_dir_all(prefs_path.parent().expect("parent")).expect("state dir");
-            crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+                .join("project-state");
+            std::fs::create_dir_all(&project_state).expect("state dir");
+            crate::save_issue_monitor_prefs(&project_state.join("issue-monitor.json"), &prefs)
+                .expect("seed prefs");
+            crate::pm_registry::save_pm_prefs(
+                &project_state.join("pm.json"),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: FIXTURE_PM_SESSION.to_string(),
+                        agent_id: "claude".to_string(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: Some("2026-08-08T00:00:00Z".to_string()),
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    settings: crate::pm_registry::PmSettings::default(),
+                },
+            )
+            .expect("seed PM registration");
             worktree
         };
         (home, repo, worktree)
+    }
+
+    /// Issue #3607 AC-5: `pm.stop` clears the registration, and that has to
+    /// actually quiet the PM. The Stop gate keys only on the worktree's path
+    /// shape, so without this a retired orphan kept forcing itself into the
+    /// next cycle — and kept rewriting the Issue Monitor state a second PM was
+    /// also writing.
+    #[test]
+    fn a_deregistered_session_stops_driving_the_resident_loop() {
+        let (home, _repo, worktree) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("gwt project dir")
+            .join("project-state");
+        crate::pm_registry::deregister_pm(&project_state.join("pm.json"), FIXTURE_PM_SESSION)
+            .expect("deregister");
+
+        let output = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+
+        assert!(
+            matches!(output, HookOutput::Silent),
+            "a retired PM must stop looping, got {output:?}"
+        );
+    }
+
+    /// A session that another PM superseded must not keep driving cycles
+    /// either — that is the two-PM state itself.
+    #[test]
+    fn a_superseded_session_stops_driving_the_resident_loop() {
+        let (home, _repo, worktree) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+
+        let output = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some("some-other-session"),
+        );
+
+        assert!(
+            matches!(output, HookOutput::Silent),
+            "only the registered PM drives the loop, got {output:?}"
+        );
+    }
+
+    /// Without a caller identity the gate cannot attribute the loop to anyone,
+    /// so it must keep the pre-#3607 behaviour rather than silently retiring a
+    /// healthy PM.
+    #[test]
+    fn a_caller_without_a_session_identity_keeps_looping() {
+        let (home, _repo, worktree) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:00:00Z", false, None),
+            HookOutput::StopBlock { .. }
+        ));
     }
 
     /// FR-012: a stopping PM is turned around into the next cycle while the
@@ -195,13 +362,101 @@ mod tests {
         let (home, _repo, worktree) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
-        let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
+        let output = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected the loop to continue, got {output:?}");
         };
         assert!(reason.contains("daemon.subscribe"));
         assert!(reason.contains("issue.monitor.status"));
+    }
+
+    #[test]
+    fn exact_target_user_prompt_submit_verifies_the_delivery_receipt() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "target-session");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "report exact status";
+        let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        pm_registry::prepare_pm_delivery_receipt(
+            &receipt_path,
+            &pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.to_string(),
+                recorded_at: "2026-08-13T00:00:00Z".to_string(),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".to_string(),
+                target_window_id: "tab-1::agent-1".to_string(),
+                target_session_id: "target-session".to_string(),
+                body_sha256: body_sha256.clone(),
+                reason: None,
+            },
+        )
+        .expect("prepare receipt");
+        let input = serde_json::json!({
+            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+        })
+        .to_string();
+
+        handle_delivery_acknowledgement(&repo, &input);
+
+        assert!(pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("load receipt")
+            .iter()
+            .any(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified));
+    }
+
+    #[test]
+    fn wrong_session_or_body_hash_cannot_verify_a_delivery_receipt() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a4";
+        let body = "report exact status";
+        let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        pm_registry::prepare_pm_delivery_receipt(
+            &receipt_path,
+            &pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.to_string(),
+                recorded_at: "2026-08-13T00:00:00Z".to_string(),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".to_string(),
+                target_window_id: "tab-1::agent-1".to_string(),
+                target_session_id: "target-session".to_string(),
+                body_sha256: body_sha256.clone(),
+                reason: None,
+            },
+        )
+        .expect("prepare receipt");
+        let input = serde_json::json!({
+            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+        })
+        .to_string();
+        {
+            let _wrong_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "wrong-session");
+            handle_delivery_acknowledgement(&repo, &input);
+        }
+        let _target_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "target-session");
+        let forged = serde_json::json!({
+            "prompt": format!("tampered [gwt-delivery:{operation_id}:{body_sha256}]")
+        })
+        .to_string();
+        handle_delivery_acknowledgement(&repo, &forged);
+
+        assert!(!pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("load receipt")
+            .iter()
+            .any(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified));
     }
 
     /// The brakes: a floor between continuations and a cap without user
@@ -212,19 +467,29 @@ mod tests {
         let _guard = ScopedGwtHome::set(home.path());
 
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
         // Inside the floor: silent, and the budget is not consumed.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:30Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:30Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent
         );
         // Exhaust the budget past the floor each time.
         let mut minute = 2;
         loop {
             let now = format!("2026-08-08T00:{minute:02}:00Z");
-            match handle_at(&worktree, &now, false) {
+            match handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)) {
                 HookOutput::StopBlock { .. } => minute += 2,
                 _ => break,
             }
@@ -233,7 +498,12 @@ mod tests {
         // A user prompt re-arms.
         handle_user_prompt_submit(&worktree);
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T02:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T02:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
     }
@@ -252,13 +522,23 @@ mod tests {
         prefs.enabled = false;
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save");
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent
         );
 
         let ordinary = tempfile::tempdir().expect("ordinary");
         assert_eq!(
-            handle_at(ordinary.path(), "2026-08-08T00:00:00Z", false),
+            handle_at(
+                ordinary.path(),
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent
         );
     }
@@ -273,7 +553,12 @@ mod tests {
 
         // A foreign chain: some other gate forced the previous continuation.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent,
             "the loop must not stack onto another gate's forced continuation"
         );
@@ -281,29 +566,54 @@ mod tests {
         // Its own chain: block once, then keep flowing across the
         // stop_hook_active stops of that same chain.
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:10:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:10:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:12:00Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:12:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
 
         // A within-floor stop ends the loop's own chain (marker cleared), so
         // a later stop_hook_active stop is foreign again.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:12:30Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:12:30Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent,
             "the floor ends the own chain"
         );
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:20:00Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:20:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent,
             "after the own chain ended, stop_hook_active stops are foreign"
         );
         // ...while a fresh chain start (no stop_hook_active) still drives.
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:21:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:21:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
     }
@@ -316,7 +626,12 @@ mod tests {
         let _guard = ScopedGwtHome::set(home.path());
 
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
         handle_user_prompt_submit_at(&worktree, "2026-08-08T00:00:30Z");
@@ -363,6 +678,7 @@ mod tests {
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             }],
             "2026-08-10T00:00:00Z",
         );
@@ -375,7 +691,7 @@ mod tests {
             let now = format!("2026-08-10T01:{minute:02}:00Z");
             assert!(
                 matches!(
-                    handle_at(&worktree, &now, false),
+                    handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
                     HookOutput::StopBlock { .. }
                 ),
                 "a supervising PM must not park while a launch is live (cycle at {now})"
@@ -401,7 +717,7 @@ mod tests {
         for _ in 0..20 {
             let now = format!("2026-08-10T02:{minute:02}:00Z");
             if matches!(
-                handle_at(&worktree, &now, false),
+                handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
                 HookOutput::StopBlock { .. }
             ) {
                 blocks += 1;

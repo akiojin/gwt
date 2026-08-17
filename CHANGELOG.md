@@ -1,6 +1,120 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.81.0] - 2026-08-15
+
+### Bug Fixes
+
+- **workspace:** Project store identity の曖昧性を拒否する
+- **issue-monitor:** 単一 PR の merge で Issue を終端 merged 扱いしない
+- **test:** Fake docker の ETXTBSY spawn を再試行する
+
+### Features
+
+- **workspace:** Project store を repository identity へ収束させ分裂 store を移行する
+- **pane:** Surface agent approval waits
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3466 の完了 Work event を記録
+- **work:** #3466 の検証準備を記録する
+
+## [9.80.0] - 2026-08-15
+
+### Bug Fixes
+
+- **verify:** Lease control dir の掃除で生きた holder を消さないようにする
+- Enable Windows PM immediate monitor scans
+- **launch:** Readiness SessionStart の bounded retry と daemon fan-out nonce 欠落を解消する
+- **execution:** Stranded lifecycle の回復誘導を整合させる
+- **pr:** Work receipt の前提を撤去
+
+### Features
+
+- **verify:** 重量級検証をホスト単位 lease で直列化する
+
+### Miscellaneous Tasks
+
+- **work:** Record #3576 work events and lockfile refresh
+- **work:** Record #3576 PR handoff receipt
+- Update Issue 3569 verification state
+- **work:** Record Issue 3569 continuation
+- **work:** Issue 3587 の検証証跡を記録する
+- **work:** #3581 の handoff receipt を記録
+
+### Testing
+
+- **ci:** Cover Windows launch_now control path
+- **ci:** Enforce authenticated Windows monitor wake
+- **ci:** Cover Windows launch_now dispatch
+
+## [9.79.1] - 2026-08-15
+
+### Bug Fixes
+
+- **test:** Stabilize issue monitor daemon synchronization
+- **test:** Observe issue monitor scan ownership directly
+- **execution:** Recover blocked build aborts
+- **execution:** Harden blocked abort reconciliation
+- **execution:** Bound blocked abort diagnostics
+
+### Miscellaneous Tasks
+
+- Refresh lockfile for v9.79.0
+- Record issue monitor verification
+- Record issue monitor PR handoff
+- Settle issue monitor work handoff
+- **work:** Record issue monitor PR handoff receipt
+
+
+## [9.79.0] - 2026-08-14
+
+### Bug Fixes
+
+- Recover manual launches from terminal generations
+- **launch:** Stabilize segmented wizard commits
+- **test:** Stabilize Windows agent launch E2E
+- **test:** Warm Windows metadata probe in E2E
+- **test:** Isolate manual launch authority fixtures
+
+### Features
+
+- **launch:** Harden manual successor handoff
+
+### Miscellaneous Tasks
+
+- Record issue 3547 verification status
+
+### Testing
+
+- **launch:** Fence live wizard state cleanup
+- **playwright:** Isolate logs preset from launch wizard
+
+## [9.78.3] - 2026-08-14
+
+### Bug Fixes
+
+- **pm:** Guarantee verified pane message delivery
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger release checks for v9.78.2
+- **work:** Record issue 3550 completion
+- **ci:** Retrigger checks for PR #3565
+
+
+## [9.78.2] - 2026-08-14
+
+### Bug Fixes
+
+- **daemon:** Resolve same-repo subscribe endpoints
+- **issue-monitor:** Prevent unsafe durable session resume
+- **issue-monitor:** Preserve late resume conflict recovery
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3492 completion
+- **work:** Record work event
 
 ## [9.78.1] - 2026-08-12
 
