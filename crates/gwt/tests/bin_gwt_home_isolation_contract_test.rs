@@ -439,7 +439,11 @@ fn env_lock_acquisitions(source: &str) -> Vec<(usize, String)> {
 fn every_env_lock_acquisition_recovers_from_poisoning() {
     let root = repo_root();
     let mut violations = Vec::new();
-    for path in bin_gwt_test_sources(&root) {
+    // Crate-wide, like the environment-mutation rule: a poisoned mutex fails
+    // every later holder in whatever binary the first panic happened in. One
+    // real failure in `gwt --lib` cascaded into six `PoisonError` aborts in
+    // `cli/env/tests.rs` and hid its own cause.
+    for path in gwt_crate_sources(&root) {
         let source = read_source(&path);
         for (line, consumer) in env_lock_acquisitions(&source) {
             // `unwrap_or_else(PoisonError::into_inner)` and the equivalent
