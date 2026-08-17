@@ -113,6 +113,12 @@ drive them.
   why, because a live agent waiting on an approval prompt, blocked by a
   provider rate limit, or genuinely hung all look identical from here.
   Read its pane to find out which, then say so when you report it.
+- `retry_hold_reason` and `retry_not_before` on an inbox row say the
+  issue is deliberately held out of the queue, and until when. A
+  provider quota block sets both: the launch is already released, no
+  retry attempt was spent, and the next scan after `retry_not_before`
+  picks the work up again. Report the reset instant; do not treat the
+  row as a stall to chase.
 - A stall is not automatically resolved for you. Decide: wait, demote it
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without
@@ -192,6 +198,14 @@ things:
   out of quota the work is fine and the account is not, and charging
   that to the issue's budget would eventually hand healthy work to a
   human over someone else's billing cycle.
+
+- `issue.monitor.launch_now` says **run this next**. It moves the issue
+  to the head of `priority_order` and also drops any `retry_hold_reason`
+  hold, reporting `hold_cleared`. That second half matters after a quota
+  block: a reset can be days out, so without it the instruction would be
+  accepted and then ignored until the provider recovers. Use it after
+  changing the launch profile when the work should not wait for someone
+  else's billing cycle.
 
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the

@@ -440,10 +440,23 @@ fn run_monitor_launch_now<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-    let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+    let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
-        Ok(())
+        // Issue #3616 AC-5: priority alone cannot beat `retry_ready`. A
+        // provider reset can be days out, so leaving the hold in place would
+        // accept this instruction and then ignore it for the whole window.
+        // Dropping the hold here is what makes "switch provider and run it
+        // now" an actual recovery instead of a no-op.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let hold_cleared = monitor.clear_retry_hold(number);
+        if hold_cleared {
+            prefs.autonomous_records = monitor.prefs().autonomous_records;
+        }
+        Ok(hold_cleared)
     })
     .map_err(io_as_api_error)?;
 
@@ -454,6 +467,7 @@ fn run_monitor_launch_now<E: CliEnv>(
             "number": number,
             "priority_order": prefs.priority_order,
             "priority_updated": true,
+            "hold_cleared": hold_cleared,
             "scan_requested": delivery.scan_requested,
             "scan_delivery": delivery.scan_delivery,
             "scan_error": delivery.scan_error,
@@ -1804,6 +1818,61 @@ mod tests {
                 .starts_with(&[42]),
             "the partial priority update remains explicit and durable"
         );
+    }
+
+    /// Issue #3616 AC-5: an explicit PM launch instruction overrides a provider
+    /// quota hold.
+    ///
+    /// The observed reset was six days out. `launch_now` only reorders
+    /// `priority_order`, so without clearing the hold the instruction is
+    /// accepted, reported as applied, and then silently ignored by
+    /// `retry_ready` for the whole window — which is precisely the recovery a
+    /// PM reaches for after switching to a healthy provider.
+    #[test]
+    fn launch_now_clears_a_provider_quota_hold_so_the_instruction_is_not_inert() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                autonomous_records: vec![crate::AutonomousIssueRecord {
+                    issue_number: 42,
+                    retry_not_before: Some("2026-08-22T03:46:00Z".to_string()),
+                    retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                    ..crate::AutonomousIssueRecord::new(42)
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let _ = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(result["hold_cleared"], true);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("the record survives");
+        assert_eq!(record.retry_not_before, None);
+        assert_eq!(record.retry_hold_reason, None);
     }
 
     #[test]

@@ -3403,6 +3403,7 @@ fn sample_runtime_with_events(
         window_approval_waiting: HashMap::new(),
         approval_settle_epoch: 0,
         recoverable_agent_error_windows: HashSet::new(),
+        provider_quota_holds: HashMap::new(),
         last_agent_activity: HashMap::new(),
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
@@ -4711,6 +4712,7 @@ fn issue_monitor_autonomous_record(
         attempts,
         acceptance_snapshot: None,
         retry_not_before: None,
+        retry_hold_reason: None,
         last_heartbeat: None,
         pr_number: None,
         reviewed_sha: None,
@@ -25920,6 +25922,164 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
     );
 }
 
+/// The exact Codex notice observed on 2026-08-16, soft-wrapped as the TUI
+/// prints it.
+const CODEX_USAGE_LIMIT_SCREEN: &str = "\
+■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage
+  to purchase more credits or try again at Aug 22nd, 2026 12:46 PM.";
+
+/// Issue #3616 AC-1/AC-3/AC-4: a quota-exhausted exit is a typed hold, not the
+/// untyped agent failure that turns the Issue terminal and spends an attempt.
+#[test]
+fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+
+    let failure = runtime.issue_monitor_failure_for_window(
+        &window_id,
+        CODEX_USAGE_LIMIT_SCREEN,
+        gwt_agent::SessionMode::Normal,
+    );
+
+    let gwt::IssueMonitorFailure::ProviderUsageLimit {
+        provider,
+        resets_at,
+    } = failure.clone().expect("a quota notice is a typed failure")
+    else {
+        panic!("expected a provider usage limit failure, got {failure:?}");
+    };
+    assert_eq!(provider, "codex");
+    assert!(
+        resets_at.is_some(),
+        "the notice states when access returns; dropping it forces the PM to guess"
+    );
+
+    let payload = AppRuntime::issue_monitor_agent_failed_payload_with_failure(
+        &window_id,
+        CODEX_USAGE_LIMIT_SCREEN,
+        Some(3510),
+        failure.as_ref(),
+    );
+    assert_eq!(
+        payload
+            .pointer("/agent_failed/failure/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("provider_usage_limit")
+    );
+}
+
+/// Issue #3616 AC-2: the pane must not read as DONE.
+///
+/// `WindowProcessStatus::Stopped` renders as the `DONE` cue, which says the
+/// work finished. The account ran out; the conversation is intact and the pane
+/// has to stay resumable rather than look complete.
+#[test]
+fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Idle",
+        "Stop",
+        "session-1",
+    ));
+
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+        true,
+    );
+
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Waiting),
+        "a quota block is a wait for the provider, not a completed run"
+    );
+    assert!(
+        runtime.active_agent_sessions.contains_key(&window_id),
+        "the session must survive so the same work can resume after the reset"
+    );
+    assert!(
+        runtime
+            .window_details
+            .get(&window_id)
+            .is_some_and(|detail| detail.contains("usage limit")),
+        "the pane must say why it is waiting; a clean exit used to discard the screen"
+    );
+}
+
+/// Issue #3616: an ordinary clean exit is untouched by the quota path.
+#[test]
+fn an_ordinary_clean_agent_exit_still_reaches_the_stopped_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Idle",
+        "Stop",
+        "session-1",
+    ));
+
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some("Process exited".to_string()),
+        true,
+    );
+
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped)
+    );
+}
+
 #[test]
 fn app_runtime_live_hook_recovery_clears_recoverable_pty_error_marker() {
     let _env_lock = env_test_lock()
@@ -35816,6 +35976,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,

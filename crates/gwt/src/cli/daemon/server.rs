@@ -1815,6 +1815,38 @@ fn try_apply_typed_issue_monitor_failure(
                 holder_window_id.as_deref(),
             ))
         }
+        // Issue #3616: a quota block releases the slot and holds the issue
+        // until the provider recovers. Nothing about the work failed, so it
+        // never reaches `record_agent_window_failed` — that path is terminal
+        // and spends an attempt.
+        IssueMonitorControl::AgentFailed {
+            issue_number,
+            window_id,
+            message,
+            failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit { resets_at, .. }),
+        } => {
+            let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
+            let Some(issue_number) = issue_number else {
+                return Some(false);
+            };
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            Some(
+                monitor.try_hold_provider_usage_limit(
+                    issue_number,
+                    &window_id,
+                    message,
+                    resets_at.as_deref(),
+                    &now,
+                ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
+            )
+        }
+        // A provider quota block cannot be reported by the launch path: the
+        // agent has to run far enough to receive the provider's refusal, which
+        // means a pane already exists.
+        IssueMonitorControl::LaunchFailed {
+            failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit { .. }),
+            ..
+        } => Some(false),
         _ => unreachable!("typed failure helper requires typed failure control"),
     }
 }
@@ -1931,6 +1963,9 @@ fn apply_routine_issue_monitor_control(
                     holder_window_id.as_deref(),
                 )
             }
+            // Issue #3616: the launch path cannot observe a provider refusal —
+            // the agent has to be running to be refused.
+            Some(crate::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
             None => monitor.record_launch_failed_delivery(
                 issue_number,
                 message,
@@ -1956,6 +1991,26 @@ fn apply_routine_issue_monitor_control(
                     message,
                     holder_window_id.as_deref(),
                 )
+            }
+            // Issue #3616: typed failures are dispatched before this function
+            // is reached, so this arm is defensive. It applies the same hold
+            // rather than falling through to the terminal failure path, so a
+            // future routing change degrades to "handled" instead of "the
+            // Issue is now terminal for someone else's billing cycle".
+            Some(crate::IssueMonitorFailure::ProviderUsageLimit { resets_at, .. }) => {
+                let issue_number =
+                    issue_number.or_else(|| monitor.launched_window_issue(&window_id));
+                let Some(issue_number) = issue_number else {
+                    return false;
+                };
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                monitor.try_hold_provider_usage_limit(
+                    issue_number,
+                    &window_id,
+                    message,
+                    resets_at.as_deref(),
+                    &now,
+                ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
             None => {
                 if let Some(issue_number) = issue_number {
@@ -5314,6 +5369,7 @@ exit 0
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,
@@ -5415,6 +5471,7 @@ exit 0
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: Some("2026-07-28T00:00:00Z".to_string()),
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
@@ -5936,6 +5993,86 @@ exit 0
             committed,
             "durable receipt replay converges a pre-commit volatile projection to the committed disk snapshot"
         );
+    }
+
+    /// Issue #3616: the daemon must route a quota block to the hold, not to
+    /// the terminal agent-failure path.
+    ///
+    /// The attempt cap is seeded to 1 so the old routing is unmistakable: an
+    /// untyped `agent_failed` at the cap escalates to `NeedsHuman`, which is
+    /// how six days of someone else's billing cycle used to become a permanent
+    /// human handoff.
+    #[test]
+    fn a_provider_usage_limit_control_holds_the_issue_instead_of_failing_it() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..crate::IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                autonomous_tuning: crate::issue_monitor::AutonomousTuning {
+                    max_attempts: 1,
+                    ..crate::issue_monitor::AutonomousTuning::default()
+                },
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(sample_issue_monitor_issue(42), "claim-a");
+        monitor
+            .next_launch_request("2026-08-16T00:00:00Z")
+            .expect("initial launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert_eq!(monitor.record_attempt(42), 1, "seed the budget cap");
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-42",
+                    "message": "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
+                    "failure": {
+                        "kind": "provider_usage_limit",
+                        "provider": "codex",
+                        "resets_at": "2026-08-22T03:46:00Z",
+                    },
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("typed quota control");
+
+        assert!(apply_issue_monitor_control(&mut monitor, control.clone()));
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "the released launch makes a duplicate quota control inert"
+        );
+
+        let record = monitor.autonomous_record(42).expect("record retained");
+        assert_eq!(record.attempts, 1, "a quota block spends no attempt");
+        assert_ne!(
+            record.phase,
+            crate::AutonomousPhase::NeedsHuman,
+            "the account ran out; the work did not fail"
+        );
+        assert_eq!(
+            record.retry_not_before.as_deref(),
+            Some("2026-08-22T03:46:00Z")
+        );
+        assert_eq!(
+            record.retry_hold_reason.as_deref(),
+            Some("Codex usage limit reached — resumes after 2026-08-22T03:46:00Z")
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Queued)
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot is released");
     }
 
     #[test]
@@ -7081,6 +7218,7 @@ exit 0
                     attempts: 1,
                     acceptance_snapshot: None,
                     retry_not_before: None,
+                    retry_hold_reason: None,
                     last_heartbeat: Some(original_heartbeat.to_string()),
                     pr_number: None,
                     reviewed_sha: None,
@@ -7559,6 +7697,7 @@ exit 1
                     attempts: 1,
                     acceptance_snapshot: None,
                     retry_not_before: None,
+                    retry_hold_reason: None,
                     last_heartbeat: Some("2026-07-27T00:00:00Z".to_string()),
                     pr_number: Some(99),
                     reviewed_sha: Some("abc".to_string()),
@@ -9781,6 +9920,7 @@ exit 1
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
@@ -9840,6 +9980,7 @@ exit 1
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: Some("2026-07-28T00:00:00Z".to_string()),
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
@@ -9886,6 +10027,7 @@ exit 1
                     attempts: 1,
                     acceptance_snapshot: None,
                     retry_not_before: None,
+                    retry_hold_reason: None,
                     last_heartbeat: None,
                     pr_number: Some(70),
                     reviewed_sha: Some("sha-7".to_string()),
@@ -9898,6 +10040,7 @@ exit 1
                     attempts: 1,
                     acceptance_snapshot: None,
                     retry_not_before: None,
+                    retry_hold_reason: None,
                     last_heartbeat: Some("2026-07-28T00:00:00Z".to_string()),
                     pr_number: Some(80),
                     reviewed_sha: Some("sha-8".to_string()),
@@ -9960,6 +10103,7 @@ exit 1
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: Some(70),
                 reviewed_sha: Some("sha-7".to_string()),
@@ -10500,6 +10644,7 @@ exit 1
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("sha-a".to_string()),
@@ -10634,6 +10779,7 @@ exit 1
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
@@ -10763,6 +10909,7 @@ exit 1
                 attempts: 1,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
@@ -11015,6 +11162,7 @@ exit 1
             attempts,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: None,
             pr_number: None,
             reviewed_sha: None,
@@ -11230,6 +11378,7 @@ exit 1
                     attempts: 6,
                     acceptance_snapshot: None,
                     retry_not_before: None,
+                    retry_hold_reason: None,
                     last_heartbeat: None,
                     pr_number: None,
                     reviewed_sha: None,
@@ -12236,6 +12385,7 @@ exit 1
                     attempts: 1,
                     acceptance_snapshot: None,
                     retry_not_before: None,
+                    retry_hold_reason: None,
                     last_heartbeat: Some(old_heartbeat.to_string()),
                     pr_number: None,
                     reviewed_sha: None,
@@ -12518,6 +12668,7 @@ exit 1
             attempts: 6,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: Some("2026-07-21T00:00:00Z".to_string()),
             pr_number: None,
             reviewed_sha: None,

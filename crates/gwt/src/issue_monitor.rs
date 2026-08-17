@@ -752,6 +752,20 @@ pub enum IssueMonitorFailure {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder_window_id: Option<String>,
     },
+    /// Issue #3616: the provider backing the agent ran out of quota.
+    ///
+    /// Distinct from every other agent exit because the cause is stated by the
+    /// provider itself and is about the account, not the work: the retry budget
+    /// must not be spent and the Issue must not become terminal.
+    ProviderUsageLimit {
+        /// Agent id the launch used (`codex` / `claude`), so a reader can tell
+        /// which account is out rather than pausing the whole fleet.
+        provider: String,
+        /// RFC3339 instant the provider said access returns, when it printed a
+        /// parseable one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<String>,
+    },
 }
 
 /// Result of applying a typed late-resume writer-conflict recovery. The
@@ -762,6 +776,15 @@ pub enum IssueMonitorResumeWriterConflictOutcome {
     Requeued,
     Rejected,
     AuthorityExhausted,
+}
+
+/// Issue #3616: result of applying a provider quota hold. `Rejected` means the
+/// reporting window is no longer the bound launch, or the issue is already
+/// terminal — in both cases nothing was mutated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorProviderUsageLimitOutcome {
+    Held,
+    Rejected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1268,6 +1291,17 @@ pub struct IssueMonitorInboxSummary {
     /// "too old" means for the work at hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<String>,
+    /// Issue #3616 AC-3/AC-4: when this issue is held out of the queue, until
+    /// when and why.
+    ///
+    /// A queued row with a reset days away is not the same situation as a
+    /// queued row waiting its turn, and a reader with only `state` cannot tell
+    /// them apart. Both fields project the autonomous record so there is one
+    /// clock rather than a parallel one that can disagree with the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_not_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_hold_reason: Option<String>,
     /// SPEC-3431 FR-024/FR-033: the claim and delivery backing this launch.
     ///
     /// `stop_only` requires an exact identity match, so the PM has to be able
@@ -1558,6 +1592,12 @@ pub struct AutonomousIssueRecord {
     /// after a transient retry was scheduled (bounded backoff). `None` ⇒ ready.
     #[serde(default)]
     pub retry_not_before: Option<String>,
+    /// Issue #3616: why `retry_not_before` is set, when the cause is something
+    /// a reader must act on differently than an ordinary backoff — today, a
+    /// provider quota block. `None` for the plain retry ladder, whose reason is
+    /// already implied by the attempt counter.
+    #[serde(default)]
+    pub retry_hold_reason: Option<String>,
     /// SPEC #3200 T-044/T-045/FR-013: RFC3339 of the last observed liveness
     /// signal from the launched agent — the anchor for stuck/idle detection.
     #[serde(default)]
@@ -1659,7 +1699,8 @@ pub enum AutonomousFailureOutcome {
 }
 
 impl AutonomousIssueRecord {
-    fn new(issue_number: u64) -> Self {
+    /// A fresh record for `issue_number` with no attempts, holds, or snapshot.
+    pub fn new(issue_number: u64) -> Self {
         Self {
             issue_number,
             phase: AutonomousPhase::Idle,
@@ -1667,6 +1708,7 @@ impl AutonomousIssueRecord {
             attempts: 0,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: None,
             pr_number: None,
             reviewed_sha: None,
@@ -2842,8 +2884,12 @@ impl IssueMonitorState {
             self.require_fresh_launch_session(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
-            self.autonomous_record_mut(issue_number).retry_not_before =
-                rfc3339_plus_secs(now, backoff);
+            let record = self.autonomous_record_mut(issue_number);
+            record.retry_not_before = rfc3339_plus_secs(now, backoff);
+            // Issue #3616: this backoff is the retry ladder, not a provider
+            // hold. Leaving a stale quota reason attached would tell the PM to
+            // wait out a reset that no longer gates anything.
+            record.retry_hold_reason = None;
             self.set_inbox_state(issue_number, MonitorInboxState::Queued);
             if !self.queue.contains(&issue_number) {
                 self.queue.push_back(issue_number);
@@ -4082,6 +4128,17 @@ impl IssueMonitorState {
                             .autonomous_records
                             .get(&item.issue.number)
                             .and_then(|record| record.last_heartbeat.clone()),
+                        // Issue #3616 AC-3/AC-4: same record, same clock as the
+                        // `retry_ready` gate, so what the PM reads is exactly
+                        // what holds the launch back.
+                        retry_not_before: self
+                            .autonomous_records
+                            .get(&item.issue.number)
+                            .and_then(|record| record.retry_not_before.clone()),
+                        retry_hold_reason: self
+                            .autonomous_records
+                            .get(&item.issue.number)
+                            .and_then(|record| record.retry_hold_reason.clone()),
                         // SPEC-3431 FR-024/FR-033: the identity `stop_only` demands
                         // has to be readable from the same snapshot, or the exact
                         // match it enforces is unsatisfiable from the PM's side.
@@ -4315,7 +4372,9 @@ impl IssueMonitorState {
                 self.set_autonomous_phase(number, AutonomousPhase::Implementing);
                 // The launch consumes the scheduled retry, so the backoff marker
                 // is cleared to avoid stale state on the in-flight attempt.
-                self.autonomous_record_mut(number).retry_not_before = None;
+                let record = self.autonomous_record_mut(number);
+                record.retry_not_before = None;
+                record.retry_hold_reason = None;
                 // SPEC #3200 T-045/FR-025: seed the liveness baseline at launch so
                 // stuck detection actually fires for an agent that hangs without
                 // producing a PR within stuck_timeout_secs. Real progress (a
@@ -5739,29 +5798,97 @@ impl IssueMonitorState {
         now: &str,
     ) -> Option<u64> {
         let issue_number = self.launched_window_issue(window_id)?;
+        self.hold_provider_usage_limit_core(issue_number, None, Some(resets_at), now)
+            .then_some(issue_number)
+    }
+
+    /// Issue #3616: hold `issue_number` because the provider backing its agent
+    /// ran out of quota, only when `source_window_id` is still the exact window
+    /// bound to that launch.
+    ///
+    /// The identity guard mirrors
+    /// [`Self::try_requeue_agent_resume_writer_conflict`]: an issue number alone
+    /// would let a dying pane revoke the successor launch that replaced it.
+    ///
+    /// `reason` is stored on the autonomous record so
+    /// [`Self::agent_status`] can say *why* a queued issue is not launching —
+    /// the failure this fixes was a quota-dead pane that read as `launched` for
+    /// 23 minutes and then as terminal `AgentFailed`.
+    pub fn try_hold_provider_usage_limit(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        reason: impl Into<String>,
+        resets_at: Option<&str>,
+        now: &str,
+    ) -> IssueMonitorProviderUsageLimitOutcome {
+        if !self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|stored_window_id| {
+                issue_monitor_window_ids_match(stored_window_id, source_window_id)
+            })
+        {
+            return IssueMonitorProviderUsageLimitOutcome::Rejected;
+        }
+        if self.hold_provider_usage_limit_core(issue_number, Some(reason.into()), resets_at, now) {
+            IssueMonitorProviderUsageLimitOutcome::Held
+        } else {
+            IssueMonitorProviderUsageLimitOutcome::Rejected
+        }
+    }
+
+    /// Free the slot and hold the issue until the provider recovers. Shared by
+    /// the identity-checked entry point and the legacy usage-poller path so the
+    /// two can never disagree about what a quota hold does.
+    fn hold_provider_usage_limit_core(
+        &mut self,
+        issue_number: u64,
+        reason: Option<String>,
+        resets_at: Option<&str>,
+        now: &str,
+    ) -> bool {
         if self.merged_issues.contains(&issue_number) {
-            return None;
+            return false;
         }
         if self
             .inbox_item(issue_number)
             .is_some_and(|item| item.state.is_terminal())
         {
-            return None;
+            return false;
         }
         self.clear_active_tracking(issue_number);
         // An unparseable or already-past reset leaves no floor rather than
         // blocking forever: the next scan then decides on fresh usage data.
-        let floor = chrono::DateTime::parse_from_rfc3339(resets_at)
-            .ok()
+        let floor = resets_at
+            .and_then(|resets_at| chrono::DateTime::parse_from_rfc3339(resets_at).ok())
             .filter(|reset| chrono::DateTime::parse_from_rfc3339(now).is_ok_and(|now| *reset > now))
             .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        self.autonomous_record_mut(issue_number).retry_not_before = floor;
+        let record = self.autonomous_record_mut(issue_number);
+        record.retry_not_before = floor;
+        record.retry_hold_reason = reason;
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
         }
-        Some(issue_number)
+        true
+    }
+
+    /// Issue #3616 AC-5: drop a retry hold so an explicit human/PM launch
+    /// instruction is not silently ignored.
+    ///
+    /// A provider reset can be days out. Switching the launch profile to a
+    /// healthy provider is the recovery, and it is useless if the hold still
+    /// gates `retry_ready`. Returns whether a hold was actually cleared.
+    pub fn clear_retry_hold(&mut self, issue_number: u64) -> bool {
+        let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
+            return false;
+        };
+        let had_hold = record.retry_not_before.is_some() || record.retry_hold_reason.is_some();
+        record.retry_not_before = None;
+        record.retry_hold_reason = None;
+        had_hold
     }
 
     /// SPEC-3431 FR-033: the window currently bound to `issue_number`.
@@ -6472,6 +6599,8 @@ mod tests {
                     // Never launched, so no activity clock was ever started
                     // and there is no launch identity to stop.
                     last_activity_at: None,
+                    retry_not_before: None,
+                    retry_hold_reason: None,
                     claim_id: None,
                     delivery_id: None,
                 }],
@@ -7110,6 +7239,7 @@ mod tests {
             attempts: 2,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: None,
             pr_number: None,
             reviewed_sha: None,
@@ -7225,6 +7355,7 @@ mod tests {
             attempts: 6,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: Some("2026-07-20T00:00:00Z".to_string()),
             pr_number: None,
             reviewed_sha: None,
@@ -7286,6 +7417,7 @@ mod tests {
                 attempts: 6,
                 acceptance_snapshot: None,
                 retry_not_before: None,
+                retry_hold_reason: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,
@@ -7347,6 +7479,7 @@ mod tests {
             attempts: 4,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: None,
             pr_number: None,
             reviewed_sha: None,
@@ -7397,6 +7530,7 @@ mod tests {
             attempts: 1,
             acceptance_snapshot: None,
             retry_not_before: None,
+            retry_hold_reason: None,
             last_heartbeat: None,
             pr_number: None,
             reviewed_sha: None,
@@ -7697,6 +7831,172 @@ mod tests {
                 .and_then(|row| row.last_activity_at.clone()),
             Some("2026-08-01T00:00:00Z".to_string()),
             "but it must be visible so the PM can act on it"
+        );
+    }
+
+    /// Issue #3616 AC-2/AC-6: a provider quota block is held, never failed.
+    ///
+    /// `record_agent_window_failed` is the path this used to take, and it is
+    /// terminal (`AgentFailed`) plus attempt-consuming. Nothing about the work
+    /// failed, so the hold keeps the issue queueable and leaves the retry
+    /// budget alone.
+    #[test]
+    fn a_provider_quota_block_holds_the_issue_without_spending_an_attempt() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let attempts_before = monitor
+            .autonomous_record(42)
+            .map(|record| record.attempts)
+            .unwrap_or_default();
+
+        let outcome = monitor.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-1",
+            "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
+            Some("2026-08-22T03:46:00Z"),
+            "2026-08-16T02:26:00Z",
+        );
+
+        assert_eq!(outcome, IssueMonitorProviderUsageLimitOutcome::Held);
+        assert_eq!(monitor.active_count(), 0, "the slot must be freed");
+        assert!(
+            !monitor
+                .inbox_item(42)
+                .map(|item| item.state)
+                .is_some_and(MonitorInboxState::is_terminal),
+            "a quota block must not be terminal"
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .map(|record| record.attempts)
+                .unwrap_or_default(),
+            attempts_before,
+            "the account ran out, not the retry budget"
+        );
+        assert!(!monitor.retry_ready(42, "2026-08-20T00:00:00Z"));
+        assert!(monitor.retry_ready(42, "2026-08-22T04:00:00Z"));
+    }
+
+    /// Issue #3616 AC-3/AC-4: the hold and its reset are readable from
+    /// `issue.monitor.status`, so the PM never has to read a pane to tell a
+    /// quota block from a hang.
+    #[test]
+    fn a_provider_quota_block_is_visible_in_the_agent_status_projection() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-1",
+            "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
+            Some("2026-08-22T03:46:00Z"),
+            "2026-08-16T02:26:00Z",
+        );
+
+        let status = monitor.agent_status();
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .expect("the held issue stays in the inbox");
+
+        assert!(
+            !status.active_launches.contains(&42),
+            "a held launch must not still read as active"
+        );
+        assert_ne!(
+            row.state,
+            MonitorInboxState::Launched,
+            "reporting `launched` is what hid this for 23 minutes"
+        );
+        assert_eq!(
+            row.retry_not_before.as_deref(),
+            Some("2026-08-22T03:46:00Z")
+        );
+        assert_eq!(
+            row.retry_hold_reason.as_deref(),
+            Some("Codex usage limit reached — resumes after 2026-08-22T03:46:00Z")
+        );
+    }
+
+    /// Issue #3616: the same source-identity rule the writer-conflict recovery
+    /// enforces. An issue number alone must not let a stale window revoke a
+    /// newer launch.
+    #[test]
+    fn a_provider_quota_block_from_a_stale_window_is_rejected() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+
+        let outcome = monitor.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-superseded",
+            "Codex usage limit reached",
+            None,
+            "2026-08-16T02:26:00Z",
+        );
+
+        assert_eq!(outcome, IssueMonitorProviderUsageLimitOutcome::Rejected);
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the live launch keeps its slot when a stale window reports"
+        );
+    }
+
+    /// Issue #3616 AC-5: a PM that switched launch profile must be able to run
+    /// the work now on a healthy provider instead of waiting out someone
+    /// else's billing cycle.
+    #[test]
+    fn clearing_the_hold_lets_the_pm_relaunch_before_the_reset() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-1",
+            "Codex usage limit reached",
+            Some("2026-08-22T03:46:00Z"),
+            "2026-08-16T02:26:00Z",
+        );
+        assert!(!monitor.retry_ready(42, "2026-08-16T02:30:00Z"));
+
+        assert!(monitor.clear_retry_hold(42));
+
+        assert!(monitor.retry_ready(42, "2026-08-16T02:30:00Z"));
+        assert_eq!(
+            monitor
+                .agent_status()
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .and_then(|row| row.retry_hold_reason.clone()),
+            None,
+            "an overridden hold must not keep advertising a reset that no longer gates anything"
+        );
+    }
+
+    /// Issue #3616: an ordinary transient retry must not inherit a quota
+    /// reason. The reason describes why *this* backoff exists.
+    #[test]
+    fn a_later_transient_backoff_replaces_the_quota_hold_reason() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-1",
+            "Codex usage limit reached",
+            Some("2026-08-22T03:46:00Z"),
+            "2026-08-16T02:26:00Z",
+        );
+
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+        monitor.record_autonomous_failure(
+            42,
+            FailureClass::Transient,
+            "boom",
+            "2026-08-16T03:00:00Z",
+        );
+
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_hold_reason.clone()),
+            None,
+            "a transient failure backoff is not a provider quota hold"
         );
     }
 

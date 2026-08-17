@@ -254,6 +254,24 @@ pub fn compose_window_state_with_approval_wait(
     }
 }
 
+/// Issue #3616: present a quota-blocked agent pane as waiting, not finished.
+///
+/// The PTY really did exit, so the underlying state is honest — but `Stopped`
+/// renders as `DONE`, which claims the work completed, and `Error` claims the
+/// agent broke. Neither happened: the account ran out and the conversation is
+/// intact. `Waiting` is the existing state for "this pane needs something from
+/// outside before it can continue", which is exactly the situation.
+///
+/// Deliberately narrow: only the two terminal states are overridden, so a live
+/// pane that merely rendered the sentence keeps whatever state it had.
+pub fn apply_provider_quota_block(composed: WindowState, quota_blocked: bool) -> WindowState {
+    if quota_blocked && matches!(composed, WindowState::Stopped | WindowState::Error) {
+        WindowState::Waiting
+    } else {
+        composed
+    }
+}
+
 pub fn is_live_agent_hook_state(state: WindowState) -> bool {
     matches!(
         state,

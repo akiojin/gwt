@@ -4654,6 +4654,7 @@ impl AppRuntime {
         }
         self.clear_agent_window_startup_restore(window_id);
         self.recoverable_agent_error_windows.remove(window_id);
+        self.provider_quota_holds.remove(window_id);
         self.window_hook_states.remove(window_id);
         let session = self.active_agent_sessions.remove(window_id);
         self.revoke_agent_capability_for_window(window_id);

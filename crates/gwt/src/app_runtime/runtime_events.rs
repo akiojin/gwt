@@ -24,6 +24,10 @@ use super::{
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
 const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
+/// Issue #3616: how many trailing screen lines are searched for a provider
+/// quota notice. Wider than the error tail because a CLI can print a prompt or
+/// blank frame after the notice, and the notice itself soft-wraps.
+const QUOTA_NOTICE_TAIL_LINES: usize = 8;
 /// Provider TUIs commonly clear and redraw the approval block after Enter.
 /// This bounded settle window avoids a false Running frame between the clear
 /// and the redraw without ever blocking the tao event loop.
@@ -78,9 +82,51 @@ fn resume_writer_conflict_outer_offset(line: &str) -> Option<usize> {
     })
 }
 
+/// Classify a typed failure out of an agent's exit detail.
+///
+/// Two causes are typed today, and they are checked in this order because they
+/// answer different questions. A provider quota block is a property of the
+/// account and applies to any session mode, so it is tested first; the
+/// late-resume writer race can only happen while resuming.
+pub(super) fn classify_issue_monitor_failure(
+    detail: &str,
+    session_mode: gwt_agent::SessionMode,
+) -> Option<gwt::IssueMonitorFailure> {
+    if let Some(failure) = classify_provider_usage_limit(detail) {
+        return Some(failure);
+    }
+    classify_resume_writer_conflict(detail, session_mode)
+}
+
+/// Issue #3616: the provider stated it is out of quota.
+///
+/// Detection lives in `gwt_core::usage` because the message formats and their
+/// reset clauses are provider domain knowledge, not runtime-event knowledge.
+/// `Local::now()` is the reference zone on purpose: both providers print a
+/// local wall clock with no offset, so the machine running the agent is the
+/// only anchor available.
+pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
+    let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
+    Some(provider_usage_limit_failure(&notice))
+}
+
+pub(super) fn provider_usage_limit_failure(
+    notice: &gwt_core::usage::ProviderLimitNotice,
+) -> gwt::IssueMonitorFailure {
+    gwt::IssueMonitorFailure::ProviderUsageLimit {
+        provider: match notice.provider {
+            gwt_core::usage::UsageProvider::Codex => "codex".to_string(),
+            gwt_core::usage::UsageProvider::ClaudeCode => "claude".to_string(),
+        },
+        resets_at: notice
+            .resets_at
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+    }
+}
+
 /// Classify the provider's exact late-resume writer race without promoting
 /// unrelated launch failures that happen to mention a writer.
-pub(super) fn classify_issue_monitor_failure(
+fn classify_resume_writer_conflict(
     detail: &str,
     session_mode: gwt_agent::SessionMode,
 ) -> Option<gwt::IssueMonitorFailure> {
@@ -636,23 +682,46 @@ impl AppRuntime {
             }
         }
 
+        // Issue #3616: read the provider's own explanation before anything is
+        // torn down. A clean exit discards the screen entirely (the branch
+        // below only composes a detail for `Error`), which is exactly why a
+        // quota-dead Codex pane looked like finished work.
+        let quota_notice =
+            self.provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail);
+        match quota_notice.as_ref() {
+            Some(notice) => {
+                self.provider_quota_holds
+                    .insert(id.clone(), provider_usage_limit_failure(notice));
+            }
+            None => {
+                self.provider_quota_holds.remove(&id);
+            }
+        }
         let keep_active_agent_session_for_recovery = !exit_confirmed
+            || quota_notice.is_some()
             || self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
         // Issue #3274: an errored agent runtime is torn down below, dropping
         // its vt100 state — a client that reconnects later replays nothing and
         // an empty Error window gives no clue why. Capture the final screen
         // tail into the persistent detail before the state is gone; the raw
         // output stays available in logs.
-        let detail = if matches!(status, WindowProcessStatus::Error)
+        let detail = if let Some(notice) = quota_notice.as_ref() {
+            Some(gwt_core::usage::describe_provider_limit_notice(notice))
+        } else if matches!(status, WindowProcessStatus::Error)
             && !approval_was_active
             && matches!(
                 self.window_preset(&id),
                 Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
-            ) {
+            )
+        {
             compose_agent_error_detail(detail, self.final_screen_tail(&id).as_deref())
         } else {
             detail
         };
+        // The hook state must still be dropped for a quota block. Keeping a
+        // live `Idle` would make `compose_window_state_with_active_session`
+        // resurrect the pane as Idle — a healthy-looking agent — and the quota
+        // overlay below only rewrites the two terminal states.
         if matches!(status, WindowProcessStatus::Error) {
             self.window_hook_states.remove(&id);
         }
@@ -779,12 +848,18 @@ impl AppRuntime {
         // the Monitor decides completion from the PR, not from an exit code,
         // so the only claim being made here is "this launch is over". Naming
         // it a success would be the lie, not naming it a failure.
+        //
+        // Issue #3616: a quota block composes to `Waiting` (the pane is not
+        // done), so it is named here explicitly. The slot still has to be
+        // released — the process is gone — but the Monitor receives it as a
+        // typed hold rather than an attempt-consuming failure.
         if exit_confirmed
             && is_agent_window
-            && matches!(
-                composed_status,
-                WindowProcessStatus::Error | WindowProcessStatus::Stopped
-            )
+            && (quota_notice.is_some()
+                || matches!(
+                    composed_status,
+                    WindowProcessStatus::Error | WindowProcessStatus::Stopped
+                ))
         {
             let default_message = if composed_status == WindowProcessStatus::Error {
                 "Agent entered error state"
@@ -839,17 +914,60 @@ impl AppRuntime {
     /// into one detail-sized string. `None` when the window has no runtime
     /// (already torn down) or the screen is blank (Issue #3274).
     fn final_screen_tail(&self, id: &str) -> Option<String> {
+        self.screen_tail(id, AGENT_ERROR_TAIL_LINES, " ")
+    }
+
+    fn screen_tail(&self, id: &str, lines: usize, separator: &str) -> Option<String> {
         let runtime = self.runtimes.get(id)?;
         let pane = runtime.pane.lock().ok()?;
         let contents = pane.screen().contents();
-        let lines: Vec<&str> = contents
+        let screen_lines: Vec<&str> = contents
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
-        let start = lines.len().saturating_sub(AGENT_ERROR_TAIL_LINES);
-        let tail = lines[start..].join(" ");
+        let start = screen_lines.len().saturating_sub(lines);
+        let tail = screen_lines[start..].join(separator);
         (!tail.is_empty()).then_some(tail)
+    }
+
+    /// Issue #3616: whether this exit is the provider saying it is out of
+    /// quota.
+    ///
+    /// Both the exit detail and the final screen are searched. The detail alone
+    /// is not enough (a clean exit carries only "Process exited"), and the
+    /// screen alone is not enough either (a launch-path failure reports through
+    /// the detail before a pane exists). Only a confirmed exit of an agent pane
+    /// qualifies — a live agent that merely *rendered* the sentence is still
+    /// working.
+    fn provider_quota_notice_for_exit(
+        &self,
+        id: &str,
+        status: WindowProcessStatus,
+        exit_confirmed: bool,
+        detail: &Option<String>,
+    ) -> Option<gwt_core::usage::ProviderLimitNotice> {
+        if !exit_confirmed
+            || !matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+            || !matches!(
+                self.window_preset(id),
+                Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
+            )
+        {
+            return None;
+        }
+        let mut haystack = String::new();
+        if let Some(detail) = detail.as_deref() {
+            haystack.push_str(detail);
+            haystack.push('\n');
+        }
+        if let Some(tail) = self.screen_tail(id, QUOTA_NOTICE_TAIL_LINES, "\n") {
+            haystack.push_str(&tail);
+        }
+        gwt_core::usage::detect_provider_limit_notice(&haystack, &chrono::Local::now())
     }
 
     pub(crate) fn handle_runtime_hook_event(
@@ -945,6 +1063,9 @@ impl AppRuntime {
             return events;
         };
         self.recoverable_agent_error_windows.remove(&window_id);
+        // Issue #3616: a hook arrival means the agent is running again, so any
+        // quota hold recorded for this pane is stale.
+        self.provider_quota_holds.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         if !hook_state_changed && !approval_wait_cleared {

@@ -2950,6 +2950,7 @@ mod tests {
             window_approval_waiting: std::collections::HashMap::new(),
             approval_settle_epoch: 0,
             recoverable_agent_error_windows: std::collections::HashSet::new(),
+            provider_quota_holds: std::collections::HashMap::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
