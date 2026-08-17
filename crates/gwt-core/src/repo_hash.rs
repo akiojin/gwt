@@ -216,6 +216,52 @@ fn repository_identity_candidate(repo_root: &Path) -> Option<RepoIdentityCandida
     })
 }
 
+/// The repository `path` belongs to, identified by its canonical git common
+/// directory.
+///
+/// Issue #3607: `~/.gwt/projects/<hash>` is a *store* scope, and one repository
+/// can end up owning two stores once scope resolution splits (#3466). The git
+/// common dir does not split — the main worktree, every linked worktree, and
+/// the `pm/worktree` gwt materializes inside a store all point at the same one
+/// — so it is the identity a per-repository singleton must key on. It is also
+/// defined for a repository with no `origin`, which [`detect_repo_hash`] is
+/// not.
+///
+/// Returns `None` when `path` is neither a repository/worktree nor a Nested
+/// Bare + Worktree layout root holding exactly one bare repository; an
+/// ambiguous layout root is deliberately not collapsed to whichever child
+/// sorts first.
+pub fn repository_common_dir(path: &Path) -> Option<PathBuf> {
+    if let Some(git_dir) = resolve_git_dir(path) {
+        return Some(canonical_or_owned(&resolve_common_git_dir(&git_dir)));
+    }
+    let mut candidates: Vec<PathBuf> = child_bare_repositories(path)
+        .into_iter()
+        .map(|bare| canonical_or_owned(&bare))
+        .collect();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Whether `left` and `right` are inside the same repository.
+///
+/// A path that cannot be resolved to a repository never matches, including
+/// against another unresolvable path: "identity unknown" must not read as
+/// "identical" for a singleton gate (fail-open would let a duplicate through).
+pub fn same_repository(left: &Path, right: &Path) -> bool {
+    match (repository_common_dir(left), repository_common_dir(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn canonical_or_owned(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Bare repositories sitting *directly* under `repo_path`, sorted by path.
 ///
 /// Only direct children qualify, so an unrelated deep checkout can never
@@ -901,6 +947,86 @@ mod tests {
         assert_eq!(repo_hash.as_str(), wt_hash.as_str());
     }
 
+    /// Issue #3607 AC-1: PM uniqueness keys on the repository, and the two
+    /// stores a scope split produces both hold `pm/worktree` linked worktrees
+    /// of the *same* repository. Those must be recognised as one repository
+    /// even though their store hashes differ.
+    #[test]
+    fn repository_common_dir_is_shared_by_main_worktree_and_linked_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        commit_file(&repo, "README.md", "# repo\n");
+
+        let first = dir.path().join("store-a-pm");
+        let second = dir.path().join("store-b-pm");
+        add_worktree(&repo, "pm/a", &first);
+        add_worktree(&repo, "pm/b", &second);
+
+        let expected = repository_common_dir(&repo).expect("main worktree common dir");
+        assert_eq!(
+            repository_common_dir(&first).as_ref(),
+            Some(&expected),
+            "a linked worktree must resolve to the repository's common dir"
+        );
+        assert_eq!(repository_common_dir(&second).as_ref(), Some(&expected));
+        assert!(same_repository(&first, &second));
+        assert!(same_repository(&first, &repo));
+    }
+
+    /// The layout root that split the store in #3466 has no `.git` of its own,
+    /// so it must resolve through its nested bare repository to the same
+    /// common dir its worktrees use.
+    #[test]
+    fn repository_common_dir_resolves_a_nested_bare_layout_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout_root = dir.path().join("layout");
+        fs::create_dir_all(&layout_root).unwrap();
+        let bare = layout_root.join("project.git");
+        init_bare_git_repo(&bare);
+
+        let worktree = layout_root.join("work");
+        add_worktree(&bare, "feature/one", &worktree);
+
+        let from_root = repository_common_dir(&layout_root).expect("layout root common dir");
+        let from_worktree = repository_common_dir(&worktree).expect("worktree common dir");
+        assert_eq!(
+            from_root, from_worktree,
+            "the layout root and its worktree are one repository"
+        );
+        assert!(same_repository(&layout_root, &worktree));
+    }
+
+    #[test]
+    fn repository_common_dir_separates_unrelated_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        let right = dir.path().join("right");
+        init_git_repo(&left);
+        init_git_repo(&right);
+
+        assert_ne!(
+            repository_common_dir(&left),
+            repository_common_dir(&right),
+            "unrelated repositories must not share an identity"
+        );
+        assert!(!same_repository(&left, &right));
+    }
+
+    /// A singleton gate must fail closed: two paths that are not repositories
+    /// are not thereby "the same repository".
+    #[test]
+    fn repository_common_dir_is_none_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        let other = dir.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+
+        assert_eq!(repository_common_dir(&plain), None);
+        assert!(!same_repository(&plain, &other));
+    }
+
     #[test]
     fn compute_path_hash_is_deterministic_for_same_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -915,7 +1041,10 @@ mod tests {
         scrub_git_env(&mut init_cmd);
         let output = init_cmd.output().expect("git init");
         assert!(output.status.success(), "git init failed");
+        init_git_identity(path);
+    }
 
+    fn init_git_identity(path: &Path) {
         let mut email_cmd = crate::process::hidden_command("git");
         email_cmd
             .args(["config", "user.email", "test@example.com"])
@@ -931,6 +1060,52 @@ mod tests {
         scrub_git_env(&mut name_cmd);
         let name = name_cmd.output().expect("git config user.name");
         assert!(name.status.success(), "git config user.name failed");
+    }
+
+    fn init_bare_git_repo(path: &Path) {
+        let mut init_cmd = crate::process::hidden_command("git");
+        init_cmd.args(["init", "--bare", path.to_str().unwrap()]);
+        scrub_git_env(&mut init_cmd);
+        let output = init_cmd.output().expect("git init --bare");
+        assert!(output.status.success(), "git init --bare failed");
+
+        // A bare repository has no commit to branch from, so seed one through a
+        // scratch clone; `git worktree add` needs a resolvable HEAD.
+        let scratch = path.parent().expect("parent").join(".seed");
+        let mut clone_cmd = crate::process::hidden_command("git");
+        clone_cmd.args(["clone", path.to_str().unwrap(), scratch.to_str().unwrap()]);
+        scrub_git_env(&mut clone_cmd);
+        assert!(
+            clone_cmd.output().expect("git clone").status.success(),
+            "git clone failed"
+        );
+        init_git_identity(&scratch);
+        commit_file(&scratch, "README.md", "# seed\n");
+        let mut push_cmd = crate::process::hidden_command("git");
+        push_cmd
+            .args(["push", "origin", "HEAD"])
+            .current_dir(&scratch);
+        scrub_git_env(&mut push_cmd);
+        let push = push_cmd.output().expect("git push");
+        assert!(
+            push.status.success(),
+            "git push failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+        fs::remove_dir_all(&scratch).expect("remove seed clone");
+    }
+
+    fn add_worktree(git_root: &Path, branch: &str, target: &Path) {
+        let mut cmd = crate::process::hidden_command("git");
+        cmd.args(["worktree", "add", "-b", branch, target.to_str().unwrap()])
+            .current_dir(git_root);
+        scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn add_origin(path: &Path, url: &str) {
