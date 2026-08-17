@@ -3668,6 +3668,7 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
 #[test]
 fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let foreign_project = temp.path().join("foreign-project");
     let authenticated_project = temp.path().join("authenticated-project");
     fs::create_dir_all(&foreign_project).expect("foreign project");
@@ -45893,6 +45894,7 @@ fn resume_branch_index_stays_optimistic_until_the_project_is_scanned() {
 #[test]
 fn resume_branch_index_accepts_existing_worktree_without_branch_evidence() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("live-worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let session = gwt_agent::Session::new(&worktree, "work/unknown", gwt_agent::AgentId::Codex);
@@ -46888,6 +46890,7 @@ fn work_events_ingest_attempt_is_throttled_per_project() {
 #[test]
 fn work_pr_titles_scan_has_its_own_long_window_and_is_per_project() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
     let root = temp.path().join("repo");
 
@@ -46915,6 +46918,7 @@ fn work_pr_titles_scan_has_its_own_long_window_and_is_per_project() {
 #[test]
 fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
     let root = temp.path().join("repo");
 

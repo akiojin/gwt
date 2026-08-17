@@ -980,6 +980,7 @@ mod tests {
     #[test]
     fn missing_event_store_still_rejects_a_non_directory_managed_parent() {
         let root = tempfile::tempdir().expect("managed root");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         std::fs::create_dir_all(root.path().join(".gwt")).expect("create .gwt");
         std::fs::write(root.path().join(".gwt/work"), b"not a directory")
             .expect("replace managed parent with a file");
@@ -1243,6 +1244,7 @@ mod tests {
     #[test]
     fn ingest_dual_reads_local_legacy_and_canonical_shards_exactly_once() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1315,6 +1317,7 @@ mod tests {
     #[test]
     fn unchanged_pass_does_not_read_immutable_local_shard_bytes() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1356,6 +1359,7 @@ mod tests {
     #[test]
     fn ingest_restores_shard_committed_only_on_fetched_origin_ref() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1414,6 +1418,7 @@ mod tests {
     #[test]
     fn invalid_shard_defers_rebuild_and_preserves_existing_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1517,6 +1522,7 @@ mod tests {
 
     fn assert_missing_local_managed_event_parent_is_authoritative_deletion(managed_parent: &str) {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1571,6 +1577,7 @@ mod tests {
     #[test]
     fn symlinked_local_event_store_defers_rebuild_without_mutating_projection_or_state() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1629,6 +1636,7 @@ mod tests {
     #[test]
     fn symlinked_local_event_shard_defers_rebuild_without_mutating_projection_or_state() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1687,6 +1695,7 @@ mod tests {
     #[test]
     fn nested_ref_shard_defers_rebuild_without_mutating_projection_or_state() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1765,6 +1774,7 @@ mod tests {
     #[test]
     fn symlink_mode_ref_shard_defers_rebuild_without_mutating_projection_or_state() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1834,6 +1844,7 @@ mod tests {
     #[test]
     fn incomplete_event_schema_shard_defers_rebuild_and_preserves_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1878,6 +1889,7 @@ mod tests {
     #[test]
     fn future_opaque_event_shard_is_source_valid_and_skipped() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1943,6 +1955,7 @@ mod tests {
     #[test]
     fn shard_source_list_fingerprint_rebuilds_after_deletion() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -2001,6 +2014,7 @@ mod tests {
     #[test]
     fn tracked_source_list_rebuilds_after_local_legacy_source_deletion() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -2046,6 +2060,7 @@ mod tests {
     #[test]
     fn tracked_source_list_rebuilds_after_origin_legacy_ref_deletion() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -2117,6 +2132,7 @@ mod tests {
     #[test]
     fn ingest_reads_bucketed_local_shard() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -2172,6 +2188,7 @@ mod tests {
     #[test]
     fn first_run_empty_source_set_preserves_existing_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -2204,6 +2221,7 @@ mod tests {
     #[test]
     fn origin_ref_discovery_ignores_recognized_writer_temp_residue() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -2271,6 +2289,7 @@ mod tests {
     #[test]
     fn local_source_discovery_ignores_only_recognized_writer_temp_residue() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -3119,6 +3138,7 @@ mod tests {
     #[test]
     fn rebuild_discovers_bucketed_shard_created_after_initial_scan() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
