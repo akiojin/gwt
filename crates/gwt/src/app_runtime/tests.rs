@@ -3554,6 +3554,78 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         .contains_key("tab-foreign::agent-foreign"));
 }
 
+/// Issue #3503: the pane that could not be cleaned up had failed *before* its
+/// PTY started, so it carries no session binding at all. The self-session
+/// protection compares the window's real binding, so `None` is not "may be
+/// yourself" — it is a peer pane and closes. Locking this keeps the guard
+/// identity-shaped instead of drifting back to a state- or authority-shaped
+/// one, and covers `pane.stop`, which resolves to the same close command.
+#[test]
+fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-caller",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-caller", Some("caller-session".to_string())));
+    let launch_failed = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    let launch_failed_window_id = combined_window_id("tab-project", &launch_failed.id);
+    assert!(
+        tab.workspace
+            .window(&launch_failed.id)
+            .expect("launch-failed window")
+            .session_id
+            .is_none(),
+        "a pane that failed before PTY start carries no session binding"
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    // The PM is a conversational role without a linked owner, so its principal
+    // never carries an active execution binding.
+    let owner_less_principal =
+        AgentSessionPrincipal::for_test(&project, "caller-session").expect("owner-less principal");
+    assert!(!owner_less_principal.authorizes_producing_mutation());
+
+    let closed = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        owner_less_principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: launch_failed_window_id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(!closed.is_empty());
+    assert!(!runtime.window_lookup.contains_key(&launch_failed_window_id));
+
+    let refused = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        owner_less_principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-caller".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        refused.is_empty(),
+        "self-session protection still refuses an uncorrelated close of the caller's own pane"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-project::agent-caller"));
+}
+
 #[test]
 fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     let temp = tempdir().expect("tempdir");

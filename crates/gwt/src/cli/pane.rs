@@ -487,8 +487,12 @@ async fn close_pane(
     if resolve_window_id(&windows, &resolved_id).is_none() {
         Ok(format!("closed {requested_id}\n"))
     } else {
+        // Issue #3503: state the observation, not a cause. The old wording
+        // asserted "this is your own Session and needs a correlated
+        // acceptance", which sent the #3503 diagnosis after a self-close guard
+        // that was never involved — the close was being refused elsewhere.
         Err(format!(
-            "pane close: backend did not close {requested_id}; the target may be this authenticated Session and requires a correlated acceptance"
+            "pane close: backend did not close {requested_id}; it is still present in the authenticated project scope"
         ))
     }
 }
@@ -2087,8 +2091,8 @@ mod tests {
                 let received_kinds = server.await.expect("pane mock task");
 
                 assert!(
-                    error.contains("requires a correlated acceptance"),
-                    "{error}"
+                    error.contains("it is still present in the authenticated project scope"),
+                    "the refusal reports what was observed and blames no particular guard: {error}"
                 );
                 assert_eq!(
                     received_kinds,
