@@ -318,6 +318,14 @@ async fn send_pm_pane_input(
             return match reply.status.as_str() {
                 "delivered" => Ok(format!("pm message delivered to {window_id}\n")),
                 "queued" => Ok(format!("pm message queued for {window_id}\n")),
+                // Issue #3608 (AC-2): an unacknowledged submit is not a failed
+                // one. The input reached the pane; only the target's
+                // acknowledgement is still outstanding, so this must never
+                // read as "the message did not arrive".
+                "unverified" => Err(format!(
+                    "pm message delivery is unverified: {}",
+                    reply.reason.unwrap_or_else(|| "unknown reason".to_string())
+                )),
                 "failed" => Err(format!(
                     "pm message failed: {}",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
@@ -2360,6 +2368,88 @@ mod tests {
             assert_eq!(mutations[0]["operation_id"], mutations[1]["operation_id"]);
             assert_eq!(mutations[0]["window_id"], mutations[1]["window_id"]);
             assert_eq!(mutations[0]["text"], mutations[1]["text"]);
+        });
+    }
+
+    /// Issue #3608 (AC-2): "the acknowledgement never arrived" and "the input
+    /// never committed" are different answers and must not collapse into one
+    /// error. Folding them together is what made the PM read a delivered
+    /// message as undelivered.
+    #[test]
+    fn pm_message_unverified_and_failed_are_distinct_caller_outcomes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let mut outcomes = Vec::new();
+            for (status, reason) in [
+                ("unverified", "submit was not acknowledged"),
+                ("failed", "input mutation was refused"),
+            ] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind PM outcome mock");
+                let address = listener.local_addr().expect("PM outcome mock address");
+                let mut target = window("tab::codex-1", WindowPreset::Codex, Some("codex"));
+                target.session_id = Some("codex-session".to_string());
+                let workspace = workspace_state_for_test("/repo/pm", vec![target]);
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.expect("accept PM connection");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept PM websocket");
+                    assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                    socket
+                        .send(Message::Text(workspace.to_string().into()))
+                        .await
+                        .expect("send workspace state");
+                    let mutation = next_frontend_json(&mut socket).await;
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "pm_message_send_result",
+                                "operation_id": mutation["operation_id"],
+                                "status": status,
+                                "window_id": mutation["window_id"],
+                                "reason": reason,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("send PM outcome");
+                });
+                let error = send_pm_pane_input(
+                    &format!("ws://{address}/internal/pane-ws"),
+                    None,
+                    "codex-1",
+                    "one outcome body",
+                )
+                .await
+                .expect_err("a non-delivered outcome is not a success");
+                server.await.expect("PM outcome mock task");
+                outcomes.push(error);
+            }
+
+            let unverified = &outcomes[0];
+            let failed = &outcomes[1];
+            assert!(
+                unverified.contains("unverified")
+                    && unverified.contains("submit was not acknowledged")
+                    && !unverified.contains("pm message failed")
+                    && !unverified.contains("invalid status"),
+                "{unverified}"
+            );
+            assert!(
+                failed.contains("pm message failed") && !failed.contains("unverified"),
+                "{failed}"
+            );
         });
     }
 

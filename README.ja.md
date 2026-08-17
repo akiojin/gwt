@@ -345,6 +345,11 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
   PM だけです。他のエージェントセッションは GUI 操作が必要です。マージ判断は
   影響を受けません — 上記の強い自動ゲートが引き続きすべてのマージを決めます。
+- PM は project store 単位ではなく**リポジトリ単位**で 1 つです。state が
+  2 つの store に分かれたリポジトリでも PM は 1 本だけになります。JSON operation
+  `pm.status` はリポジトリ内の全登録を一覧し、`pm.stop` は CLI から PM を
+  停止します。登録済み PM は孤児化した PM を停止でき、自分自身も GUI 操作なしで
+  停止できます。
 
 設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
 

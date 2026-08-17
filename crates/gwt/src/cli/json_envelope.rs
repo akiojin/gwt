@@ -517,6 +517,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
+        "pm.stop" | "pm.deregister" => CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
+            project_root: optional_string(params, "project_root")?,
+            session_id: optional_string(params, "session_id")?,
+        }),
         "workflow.bypass" => CliCommand::Workflow(WorkflowCommand::Bypass {
             mode: WorkflowBypassMode::parse(&required_string(params, "mode")?).ok_or(
                 CliParseError::InvalidValue {
@@ -2393,6 +2397,45 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    // Issue #3607: PM stop/deregister parse variants.
+    #[test]
+    fn pm_stop_variants() {
+        assert!(matches!(
+            ok("pm.stop", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
+                project_root: None,
+                session_id: None,
+            })
+        ));
+        match ok(
+            "pm.deregister",
+            json!({"project_root": "/tmp/elsewhere", "session_id": "b0801016-orphan"}),
+        ) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::Stop {
+                project_root,
+                session_id,
+            }) => {
+                assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
+                assert_eq!(session_id.as_deref(), Some("b0801016-orphan"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// The stop side must never be mistaken for a read-only diagnostic: it
+    /// clears a durable registration.
+    #[test]
+    fn pm_stop_is_not_a_read_only_operation() {
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation("pm.status"),
+            "pm.status stays read-only"
+        );
+        assert!(
+            !crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation("pm.stop"),
+            "pm.stop writes durable PM state"
+        );
     }
 
     // SPEC-3248 P8a: execution settlement parse variants.

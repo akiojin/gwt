@@ -1048,6 +1048,24 @@ fn issue_cache_root(repo_path: &Path) -> PathBuf {
     gwt_cache_dir().join("issues").join(repo_hash.as_str())
 }
 
+/// Issue #3609: the issue-link cache handed to `AppRuntime`, derived from the
+/// caller's temp root the way `sessions_dir` / `log_dir` / `session_state_path`
+/// already are.
+///
+/// Resolving `gwt_cache_dir()` here instead made the shared runtime fixture
+/// read the process-global `HOME` at construction time, so the 200+ tests that
+/// build a runtime without owning the home inherited whatever tempdir a
+/// parallel test had installed — the mechanism behind #3411 / #3414 / #3601.
+///
+/// The layout mirrors an isolated gwt home (`<home>/.gwt/cache`) on purpose:
+/// tests that seed the store through [`write_issue_link_store`] reach it via
+/// `gwt_cache_dir()`, because `knowledge_bridge::load_linked_branches` still
+/// resolves that path itself rather than taking the runtime's field. Callers
+/// that pin their home to the same root therefore see one cache, not two.
+fn issue_link_cache_dir_for(temp_root: &Path) -> PathBuf {
+    temp_root.join(".gwt").join("cache")
+}
+
 fn write_issue_link_store(repo_path: &Path, branches: HashMap<String, u64>) {
     let repo_hash = detect_repo_hash(repo_path).expect("repo hash");
     let path = gwt_cache_dir()
@@ -1205,6 +1223,14 @@ fn write_fake_agent_command(temp_root: &Path, command: &str) -> PathBuf {
 
 fn write_fake_codex(temp_root: &Path) -> PathBuf {
     write_fake_agent_command(temp_root, "codex")
+}
+
+/// Issue #3611: a scanned-but-empty branch snapshot. Fixtures that used to
+/// pass a non-repository path (where every `git show-ref` failed) get the same
+/// verdict — "no branch survives" — without any Git process.
+fn scanned_without_branches() -> super::ResumeBranchIndex<'static> {
+    static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    super::ResumeBranchIndex::scanned(Some(EMPTY.get_or_init(HashSet::new)))
 }
 
 fn write_fake_git_recorder(temp_root: &Path) -> PathBuf {
@@ -1649,7 +1675,8 @@ fn workspace_work_agent_view_attaches_session_history() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
 
     let ids: Vec<&str> = view
         .sessions
@@ -1662,8 +1689,11 @@ fn workspace_work_agent_view_attaches_session_history() {
 
     // A Work with no persisted Session yields an empty Session list, not a panic.
     let empty_index = super::work_session_index(&[]);
-    let empty_view =
-        super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index, Path::new("/"));
+    let empty_view = super::workspace_work_agent_view_from_ref(
+        &agent_ref,
+        &empty_index,
+        scanned_without_branches(),
+    );
     assert!(empty_view.sessions.is_empty());
 }
 
@@ -3350,6 +3380,7 @@ fn sample_runtime_with_events(
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         work_merged_branches: HashMap::new(),
+        work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
         work_cleanup_ready_branches: HashMap::new(),
@@ -3364,6 +3395,7 @@ fn sample_runtime_with_events(
         ),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
@@ -3375,7 +3407,7 @@ fn sample_runtime_with_events(
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
-        issue_link_cache_dir: gwt_cache_dir(),
+        issue_link_cache_dir: issue_link_cache_dir_for(temp_root),
         knowledge_related_snapshot: Default::default(),
         knowledge_monitor_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
@@ -9271,6 +9303,10 @@ fn app_runtime_open_intake_session_without_active_project_uses_intake_error_copy
 #[test]
 fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
+    // Issue #3609: the reservation directory this path creates must land in
+    // this test's tempdir, not in whichever one a parallel test installed as
+    // the process-global `HOME`.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab(
@@ -22844,7 +22880,12 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 /// so this still cannot loop.
 #[test]
 fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    // Issue #3609: the other 387 acquisitions in this binary recover from a
+    // poisoned mutex. `expect` here turned any unrelated panic under the lock
+    // into a second, misleading failure in the same run.
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let missing_pin = root.path().join("missing/gwtd");
@@ -24395,7 +24436,7 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        &repo,
+        scanned_without_branches(),
     );
 
     assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
@@ -24490,7 +24531,7 @@ fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        &repo,
+        scanned_without_branches(),
     );
 
     assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
@@ -29090,6 +29131,206 @@ fn active_work_projection_source_has_no_live_process_scan_helper() {
     assert!(
         !source.contains("fn live_process_worktree_paths_for_cleanup("),
         "all-OS-process enumeration must run in the background merge scan, not projection"
+    );
+}
+
+/// Issue #3611 AC-1/AC-2/AC-3: a Session whose worktree was deleted used to
+/// fall through `session_exact_resume_materializable` into
+/// `git rev-parse --git-common-dir` + `git show-ref` **per Session**, on the
+/// GUI event-loop thread. `pane.*` is served from that same single-threaded
+/// loop, so its response latency *is* the projection's occupancy (#3510: 6ms
+/// idle, >2s during a scan). At this fixture's scale the old path meant ~384
+/// short-lived Git processes (~6s) per build.
+///
+/// Both assertions target that cost: the spawn count must stay flat at zero
+/// however many Sessions exist, and the build must finish inside a budget well
+/// below the pre-fix cost while leaving ~40x headroom over the measured
+/// process-free build (~45ms), so a loaded machine cannot flake it.
+#[test]
+fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    for index in 0..128 {
+        let branch = format!("work/missing-worktree-{index}");
+        // Deliberately never created: this is the historical Session whose
+        // worktree is gone but whose branch may still exist.
+        let worktree_path = repo.join("work").join(index.to_string());
+        let session_id = format!("session-missing-worktree-{index}");
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            format!("work-missing-worktree-{index}"),
+            chrono::Utc::now(),
+        );
+        event.title = Some(format!("Missing worktree work {index}"));
+        event.agent_session_id = Some(session_id.clone());
+        event.agent_id = Some("codex".to_string());
+        let mut session =
+            gwt_agent::Session::new(&worktree_path, &branch, gwt_agent::AgentId::Codex);
+        session.id = session_id;
+        session.agent_session_id = Some(format!("conv-missing-worktree-{index}"));
+        session.project_state_root = Some(repo.clone());
+        session
+            .save(&sessions_dir)
+            .expect("save projection Session fixture");
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch),
+                worktree_path: Some(worktree_path),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work");
+    }
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .work_dirty_branches
+        .insert(repo.clone(), HashSet::new());
+    runtime
+        .work_live_process_branches
+        .insert(repo.clone(), HashSet::new());
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let started = Instant::now();
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let elapsed = started.elapsed();
+
+    assert_eq!(view.active_works.len(), 128);
+    assert!(
+        view.active_works
+            .iter()
+            .flat_map(|workspace| workspace.agents.iter())
+            .any(|agent| !agent.sessions.is_empty()),
+        "fixture must actually render Session rows, otherwise the probe is untested"
+    );
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "Session resumability must resolve from the background ref snapshot, \
+         never from a per-Session Git spawn on the event loop; invocations:\n{invocations}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "128 Sessions held the event loop for {elapsed:?}; \
+         `pane.*` cannot answer while this runs"
+    );
+}
+
+/// Issue #3611 AC-2: resumability answers come from the published branch-ref
+/// snapshot, so the verdict is exact once the background scan has run — a
+/// Session whose branch survives stays resumable, one whose branch is gone does
+/// not — without either case touching a Git process.
+#[test]
+fn active_work_projection_resumability_follows_published_branch_refs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let live_branch = "work/ref-snapshot-live";
+    let gone_branch = "work/ref-snapshot-gone";
+    for (index, branch) in [live_branch, gone_branch].into_iter().enumerate() {
+        let session_id = format!("session-ref-snapshot-{index}");
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            format!("work-ref-snapshot-{index}"),
+            chrono::Utc::now(),
+        );
+        event.title = Some(format!("Ref snapshot work {index}"));
+        event.agent_session_id = Some(session_id.clone());
+        event.agent_id = Some("codex".to_string());
+        let worktree_path = repo.join("work").join(format!("ref-snapshot-{index}"));
+        let mut session =
+            gwt_agent::Session::new(&worktree_path, branch, gwt_agent::AgentId::Codex);
+        session.id = session_id;
+        session.agent_session_id = Some(format!("conv-ref-snapshot-{index}"));
+        session.project_state_root = Some(repo.clone());
+        session
+            .save(&sessions_dir)
+            .expect("save projection Session fixture");
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree_path),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work");
+    }
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.apply_work_merge_status(
+        &repo,
+        HashMap::new(),
+        HashMap::new(),
+        HashSet::new(),
+        HashSet::new(),
+        Some(HashSet::from([
+            live_branch.to_string(),
+            format!("origin/{live_branch}"),
+            "main".to_string(),
+        ])),
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+
+    let resumable_by_branch: HashMap<String, bool> = view
+        .active_works
+        .iter()
+        .filter_map(|workspace| {
+            let branch = workspace.branch.clone()?;
+            let resumable = workspace
+                .agents
+                .iter()
+                .flat_map(|agent| agent.sessions.iter())
+                .any(|session| session.resumable);
+            Some((branch, resumable))
+        })
+        .collect();
+
+    assert_eq!(
+        resumable_by_branch.get(live_branch),
+        Some(&true),
+        "a Session whose branch is in the snapshot can re-materialize its worktree"
+    );
+    assert_eq!(
+        resumable_by_branch.get(gone_branch),
+        Some(&false),
+        "a Session with neither worktree nor branch is history-only"
     );
 }
 
@@ -36330,7 +36571,20 @@ fn app_runtime_compatibility_claim_driver_defers_while_scheduled_lease_is_held()
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    // Issue #3601: `issue_monitor_prefs_path_for_repo_path` resolves the
+    // process-global `HOME`, and a parallel test that points `HOME` at its own
+    // tempdir moves this fixture into that tempdir. Once that test drops its
+    // `TempDir`, the fixture is removed and the reload below silently returns
+    // `IssueMonitorPrefs::default()` instead of the persisted Prepared fence.
+    // Pinning the thread-local home keeps the fixture owned by this test.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    assert!(
+        prefs_path.starts_with(temp.path()),
+        "the durable fence fixture must be owned by this test, not by the process-global \
+         home a parallel test may replace and delete: {}",
+        prefs_path.display()
+    );
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
@@ -42553,6 +42807,14 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
 #[test]
 fn open_intake_session_opens_ephemeral_branchless_wizard() {
     let temp = tempdir().expect("tempdir");
+    // Issue #3609: `OpenIntakeSession` reaches
+    // `reserve_start_work_branch_name_for_project`, which resolves
+    // `gwt_project_dir_for_repo_path` from the process-global `HOME`. Without
+    // this pin the reservation directory is created inside whichever tempdir a
+    // parallel test installed, and this test fails with
+    // "Failed to reserve Start Work branch name: Invalid argument (os error 22)"
+    // once that tempdir is gone. Observed under parallel load on 2026-08-16.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -44091,7 +44353,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(works[0].session_agent_total, 12, "uncapped count reported");
@@ -44213,7 +44475,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let agents = &works[0].agents;
@@ -44421,7 +44683,7 @@ fn attach_registry_sessions_preserves_same_identity_agent_per_child_work() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44477,7 +44739,7 @@ fn attach_registry_sessions_keeps_usable_agent_only_within_one_child_work() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44529,7 +44791,7 @@ fn attach_registry_sessions_preserves_punctuation_distinct_custom_agent_identiti
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44576,7 +44838,7 @@ fn attach_registry_sessions_collapses_same_conversation_across_child_works() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert!(
@@ -44615,7 +44877,7 @@ fn attach_registry_sessions_caps_agents_across_all_child_works() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44658,7 +44920,7 @@ fn attach_registry_sessions_assigns_shared_session_to_one_canonical_child_work()
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert_eq!(
@@ -44702,7 +44964,7 @@ fn attach_registry_sessions_assigns_shared_session_to_latest_legacy_child_work()
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     assert!(works[0].works[0].agents.is_empty());
@@ -44797,7 +45059,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let ids: Vec<&str> = works[0]
@@ -44882,7 +45144,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let agents = &works[0].agents;
@@ -44918,7 +45180,8 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
     assert!(view.agent_id.is_some(), "agent_id borrowed from the ledger");
 }
@@ -45016,7 +45279,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let agents = &works[0].agents;
@@ -45076,7 +45339,6 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
     }
 
     let temp = tempdir().expect("tempdir");
-    let repo = temp.path().join("unity-cli");
     let issue_worktree = temp.path().join("unity-cli/work/issue-206");
     let other_worktree = temp.path().join("unity-cli/work/20260616-1102");
     fs::create_dir_all(&issue_worktree).expect("issue worktree");
@@ -45146,7 +45408,13 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         updated_at: "2026-06-19T13:49:00Z".to_string(),
     }];
 
-    super::attach_registry_sessions_to_active_works(&mut works, &[], None, &session_index, &repo);
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &session_index,
+        scanned_without_branches(),
+    );
 
     let agents = &works[0].agents;
     assert_eq!(agents.len(), 1, "only sessions owned by this row stay");
@@ -45190,7 +45458,8 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
 
     assert_eq!(
         view.sessions.len(),
@@ -45228,7 +45497,8 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+    let view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &index, scanned_without_branches());
 
     assert_eq!(view.sessions.len(), 1);
     assert!(
@@ -45265,13 +45535,72 @@ fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+    let known_branch_refs = super::resume_branch_refs_snapshot(&repo);
+    let view = super::workspace_work_agent_view_from_ref(
+        &agent_ref,
+        &index,
+        super::ResumeBranchIndex::scanned(Some(&known_branch_refs)),
+    );
 
     assert_eq!(view.sessions.len(), 1);
     assert!(
         view.sessions[0].resumable,
         "available branch lets exact Session Resume re-materialize the worktree"
     );
+}
+
+/// Issue #3611: the snapshot is keyed by short ref name, so both the local
+/// (`work/x`) and the remote-tracking (`origin/work/x`) form must satisfy the
+/// same check the retired `git show-ref refs/heads` + `refs/remotes/origin`
+/// pair performed.
+#[test]
+fn resume_branch_index_matches_local_and_origin_ref_names() {
+    let refs = HashSet::from([
+        "work/local-only".to_string(),
+        "origin/work/remote-only".to_string(),
+    ]);
+    let index = super::ResumeBranchIndex::scanned(Some(&refs));
+
+    assert!(index.branch_exists("work/local-only"));
+    assert!(index.branch_exists("work/remote-only"));
+    assert!(index.branch_exists("origin/work/remote-only"));
+    assert!(index.branch_exists("refs/remotes/origin/work/remote-only"));
+    assert!(!index.branch_exists("work/deleted"));
+    assert!(!index.branch_exists("   "));
+}
+
+/// Issue #3611: before the first background scan there is no snapshot to
+/// consult. Answering "not resumable" would hide a working Resume control on
+/// every project open, so an unscanned project stays optimistic — the Launch
+/// Wizard re-verifies branch existence before it materializes anything.
+#[test]
+fn resume_branch_index_stays_optimistic_until_the_project_is_scanned() {
+    let unscanned = super::ResumeBranchIndex::scanned(None);
+    assert!(unscanned.branch_exists("work/not-yet-scanned"));
+    assert!(
+        !unscanned.branch_exists(""),
+        "an empty branch name is never materializable"
+    );
+
+    let no_branches = HashSet::new();
+    let scanned_empty = super::ResumeBranchIndex::scanned(Some(&no_branches));
+    assert!(
+        !scanned_empty.branch_exists("work/not-yet-scanned"),
+        "a completed scan that found nothing is a real negative verdict"
+    );
+}
+
+/// Issue #3611: a live worktree is decided by a filesystem stat alone — no
+/// snapshot needed and no process, even when the branch is unknown.
+#[test]
+fn resume_branch_index_accepts_existing_worktree_without_branch_evidence() {
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("live-worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let session = gwt_agent::Session::new(&worktree, "work/unknown", gwt_agent::AgentId::Codex);
+
+    assert!(super::ResumeBranchIndex::scanned(Some(&HashSet::new()))
+        .session_exact_resume_materializable(&session));
 }
 
 /// SPEC-2359 Phase W-16 (FR-403): the Workspace list is ordered by last
@@ -45342,7 +45671,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        scanned_without_branches(),
     );
 
     let order: Vec<&str> = works.iter().map(|work| work.id.as_str()).collect();
@@ -45556,6 +45885,7 @@ fn apply_work_merge_status_caches_and_flags_rows() {
         HashMap::new(),
         HashSet::new(),
         HashSet::new(),
+        None,
     );
 
     let view = runtime
@@ -45648,6 +45978,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
                     cleanup_ready_branches,
                     dirty_branches,
                     live_process_branches,
+                    ..
                 } if project_root == &repo => Some((
                     project_root,
                     merged_branches,
@@ -45764,16 +46095,18 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
+                known_branch_refs,
             } if project_root == &repo => Some((
                 merged_branches.clone(),
                 cleanup_ready_branches.clone(),
                 dirty_branches.clone(),
                 live_process_branches.clone(),
+                known_branch_refs.clone(),
             )),
             _ => None,
         })
         .expect("historical work merge status");
-    let _ = runtime.apply_work_merge_status(&repo, event.0, event.1, event.2, event.3);
+    let _ = runtime.apply_work_merge_status(&repo, event.0, event.1, event.2, event.3, event.4);
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -45962,6 +46295,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
         cleanup_ready,
         HashSet::new(),
         HashSet::new(),
+        None,
     );
 
     let view = runtime
@@ -45986,6 +46320,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
         HashMap::new(),
         HashSet::new(),
         HashSet::new(),
+        None,
     );
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -46241,6 +46576,54 @@ fn work_events_ingest_attempt_is_throttled_per_project() {
     assert!(
         runtime.note_work_events_ingest_attempt(&other, false),
         "throttle is per project root"
+    );
+}
+
+/// Issue #3604: the rail's PR-title lookup is a single
+/// `gh pr list --state all --limit 999` — up to ten GraphQL requests. It rode
+/// the 30s ingest throttle, so a GUI in ordinary use re-enumerated every PR in
+/// the repository twice a minute. It now has its own, far longer window.
+#[test]
+fn work_pr_titles_scan_has_its_own_long_window_and_is_per_project() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_pr_titles_scan_attempt(&root));
+    assert!(
+        !runtime.note_work_pr_titles_scan_attempt(&root),
+        "a second PR-title enumeration inside the window is suppressed"
+    );
+
+    let other = temp.path().join("other");
+    assert!(
+        runtime.note_work_pr_titles_scan_attempt(&other),
+        "the window is per project root"
+    );
+
+    assert!(
+        super::WORK_PR_TITLES_SCAN_WINDOW >= Duration::from_secs(300),
+        "the window must be an order of magnitude wider than the 30s ingest throttle"
+    );
+}
+
+/// Issue #3604: bounded staleness must not become unbounded staleness. Opening
+/// a project is the moment a stale rail summary would be noticed, so the forced
+/// ingest reopens the PR-title window.
+#[test]
+fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_pr_titles_scan_attempt(&root));
+    assert!(!runtime.note_work_pr_titles_scan_attempt(&root));
+
+    runtime.reopen_work_pr_titles_window(&root);
+
+    assert!(
+        runtime.note_work_pr_titles_scan_attempt(&root),
+        "reopening the window must allow the next enumeration through"
     );
 }
 
@@ -47653,6 +48036,301 @@ fn pm_ensure_focuses_live_pm_instead_of_spawning() {
         "ensure focuses the live PM (focus/broadcast events)"
     );
     assert!(runtime.pending_pm_launches.is_empty());
+}
+
+/// Issue #3607 fixture: one repository whose stores split.
+///
+/// A repository with no `origin` falls back to a path hash, so its main
+/// worktree and a linked worktree land in *different* project stores while
+/// sharing one git common dir — the exact `b19aac…` / `99a866…` shape from the
+/// incident, reproduced without depending on a stale on-disk store.
+struct SplitStoreRepo {
+    main: PathBuf,
+    linked: PathBuf,
+}
+
+fn split_store_repo(root: &Path) -> SplitStoreRepo {
+    let main = root.join("repo");
+    fs::create_dir_all(&main).expect("create repo");
+    init_repo_without_origin(&main);
+    run_git(&main, &["config", "user.name", "Test User"]);
+    run_git(&main, &["config", "user.email", "test@example.com"]);
+    run_git(&main, &["commit", "--allow-empty", "-m", "init"]);
+    let linked = root.join("linked");
+    run_git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/split",
+            linked.to_str().expect("linked path"),
+        ],
+    );
+    assert_ne!(
+        gwt_core::paths::project_scope_hash(&main).as_str(),
+        gwt_core::paths::project_scope_hash(&linked).as_str(),
+        "fixture must reproduce a split: the two roots need different stores"
+    );
+    SplitStoreRepo { main, linked }
+}
+
+/// Materialize `<gwt projects dir>/<hash>/pm/worktree` for a store that is not
+/// the one under test, so restore has a real foreign PM worktree to refuse.
+fn foreign_pm_worktree(store_hash: &str) -> PathBuf {
+    let worktree = gwt_core::paths::gwt_projects_dir()
+        .join(store_hash)
+        .join("pm/worktree");
+    fs::create_dir_all(&worktree).expect("create foreign PM worktree");
+    worktree
+}
+
+/// Issue #3607 AC-1 / AC-2 / AC-4: the second store of a split repository must
+/// not start its own PM. Store-scoped uniqueness cannot see the first one, so
+/// before this gate both stores auto-started and two PMs supervised one
+/// repository.
+#[test]
+fn pm_ensure_refuses_a_second_pm_for_the_same_repository_across_split_stores() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = split_store_repo(temp.path());
+
+    let live_tab = sample_project_tab_with_window_at(
+        "tab-live",
+        "agent-1",
+        repo.main.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Linked",
+        repo.linked.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![live_tab, second_tab], Some("tab-second"));
+    let window_id = "tab-live::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-live", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime.active_agent_sessions.insert(window_id, session);
+
+    // The live PM registered in the *first* store, whose PM worktree is a
+    // linked worktree of the same repository.
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
+    fs::create_dir_all(&pm_worktree).expect("pm worktree");
+    run_git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "--force",
+            "-b",
+            "pm/live",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.main),
+        pm_registration_fixture("pm-session-live", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    let events =
+        runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime
+            .tab("tab-second")
+            .expect("second tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "the second store must not spawn a PM pane for a repository that already has one"
+    );
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "no PM launch may be queued for the second store"
+    );
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(
+            &repo.linked
+        ))
+        .expect("second store prefs")
+        .registration
+        .is_none(),
+        "the second store must not acquire its own registration"
+    );
+    assert!(
+        !events.is_empty(),
+        "AC-2: the refusal focuses the existing PM instead of failing silently"
+    );
+}
+
+/// A repository whose only PM is dead must still get one: repository-scoped
+/// uniqueness blocks duplicates, never recovery.
+#[test]
+fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = split_store_repo(temp.path());
+
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Linked",
+        repo.linked.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![second_tab], Some("tab-second"));
+
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
+    run_git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "pm/dead",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.main),
+        pm_registration_fixture("pm-session-dead", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed dead registration");
+
+    runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "a dead PM elsewhere must not leave the repository without one"
+    );
+}
+
+/// Issue #3607 AC-3: the stopped store was not even open, yet its PM came back
+/// because the current store's `workspace.json` still held a window whose
+/// Session pointed at that store's `pm/worktree`.
+#[test]
+fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let orphan_pm_worktree = foreign_pm_worktree("b19aac38305901f5");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-foreign-pm".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+
+    let mut session =
+        gwt_agent::Session::new(&orphan_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-foreign-pm".to_string();
+    session.agent_session_id = Some("native-foreign-pm".to_string());
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.restore_open_project_windows("tab-current");
+
+    assert!(
+        events.is_empty(),
+        "restoring another store's PM worktree must not spawn anything"
+    );
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "no resume may be tracked for a foreign PM session"
+    );
+}
+
+/// The same gate must leave the store's *own* PM restorable — the stale-PM
+/// resume path (FR-003) goes through the same primitive.
+#[test]
+fn restore_still_resumes_the_stores_own_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let own_pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&own_pm_worktree).expect("own PM worktree");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-own-pm".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+
+    let mut session =
+        gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-own-pm".to_string();
+    session.agent_session_id = Some("native-own-pm".to_string());
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.restore_open_project_windows("tab-current");
+
+    assert!(
+        !events.is_empty(),
+        "the store's own PM must still restore through the shared primitive"
+    );
+    assert!(runtime
+        .pending_auto_resume_sources
+        .values()
+        .any(|source| source == "session-own-pm"));
 }
 
 #[test]
@@ -50280,8 +50958,138 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     );
 }
 
+/// Issue #3608 (AC-1/AC-4/AC-5): the acknowledgement is written by the target
+/// Session's own UserPromptSubmit hook, so it routinely lands after the submit
+/// retries are exhausted — the live incident recorded `prepared 02:40:38 →
+/// ambiguous 02:40:39 → verified 02:40:40`, a delivery that succeeded but was
+/// reported as a failure. The operation must spend its whole remaining budget
+/// waiting for that acknowledgement, and the durable log must not carry an
+/// Ambiguous row for a delivery it reports as delivered.
 #[test]
-fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
+fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retries() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b6";
+    let body = "acknowledged after the submit retries";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let ack_receipt_path = receipt_path.clone();
+    let ack_body_sha256 = body_sha256.clone();
+    let ack = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let prepared = gwt::pm_registry::load_pm_delivery_receipts(&ack_receipt_path)
+                .unwrap_or_default()
+                .iter()
+                .any(|receipt| {
+                    receipt.operation_id == operation_id
+                        && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+                });
+            if prepared {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Prepared receipt was not committed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Past the two-attempt submit budget (2 x PANE_SUBMIT_SETTLE), still
+        // well inside the operation deadline: exactly the observed incident.
+        thread::sleep(Duration::from_millis(1_500));
+        gwt::pm_registry::finish_pm_delivery_receipt(
+            &ack_receipt_path,
+            operation_id,
+            "other-session",
+            &ack_body_sha256,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .expect("late target hook acknowledgement");
+    });
+    // Long enough for the late acknowledgement, short enough that the test
+    // does not sit on the production acceptance window.
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            &format!("{body}\r"),
+            Some(responder),
+        )
+        .is_empty());
+    let result = result.blocking_recv().expect("terminal delivery result");
+    ack.join().expect("ack thread");
+
+    assert!(
+        matches!(
+            &result,
+            BackendEvent::PmMessageSendResult {
+                status,
+                reason: None,
+                ..
+            } if status == "delivered"
+        ),
+        "a delivery acknowledged inside the operation deadline is delivered, not failed: {result:?}"
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("delivery receipts")
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .map(|receipt| receipt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        ],
+        "the durable log must agree with the reported outcome"
+    );
+}
+
+/// Issue #3608 (AC-2/AC-3): a delivery whose acknowledgement never arrives is
+/// reported as its own outcome, distinct from a submit that failed, and it
+/// never claims the body is staged — both the body and its submit terminator
+/// were written to the pane on this path.
+#[test]
+fn authenticated_pm_send_reports_unverified_without_target_hook_ack() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -50317,7 +51125,10 @@ fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
     let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643af";
     let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
-    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+    // This delivery waits out its whole acceptance window; keep that window the
+    // test's own rather than the production one.
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
 
     assert!(runtime
         .authenticated_pm_pane_send_input_events(
@@ -50332,16 +51143,20 @@ fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
         .is_empty());
     let result = result.blocking_recv().expect("terminal delivery result");
 
-    assert!(matches!(
-        result,
-        BackendEvent::PmMessageSendResult {
-            status,
-            reason: Some(reason),
-            ..
-        } if status == "failed"
-            && reason.contains("not verified")
-            && reason.contains("do not retry")
-    ));
+    assert!(
+        matches!(
+            &result,
+            BackendEvent::PmMessageSendResult {
+                status,
+                reason: Some(reason),
+                ..
+            } if status == "unverified"
+                && reason.contains("not acknowledged")
+                && reason.contains("do not retry")
+                && !reason.contains("staged")
+        ),
+        "an unacknowledged submit is its own outcome and was never staged: {result:?}"
+    );
     assert!(gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
         .expect("delivery receipts")
         .iter()
