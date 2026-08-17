@@ -1574,6 +1574,9 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    // The handshake callback's `Err` type is `tungstenite`'s `ErrorResponse`,
+    // fixed by `accept_hdr_async`'s signature, so it cannot be boxed down.
+    #[allow(clippy::result_large_err)]
     fn windows_launch_now_persists_priority_and_reports_authenticated_gui_ack() {
         use futures_util::{SinkExt as _, StreamExt as _};
         use gwt_core::test_support::ScopedEnvVar;
