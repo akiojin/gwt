@@ -3743,7 +3743,7 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
             branch_identity: T812_TARGET_BRANCH.to_string(),
             worktree_identity: work_event_root,
             work_id: T812_TARGET_WORK_ID.to_string(),
-            owner: T812_TARGET_OWNER.to_string(),
+            owner: Some(T812_TARGET_OWNER.to_string()),
             agent_id: "codex".to_string(),
         },
         work_items_path,

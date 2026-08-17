@@ -779,6 +779,48 @@ pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
     })
 }
 
+/// SPEC-3431 FR-032 (Issue #3477): is `session_id` this project's registered
+/// PM, running in this project's canonical PM worktree?
+///
+/// The Work mutation paths use this to grant a branchless identity to the one
+/// Session that has no branch by design. It is stricter than
+/// [`session_is_registered_pm`] on purpose: PM privilege over conversational
+/// operations only needs the subject, but rewriting Work state also needs the
+/// *container* to be the exact worktree this project's PM was given. Three
+/// facts must agree, and any disagreement is not privileged (fail-closed):
+///
+/// 1. the durable registration names `session_id`,
+/// 2. the registration's worktree is `worktree`, and
+/// 3. `worktree` is the canonical PM worktree derived from
+///    `project_state_root` itself.
+///
+/// (3) is what keeps a stale registration pointing at some other directory —
+/// or a foreign project's PM path — from authorizing anything here. Paths are
+/// compared canonically because callers hand us an already-canonicalized
+/// worktree while the derived and stored paths may still contain symlinks.
+pub fn registered_pm_worktree_authority(
+    project_state_root: &Path,
+    session_id: &str,
+    worktree: &Path,
+) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let canonical = |path: &Path| dunce::canonicalize(path).ok();
+    let Some(worktree) = canonical(worktree) else {
+        return false;
+    };
+    if canonical(&pm_worktree_path_for_repo_path(project_state_root)).as_ref() != Some(&worktree) {
+        return false;
+    }
+    load_pm_prefs(&pm_prefs_path_for_repo_path(project_state_root)).is_ok_and(|prefs| {
+        prefs.registration.is_some_and(|registration| {
+            registration.session_id == session_id
+                && canonical(Path::new(&registration.worktree_path)).as_ref() == Some(&worktree)
+        })
+    })
+}
+
 /// FR-003 crash-loop damper: uptime beyond this resets the consecutive-crash
 /// count (the PM ran healthily, so the next crash starts a fresh series).
 pub const PM_HEALTHY_UPTIME_SECS: i64 = 600;

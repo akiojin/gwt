@@ -2331,7 +2331,11 @@ pub struct SessionBoundWorkspaceMutationTarget {
     pub branch_identity: String,
     pub worktree_identity: PathBuf,
     pub work_id: String,
-    pub owner: String,
+    /// The durable Work owner the resolver matched, or `None` for a Work that
+    /// deliberately has none (SPEC-3431 FR-042's resident PM coordination
+    /// projection). This field is a resolved precondition, never a matcher:
+    /// the resolving layer has already compared it against the stored Work.
+    pub owner: Option<String>,
     pub agent_id: String,
 }
 
@@ -2348,7 +2352,8 @@ pub struct SessionBoundWorkspaceTerminalTarget {
     pub session_id: String,
     pub branch_identity: String,
     pub worktree_identity: PathBuf,
-    pub owner: String,
+    /// See [`SessionBoundWorkspaceMutationTarget::owner`].
+    pub owner: Option<String>,
     pub agent_id: String,
 }
 
@@ -2602,7 +2607,7 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     validate_session_bound_target_identity_shape(target)?;
-    if target.owner.trim().is_empty() || target.agent_id.trim().is_empty() {
+    if session_bound_owner_is_blank(target.owner.as_deref()) || target.agent_id.trim().is_empty() {
         return Err(GwtError::Other(
             "Session-bound Work terminalization received incomplete Work authority".to_string(),
         ));
@@ -2792,7 +2797,7 @@ fn resolve_session_bound_terminal_target_locked(
             "Session-bound Work terminalization target became ambiguous".to_string(),
         ));
     }
-    if item.owner.as_deref() != Some(target.owner.as_str()) {
+    if item.owner.as_deref() != target.owner.as_deref() {
         return Err(GwtError::Other(
             "Session-bound Work terminalization owner authority changed before commit".to_string(),
         ));
@@ -2858,7 +2863,7 @@ fn validate_session_bound_target_shape(
             "Session-bound workspace transaction received an incomplete target".to_string(),
         ));
     }
-    if target.owner.trim().is_empty() || target.agent_id.trim().is_empty() {
+    if session_bound_owner_is_blank(target.owner.as_deref()) || target.agent_id.trim().is_empty() {
         return Err(GwtError::Other(
             "Session-bound workspace transaction received incomplete Work authority".to_string(),
         ));
@@ -2869,6 +2874,14 @@ fn validate_session_bound_target_shape(
         ));
     }
     Ok(())
+}
+
+/// A resolved target may legitimately carry no owner (SPEC-3431 FR-042's
+/// resident PM coordination Work), but an owner that is present and blank is
+/// still an incomplete authority — it means the resolver produced a value it
+/// could not name.
+fn session_bound_owner_is_blank(owner: Option<&str>) -> bool {
+    owner.is_some_and(|owner| owner.trim().is_empty())
 }
 
 fn validate_session_bound_target_identity_shape(
@@ -2979,7 +2992,7 @@ fn validate_session_bound_target_locked(
             "Session-bound workspace target is ambiguous or terminal".to_string(),
         ));
     }
-    if item.owner.as_deref() != Some(target.owner.as_str()) {
+    if item.owner.as_deref() != target.owner.as_deref() {
         return Err(GwtError::Other(
             "Session-bound workspace owner authority changed before commit".to_string(),
         ));
