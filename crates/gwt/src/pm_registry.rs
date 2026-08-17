@@ -569,6 +569,37 @@ pub fn is_pm_worktree(path: &Path) -> bool {
     pm_worktree_store_dir(path).is_some()
 }
 
+/// [`is_pm_worktree`] for callers holding an already-canonicalized path.
+///
+/// The Work mutation paths canonicalize every path they touch, while
+/// [`gwt_projects_dir`](gwt_core::paths::gwt_projects_dir) is built from `HOME`
+/// verbatim. When `HOME` traverses a symlink — macOS `/var` -> `/private/var`
+/// is the everyday case under a temporary home — the two spellings disagree
+/// and the plain shape test rejects a genuine PM worktree. Comparing both
+/// spellings keeps the answer about the path, not about how it was spelled.
+pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    if is_pm_worktree(path) {
+        return true;
+    }
+    let Some(canonical_projects_dir) =
+        dunce::canonicalize(gwt_core::paths::gwt_projects_dir()).ok()
+    else {
+        return false;
+    };
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
+    pm_dir
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|projects_dir| projects_dir == canonical_projects_dir)
+}
+
 /// The project store that owns `path`, when `path` is that store's PM
 /// worktree: `<gwt projects dir>/<repo hash>` for
 /// `<gwt projects dir>/<repo hash>/pm/worktree`.

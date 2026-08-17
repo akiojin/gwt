@@ -445,7 +445,7 @@ pub(crate) fn resolve_execution_recovery_context(
     let declared_repo_hash = required_session_repo_hash(&session)?;
     let branch_identity = required_session_branch(&session)?;
     let branch_authority =
-        resolve_session_branch_authority(&session, &project_state_root, &worktree)?;
+        resolve_session_branch_authority(&session, &project_state_root, &worktree);
     validate_runtime_repo_and_branch(
         &worktree,
         declared_repo_hash,
@@ -1267,17 +1267,35 @@ pub fn observe_agent_runtime(
             "workspace.update runtime repository identity is unavailable",
         )
     })?;
-    // SPEC-3431 FR-032 (Issue #3477): a detached HEAD is reported as a
-    // branchless observation rather than refused. Reporting it truthfully is
-    // what lets the authority layer decide; every consumer still compares the
-    // observed branch against the Session ledger, so an ordinary Session in a
-    // detached worktree keeps failing closed on that mismatch.
-    let branch = git_attached_branch(&git_toplevel, "cwd").map_err(|_| {
-        AgentWorkspaceUpdateError::new(
-            AgentWorkspaceUpdateErrorCode::InvalidRequest,
-            "workspace.update runtime branch identity is unavailable",
-        )
-    })?;
+    // Issue #3491: keep the rejection (a branchless worktree has no Workspace
+    // to record against) but never swallow why. The old `map_err(|_| ...)`
+    // reported a generic "branch identity is unavailable" that read like a
+    // transient failure, leaving both the agent and the user with no way to
+    // tell that a detached HEAD was the cause or what to do about it.
+    //
+    // SPEC-3431 FR-032 (Issue #3477) carves out exactly one exception: the
+    // resident PM's own worktree is detached by design, so it is reported
+    // branchlessly and the authority layer decides. The canonical-path shape
+    // alone grants nothing — the Work mutation paths still require a live
+    // `pm.json` registration naming this Session and this worktree. Every
+    // other detached worktree keeps the rejection above.
+    let branch = match read_git_branch(&git_toplevel) {
+        Ok(branch) => Some(branch),
+        Err(BranchIdentityFailure::DetachedHead)
+            if crate::pm_registry::is_canonical_pm_worktree(&git_toplevel) =>
+        {
+            None
+        }
+        Err(failure) => {
+            return Err(AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                format!(
+                    "workspace.update runtime branch identity is unavailable: {}",
+                    branch_identity_diagnosis(&failure, &git_toplevel)
+                ),
+            ))
+        }
+    };
     Ok(AgentRuntimeObservation {
         cwd: cwd.to_string_lossy().into_owned(),
         git_toplevel: git_toplevel.to_string_lossy().into_owned(),
@@ -2057,8 +2075,7 @@ fn resolve_authenticated_session_terminal_target(
         .to_string();
     let branch_identity = required_session_branch(&session).map_err(classify_target_error)?;
     let branch_authority =
-        resolve_session_branch_authority(&session, &project_state_root, &session_worktree)
-            .map_err(|_| relaunch_required_error())?;
+        resolve_session_branch_authority(&session, &project_state_root, &session_worktree);
     validate_runtime_repo_and_branch(
         &session_git_root,
         &declared_repo_hash,
@@ -2890,7 +2907,7 @@ fn validate_host_session_identity(
 
     let branch_identity = required_session_branch(session)?;
     let branch_authority =
-        resolve_session_branch_authority(session, &project_state_root, &session_worktree)?;
+        resolve_session_branch_authority(session, &project_state_root, &session_worktree);
     if branch_authority == SessionBranchAuthority::AttachedBranch {
         let session_branch =
             attached_branch_for_mutation(session, &session_git_root, &branch_identity, "worktree")?;
@@ -2990,18 +3007,22 @@ fn resolve_session_branch_authority(
     session: &Session,
     project_state_root: &Path,
     worktree_identity: &Path,
-) -> Result<SessionBranchAuthority> {
+) -> SessionBranchAuthority {
     if !crate::pm_registry::registered_pm_worktree_authority(
         project_state_root,
         &session.id,
         worktree_identity,
     ) {
-        return Ok(SessionBranchAuthority::AttachedBranch);
+        return SessionBranchAuthority::AttachedBranch;
     }
-    if !git_head_is_detached(worktree_identity, "worktree")? {
-        return Ok(SessionBranchAuthority::AttachedBranch);
+    // A positive fail-closed check, not an inference: the branchless authority
+    // is only granted to a worktree that really has no branch, so a PM worktree
+    // someone re-attached — or one whose HEAD cannot be read at all — goes back
+    // through the branch guard instead of silently keeping the privilege.
+    if !worktree_head_is_detached(worktree_identity) {
+        return SessionBranchAuthority::AttachedBranch;
     }
-    Ok(SessionBranchAuthority::DetachedResidentPm)
+    SessionBranchAuthority::DetachedResidentPm
 }
 
 /// The attached branch at `worktree`, with a diagnosable refusal when HEAD is
@@ -3175,49 +3196,106 @@ fn git_toplevel(path: &Path, identity: &str) -> Result<PathBuf> {
     canonicalize_mutation_path(&root, identity)
 }
 
-/// `git symbolic-ref --quiet HEAD` exits 1 for a detached HEAD — a legitimate
-/// worktree form, not a failure. Every other non-zero status (128) means the
-/// repository could not be read at all.
-const GIT_SYMBOLIC_REF_DETACHED_STATUS: i32 = 1;
-
-/// The attached branch at `path`, or `None` when HEAD is detached.
+/// Why a worktree has no usable branch identity.
 ///
-/// A detached HEAD is a real state (the resident PM's own worktree is always
-/// one), so it is reported rather than raised. An unreadable repository is
-/// still an error: collapsing both into "no attached branch" is exactly the
-/// misdiagnosis Issue #3491 documents, and the resident-PM authority must not
-/// treat a broken repository as a branchless PM.
-fn git_attached_branch(path: &Path, identity: &str) -> Result<Option<String>> {
+/// Issue #3491: the previous code collapsed every `git symbolic-ref` failure
+/// into "has no attached branch", so a detached HEAD — permanent, and a state
+/// gwt itself creates for ephemeral intake worktrees and for the resident PM —
+/// was indistinguishable from an unreadable repository. Callers need the
+/// distinction: only the former is a settled fact about the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BranchIdentityFailure {
+    /// `HEAD` is not a symbolic ref: the worktree is on a detached HEAD and
+    /// has no branch to identify a Workspace with.
+    DetachedHead,
+    /// The branch could not be read at all. Carries the underlying git
+    /// failure so it is never swallowed.
+    Unreadable(String),
+}
+
+fn read_git_branch(path: &Path) -> std::result::Result<String, BranchIdentityFailure> {
     let output = gwt_core::process::run_git_logged(
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
         Some(path),
     )
     .map_err(|error| {
-        mutation_error(format!(
-            "Session branch mismatch: git symbolic-ref failed for {identity} {}: {error}",
-            path.display()
-        ))
+        BranchIdentityFailure::Unreadable(format!("git symbolic-ref could not run: {error}"))
     })?;
     if !output.status.success() {
-        if output.status.code() == Some(GIT_SYMBOLIC_REF_DETACHED_STATUS) {
-            return Ok(None);
-        }
-        return Err(mutation_error(format!(
-            "Session branch mismatch: git symbolic-ref could not read HEAD for {identity} {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        // With `--quiet`, git exits 1 exactly when HEAD is not a symbolic ref,
+        // which is the detached case. Any other status is a repository-level
+        // failure (a missing or unreadable Git worktree) and must not be
+        // reported as a branchless one.
+        return Err(if output.status.code() == Some(1) {
+            BranchIdentityFailure::DetachedHead
+        } else {
+            BranchIdentityFailure::Unreadable(format!(
+                "git symbolic-ref failed ({}): {}",
+                output
+                    .status
+                    .code()
+                    .map(|code| format!("exit {code}"))
+                    .unwrap_or_else(|| "terminated by signal".to_string()),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        });
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!branch.is_empty()).then_some(branch))
+    if branch.is_empty() {
+        return Err(BranchIdentityFailure::Unreadable(
+            "git symbolic-ref returned an empty branch name".to_string(),
+        ));
+    }
+    Ok(branch)
 }
 
-/// Whether HEAD at `path` is detached. Used as a positive fail-closed check:
-/// the detached-PM authority is only granted to a worktree that really has no
-/// branch, so a PM worktree someone re-attached goes back through the branch
-/// guard instead of silently keeping branchless privileges.
-fn git_head_is_detached(path: &Path, identity: &str) -> Result<bool> {
-    Ok(git_attached_branch(path, identity)?.is_none())
+/// The attached branch at `path`, or `None` when HEAD is detached.
+///
+/// Issue #3477 needs "detached" as a value rather than an error, because the
+/// resident PM's worktree is always one. An unreadable repository stays an
+/// error: the detached-PM authority must never mistake a broken repository for
+/// a branchless PM.
+fn git_attached_branch(path: &Path, identity: &str) -> Result<Option<String>> {
+    match read_git_branch(path) {
+        Ok(branch) => Ok(Some(branch)),
+        Err(BranchIdentityFailure::DetachedHead) => Ok(None),
+        Err(failure) => Err(mutation_error(format!(
+            "Session branch mismatch for {identity} {}: {}",
+            path.display(),
+            branch_identity_diagnosis(&failure, path)
+        ))),
+    }
+}
+
+/// The cause of a branch-identity failure plus the next action to take, so a
+/// rejection is actionable instead of merely final (Issue #3491).
+fn branch_identity_diagnosis(failure: &BranchIdentityFailure, path: &Path) -> String {
+    match failure {
+        BranchIdentityFailure::DetachedHead => format!(
+            "{} has a detached HEAD, so it has no branch and therefore no Workspace identity to record Work state against. \
+Attach a branch there with `git switch <branch>`, or relaunch this Work through gwt Start Work. \
+gwt's ephemeral intake worktrees are branchless by design and never hold Work state.",
+            path.display()
+        ),
+        BranchIdentityFailure::Unreadable(cause) => format!(
+            "the branch of {} could not be read: {cause}",
+            path.display()
+        ),
+    }
+}
+
+/// Whether `worktree` is definitively on a detached HEAD.
+///
+/// Issue #3491: every Work-state mutation against a branchless worktree is
+/// permanently rejected, so callers use this to avoid demanding an update the
+/// agent has no way to perform. An indeterminate answer (the branch could not
+/// be read at all) reports `false`, so only the settled case suppresses
+/// anything.
+pub fn worktree_head_is_detached(worktree: &Path) -> bool {
+    matches!(
+        read_git_branch(worktree),
+        Err(BranchIdentityFailure::DetachedHead)
+    )
 }
 
 fn repo_hash_for_mutation(path: &Path, identity: &str) -> Result<String> {
@@ -4964,6 +5042,95 @@ mod tests {
         assert_eq!(
             error.message,
             "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying"
+        );
+    }
+
+    /// Issue #3491: a branchless worktree stays rejected — SPEC-2359 Phase
+    /// W-15 (FR-381) already keeps detached worktrees out of the Workspace
+    /// projection, so there is no Workspace for Work state to land in — but
+    /// the rejection must now name its cause and the next action. The old
+    /// `map_err(|_| ...)` replaced the whole diagnosis with a generic
+    /// "runtime branch identity is unavailable", which read like a transient
+    /// failure and left the agent with no way to tell what to do.
+    #[test]
+    fn observe_agent_runtime_rejects_detached_head_with_actionable_cause() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "detached-runtime",
+            "https://example.com/detached-runtime.git",
+            "work/detached-runtime",
+        );
+        run_git(&["checkout", "--detach"], &repo);
+
+        let error =
+            observe_agent_runtime(&repo).expect_err("a branchless worktree must stay rejected");
+        assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::InvalidRequest);
+        let message = error.message.as_str();
+        assert!(
+            message.contains("detached HEAD"),
+            "the rejection must name the cause: {message}"
+        );
+        assert!(
+            message.contains("git switch"),
+            "the rejection must name the next action: {message}"
+        );
+        assert!(
+            message.contains(&repo.display().to_string()),
+            "the rejection must identify the offending worktree: {message}"
+        );
+    }
+
+    /// Issue #3491 (policy pair): an attached branch keeps observing normally,
+    /// so the regression fixes "detached is rejected, attached is accepted"
+    /// rather than leaving the decision implicit.
+    #[test]
+    fn observe_agent_runtime_accepts_attached_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "attached-runtime",
+            "https://example.com/attached-runtime.git",
+            "work/attached-runtime",
+        );
+
+        let observation = observe_agent_runtime(&repo).expect("attached branch observation");
+        assert_eq!(observation.branch, "work/attached-runtime");
+    }
+
+    /// Issue #3491: `git symbolic-ref` failing is not proof of a detached
+    /// HEAD. The old code reported every non-zero exit as "has no attached
+    /// branch", so an unreadable repository was misdiagnosed as a branchless
+    /// one. The two must stay distinguishable, and the underlying git error
+    /// must survive instead of being swallowed.
+    #[test]
+    fn branch_identity_failure_separates_detached_head_from_unreadable_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "branch-identity",
+            "https://example.com/branch-identity.git",
+            "work/branch-identity",
+        );
+        run_git(&["checkout", "--detach"], &repo);
+        assert_eq!(
+            read_git_branch(&repo),
+            Err(BranchIdentityFailure::DetachedHead)
+        );
+        assert!(worktree_head_is_detached(&repo));
+
+        let non_repo = temp.path().join("not-a-repo");
+        std::fs::create_dir_all(&non_repo).expect("non-repo dir");
+        match read_git_branch(&non_repo) {
+            Err(BranchIdentityFailure::Unreadable(cause)) => assert!(
+                !cause.trim().is_empty(),
+                "the underlying git failure must be carried, not swallowed"
+            ),
+            other => panic!("an unreadable repository must not read as detached: {other:?}"),
+        }
+        assert!(
+            !worktree_head_is_detached(&non_repo),
+            "only a definitive detached HEAD may be reported as branchless"
         );
     }
 

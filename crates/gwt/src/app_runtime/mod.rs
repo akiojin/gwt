@@ -144,6 +144,12 @@ pub struct WindowRuntime {
     status_thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorktreeFormProjection {
+    Resolve,
+    Persisted,
+}
+
 struct RuntimeStopThreads {
     output_thread: Option<JoinHandle<()>>,
     status_thread: Option<JoinHandle<()>>,
@@ -5863,6 +5869,13 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         match request {
             AgentFrontendRequest::Ready => self.agent_frontend_sync_events(&client_id, &principal),
+            AgentFrontendRequest::ListWindows => {
+                vec![self.agent_workspace_state_reply(
+                    &client_id,
+                    &principal,
+                    WorktreeFormProjection::Persisted,
+                )]
+            }
             AgentFrontendRequest::CloseWindow {
                 id,
                 request_id,
@@ -6094,18 +6107,8 @@ impl AppRuntime {
         client_id: &str,
         principal: &AgentSessionPrincipal,
     ) -> Vec<OutboundEvent> {
-        let mut workspace = self.app_state_view();
-        workspace
-            .tabs
-            .retain(|tab| principal.authorizes_project_root(Path::new(&tab.project_root)));
-        workspace.active_tab_id = workspace
-            .active_tab_id
-            .filter(|active| workspace.tabs.iter().any(|tab| &tab.id == active))
-            .or_else(|| workspace.tabs.first().map(|tab| tab.id.clone()));
-        // Recent-project history is process-global and is not required by
-        // pane.list/read. Never expose it on the agent capability route.
-        workspace.recent_projects.clear();
-
+        let workspace_state =
+            self.agent_workspace_state_reply(client_id, principal, WorktreeFormProjection::Resolve);
         let allowed_window_ids = self
             .window_lookup
             .iter()
@@ -6141,10 +6144,7 @@ impl AppRuntime {
             }
         }
 
-        let mut events = vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::WindowCanvasState { workspace },
-        )];
+        let mut events = vec![workspace_state];
         events.extend(terminal_snapshots.into_iter().map(|(id, snapshot)| {
             OutboundEvent::reply(
                 client_id,
@@ -6155,6 +6155,35 @@ impl AppRuntime {
             )
         }));
         events
+    }
+
+    fn agent_workspace_state_reply(
+        &self,
+        client_id: &str,
+        principal: &AgentSessionPrincipal,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> OutboundEvent {
+        let tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .map(|tab| self.project_tab_view(tab, worktree_form_projection))
+            .collect::<Vec<_>>();
+        let active_tab_id = self
+            .active_tab_id
+            .as_ref()
+            .filter(|active| tabs.iter().any(|tab| &tab.id == *active))
+            .cloned()
+            .or_else(|| tabs.first().map(|tab| tab.id.clone()));
+        let workspace = gwt::AppStateView {
+            app_version: crate::runtime_support::current_app_version().to_string(),
+            tabs,
+            active_tab_id,
+            // Recent-project history is process-global and is not required by
+            // pane.list/read. Never expose it on the agent capability route.
+            recent_projects: Vec::new(),
+        };
+        OutboundEvent::reply(client_id, BackendEvent::WindowCanvasState { workspace })
     }
 
     pub(crate) fn frontend_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
@@ -6230,20 +6259,7 @@ impl AppRuntime {
             tabs: self
                 .tabs
                 .iter()
-                .map(|tab| {
-                    let workspace = self.workspace_view_for_tab(tab);
-                    let running_agents =
-                        crate::runtime_support::collect_running_agents(&workspace.windows);
-                    gwt::ProjectTabView {
-                        id: tab.id.clone(),
-                        title: tab.title.clone(),
-                        project_root: tab.project_root.display().to_string(),
-                        kind: tab.kind,
-                        workspace,
-                        running_agent_count: running_agents.len() as u32,
-                        running_agents,
-                    }
-                })
+                .map(|tab| self.project_tab_view(tab, WorktreeFormProjection::Resolve))
                 .collect(),
             active_tab_id: self.active_tab_id.clone(),
             recent_projects: self
@@ -6258,7 +6274,33 @@ impl AppRuntime {
         }
     }
 
+    fn project_tab_view(
+        &self,
+        tab: &ProjectTabRuntime,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> gwt::ProjectTabView {
+        let workspace = self.workspace_view_for_tab_with(tab, worktree_form_projection);
+        let running_agents = crate::runtime_support::collect_running_agents(&workspace.windows);
+        gwt::ProjectTabView {
+            id: tab.id.clone(),
+            title: tab.title.clone(),
+            project_root: tab.project_root.display().to_string(),
+            kind: tab.kind,
+            workspace,
+            running_agent_count: running_agents.len() as u32,
+            running_agents,
+        }
+    }
+
     fn workspace_view_for_tab(&self, tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+        self.workspace_view_for_tab_with(tab, WorktreeFormProjection::Resolve)
+    }
+
+    fn workspace_view_for_tab_with(
+        &self,
+        tab: &ProjectTabRuntime,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> gwt::WorkspaceView {
         gwt::WorkspaceView {
             viewport: tab.workspace.persisted().viewport.clone(),
             windows: tab
@@ -6279,17 +6321,19 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
-                    window.worktree_form = self
-                        .active_agent_sessions
-                        .get(&window.id)
-                        .map(|session| {
-                            if self.session_uses_ephemeral_worktree(session) {
-                                gwt::WindowWorktreeForm::Ephemeral
-                            } else {
-                                gwt::WindowWorktreeForm::BranchBacked
-                            }
-                        })
-                        .unwrap_or(gwt::WindowWorktreeForm::Unknown);
+                    if worktree_form_projection == WorktreeFormProjection::Resolve {
+                        window.worktree_form = self
+                            .active_agent_sessions
+                            .get(&window.id)
+                            .map(|session| {
+                                if self.session_uses_ephemeral_worktree(session) {
+                                    gwt::WindowWorktreeForm::Ephemeral
+                                } else {
+                                    gwt::WindowWorktreeForm::BranchBacked
+                                }
+                            })
+                            .unwrap_or(gwt::WindowWorktreeForm::Unknown);
+                    }
                     if let gwt::WindowPlacement::AgentKanban {
                         board_id,
                         lane_id,
