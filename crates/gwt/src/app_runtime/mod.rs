@@ -3779,6 +3779,80 @@ impl AppRuntime {
         if monitor_windows.is_empty() {
             return Vec::new();
         }
+        self.issue_monitor_release_closed_windows(project_root, monitor_windows)
+    }
+
+    /// Issue #3627: release launches whose agent window no longer exists.
+    ///
+    /// Slot release was driven exclusively by PTY exit events, so a window that
+    /// disappeared without one — an app restart, a crash, an error pane reaped
+    /// outside `close_window_events` — kept its `max_active` slot forever.
+    /// Nothing else reclaimed it either: `expire_stale_unbound_launches` only
+    /// covers claims that were never bound to a window, and
+    /// `recover_stuck_autonomous` returns early unless autonomous mode is on.
+    /// A human-gated deployment therefore sat with every slot held by an agent
+    /// that had been gone for over a day, and the queue behind it never moved.
+    ///
+    /// The tab's canvas is the store that issues these window ids, so its
+    /// contents are the authority on whether a window still exists. Consulting
+    /// it costs nothing, needs no new protocol, and — unlike a pid probe —
+    /// cannot be fooled by pid reuse. The release itself reuses the existing
+    /// `window_closed` control, which is the same accounting a manual close
+    /// performs: the Issue returns to `Queued` under the usual attempt budget
+    /// and backoff, never a fabricated completion.
+    pub(crate) fn issue_monitor_vanished_window_release_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        // Every tab open on this project is asked about its own windows. The
+        // scheduled tick visits a project once, through whichever tab it saw
+        // first, but a second tab on the same project shares these prefs and
+        // its launches would otherwise never be judged by anyone.
+        let live_windows_per_tab = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.project_root == project_root)
+            .map(|tab| {
+                (
+                    tab.id.clone(),
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .map(|window| window.id.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if live_windows_per_tab.is_empty() {
+            return Vec::new();
+        }
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        let vanished = live_windows_per_tab
+            .iter()
+            .flat_map(|(tab_id, live_window_ids)| {
+                monitor.vanished_launched_windows(tab_id, live_window_ids)
+            })
+            .collect::<Vec<_>>();
+        if vanished.is_empty() {
+            return Vec::new();
+        }
+        tracing::info!(
+            windows = ?vanished,
+            "releasing issue monitor launches whose agent window no longer exists"
+        );
+        self.issue_monitor_release_closed_windows(project_root, vanished)
+    }
+
+    fn issue_monitor_release_closed_windows(
+        &mut self,
+        project_root: &Path,
+        monitor_windows: Vec<String>,
+    ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         for window_id in monitor_windows {
             let publication = self.publish_issue_monitor_control(
@@ -4553,6 +4627,12 @@ impl AppRuntime {
             if !enabled_or_cleanup {
                 continue;
             }
+            // Issue #3627: reclaim slots held by windows that no longer exist
+            // before deciding what to launch. This runs on the periodic tick
+            // rather than the launch path because the launch path stops being
+            // reached at all once every slot is held — that is exactly the
+            // wedge, and a check gated behind free capacity could never open it.
+            events.extend(self.issue_monitor_vanished_window_release_events(&project_root));
             match self.enqueue_issue_monitor_scan_worker(
                 &project_root,
                 &prefs_path,

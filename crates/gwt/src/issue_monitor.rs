@@ -2385,8 +2385,56 @@ impl IssueMonitorState {
         state.priority_order = prefs.priority_order;
         state.launch_profile = prefs.launch_profile;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
+        // Issue #3627: restore used to re-inject every persisted launch into
+        // `active_launches` without consulting `config.max_active`, so a disk
+        // snapshot holding more launches than the cap (11 slots against a cap
+        // of 5, in the reported wedge) reproduced that over-cap accounting on
+        // every reload and every restart — the queue could never recover by
+        // restarting.
+        //
+        // The excess is dropped whole, window binding included, so
+        // `launched_windows` stays a subset of `active_launches`. Every
+        // reconciler in this file walks one of the two and assumes the other
+        // agrees; admitting a bound launch that holds no slot would make those
+        // passes skip it silently.
+        //
+        // Claimed-but-unbound launches (Issue #3222) reserve their slots ahead
+        // of the bound ones rather than being capped away. Their claim is
+        // serialized back out of `active_launches`, so dropping one here would
+        // erase an in-flight claim from disk and let the next rescan re-claim
+        // the same Issue into a duplicate window — the exact regression #3222
+        // fixed. They lapse on their own TTL through
+        // [`Self::expire_stale_unbound_launches`] instead.
+        let max_active = state.config.max_active.max(1);
+        let bound_issue_numbers = prefs
+            .launched_issues
+            .iter()
+            .filter(|launched| !launched.window_id.is_empty())
+            .map(|launched| launched.issue_number)
+            .collect::<BTreeSet<_>>();
+        let unbound_reservation = prefs
+            .launching_issues
+            .iter()
+            .map(|entry| entry.issue_number)
+            .chain(
+                prefs
+                    .pending_launch_deliveries
+                    .iter()
+                    .map(|delivery| delivery.issue_number),
+            )
+            .filter(|issue_number| !bound_issue_numbers.contains(issue_number))
+            .collect::<BTreeSet<_>>()
+            .len();
+        let bound_capacity = max_active.saturating_sub(unbound_reservation);
+        let mut dropped_over_cap = Vec::new();
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
+                continue;
+            }
+            if !state.active_launches.contains(&launched.issue_number)
+                && state.active_launches.len() >= bound_capacity
+            {
+                dropped_over_cap.push(launched.issue_number);
                 continue;
             }
             state
@@ -2395,6 +2443,13 @@ impl IssueMonitorState {
             if !state.active_launches.contains(&launched.issue_number) {
                 state.active_launches.push(launched.issue_number);
             }
+        }
+        if !dropped_over_cap.is_empty() {
+            tracing::warn!(
+                dropped = ?dropped_over_cap,
+                max_active,
+                "issue monitor prefs held more launches than max_active; dropped the excess on restore"
+            );
         }
         // Issue #3222: restore claimed-but-unbound launches so a reload (every
         // GUI handler) still sees the in-flight claim and cannot re-claim it.
@@ -3224,7 +3279,23 @@ impl IssueMonitorState {
             self.active_launches.clear();
             self.pending_launches.clear();
             self.queued_launch_session_strategies.clear();
+            self.clear_launched_window_bindings();
         }
+    }
+
+    /// Issue #3627: turning the monitor off cleared `active_launches` but left
+    /// `launched_windows` in place, and [`Self::prefs`] serializes
+    /// `launched_issues` from exactly that map. The next reload therefore
+    /// restored every slot the operator had just released, which is why
+    /// toggling the monitor OFF and back ON — the one manual escape hatch from
+    /// a wedged queue — never recovered anything.
+    ///
+    /// Disabling the monitor stops managing launches; it does not close the
+    /// windows. Dropping the bindings is what makes OFF/ON a true reset.
+    fn clear_launched_window_bindings(&mut self) {
+        self.launched_windows.clear();
+        self.launched_branches.clear();
+        self.launching_claimed_at.clear();
     }
 
     /// Advance remote-effect authority together with the global monitor switch.
@@ -3271,6 +3342,7 @@ impl IssueMonitorState {
             self.pending_launches.clear();
             self.pending_launch_deliveries.clear();
             self.queued_launch_session_strategies.clear();
+            self.clear_launched_window_bindings();
         }
         Some(next_epoch)
     }
@@ -5471,6 +5543,48 @@ impl IssueMonitorState {
         self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
     }
 
+    /// Issue #3627: launched agent windows that the owning project tab no
+    /// longer has on its canvas.
+    ///
+    /// Slot release used to be driven exclusively by PTY exit events, so a
+    /// launch whose window disappeared without one — an app restart, a crash,
+    /// an error pane reaped outside `close_window_events` — held its
+    /// `max_active` slot forever. With the default caps that stops the whole
+    /// queue, and `with_prefs` faithfully restored the dead entry on every
+    /// reload, so the wedge survived restarts.
+    ///
+    /// The judgement source here is window existence on the owning tab's
+    /// canvas, which is the same store that issues the ids. No pid is
+    /// consulted, so pid reuse cannot mistake a dead launch for a live one (or
+    /// the reverse). Equally important, a window that still exists keeps its
+    /// slot no matter how long it has been silent: an unexplained stall is
+    /// reported, not reclaimed (SPEC-3431 FR-069).
+    ///
+    /// Only windows qualified with `project_tab_id` are judged. A window
+    /// belonging to another tab — including another gwt instance's tab — is
+    /// invisible from here, and a legacy bare id has no trustworthy
+    /// provenance, so both are retained exactly as
+    /// `prune_inflight_launches_for_live_snapshot` retains them.
+    pub fn vanished_launched_windows(
+        &self,
+        project_tab_id: &str,
+        live_window_ids: &BTreeSet<String>,
+    ) -> Vec<String> {
+        self.launched_windows
+            .values()
+            .filter(|window_id| {
+                issue_monitor_qualified_window_id(window_id)
+                    .is_some_and(|(tab_id, _)| tab_id == project_tab_id)
+            })
+            .filter(|window_id| {
+                !live_window_ids
+                    .iter()
+                    .any(|live| issue_monitor_window_ids_match(window_id, live))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Reverse-lookup the Issue associated with a launched agent `window_id`.
     pub fn launched_window_issue(&self, window_id: &str) -> Option<u64> {
         self.launched_windows
@@ -6875,6 +6989,10 @@ mod tests {
     #[test]
     fn live_candidate_snapshot_prunes_repo_absent_inflight_launches_but_cache_does_not() {
         let stale_prefs = IssueMonitorPrefs {
+            // Both in-flight entries must fit under the cap: Issue #3627 makes
+            // restore drop persisted launches beyond `max_active`, and this
+            // fixture is about snapshot provenance, not slot accounting.
+            max_active_agents: 2,
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-a::agent-1".to_string(),
@@ -6922,6 +7040,10 @@ mod tests {
     #[test]
     fn live_gui_snapshot_prunes_foreign_qualified_windows_after_disk_rebase() {
         let stale_prefs = IssueMonitorPrefs {
+            // Both launches must fit under the cap: Issue #3627 makes restore
+            // drop persisted launches beyond `max_active`, and this fixture is
+            // about window provenance, not slot accounting.
+            max_active_agents: 2,
             launched_issues: vec![
                 IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -7697,6 +7819,200 @@ mod tests {
                 .and_then(|row| row.last_activity_at.clone()),
             Some("2026-08-01T00:00:00Z".to_string()),
             "but it must be visible so the PM can act on it"
+        );
+    }
+
+    /// Issue #3627: a launch whose agent window is gone from the owning tab's
+    /// canvas no longer holds a slot.
+    ///
+    /// Release used to be driven only by PTY exit events, so a window that
+    /// disappeared without one held its slot forever. Window existence is the
+    /// judgement source precisely because it cannot be confused by a reused
+    /// pid: no pid is read at all.
+    #[test]
+    fn a_launch_whose_agent_window_is_gone_releases_its_slot() {
+        let monitor = launched_monitor(42, "project-a::agent-24");
+
+        let live = ["agent-51".to_string(), "agent-52".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            monitor.vanished_launched_windows("project-a", &live),
+            vec!["project-a::agent-24".to_string()],
+            "a window the tab no longer has cannot be holding an agent"
+        );
+    }
+
+    /// Issue #3627 (companion to `an_unexplained_stall_keeps_its_slot`): the
+    /// reclaim must separate "the host is provably gone" from "we cannot
+    /// explain the silence". A window that still exists keeps its slot however
+    /// long it has been quiet.
+    #[test]
+    fn a_silent_agent_whose_window_still_exists_keeps_its_slot() {
+        let mut monitor = launched_monitor(42, "project-a::agent-24");
+        monitor.record_autonomous_heartbeat(42, "2026-08-01T00:00:00Z");
+
+        let live = ["agent-24".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            monitor
+                .vanished_launched_windows("project-a", &live)
+                .is_empty(),
+            "an unexplained stall is reported, never auto-reclaimed"
+        );
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    /// Issue #3627: a tab can only judge the windows it issued. Another tab's
+    /// qualified window (including another gwt instance's) and a legacy bare id
+    /// have no trustworthy provenance here, so both are retained.
+    #[test]
+    fn only_the_owning_tabs_windows_are_judged() {
+        let foreign = launched_monitor(42, "project-b::agent-24");
+        assert!(
+            foreign
+                .vanished_launched_windows("project-a", &BTreeSet::new())
+                .is_empty(),
+            "another tab's window is invisible from here, not dead"
+        );
+
+        let legacy = launched_monitor(42, "agent-24");
+        assert!(
+            legacy
+                .vanished_launched_windows("project-a", &BTreeSet::new())
+                .is_empty(),
+            "a bare legacy id proves no ownership"
+        );
+    }
+
+    /// Issue #3627 AC-1: the reclaim is slot accounting, not an autonomous
+    /// pipeline concern. `stuck_autonomous_issues` is gated on
+    /// `autonomous_mode`, which is why a human-gated deployment could sit
+    /// wedged for 30 hours with nobody reclaiming anything.
+    #[test]
+    fn window_liveness_reclaim_ignores_autonomous_mode() {
+        for autonomous_mode in [false, true] {
+            let mut monitor = launched_monitor(42, "project-a::agent-24");
+            monitor.set_autonomous_mode(autonomous_mode);
+
+            assert_eq!(
+                monitor.vanished_launched_windows("project-a", &BTreeSet::new()),
+                vec!["project-a::agent-24".to_string()],
+                "autonomous_mode={autonomous_mode} must not gate slot accounting"
+            );
+        }
+    }
+
+    /// Issue #3627 AC-2/AC-6: the reported wedge — 11 launched entries against
+    /// `max_active` 5, none of whose windows still exist — recovers completely,
+    /// and the restore that used to resurrect it no longer over-fills the cap.
+    #[test]
+    fn a_restart_that_lost_every_agent_window_frees_every_slot() {
+        let prefs = IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 5,
+            launched_issues: (1..=11)
+                .map(|issue_number| IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: format!("project-a::agent-{issue_number}"),
+                })
+                .collect(),
+            ..IssueMonitorPrefs::default()
+        };
+
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+
+        assert_eq!(
+            restored.active_count(),
+            5,
+            "restore must not re-inject 11 launches into a 5-slot cap"
+        );
+        assert_eq!(
+            restored.prefs().launched_issues.len(),
+            5,
+            "the dropped excess must not stay bound to a slot it does not hold"
+        );
+
+        let vanished = restored.vanished_launched_windows("project-a", &BTreeSet::new());
+        assert_eq!(
+            vanished.len(),
+            5,
+            "every surviving window is gone after the restart"
+        );
+        for window_id in vanished {
+            restored.requeue_window_at(&window_id, "2026-08-17T09:00:00Z");
+        }
+
+        assert_eq!(restored.active_count(), 0, "every slot is free again");
+        assert!(
+            restored.prefs().launched_issues.is_empty(),
+            "and the wedge cannot be restored from disk a second time"
+        );
+    }
+
+    /// Issue #3627 AC-3: a bound launch never takes a slot away from a
+    /// claimed-but-unbound one. Dropping an in-flight claim would erase it from
+    /// disk and let the next rescan launch a duplicate (Issue #3222).
+    #[test]
+    fn restore_caps_bound_launches_without_dropping_in_flight_claims() {
+        let prefs = IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            launched_issues: (1..=4)
+                .map(|issue_number| IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: format!("project-a::agent-{issue_number}"),
+                })
+                .collect(),
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 99,
+                claimed_at: Some("2026-08-17T09:00:00Z".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+
+        assert!(
+            restored.active_count() <= 2,
+            "the restored slot accounting must respect max_active, got {}",
+            restored.active_count()
+        );
+        assert!(
+            restored.active_issue_numbers().contains(&99),
+            "the unbound claim keeps its slot so it cannot be re-claimed"
+        );
+        assert_eq!(
+            restored.prefs().launching_issues.len(),
+            1,
+            "and it survives the prefs roundtrip"
+        );
+    }
+
+    /// Issue #3627 AC-5: OFF/ON is the operator's manual escape hatch from a
+    /// wedged queue. It used to recover nothing, because `prefs()` rebuilds
+    /// `launched_issues` from `launched_windows`, which the disable left alone.
+    #[test]
+    fn disabling_the_monitor_leaves_no_launched_slot_behind() {
+        let mut monitor = launched_monitor(42, "project-a::agent-24");
+
+        monitor.set_enabled(false);
+
+        assert_eq!(monitor.active_count(), 0);
+        assert!(
+            monitor.prefs().launched_issues.is_empty(),
+            "a disabled monitor must not persist slots it no longer manages"
+        );
+
+        let restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(
+            restored.active_count(),
+            0,
+            "and the next reload must not resurrect them"
         );
     }
 

@@ -47527,6 +47527,119 @@ fn issue_monitor_windows_closed_requeue_is_non_scanning() {
     );
 }
 
+/// Issue #3627: a launch whose agent window is gone from the tab canvas held
+/// its `max_active` slot forever, because release was driven exclusively by PTY
+/// exit events. A window reaped without one — app restart, crash, error pane
+/// closed outside `close_window_events` — told the Monitor nothing, and with
+/// every slot held the queue stopped permanently (95 queued behind 11 launches
+/// against a cap of 5, all last seen more than a day earlier).
+#[test]
+fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick() {
+    // Issue #3609: the scheduled tick's worker re-resolves the prefs path from
+    // the process-global HOME on its own thread, so this test pins HOME under
+    // the shared process env lock rather than a thread-local `ScopedGwtHome`.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-24".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+
+    // The canvas kept a different agent window: the launched one is gone.
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-51",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("scan worker is out of scope here");
+
+    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T09:00:00Z");
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert!(
+        persisted.launched_issues.is_empty(),
+        "a window the canvas no longer has cannot keep holding a slot"
+    );
+}
+
+/// Issue #3627 (companion to the release above): the reclaim must not fire on
+/// a live agent. Everything an agent can stall on — an approval prompt, a
+/// provider rate limit, a genuine hang — leaves the window in place, and
+/// SPEC-3431 FR-069 deliberately keeps those slots held so the PM decides.
+#[test]
+fn a_launch_whose_agent_window_still_exists_keeps_its_slot_on_the_scheduled_tick() {
+    // Issue #3609: see the companion test above — the scan worker reads the
+    // process-global HOME from another thread.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-24".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-24",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("scan worker is out of scope here");
+
+    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T09:00:00Z");
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert_eq!(
+        persisted
+            .launched_issues
+            .iter()
+            .map(|launched| launched.issue_number)
+            .collect::<Vec<_>>(),
+        vec![42],
+        "a window that still exists keeps its slot however long it has been quiet"
+    );
+}
+
 #[test]
 fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
     let temp = tempfile::TempDir::new().expect("tempdir");
