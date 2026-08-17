@@ -218,19 +218,18 @@ pub(crate) fn write_internal_command_output<E: CliEnv>(
 
 /// Prepare this process to act as the GUI front door for `project_root`.
 ///
-/// The front door converges managed hook assets and nothing else. It
-/// deliberately leaves the project's daemon endpoint slot alone (Issues #2338
-/// and #3633): the GUI serves no IPC transport, so the
-/// `internal://gwt-front-door` sentinel it used to persist here was unusable
-/// for every consumer that resolved it. Worse, a live sentinel made the slot
-/// look occupied, so `daemon.start` resolved `Reuse` and refused to start —
-/// which is why "start a daemon in production" had no working implementation.
-/// Claiming, reusing and stale-cleaning that slot belongs to the callers that
-/// actually speak the transport (`crates/gwt/src/cli/daemon`,
-/// `crates/gwt/src/daemon_publisher.rs`) and to
-/// [`crate::daemon_supervisor::DaemonSupervisor`], which starts the process
-/// that fills it.
-pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
+/// The front door only converges managed hook assets. It deliberately leaves
+/// the project's daemon endpoint slot alone (Issue #2338): the GUI serves no
+/// IPC transport, so the `internal://gwt-front-door` sentinel it used to
+/// persist here was unusable for every consumer that resolves the endpoint —
+/// while overwriting a live `gwtd daemon start` endpoint, blocking a later
+/// `gwtd daemon start`, and making `gwtd daemon status` report a daemon that
+/// does not exist. Claiming, reusing and stale-cleaning that slot belongs to
+/// the callers that actually speak the transport (`crates/gwt/src/cli/daemon`
+/// and `crates/gwt/src/daemon_publisher.rs`), and filling it belongs to
+/// [`crate::daemon_supervisor::DaemonSupervisor`], which is what actually
+/// starts a daemon for this project (Issue #3633).
+pub fn prepare_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
     if !project_root.exists() {
         return Ok(());
     }
@@ -497,7 +496,7 @@ mod tests {
     fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {
         let source = include_str!("mod.rs");
         let front_door = source
-            .split_once("pub fn prepare_daemon_front_door_for_path")
+            .split_once("pub fn prepare_front_door_for_path")
             .expect("front-door function must exist")
             .1
             .split_once("pub(crate) fn refresh_managed_assets_for_hook_front_door")
@@ -511,8 +510,7 @@ mod tests {
     }
 
     /// Build a daemon-shaped endpoint for `project_root` owned by `pid` and
-    /// persist it into the ambient gwt home, returning its path.
-    #[cfg(unix)]
+    /// persist it into the isolated gwt home, returning its path.
     fn seed_daemon_endpoint(
         project_root: &std::path::Path,
         pid: u32,
@@ -529,66 +527,88 @@ mod tests {
             pid,
             bind.to_string(),
             "daemon-auth-token".to_string(),
-            "9.99.0".to_string(),
+            "9.9.9".to_string(),
         );
         gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint).expect("persist endpoint");
         endpoint_path
     }
 
-    /// Issue #3633 (and #2338): the GUI serves no IPC transport, so the
-    /// `internal://gwt-front-door` sentinel it used to persist was unusable for
-    /// every consumer that resolved it — while its narrow `pid == self`
-    /// liveness predicate deleted a live daemon's endpoint first. Once the slot
-    /// is squatted by a live sentinel, `daemon.start` resolves `Reuse` and
-    /// refuses to start, which is what made "start a daemon" unimplementable.
-    #[cfg(unix)]
-    #[test]
-    fn gui_front_door_leaves_the_daemon_endpoint_slot_alone() {
-        use gwt_core::test_support::ScopedGwtHome;
-
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = ScopedGwtHome::set(temp.path());
-        let project_root = temp.path().join("project");
-        fs::create_dir_all(&project_root).expect("project root");
-
-        // A live daemon (any pid other than ours) already owns the slot.
-        let endpoint_path =
-            seed_daemon_endpoint(&project_root, std::process::id() + 1, "/tmp/d.sock");
-        let before = fs::read(&endpoint_path).expect("seeded endpoint");
-
-        prepare_daemon_front_door_for_path(&project_root).expect("front door");
-
-        let after = fs::read(&endpoint_path).expect("the front door must not delete the endpoint");
-        assert_eq!(
-            before, after,
-            "the GUI front door must not rewrite another process's daemon endpoint"
-        );
+    fn read_endpoint(path: &std::path::Path) -> gwt_core::daemon::DaemonEndpoint {
+        let payload = fs::read(path)
+            .unwrap_or_else(|err| panic!("endpoint must exist at {}: {err}", path.display()));
+        serde_json::from_slice(&payload).expect("endpoint json")
     }
 
-    /// The front door must not create an endpoint either: an endpoint file is
-    /// a claim that some process is serving the scope, and the GUI is not.
+    /// Issue #2338: launching the GUI front door on a project whose
+    /// `gwtd daemon start` is already running must not touch the daemon's
+    /// persisted endpoint. The front door serves no IPC transport, so a
+    /// sentinel written into that slot silently breaks every consumer that
+    /// resolves the endpoint while the daemon process is still alive.
     #[cfg(unix)]
     #[test]
-    fn gui_front_door_publishes_no_endpoint_when_the_slot_is_empty() {
-        use gwt_core::test_support::ScopedGwtHome;
-
+    fn gui_front_door_leaves_a_running_daemons_endpoint_untouched() {
         let temp = tempdir().expect("tempdir");
-        let _gwt_home = ScopedGwtHome::set(temp.path());
-        let project_root = temp.path().join("project");
-        fs::create_dir_all(&project_root).expect("project root");
-        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
-            &project_root,
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+
+        // A live PID that is not this process: the narrow
+        // `|pid| pid == std::process::id()` predicate classified exactly this
+        // case as dead and deleted the endpoint file.
+        let daemon_pid = std::os::unix::process::parent_id();
+        let socket = temp.path().join("daemon.sock");
+        let endpoint_path =
+            seed_daemon_endpoint(&project, daemon_pid, &socket.display().to_string());
+        let before = read_endpoint(&endpoint_path);
+
+        prepare_front_door_for_path(&project).expect("front door preparation");
+
+        let after = read_endpoint(&endpoint_path);
+        assert_eq!(
+            before, after,
+            "GUI front door must not rewrite a running daemon's endpoint"
+        );
+        assert_eq!(after.pid, daemon_pid);
+        assert_eq!(after.bind, socket.display().to_string());
+    }
+
+    /// The front door owns no daemon slot at all: it neither claims a free one
+    /// nor performs stale cleanup on a dead owner's endpoint. Both of those
+    /// belong to the callers that actually speak the daemon transport
+    /// (`gwtd daemon start` / `status` / the publisher).
+    #[test]
+    fn gui_front_door_never_manages_the_daemon_endpoint_slot() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+
+        let empty_slot = temp.path().join("empty-slot");
+        fs::create_dir_all(&empty_slot).expect("empty slot project dir");
+        let empty_scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            &empty_slot,
             gwt_core::daemon::RuntimeTarget::Host,
         )
         .expect("runtime scope");
-        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        let empty_endpoint_path = empty_scope.endpoint_path(&gwt_core::paths::gwt_home());
 
-        prepare_daemon_front_door_for_path(&project_root).expect("front door");
+        prepare_front_door_for_path(&empty_slot).expect("front door preparation");
 
         assert!(
-            !endpoint_path.exists(),
-            "the GUI front door must not claim the daemon endpoint slot: {}",
-            endpoint_path.display()
+            !empty_endpoint_path.exists(),
+            "GUI front door must not claim a free daemon endpoint slot at {}",
+            empty_endpoint_path.display()
+        );
+
+        let stale_slot = temp.path().join("stale-slot");
+        fs::create_dir_all(&stale_slot).expect("stale slot project dir");
+        let stale_path = seed_daemon_endpoint(&stale_slot, i32::MAX as u32, "/nonexistent.sock");
+        let before = read_endpoint(&stale_path);
+
+        prepare_front_door_for_path(&stale_slot).expect("front door preparation");
+
+        let after = read_endpoint(&stale_path);
+        assert_eq!(
+            before, after,
+            "stale endpoint cleanup belongs to the daemon transport callers"
         );
     }
 
