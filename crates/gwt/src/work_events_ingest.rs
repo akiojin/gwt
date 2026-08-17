@@ -548,6 +548,7 @@ mod tests {
     #[test]
     fn ingest_restores_skeleton_from_worktree_fs_and_origin_ref() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -660,6 +661,7 @@ mod tests {
     #[test]
     fn projection_parse_failure_requires_rebuild_with_current_version_and_fingerprints() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -715,6 +717,7 @@ mod tests {
     #[test]
     fn valid_incompatible_projection_does_not_rebuild_or_advance_intake_state() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -791,6 +794,7 @@ mod tests {
     #[test]
     fn ingest_reprocesses_old_raw_fingerprint_state_to_repair_source_container() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -934,6 +938,7 @@ mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1074,6 +1079,7 @@ mod tests {
     #[test]
     fn ingest_folds_all_sources_globally_before_resolving_session_owner() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let owner_worktree = temp.path().join("owner-worktree");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -1176,6 +1182,7 @@ mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1220,6 +1227,7 @@ mod tests {
         use gwt_core::workspace_projection::{WorkEvent, WorkEventKind, WorkspaceStatusCategory};
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1277,6 +1285,7 @@ mod tests {
     #[test]
     fn detached_containerless_source_rebuilds_once_then_is_fingerprint_current() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1326,6 +1335,7 @@ mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1389,6 +1399,7 @@ mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
@@ -1450,6 +1461,7 @@ mod tests {
     #[test]
     fn version_rebuild_replaces_stale_source_state_so_restored_source_is_ingested() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let restored_worktree = temp.path().join("restored-worktree");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -1533,6 +1545,7 @@ mod tests {
     #[test]
     fn version_rebuild_defers_when_one_discovered_source_is_unreadable() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let side_worktree = temp.path().join("side-worktree");
         std::fs::create_dir_all(&repo).expect("repo dir");

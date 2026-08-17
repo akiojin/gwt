@@ -37,18 +37,20 @@
 //! a fixture struct rather than the test body, which this simple body-level
 //! detector cannot see.
 //!
-//! Known gap, stated so nobody reads a pass here as full coverage: the rules
-//! below follow calls a test makes *directly*, plus fixtures declared in
-//! [`SHARED_FIXTURE_SOURCE`]. They do not follow a test into production code.
-//! A test that drives, say, `handle_frontend_event(OpenIntakeSession)` reaches
-//! `reserve_start_work_branch_name_for_project`, which resolves
-//! `gwt_project_dir_for_repo_path` two hops away — and this detector stays
-//! silent. Name-based propagation through production code was measured and
+//! None of the rules follow a test into production code, and they deliberately
+//! do not try. Name-based propagation through production was measured and
 //! rejected: it reaches generic entry points such as `handle_frontend_event`
 //! and `new`, and would flag roughly 260 tests without distinguishing the ones
-//! that actually resolve a home. Closing that class needs either per-test home
-//! pinning across the binary or a runtime guard inside `gwt_home()`, not a
-//! wider static rule.
+//! that actually resolve a home. The hops are real, though —
+//! `handle_frontend_event(OpenIntakeSession)` reaches
+//! `reserve_start_work_branch_name_for_project`, and `abort_prepared_execution`
+//! reaches the durable ledger — so instead of chasing them,
+//! [`every_test_with_a_tempdir_owns_its_gwt_home`] applies the rule at the
+//! door: a test doing filesystem work owns its home before it starts.
+//!
+//! What still escapes: a test that resolves the home without ever creating a
+//! `TempDir`. Nothing in this binary does that today, and such a test would be
+//! writing into the real user home, which is its own bug.
 
 use std::{
     collections::BTreeSet,
@@ -103,18 +105,18 @@ const SCAN_WORKER_TRIGGERS: &[&str] = &[
     "wait_for_scheduled_scan_completion",
 ];
 
-/// Fixtures that build an `AppRuntime` and therefore let the test drive
-/// production code.
-///
-/// Issue #3609 AC-6: production entry points reached this way resolve the gwt
-/// home several hops in — `handle_frontend_event(OpenIntakeSession)` reaches
+/// Issue #3609 AC-6: a test that creates a `TempDir` is doing filesystem work,
+/// and anything it drives from there can resolve the gwt home several hops
+/// into production code — `handle_frontend_event(OpenIntakeSession)` reaches
 /// `reserve_start_work_branch_name_for_project`, which calls
-/// `gwt_project_dir_for_repo_path`. Following those hops by name is not
-/// workable (it lands on generic entry points such as `handle_frontend_event`
-/// and `new`), so the rule is applied at the door instead: a test that can
-/// drive production code must own its home first. The runtime fixture already
-/// takes that root as its first argument, so the pin is always available.
-const RUNTIME_FIXTURES: &[&str] = &["sample_runtime", "sample_runtime_with_events"];
+/// `gwt_project_dir_for_repo_path`; `abort_prepared_execution` reaches the
+/// durable ledger the same way. Following those hops by name is not workable
+/// (it lands on generic entry points such as `handle_frontend_event` and
+/// `new`, flagging ~260 tests without distinguishing the ones that resolve a
+/// home), so the rule is applied at the door instead: own your home before you
+/// touch the filesystem. Pinning costs one line and is harmless for a test
+/// that never resolves the home.
+const TEMP_DIR_CONSTRUCTORS: &[&str] = &["tempdir"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -508,21 +510,21 @@ fn every_scan_worker_test_holds_the_process_env_lock() {
 }
 
 #[test]
-fn every_test_that_builds_a_runtime_owns_its_gwt_home() {
+fn every_test_with_a_tempdir_owns_its_gwt_home() {
     let root = repo_root();
-    let watched: BTreeSet<String> = RUNTIME_FIXTURES
+    let watched: BTreeSet<String> = TEMP_DIR_CONSTRUCTORS
         .iter()
         .map(|name| (*name).to_string())
         .collect();
     let violations = violations_for(&root, &watched, ParsedFn::guarded);
     assert!(
         violations.is_empty(),
-        "Issue #3609 AC-6: {} test(s) build an `AppRuntime` without owning a gwt home. \
-         Driving production code from there resolves the process-global `HOME` several \
-         hops in, so the fixture root a parallel test installed decides where this test \
-         writes. Add `let _gwt_home = ScopedGwtHome::set(<the root passed to the \
-         fixture>);` before the fixture call, or take `env_test_lock()` and repoint \
-         `HOME`:\n{}",
+        "Issue #3609 AC-6: {} test(s) create a `TempDir` without owning a gwt home. \
+         Production code driven from such a test resolves the process-global `HOME` \
+         several hops in, so whichever tempdir a parallel test installed decides where \
+         this one writes — and it disappears when that test ends. Add \
+         `let _gwt_home = ScopedGwtHome::set(<this test's temp root>);` right after the \
+         `tempdir()` binding, or take `env_test_lock()` and repoint `HOME`:\n{}",
         violations.len(),
         report(&violations)
     );

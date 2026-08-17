@@ -2199,6 +2199,7 @@ fn active_work_view_surfaces_shell_work_and_groups_with_same_branch_agent() {
 #[test]
 fn image_paste_prepare_uses_drop_files_relative_path_reference() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let payload = base64::engine::general_purpose::STANDARD.encode(b"image-bytes");
     let agent_root = temp.path().display().to_string();
 
@@ -2232,6 +2233,7 @@ fn image_paste_prepare_uses_drop_files_relative_path_reference() {
 #[test]
 fn image_paste_prepare_uses_docker_project_root_reference() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let payload = base64::engine::general_purpose::STANDARD.encode(b"jpeg-bytes");
 
     let prepared = super::prepare_image_paste_file(
@@ -2264,6 +2266,7 @@ fn image_paste_prepare_uses_docker_project_root_reference() {
 #[test]
 fn image_paste_prepare_rejects_unsupported_mime_and_empty_payload() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let payload = base64::engine::general_purpose::STANDARD.encode(b"gif-bytes");
 
     let unsupported = super::prepare_image_paste_file(
@@ -2472,6 +2475,7 @@ fn image_paste_event_ignores_non_agent_terminal_window() {
 #[test]
 fn file_attachment_prepare_copies_host_native_path_under_drop_files() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let source = temp.path().join("report.pdf");
@@ -2513,6 +2517,7 @@ fn file_attachment_prepare_copies_host_native_path_under_drop_files() {
 #[test]
 fn file_attachment_prepare_copies_inline_file_under_worktree() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let payload = base64::engine::general_purpose::STANDARD.encode(b"notes-bytes");
@@ -2551,6 +2556,7 @@ fn file_attachment_prepare_copies_inline_file_under_worktree() {
 #[test]
 fn file_attachment_prepare_preserves_japanese_unicode_basename() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let payload = base64::engine::general_purpose::STANDARD.encode(b"unicode-notes");
@@ -2594,6 +2600,7 @@ fn file_attachment_prepare_preserves_japanese_unicode_basename() {
 #[test]
 fn file_attachment_prepare_copies_native_file_for_docker_agent_path() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let source = temp.path().join("Data Set.bin");
@@ -2633,6 +2640,7 @@ fn file_attachment_prepare_copies_native_file_for_docker_agent_path() {
 #[test]
 fn file_attachment_prepare_rejects_invalid_items() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let payload = base64::engine::general_purpose::STANDARD.encode(b"too-large");
@@ -3001,6 +3009,7 @@ fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_
 #[test]
 fn file_attachment_copy_reports_byte_progress() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let source = temp.path().join("日本語-source.bin");
     let storage = temp
         .path()
@@ -3997,6 +4006,7 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
 #[test]
 fn queued_correlated_self_close_rechecks_generation_before_acceptance() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, issuer, queued_grant, window_id) = self_close_runtime(temp.path());
     issuer
         .issue(temp.path().join("project").as_path(), "session-project")
@@ -4082,6 +4092,7 @@ fn take_self_close_commit(
 #[test]
 fn accepted_agent_self_close_waits_for_direct_ack_then_commits_exactly_once() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
     let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
 
@@ -4133,6 +4144,7 @@ fn accepted_agent_self_close_waits_for_direct_ack_then_commits_exactly_once() {
 #[test]
 fn agent_self_close_disconnect_before_acceptance_rolls_back_the_grant() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
     let (responder, acceptance) = AgentSelfCloseResponder::channel();
     drop(acceptance);
@@ -4278,6 +4290,7 @@ fn correlated_agent_self_close_fails_closed_for_ambiguous_session_windows() {
 #[test]
 fn accepted_agent_self_close_survives_external_stop_before_commit() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, _issuer, grant, window_id) = self_close_runtime(temp.path());
     let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
 
@@ -4310,6 +4323,7 @@ fn accepted_agent_self_close_survives_external_stop_before_commit() {
 #[test]
 fn accepted_agent_self_close_does_not_remove_same_id_successor_session() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, _issuer, grant, window_id) = self_close_runtime(temp.path());
     let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
 
@@ -4497,6 +4511,7 @@ fn wait_for_path(label: &str, path: &Path) {
 #[test]
 fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (proxy, events) = AppEventProxy::stub();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -4560,6 +4575,7 @@ fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
 #[test]
 fn agent_launch_success_dispatches_launch_complete_before_project_index_status() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let (proxy, events) = AppEventProxy::stub();
     let completion: AgentLaunchCompletion = (
         ProcessLaunch {
@@ -11933,6 +11949,7 @@ fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_co
 #[test]
 fn persisted_session_launch_config_restores_path_independent_tool_runtime_provenance() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut session =
         gwt_agent::Session::new(temp.path(), "work/issue-3456", gwt_agent::AgentId::Codex);
     session.tool_version = Some("latest".to_string());
@@ -20319,6 +20336,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
 #[test]
 fn continue_work_pre_dispatch_abort_surfaces_durable_write_failure() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     init_repo(temp.path());
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
@@ -23999,6 +24017,7 @@ fn git_details_for_active_work_test(
 #[test]
 fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let projection =
@@ -24057,6 +24076,7 @@ fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
 #[test]
 fn app_runtime_shared_session_with_conflicting_worktree_keeps_both_works() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut projection =
@@ -24117,6 +24137,7 @@ fn app_runtime_shared_session_with_conflicting_worktree_keeps_both_works() {
 #[test]
 fn app_runtime_shared_session_with_conflicting_branch_keeps_both_works() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let shared_worktree = "/home/user/gwt/work/shared";
@@ -24179,6 +24200,7 @@ fn app_runtime_shared_session_with_conflicting_branch_keeps_both_works() {
 #[test]
 fn app_runtime_projection_branch_fallback_blocks_foreign_history_metadata() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let shared_worktree = "/home/user/gwt/work/shared";
@@ -24232,6 +24254,7 @@ fn app_runtime_projection_branch_fallback_blocks_foreign_history_metadata() {
 #[test]
 fn app_runtime_projection_worktree_fallback_blocks_foreign_history_metadata() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let live_worktree = "/home/user/gwt/work/live";
@@ -24285,6 +24308,7 @@ fn app_runtime_projection_worktree_fallback_blocks_foreign_history_metadata() {
 #[test]
 fn app_runtime_sessionless_live_work_does_not_claim_legacy_history_by_git_identity() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let shared_worktree = "/home/user/gwt/work/shared";
@@ -24332,6 +24356,7 @@ fn app_runtime_sessionless_live_work_does_not_claim_legacy_history_by_git_identi
 #[test]
 fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let projection =
@@ -24425,6 +24450,7 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
 #[test]
 fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let shared_worktree = "/home/user/gwt/work/shared";
@@ -24511,6 +24537,7 @@ fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
 #[test]
 fn app_runtime_resumed_work_dedupes_missing_lexically_equivalent_worktree_paths() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let worktree = repo.join("work/resume");
     let alternate_worktree_path = worktree.join("..").join("resume");
@@ -24579,6 +24606,7 @@ fn app_runtime_resumed_work_dedupes_missing_lexically_equivalent_worktree_paths(
 #[test]
 fn app_runtime_duplicate_paused_history_for_same_session_stays_one_work() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let projection =
@@ -24624,6 +24652,7 @@ fn app_runtime_duplicate_paused_history_for_same_session_stays_one_work() {
 #[test]
 fn app_runtime_paused_history_dedupe_scales_with_session_matches() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let projection =
@@ -24662,6 +24691,7 @@ fn app_runtime_paused_history_dedupe_scales_with_session_matches() {
 #[test]
 fn app_runtime_paused_work_dedups_by_session_when_live_row_has_no_git_identity() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut projection =
@@ -36325,6 +36355,7 @@ fn app_runtime_local_driver_surfaces_remote_claim_failures_in_the_monitor_snapsh
 
     for outcome_unknown in [false, true] {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let prefs_path = temp.path().join("issue-monitor.json");
         let prefs = gwt::IssueMonitorPrefs {
             enabled: true,
@@ -36473,6 +36504,7 @@ fn app_runtime_compatibility_claim_driver_defers_while_scheduled_lease_is_held()
 #[test]
 fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
         enabled: true,
@@ -37498,6 +37530,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
 #[test]
 fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     let fresh_failure = legacy_issue_monitor_git_failure(temp.path());
     let disk = gwt::IssueMonitorPrefs {
@@ -37536,6 +37569,7 @@ fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
 #[test]
 fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     fs::write(&prefs_path, b"{").expect("seed malformed prefs");
     let mut current = gwt::IssueMonitorState::with_prefs(
@@ -37573,6 +37607,7 @@ fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
 #[test]
 fn local_fallback_transaction_preserves_the_background_worker_deadline() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     let prefs = gwt::IssueMonitorPrefs {
         enabled: true,
@@ -37666,6 +37701,7 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
 #[test]
 fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     fs::write(&prefs_path, b"{").expect("seed malformed prefs");
 
@@ -37686,6 +37722,7 @@ fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
 #[test]
 fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     let stale_record = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Implementing, 1);
     let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
@@ -41987,6 +42024,7 @@ fn sync_agent_window_titles_skips_fallback_when_projection_window_id_unknown_loc
 #[test]
 fn sync_agent_window_titles_returns_false_when_no_resolution_path_exists() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, _window_id) =
@@ -42036,6 +42074,7 @@ fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
     // `workspace.update` succeeded at the data
     // layer.
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let unrelated = temp.path().join("unrelated");
     fs::create_dir_all(&repo).expect("create repo");
@@ -42071,6 +42110,7 @@ fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
 #[test]
 fn sync_agent_window_titles_falls_back_to_worktree_when_session_id_not_active() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, _window_id) =
@@ -42105,6 +42145,7 @@ fn sync_agent_window_titles_falls_back_to_worktree_when_session_id_not_active() 
 #[test]
 fn sync_agent_window_titles_worktree_fallback_refuses_when_agent_id_mismatches() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, _window_id) =
@@ -42136,6 +42177,7 @@ fn sync_agent_window_titles_worktree_fallback_refuses_when_agent_id_mismatches()
 #[test]
 fn sync_agent_window_titles_worktree_fallback_refuses_when_multiple_sessions_match() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
@@ -42484,6 +42526,7 @@ fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRunti
 #[test]
 fn project_tab_runtime_main_worktree_root_caches_resolution() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo");
     gwt_core::process::hidden_command("git")
@@ -43103,6 +43146,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
 #[test]
 fn validate_update_log_path_accepts_file_inside_logs_root() {
     let logs_root = tempfile::tempdir().expect("logs root tempdir");
+    let _gwt_home = ScopedGwtHome::set(logs_root.path());
     let log_file = logs_root.path().join("update-2026-05-10.log");
     std::fs::write(&log_file, b"{}\n").unwrap();
 
@@ -43119,6 +43163,7 @@ fn validate_update_log_path_accepts_file_inside_logs_root() {
 #[test]
 fn validate_update_log_path_rejects_files_outside_logs_root() {
     let logs_root = tempfile::tempdir().expect("logs root tempdir");
+    let _gwt_home = ScopedGwtHome::set(logs_root.path());
     let outside = tempfile::tempdir().expect("outside tempdir");
     let outside_file = outside.path().join("evil.txt");
     std::fs::write(&outside_file, b"steal me").unwrap();
@@ -43131,6 +43176,7 @@ fn validate_update_log_path_rejects_files_outside_logs_root() {
 #[test]
 fn validate_update_log_path_rejects_url_schemes_and_empty() {
     let logs_root = tempfile::tempdir().expect("logs root tempdir");
+    let _gwt_home = ScopedGwtHome::set(logs_root.path());
     for raw in [
         "",
         "   ",
@@ -43148,6 +43194,7 @@ fn validate_update_log_path_rejects_url_schemes_and_empty() {
 #[test]
 fn validate_update_log_path_rejects_directories() {
     let logs_root = tempfile::tempdir().expect("logs root tempdir");
+    let _gwt_home = ScopedGwtHome::set(logs_root.path());
     // Caller passes the logs root itself; a directory must not be opened
     // as a file.
     let resolved =
@@ -43158,6 +43205,7 @@ fn validate_update_log_path_rejects_directories() {
 #[test]
 fn validate_update_log_path_rejects_missing_files() {
     let logs_root = tempfile::tempdir().expect("logs root tempdir");
+    let _gwt_home = ScopedGwtHome::set(logs_root.path());
     let missing = logs_root.path().join("does-not-exist.log");
     let resolved = super::validate_update_log_path(missing.to_str().unwrap(), logs_root.path());
     assert!(resolved.is_none(), "missing files must be rejected");
@@ -43289,6 +43337,7 @@ fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(temp.path())
         .build();
@@ -43324,6 +43373,7 @@ fn codex_hook_discovery_mode_treats_latest_fallback_as_workspace_home() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(temp.path())
         .build();
@@ -43343,6 +43393,7 @@ fn docker_codex_hook_discovery_mode_keeps_safe_both_fallback() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(temp.path())
         .build();
@@ -43370,6 +43421,7 @@ fn codex_hook_discovery_has_no_standalone_process_probe() {
 #[test]
 fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
     let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
     let profile_config_path = home.path().join(".gwt/config.toml");
     let mut settings = Settings::default();
     settings.agent.codex_trust_managed_hooks = Some(true);
@@ -43403,6 +43455,7 @@ fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
 #[test]
 fn codex_hook_trust_launch_uses_effective_codex_home_config() {
     let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
     let codex_home = tempdir().expect("codex home");
@@ -43436,6 +43489,7 @@ fn codex_hook_trust_launch_uses_effective_codex_home_config() {
 #[test]
 fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_out() {
     let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
@@ -43520,6 +43574,7 @@ fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_ou
 #[test]
 fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
     let home = tempdir().expect("home tempdir");
+    let _gwt_home = ScopedGwtHome::set(home.path());
     let profile_config_path = home.path().join(".gwt/config.toml");
     let worktree = tempdir().expect("worktree tempdir");
     gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
@@ -43638,6 +43693,7 @@ fn write_canonical_log_file(log_dir: &Path, lines: &[&str]) {
 #[test]
 fn load_log_entries_from_dir_returns_outcome_with_no_skipped_lines() {
     let dir = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(dir.path());
     write_canonical_log_file(dir.path(), &[PROD_LINE_INFO]);
 
     let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
@@ -43650,6 +43706,7 @@ fn load_log_entries_from_dir_returns_outcome_with_no_skipped_lines() {
 #[test]
 fn load_log_entries_from_dir_counts_skipped_lines() {
     let dir = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(dir.path());
     write_canonical_log_file(
         dir.path(),
         &[PROD_LINE_INFO, MALFORMED_LINE, PROD_LINE_INFO],
@@ -43664,6 +43721,7 @@ fn load_log_entries_from_dir_counts_skipped_lines() {
 #[test]
 fn load_log_entries_from_dir_returns_empty_outcome_when_file_missing() {
     let dir = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(dir.path());
 
     let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
 
@@ -43846,6 +43904,7 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
 #[test]
 fn startup_orphan_intake_prune_dispatch_returns_before_inspection_finishes() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -45174,6 +45233,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
     }
 
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("unity-cli");
     let issue_worktree = temp.path().join("unity-cli/work/issue-206");
     let other_worktree = temp.path().join("unity-cli/work/20260616-1102");
@@ -45270,6 +45330,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
 #[test]
 fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let mut session =
@@ -45513,6 +45574,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
 #[test]
 fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     run_git(&repo, &["init", "-q", "-b", "develop"]);
@@ -45892,6 +45954,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
 #[test]
 fn work_branch_dirty_scan_failure_is_fail_closed() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let missing_worktree = temp.path().join("missing-worktree");
     let target = super::WorkBranchScanTarget {
         branch: "work/missing".to_string(),
@@ -46509,6 +46572,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
     }
 
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("repo");
     let mut branch_backed = row(
         "work-work-x-aaaa",
@@ -46917,6 +46981,7 @@ fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
 #[test]
 fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let live_process_worktree = temp.path().join("gwt-live-process");
     fs::create_dir_all(&live_process_worktree).expect("create live process worktree");
     let mut works = vec![
