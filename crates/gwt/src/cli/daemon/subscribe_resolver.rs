@@ -964,6 +964,9 @@ mod tests {
         assert!(diagnostic.contains("metadata_path_mismatch=1"));
     }
 
+    /// Issue #2338 stopped the GUI front door from writing this sentinel, but
+    /// gwt homes upgraded from an older build can still hold one on disk, so
+    /// the resolver must keep rejecting it instead of treating it as reachable.
     #[test]
     fn internal_front_door_is_not_a_candidate() {
         let fixture = Fixture::new();

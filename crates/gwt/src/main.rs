@@ -7838,8 +7838,8 @@ fn main() -> std::io::Result<()> {
         })
         .ok();
 
-    if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
-        eprintln!("gwt daemon bootstrap: {error}");
+    if let Err(error) = gwt::cli::hook::prepare_front_door_for_path(&startup_dir) {
+        eprintln!("gwt front door preparation: {error}");
     }
 
     // SPEC #2920 Phase 4 / FR-011: acquire the per-user tray
