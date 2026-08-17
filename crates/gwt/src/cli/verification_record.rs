@@ -4992,7 +4992,11 @@ pub(crate) mod tests {
 
         initialize_generation_scoped_execution(&fixture.repo, session_id);
         seed_canonical_work(&fixture, session_id, true);
+        // W-33b: `record_workspace_work_event` writes immutable shards, so the
+        // delivery this test performs has to stage the shard store as well as
+        // the frozen legacy monolith.
         fixture.stage_events();
+        fixture.stage_event_shards();
         fixture.commit("chore(work): deliver the terminalized Work events");
         fixture.push();
 
@@ -5045,7 +5049,10 @@ pub(crate) mod tests {
 
         initialize_generation_scoped_execution(&fixture.repo, session_id);
         seed_canonical_work(&fixture, session_id, false);
+        // W-33b: the seeded events land in immutable shards, not the frozen
+        // legacy monolith, so both paths belong in this delivery commit.
         fixture.stage_events();
+        fixture.stage_event_shards();
         fixture.commit("chore(work): deliver the live Work events");
         fixture.push();
 
