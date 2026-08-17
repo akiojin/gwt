@@ -28,6 +28,15 @@ const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 /// quota notice. Wider than the error tail because a CLI can print a prompt or
 /// blank frame after the notice, and the notice itself soft-wraps.
 const QUOTA_NOTICE_TAIL_LINES: usize = 8;
+/// Issue #3616: how long a quota notice must sit on a *live* pane's screen,
+/// with no agent activity at all, before it is treated as a block.
+///
+/// A blocked pane produces nothing for days. A working agent runs a tool —
+/// and so fires a hook — far inside this window, and any hook abandons the
+/// candidate. The cost of waiting is a held slot for two minutes; the cost of
+/// not waiting is releasing a healthy launch because its own output quoted the
+/// provider's sentence.
+const PROVIDER_QUOTA_SETTLE_SECS: i64 = 120;
 /// Provider TUIs commonly clear and redraw the approval block after Enter.
 /// This bounded settle window avoids a false Running frame between the clear
 /// and the redraw without ever blocking the tao event loop.
@@ -107,20 +116,41 @@ pub(super) fn classify_issue_monitor_failure(
 /// only anchor available.
 pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
     let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
-    Some(provider_usage_limit_failure(&notice))
+    Some(provider_usage_limit_failure(&notice, None))
 }
 
+/// `pane_agent_id` is the agent the pane is actually running, and it wins over
+/// the notice's own wording: Claude's weekly-limit text names no provider at
+/// all, and mis-attributing the block would tell the PM the wrong account is
+/// out.
 pub(super) fn provider_usage_limit_failure(
     notice: &gwt_core::usage::ProviderLimitNotice,
+    pane_agent_id: Option<&str>,
 ) -> gwt::IssueMonitorFailure {
     gwt::IssueMonitorFailure::ProviderUsageLimit {
-        provider: match notice.provider {
-            gwt_core::usage::UsageProvider::Codex => "codex".to_string(),
-            gwt_core::usage::UsageProvider::ClaudeCode => "claude".to_string(),
-        },
+        provider: provider_label(notice, pane_agent_id),
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+    }
+}
+
+/// The agent id to report as the exhausted account, falling back to the
+/// notice's hint and finally to `unknown` — never to a guess.
+pub(super) fn provider_label(
+    notice: &gwt_core::usage::ProviderLimitNotice,
+    pane_agent_id: Option<&str>,
+) -> String {
+    if let Some(agent_id) = pane_agent_id
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+    {
+        return agent_id.to_string();
+    }
+    match notice.provider {
+        Some(gwt_core::usage::UsageProvider::Codex) => "codex".to_string(),
+        Some(gwt_core::usage::UsageProvider::ClaudeCode) => "claude".to_string(),
+        None => "unknown".to_string(),
     }
 }
 
@@ -294,6 +324,15 @@ impl AppRuntime {
         if publish_to_daemon {
             let prompt = self.current_screen_approval_prompt(&output_id);
             events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
+            // Issue #3616: the only place a still-running quota-blocked pane can
+            // be recognized. Claude keeps its process alive and reports `idle`,
+            // so no exit or status event ever arrives to classify.
+            let screen = self.screen_tail(&output_id, QUOTA_NOTICE_TAIL_LINES, "\n");
+            events.extend(self.observe_provider_quota_notice(
+                &output_id,
+                screen.as_deref(),
+                chrono::Utc::now(),
+            ));
         }
         events
     }
@@ -688,10 +727,13 @@ impl AppRuntime {
         // quota-dead Codex pane looked like finished work.
         let quota_notice =
             self.provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail);
+        let quota_agent_id = self.pane_agent_id(&id);
         match quota_notice.as_ref() {
             Some(notice) => {
-                self.provider_quota_holds
-                    .insert(id.clone(), provider_usage_limit_failure(notice));
+                self.provider_quota_holds.insert(
+                    id.clone(),
+                    provider_usage_limit_failure(notice, quota_agent_id.as_deref()),
+                );
             }
             None => {
                 self.provider_quota_holds.remove(&id);
@@ -706,7 +748,10 @@ impl AppRuntime {
         // tail into the persistent detail before the state is gone; the raw
         // output stays available in logs.
         let detail = if let Some(notice) = quota_notice.as_ref() {
-            Some(gwt_core::usage::describe_provider_limit_notice(notice))
+            Some(gwt_core::usage::describe_provider_limit_notice(
+                notice,
+                Some(provider_label(notice, quota_agent_id.as_deref()).as_str()),
+            ))
         } else if matches!(status, WindowProcessStatus::Error)
             && !approval_was_active
             && matches!(
@@ -931,6 +976,145 @@ impl AppRuntime {
         (!tail.is_empty()).then_some(tail)
     }
 
+    /// Issue #3616: fold one live-screen observation into the quota state for
+    /// `window_id`, returning whatever the resulting state change must publish.
+    ///
+    /// `screen` is the pane's currently rendered screen, or `None` when it has
+    /// no runtime to read. Idempotent: a notice that is already a confirmed hold
+    /// produces nothing, so this can be called on every output chunk.
+    pub(crate) fn observe_provider_quota_notice(
+        &mut self,
+        window_id: &str,
+        screen: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        if self.provider_quota_holds.contains_key(window_id) {
+            return Vec::new();
+        }
+        if !matches!(
+            self.window_preset(window_id),
+            Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
+        ) {
+            return Vec::new();
+        }
+        let notice = screen.and_then(|screen| {
+            gwt_core::usage::detect_provider_limit_notice(
+                screen,
+                &now.with_timezone(&chrono::Local),
+            )
+        });
+        let Some(notice) = notice else {
+            self.provider_quota_candidates.remove(window_id);
+            return Vec::new();
+        };
+        let agent_id = self.pane_agent_id(window_id);
+        let first_seen = self
+            .provider_quota_candidates
+            .entry(window_id.to_string())
+            .or_insert_with(|| super::ProviderQuotaCandidate { first_seen: now })
+            .first_seen;
+        let corroborated = agent_id.as_deref().is_some_and(|agent_id| {
+            gwt::issue_monitor::provider_limit_reached_for_agent(
+                agent_id,
+                &self.provider_usage_accounts,
+            )
+        });
+        let settled = now
+            .signed_duration_since(first_seen)
+            .num_seconds()
+            .ge(&PROVIDER_QUOTA_SETTLE_SECS);
+        if !corroborated && !settled {
+            return Vec::new();
+        }
+        self.provider_quota_candidates.remove(window_id);
+        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref())
+    }
+
+    /// Latch the block, project the pane as waiting, and tell the Monitor the
+    /// slot is free.
+    ///
+    /// The slot is released even though the process may still be alive: the
+    /// account is out for as long as the provider says, and holding a slot for
+    /// days stops the whole queue at the default `max_active = 1`. The pane
+    /// stays on screen with its session intact so the same conversation can be
+    /// resumed after the reset.
+    fn commit_provider_quota_hold(
+        &mut self,
+        window_id: &str,
+        notice: &gwt_core::usage::ProviderLimitNotice,
+        agent_id: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let failure = provider_usage_limit_failure(notice, agent_id);
+        let detail = gwt_core::usage::describe_provider_limit_notice(
+            notice,
+            Some(provider_label(notice, agent_id).as_str()),
+        );
+        self.provider_quota_holds
+            .insert(window_id.to_string(), failure);
+        self.window_details
+            .insert(window_id.to_string(), detail.clone());
+        let mut events = Vec::new();
+        if self.window_preset(window_id) == Some(WindowPreset::Agent) {
+            let session_mode = self.issue_monitor_session_mode_for_window(window_id);
+            if let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) {
+                events.extend(self.issue_monitor_agent_failed_events_with_mode(
+                    &project_root,
+                    window_id,
+                    &detail,
+                    session_mode,
+                ));
+            }
+        }
+        let _ = self.persist();
+        if let Some(composed) = self.recompute_window_state(window_id) {
+            events.extend(Self::status_events(
+                window_id.to_string(),
+                composed,
+                Some(detail),
+            ));
+        }
+        events
+    }
+
+    /// Issue #3616: re-check every pending candidate against its pane's current
+    /// screen.
+    ///
+    /// A blocked pane emits no further output, so the output path alone would
+    /// never reach the settle deadline. This runs on the usage-poller tick,
+    /// which is also where fresh corroboration arrives.
+    pub(crate) fn sweep_provider_quota_candidates(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        let pending: Vec<String> = self.provider_quota_candidates.keys().cloned().collect();
+        let mut events = Vec::new();
+        for window_id in pending {
+            let screen = self.screen_tail(&window_id, QUOTA_NOTICE_TAIL_LINES, "\n");
+            events.extend(self.observe_provider_quota_notice(&window_id, screen.as_deref(), now));
+        }
+        events
+    }
+
+    /// Issue #3616: the agent this pane is running, live entry first and the
+    /// persisted window second.
+    ///
+    /// PTY teardown removes the active session before the failure is published,
+    /// so the persisted fallback is what keeps the account attributable at the
+    /// moment it matters — the same ordering `approval_prompt_provider` uses.
+    fn pane_agent_id(&self, window_id: &str) -> Option<String> {
+        self.active_agent_sessions
+            .get(window_id)
+            .map(|session| session.agent_id.clone())
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                self.tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?
+                    .agent_id
+                    .clone()
+            })
+    }
+
     /// Issue #3616: whether this exit is the provider saying it is out of
     /// quota.
     ///
@@ -1063,9 +1247,13 @@ impl AppRuntime {
             return events;
         };
         self.recoverable_agent_error_windows.remove(&window_id);
-        // Issue #3616: a hook arrival means the agent is running again, so any
-        // quota hold recorded for this pane is stale.
+        // Issue #3616: a hook arrival is proof the agent is running, so any
+        // quota hold or pending candidate for this pane is stale. This is also
+        // what makes the live-screen classifier safe: an agent whose own output
+        // quotes the provider's sentence keeps running tools, and every tool
+        // fires a hook well inside the settle window.
         self.provider_quota_holds.remove(&window_id);
+        self.provider_quota_candidates.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         if !hook_state_changed && !approval_wait_cleared {

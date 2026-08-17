@@ -1241,6 +1241,33 @@ pub fn rate_limit_reset_for_agent(
     agent_id: &str,
     accounts: &[gwt_core::usage::ProviderUsage],
 ) -> Option<String> {
+    exhausted_account_for_agent(agent_id, accounts)?
+        .windows
+        .iter()
+        .filter_map(|window| window.resets_at)
+        .min()
+        .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// Issue #3616: whether the poller independently reports `agent_id`'s account
+/// out of quota.
+///
+/// Distinct from [`rate_limit_reset_for_agent`], which returns `None` both for
+/// "has quota left" and for "out of quota but printed no reset instant". A
+/// caller corroborating a screen notice needs the first fact on its own.
+pub fn provider_limit_reached_for_agent(
+    agent_id: &str,
+    accounts: &[gwt_core::usage::ProviderUsage],
+) -> bool {
+    exhausted_account_for_agent(agent_id, accounts).is_some()
+}
+
+/// The exhausted account backing `agent_id`, scoped to that agent's own
+/// provider so one drained account never stalls a fleet on another.
+fn exhausted_account_for_agent<'accounts>(
+    agent_id: &str,
+    accounts: &'accounts [gwt_core::usage::ProviderUsage],
+) -> Option<&'accounts gwt_core::usage::ProviderUsage> {
     use gwt_core::usage::UsageProvider;
 
     let provider = match agent_id.trim().to_ascii_lowercase().as_str() {
@@ -1250,12 +1277,7 @@ pub fn rate_limit_reset_for_agent(
     };
     accounts
         .iter()
-        .find(|account| account.provider == provider && account.limit_reached)?
-        .windows
-        .iter()
-        .filter_map(|window| window.resets_at)
-        .min()
-        .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .find(|account| account.provider == provider && account.limit_reached)
 }
 
 /// One inbox row, reduced to the facts an agent acts on. The full

@@ -119,6 +119,11 @@ drive them.
   retry attempt was spent, and the next scan after `retry_not_before`
   picks the work up again. Report the reset instant; do not treat the
   row as a stall to chase.
+- A quota-blocked pane reads as `waiting`, not `idle` or `stopped`, and
+  its window detail names the account and the reset. The two providers
+  fail differently — one exits, one keeps its process alive and stops
+  responding — so the pane state is the reliable signal, not whether the
+  process is gone.
 - A stall is not automatically resolved for you. Decide: wait, demote it
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without

@@ -843,6 +843,15 @@ pub(crate) struct ApprovalPromptLatch {
     pub(crate) pending_settle_token: Option<u64>,
 }
 
+/// Issue #3616: a quota notice seen on a live pane, awaiting confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderQuotaCandidate {
+    /// When this uninterrupted run of the notice began. Reset whenever the
+    /// notice leaves the screen or the agent shows activity, so the settle
+    /// window always measures continuous silence.
+    pub(crate) first_seen: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
@@ -1020,6 +1029,21 @@ pub struct AppRuntime {
     /// from the window detail keeps the decision made once, at the one moment
     /// the provider's wording is on screen.
     pub(crate) provider_quota_holds: HashMap<String, gwt::IssueMonitorFailure>,
+    /// Issue #3616: quota notices seen on a *live* pane's screen, not yet
+    /// confirmed as a block.
+    ///
+    /// Claude does not exit when its quota runs out — the pane stays alive
+    /// showing the notice and stops responding — so the exit path cannot see
+    /// that shape at all. A candidate is only promoted once it has survived
+    /// [`PROVIDER_QUOTA_SETTLE_SECS`] with no agent activity, or once the usage
+    /// poller independently reports the same account exhausted. That gate is
+    /// what keeps an agent whose own output *contains* the sentence from being
+    /// released out from under itself.
+    pub(crate) provider_quota_candidates: HashMap<String, ProviderQuotaCandidate>,
+    /// Issue #3616: the newest account-level usage snapshot, used only to
+    /// corroborate a screen notice. Never a trigger on its own: the poller is
+    /// silent while no client is connected and Claude's account read is opt-in.
+    pub(crate) provider_usage_accounts: Vec<gwt_core::usage::ProviderUsage>,
     /// SPEC-3431 FR-068: when each agent window last showed activity, so the
     /// heartbeat published to the Issue Monitor can be throttled instead of
     /// firing a daemon control on every hook. Keyed by combined window id.
@@ -2106,6 +2130,8 @@ impl AppRuntime {
             approval_settle_epoch: 0,
             recoverable_agent_error_windows: HashSet::new(),
             provider_quota_holds: HashMap::new(),
+            provider_quota_candidates: HashMap::new(),
+            provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
@@ -6839,7 +6865,32 @@ impl AppRuntime {
         self.clear_runtime_approval_latch_without_status(window_id, true);
         self.recoverable_agent_error_windows.remove(window_id);
         self.provider_quota_holds.remove(window_id);
+        self.provider_quota_candidates.remove(window_id);
         self.board_all_view_windows.remove(window_id);
+    }
+
+    /// Issue #3616: record the newest account-level usage snapshot and act on
+    /// any candidate it now corroborates.
+    ///
+    /// The snapshot is corroboration only. `limit_reached` is read from local
+    /// rollout files (Codex) or an opt-in account endpoint (Claude), so it can
+    /// be absent exactly when a block is real; the screen notice remains the
+    /// trigger.
+    pub(crate) fn handle_provider_usage_snapshot(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        self.provider_usage_accounts = accounts;
+        self.sweep_provider_quota_candidates(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_provider_usage_accounts(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+    ) {
+        self.provider_usage_accounts = accounts;
     }
 
     fn tracked_window_exists(&self, window_id: &str) -> bool {

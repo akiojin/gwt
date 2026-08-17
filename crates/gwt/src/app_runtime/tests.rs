@@ -3404,6 +3404,8 @@ fn sample_runtime_with_events(
         approval_settle_epoch: 0,
         recoverable_agent_error_windows: HashSet::new(),
         provider_quota_holds: HashMap::new(),
+        provider_quota_candidates: HashMap::new(),
+        provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
@@ -25984,6 +25986,63 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     );
 }
 
+/// The exact Claude wording observed on 2026-08-17 (Issue #3616 comment). It
+/// names no provider, so the account can only be attributed from the pane.
+const CLAUDE_USAGE_LIMIT_SCREEN: &str = "\
+You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
+/usage-credits to finish what you're working on.";
+
+/// Issue #3616: the block is recognized across providers, and the account is
+/// attributed from the pane's own agent rather than from the wording.
+///
+/// The first report was Codex; the recurrence was Claude, whose text shares no
+/// distinctive phrase with it. Reading the provider out of the sentence would
+/// have named Claude's outage "codex" (or nothing at all).
+#[test]
+fn a_claude_usage_limit_exit_is_attributed_to_the_panes_own_agent() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "claude-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "claude-1");
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.agent_id = "claude".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+
+    let failure = runtime.issue_monitor_failure_for_window(
+        &window_id,
+        CLAUDE_USAGE_LIMIT_SCREEN,
+        gwt_agent::SessionMode::Normal,
+    );
+
+    let gwt::IssueMonitorFailure::ProviderUsageLimit {
+        provider,
+        resets_at,
+    } = failure.clone().expect("a quota notice is a typed failure")
+    else {
+        panic!("expected a provider usage limit failure, got {failure:?}");
+    };
+    assert_eq!(
+        provider, "claude",
+        "the pane's agent is the account that ran out"
+    );
+    assert!(
+        resets_at.is_some(),
+        "`resets Aug 20 at 6am` carries a usable instant even without a year"
+    );
+}
+
 /// Issue #3616 AC-2: the pane must not read as DONE.
 ///
 /// `WindowProcessStatus::Stopped` renders as the `DONE` cue, which says the
@@ -26037,6 +26096,263 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
             .get(&window_id)
             .is_some_and(|detail| detail.contains("usage limit")),
         "the pane must say why it is waiting; a clean exit used to discard the screen"
+    );
+}
+
+fn quota_live_runtime(temp: &Path, agent_id: &str) -> (AppRuntime, String) {
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.agent_id = agent_id.to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Idle",
+        "Stop",
+        "session-1",
+    ));
+    (runtime, window_id)
+}
+
+fn instant(text: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .expect("fixture instant")
+        .with_timezone(&chrono::Utc)
+}
+
+/// Issue #3616: Claude does not exit when its quota runs out — the pane stays
+/// alive showing the notice and stops responding, which reads as a healthy
+/// `idle` agent.
+///
+/// A notice that has only just appeared is not yet a block: the settle window
+/// exists so a pane that merely *rendered* the sentence (an agent working on
+/// this very Issue does) is not released out from under itself.
+#[test]
+fn a_live_quota_notice_becomes_a_hold_only_after_the_settle_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:20:00Z"),
+    );
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "a freshly rendered notice must not release a live launch"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Idle),
+        "the pane keeps its own state until the block is confirmed"
+    );
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:25:00Z"),
+    );
+
+    assert!(
+        runtime.provider_quota_holds.contains_key(&window_id),
+        "a notice that persists without any agent activity is a block"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Waiting),
+        "a live but quota-blocked pane must not read as a healthy idle agent"
+    );
+}
+
+/// Issue #3616: a hook arrival proves the agent is working, so the candidate is
+/// abandoned. This is what keeps an agent that renders the sentence mid-task
+/// from ever being released.
+#[test]
+fn agent_activity_abandons_a_pending_quota_candidate() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:20:00Z"),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:25:00Z"),
+    );
+
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "the agent ran a tool after the notice appeared, so it is not blocked"
+    );
+}
+
+/// Issue #3616: the notice leaving the screen abandons the candidate too.
+#[test]
+fn a_redrawn_screen_abandons_a_pending_quota_candidate() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:20:00Z"),
+    );
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some("> running cargo test\ncompiling gwt v9.81.0"),
+        instant("2026-08-17T09:21:00Z"),
+    );
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:25:00Z"),
+    );
+
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "the settle clock restarts when the notice leaves the screen"
+    );
+}
+
+/// Issue #3616: when the usage poller independently reports the account out of
+/// quota, the settle window is unnecessary — two independent sources agree, so
+/// waiting only prolongs a held slot.
+#[test]
+fn a_corroborated_quota_notice_holds_immediately() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+    runtime.set_provider_usage_accounts(vec![gwt_core::usage::ProviderUsage {
+        provider: gwt_core::usage::UsageProvider::ClaudeCode,
+        account_label: None,
+        plan: None,
+        windows: vec![gwt_core::usage::UsageWindow::new(
+            gwt_core::usage::WindowKind::Weekly,
+            100.0,
+            Some(instant("2026-08-19T21:00:00Z")),
+        )],
+        limit_reached: true,
+        state: gwt_core::usage::UsageState::Ok,
+        fetched_at: None,
+    }]);
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:20:00Z"),
+    );
+
+    assert!(
+        runtime.provider_quota_holds.contains_key(&window_id),
+        "the poller already confirmed the account is out; no settle window is needed"
+    );
+}
+
+/// Issue #3616: the usage-poller tick is what reaches a pending candidate's
+/// settle deadline.
+///
+/// A blocked pane emits no further output, so the output path alone would leave
+/// the candidate pending forever — the launch would keep its slot for the whole
+/// multi-day window, which is the harm this Issue is about.
+#[test]
+fn the_usage_snapshot_tick_promotes_a_settled_candidate() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+    runtime.provider_quota_candidates.insert(
+        window_id.clone(),
+        super::ProviderQuotaCandidate {
+            first_seen: instant("2026-08-17T09:20:00Z"),
+        },
+    );
+
+    // No screen is readable for a test window, so a pending candidate whose
+    // notice cannot be re-confirmed is abandoned rather than promoted.
+    let _ = runtime.handle_provider_usage_snapshot(Vec::new(), instant("2026-08-17T09:25:00Z"));
+
+    assert!(
+        !runtime.provider_quota_candidates.contains_key(&window_id),
+        "a candidate whose notice can no longer be seen must not survive the sweep"
+    );
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "and it must never be promoted on an unverifiable screen"
+    );
+}
+
+/// Issue #3616: an exhausted account must not stall panes running on a
+/// different provider.
+#[test]
+fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+    runtime.set_provider_usage_accounts(vec![gwt_core::usage::ProviderUsage {
+        provider: gwt_core::usage::UsageProvider::ClaudeCode,
+        account_label: None,
+        plan: None,
+        windows: Vec::new(),
+        limit_reached: true,
+        state: gwt_core::usage::UsageState::Ok,
+        fetched_at: None,
+    }]);
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:20:00Z"),
+    );
+
+    assert!(
+        runtime.provider_quota_candidates.contains_key(&window_id),
+        "precondition: the Codex notice was recognized, so this is the scoping check"
+    );
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "Claude running out says nothing about this Codex pane, so the settle \
+         window must still apply"
     );
 }
 
