@@ -7892,10 +7892,10 @@ fn apply_agent_frontend_dispatch_outcome(
 
 fn main() -> std::io::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
-    if matches!(
-        argv.get(1).map(String::as_str),
-        Some("__internal-pty-start-gate")
-    ) {
+    // POSIX bound launches still host the gate here (the gate `exec`s the target
+    // so the gated PID survives). Windows routes it to the console-subsystem
+    // `gwtd` companion instead — see `gwt::pty_start_gate` and issue #3631.
+    if argv.get(1).map(String::as_str) == Some(gwt::pty_start_gate::PTY_START_GATE_ARG) {
         let exit_code = match gwt_terminal::pty::run_start_gate_from_env() {
             Ok(exit_code) => exit_code,
             Err(error) => {

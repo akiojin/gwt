@@ -92,7 +92,8 @@ fn bound_pty_gate_program() -> Result<PathBuf, String> {
 
 #[cfg(not(test))]
 fn bound_pty_gate_program() -> Result<PathBuf, String> {
-    std::env::current_exe().map_err(|error| error.to_string())
+    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    gwt::pty_start_gate::resolve_pty_start_gate_program(&current_exe)
 }
 
 #[cfg(not(test))]
@@ -3336,7 +3337,7 @@ impl AppRuntime {
         let gate_program = bound_pty_gate_program()
             .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
         #[cfg(not(test))]
-        let gate_args = vec!["__internal-pty-start-gate".to_string()];
+        let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
         #[cfg(test)]
         let gate_args = vec![
             "app_runtime::tests::pty_start_gate_helper".to_string(),

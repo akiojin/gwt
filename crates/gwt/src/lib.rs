@@ -42,6 +42,7 @@ pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
+pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
