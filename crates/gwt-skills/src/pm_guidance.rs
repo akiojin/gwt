@@ -285,6 +285,15 @@ Hard limits, no exceptions:
   suppressed; only a leave-then-re-enter transition rearms reporting.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
+- A cycle that produced no milestone and no escalation ends with no
+  user-facing output at all. Do not post a "no change" line, do not
+  restate the queue or the running launches, and do not emit a keepalive
+  to prove you are still looping: the resident loop's liveness is
+  observable in the GUI's PM residency indicator and in
+  `pm-loop.json`'s `last_wake_at`, never in the conversation.
+- The cycle itself is never skipped — silence is about the report, not
+  about the cycle. An injected `[gwt]` wake prompt starts a full
+  reconcile even when that reconcile ends without a word to the user.
 
 ## Auxiliary agents
 
@@ -455,6 +464,12 @@ mod tests {
             // FR-017: milestone-only digest, escalations never batched.
             "one digest",
             "never held for a digest",
+            // Issue #3632: the quiet case is stated out loud — a cycle with
+            // nothing to report ends silently, and liveness is proven outside
+            // the conversation.
+            "ends with no user-facing output at all",
+            "`pm-loop.json`'s `last_wake_at`",
+            "silence is about the report, not about the cycle",
             // FR-007: auxiliary agents never touch production.
             "must not modify production code",
             // FR-013: stopping story.
@@ -480,6 +495,40 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
+    /// nothing to report ends without saying anything. The cadence already
+    /// described milestone-only reporting, but never stated the quiet case, so
+    /// "report every cycle" stayed a defensible reading — and the runtime's
+    /// wake prompts took it. Both halves are pinned: silence on no change, and
+    /// liveness proven outside the conversation so the PM is not tempted to
+    /// emit a keepalive.
+    #[test]
+    fn contract_ends_a_no_change_cycle_with_no_user_facing_output() {
+        let body = body();
+        assert!(
+            body.contains(
+                "A cycle that produced no milestone and no escalation ends with no user-facing \
+                 output at all"
+            ),
+            "no-change 周回は無出力で終える規定が要る"
+        );
+        assert!(
+            body.contains("Do not post a \"no change\" line"),
+            "「変化なし」の明示的な禁止が要る"
+        );
+        assert!(
+            body.contains(
+                "the resident loop's liveness is observable in the GUI's PM residency indicator \
+                 and in `pm-loop.json`'s `last_wake_at`, never in the conversation"
+            ),
+            "沈黙と死んだループの区別は会話の外で示す"
+        );
+        assert!(
+            body.contains("silence is about the report, not about the cycle"),
+            "省略してよいのは出力であって周回ではない（FR-3）"
+        );
     }
 
     #[test]

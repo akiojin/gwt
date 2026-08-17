@@ -49710,6 +49710,87 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
     );
 }
 
+/// Issue #3632 AC-3/AC-6 (user ruling 2026-08-17): neither wake prompt may
+/// order a report unconditionally.
+///
+/// The gwt-pm contract has always been milestone-only, but both wake prompts
+/// closed with "report the milestone digest" — injected text outranks the skill
+/// body, so every scheduled tick produced a digest whether or not anything had
+/// changed. The wording is pinned here so a reinstated unconditional order
+/// fails the suite instead of shipping.
+fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
+    assert!(
+        prompt.contains(gwt::pm_registry::PM_CYCLE_REPORTING_CLAUSE),
+        "{label} must carry the shared conditional-reporting clause; got: {prompt}"
+    );
+    assert!(
+        !prompt.contains("report the milestone digest"),
+        "{label} must not order a digest unconditionally; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("issue.monitor.status"),
+        "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
+    );
+}
+
+#[test]
+fn wake_prompts_ask_for_a_report_only_when_the_cycle_changed_something() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+
+    // Standing supervision work so the periodic wake is eligible on its own.
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..gwt::IssueMonitorConfig::default()
+        },
+        gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-17T00:00:00Z",
+    );
+    monitor.complete_active_launch(42, "tab-1::other-window");
+    gwt::save_issue_monitor_prefs(&monitor_prefs_path, &monitor.prefs()).expect("save prefs");
+
+    // The delta wake: baseline, then one genuinely new signal.
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-17T01:00:00Z")
+        .is_none());
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    let delta = runtime
+        .pm_wake_decision_at(&repo, &escalated, "2026-08-17T01:01:00Z")
+        .expect("a fresh signal must wake the quiet PM");
+    assert_wake_prompt_reports_only_on_change(&delta.prompt, "the delta wake prompt");
+
+    // The periodic wake, one quiet window later.
+    let periodic = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-17T01:05:00Z")
+        .expect("standing work must periodically wake a quiet PM");
+    assert_wake_prompt_reports_only_on_change(&periodic.prompt, "the periodic wake prompt");
+
+    // Issue #3632 FR-4/AC-5: the cycle a silent PM just ran is still visible
+    // outside the conversation, so "quiet" stays distinguishable from "dead"
+    // without a keepalive line in the chat.
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    assert_eq!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("loop state")
+            .last_wake_at
+            .as_deref(),
+        Some("2026-08-17T01:05:00Z"),
+        "pm-loop.json must record the wake even when the cycle reports nothing"
+    );
+}
+
 /// Issue #3505 / FR-108(b): a delta wake and the periodic wake share the wake
 /// clock, so one tick never stacks two prompts into the PM pane.
 #[test]
