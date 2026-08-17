@@ -3623,6 +3623,119 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+#[test]
+fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
+    let temp = tempdir().expect("tempdir");
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let window_id = "tab-authenticated::agent-authenticated";
+    let mut pane = long_running_test_pane(window_id);
+    pane.process_bytes(b"pane list must not serialize this snapshot\n");
+    let pane = Arc::new(Mutex::new(pane));
+    runtime.runtimes.insert(
+        window_id.to_string(),
+        WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
+            pane: pane.clone(),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+    let intake_worktree = temp.path().join(".intake-pane-list");
+    fs::create_dir(&intake_worktree).expect("intake-shaped worktree");
+    let mut active_session = sample_active_agent_session("tab-authenticated", window_id);
+    active_session.worktree_path = intake_worktree;
+    runtime
+        .active_agent_sessions
+        .insert(window_id.to_string(), active_session);
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let holder = thread::spawn(move || {
+        let _pane = pane.lock().expect("hold terminal snapshot mutex");
+        held_tx.send(()).expect("announce held snapshot mutex");
+        release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+    });
+    held_rx.recv().expect("snapshot mutex must be held");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::ListWindows,
+    );
+    release_tx
+        .send(())
+        .expect("list response must not wait for the snapshot mutex");
+    assert!(
+        holder.join().expect("snapshot mutex holder"),
+        "list response waited for the terminal snapshot mutex"
+    );
+
+    let [OutboundEvent {
+        target: DispatchTarget::Client(client_id),
+        event: BackendEvent::WindowCanvasState { workspace },
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("pane list must return exactly one workspace_state reply");
+    };
+    assert_eq!(client_id, "pane-client");
+    assert_eq!(workspace.tabs.len(), 1);
+    assert_eq!(
+        workspace.tabs[0].project_root,
+        authenticated_project.to_string_lossy()
+    );
+    assert_eq!(workspace.tabs[0].workspace.windows.len(), 1);
+    assert_eq!(workspace.tabs[0].workspace.windows[0].id, window_id);
+    assert_eq!(
+        workspace.tabs[0].workspace.windows[0].worktree_form,
+        gwt::WindowWorktreeForm::Unknown,
+        "pane list must use the persisted no-I/O projection instead of resolving Git worktree form"
+    );
+
+    let ready_events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal"),
+        AgentFrontendRequest::Ready,
+    );
+    let ready_workspace = ready_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("frontend_ready workspace state");
+    assert_eq!(
+        ready_workspace.tabs[0].workspace.windows[0].worktree_form,
+        gwt::WindowWorktreeForm::BranchBacked,
+        "existing frontend_ready payload must retain resolved worktree-form semantics"
+    );
+}
+
 fn materialize_active_agent_pane_binding(
     project: &Path,
     session_id: &str,
@@ -50958,8 +51071,138 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     );
 }
 
+/// Issue #3608 (AC-1/AC-4/AC-5): the acknowledgement is written by the target
+/// Session's own UserPromptSubmit hook, so it routinely lands after the submit
+/// retries are exhausted — the live incident recorded `prepared 02:40:38 →
+/// ambiguous 02:40:39 → verified 02:40:40`, a delivery that succeeded but was
+/// reported as a failure. The operation must spend its whole remaining budget
+/// waiting for that acknowledgement, and the durable log must not carry an
+/// Ambiguous row for a delivery it reports as delivered.
 #[test]
-fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
+fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retries() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b6";
+    let body = "acknowledged after the submit retries";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let ack_receipt_path = receipt_path.clone();
+    let ack_body_sha256 = body_sha256.clone();
+    let ack = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let prepared = gwt::pm_registry::load_pm_delivery_receipts(&ack_receipt_path)
+                .unwrap_or_default()
+                .iter()
+                .any(|receipt| {
+                    receipt.operation_id == operation_id
+                        && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+                });
+            if prepared {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Prepared receipt was not committed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Past the two-attempt submit budget (2 x PANE_SUBMIT_SETTLE), still
+        // well inside the operation deadline: exactly the observed incident.
+        thread::sleep(Duration::from_millis(1_500));
+        gwt::pm_registry::finish_pm_delivery_receipt(
+            &ack_receipt_path,
+            operation_id,
+            "other-session",
+            &ack_body_sha256,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .expect("late target hook acknowledgement");
+    });
+    // Long enough for the late acknowledgement, short enough that the test
+    // does not sit on the production acceptance window.
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "origin-client".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            &format!("{body}\r"),
+            Some(responder),
+        )
+        .is_empty());
+    let result = result.blocking_recv().expect("terminal delivery result");
+    ack.join().expect("ack thread");
+
+    assert!(
+        matches!(
+            &result,
+            BackendEvent::PmMessageSendResult {
+                status,
+                reason: None,
+                ..
+            } if status == "delivered"
+        ),
+        "a delivery acknowledged inside the operation deadline is delivered, not failed: {result:?}"
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("delivery receipts")
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .map(|receipt| receipt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        ],
+        "the durable log must agree with the reported outcome"
+    );
+}
+
+/// Issue #3608 (AC-2/AC-3): a delivery whose acknowledgement never arrives is
+/// reported as its own outcome, distinct from a submit that failed, and it
+/// never claims the body is staged — both the body and its submit terminator
+/// were written to the pane on this path.
+#[test]
+fn authenticated_pm_send_reports_unverified_without_target_hook_ack() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -50995,7 +51238,10 @@ fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
     let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643af";
     let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
-    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+    // This delivery waits out its whole acceptance window; keep that window the
+    // test's own rather than the production one.
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
 
     assert!(runtime
         .authenticated_pm_pane_send_input_events(
@@ -51010,16 +51256,20 @@ fn authenticated_pm_send_reports_ambiguous_failure_without_target_hook_ack() {
         .is_empty());
     let result = result.blocking_recv().expect("terminal delivery result");
 
-    assert!(matches!(
-        result,
-        BackendEvent::PmMessageSendResult {
-            status,
-            reason: Some(reason),
-            ..
-        } if status == "failed"
-            && reason.contains("not verified")
-            && reason.contains("do not retry")
-    ));
+    assert!(
+        matches!(
+            &result,
+            BackendEvent::PmMessageSendResult {
+                status,
+                reason: Some(reason),
+                ..
+            } if status == "unverified"
+                && reason.contains("not acknowledged")
+                && reason.contains("do not retry")
+                && !reason.contains("staged")
+        ),
+        "an unacknowledged submit is its own outcome and was never staged: {result:?}"
+    );
     assert!(gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
         .expect("delivery receipts")
         .iter()

@@ -771,6 +771,7 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 #[derive(Clone)]
 pub(crate) enum AgentFrontendRequest {
     Ready,
+    ListWindows,
     CloseWindow {
         id: String,
         request_id: Option<String>,
@@ -794,6 +795,7 @@ impl std::fmt::Debug for AgentFrontendRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
+            Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
@@ -1187,12 +1189,25 @@ impl AgentPmSendResponder {
         oneshot::Receiver<BackendEvent>,
         AgentPmSendCancellation,
     ) {
+        Self::channel_with_acceptance_window(AGENT_PM_SEND_ACCEPTANCE_DEADLINE)
+    }
+
+    /// The same channel with an explicit acceptance window. Tests that drive
+    /// the acknowledgement wait to its end use this so they cost their own
+    /// budget rather than the production one.
+    pub(crate) fn channel_with_acceptance_window(
+        acceptance_window: Duration,
+    ) -> (
+        Self,
+        oneshot::Receiver<BackendEvent>,
+        AgentPmSendCancellation,
+    ) {
         let (sender, receiver) = oneshot::channel();
         let mutation_state = Arc::new(AtomicU8::new(AGENT_PM_MUTATION_PENDING));
         let responder = Self {
             sender: Arc::new(Mutex::new(Some(sender))),
             mutation_state: Arc::clone(&mutation_state),
-            deadline: Instant::now() + AGENT_PM_SEND_ACCEPTANCE_DEADLINE,
+            deadline: Instant::now() + acceptance_window,
         };
         (
             responder,
@@ -3284,6 +3299,7 @@ impl AgentPaneSessionScope {
     fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
+            FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
             FrontendEvent::CloseWindow { id, request_id }
                 if self.allowed_window_ids.contains(&id)
                     && (self.grant.principal().authorizes_producing_mutation()
@@ -3870,10 +3886,19 @@ async fn client_session_with_scope(
                                                 let mutation_committed = cancellation.cancel();
                                                 BackendEvent::PmMessageSendResult {
                                                     operation_id,
-                                                    status: "failed".to_string(),
+                                                    // Issue #3608 (AC-2/AC-3): a committed input
+                                                    // whose worker never answered is unverified,
+                                                    // not failed, and nothing here observed the
+                                                    // body sitting unsubmitted — only the durable
+                                                    // receipt knows how it ended.
+                                                    status: if mutation_committed {
+                                                        "unverified".to_string()
+                                                    } else {
+                                                        "failed".to_string()
+                                                    },
                                                     window_id: Some(window_id),
                                                     reason: Some(if mutation_committed {
-                                                        "PM delivery may already have staged its prompt body — do not retry with a new operation"
+                                                        "PM delivery returned no terminal result before the server acceptance deadline; the input was committed to the pane and the durable receipt records the final outcome — do not retry with a new operation"
                                                             .to_string()
                                                     } else if timed_out {
                                                         "PM delivery exceeded the server acceptance deadline"
@@ -5069,6 +5094,10 @@ mod tests {
             filtered["workspace"]["recent_projects"],
             serde_json::json!([])
         );
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::ListWindows),
+            Some(super::AgentFrontendRequest::ListWindows)
+        ));
 
         assert!(scope
             .filter_outbound(
