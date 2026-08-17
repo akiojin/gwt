@@ -1574,6 +1574,9 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    // The tungstenite handshake callback's `Err` variant is the library's own
+    // `ErrorResponse` type, so its size is not ours to shrink.
+    #[allow(clippy::result_large_err, reason = "tungstenite fixes this signature")]
     fn windows_launch_now_persists_priority_and_reports_authenticated_gui_ack() {
         use futures_util::{SinkExt as _, StreamExt as _};
         use gwt_core::test_support::ScopedEnvVar;
