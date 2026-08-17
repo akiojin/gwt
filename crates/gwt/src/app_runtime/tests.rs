@@ -37,7 +37,7 @@ use gwt_github::{
     ApiError, Cache, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient,
     IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
 };
-use gwt_terminal::Pane;
+use gwt_terminal::{Pane, PaneStatus};
 use tracing::{field::Visit, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
@@ -3282,6 +3282,80 @@ fn long_running_test_pane(id: &str) -> Pane {
         test_pane_cwd(),
     )
     .expect("test pane")
+}
+
+/// Install a runtime whose child has already exited with `exit_code`, so the
+/// pane carries the real `PaneExit` receipt Issue #3341 persists.
+///
+/// The PTY output is drained the way the production reader thread does. That
+/// is required, not cosmetic: a macOS session leader stays in "trying to exit"
+/// until its tty output is consumed, so an undrained pane never becomes
+/// reapable and the receipt never appears.
+fn insert_exited_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str, exit_code: u8) {
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                format!("exit /b {exit_code}"),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), format!("exit {exit_code}")],
+        )
+    };
+    let mut pane = Pane::new(
+        window_id.to_string(),
+        command,
+        args,
+        80,
+        24,
+        HashMap::new(),
+        test_pane_cwd(),
+    )
+    .expect("exited test pane");
+    if let Ok(mut reader) = pane.reader() {
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while std::io::Read::read(&mut reader, &mut buffer).is_ok_and(|read| read > 0) {}
+        });
+    }
+    for _ in 0..100 {
+        if pane
+            .check_status()
+            .is_ok_and(|status| *status != PaneStatus::Running)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        pane.last_exit().is_some(),
+        "test fixture must observe the child exit before installing the runtime"
+    );
+    runtime.runtimes.insert(
+        window_id.to_string(),
+        WindowRuntime {
+            incarnation: super::next_window_runtime_incarnation(),
+            pane: Arc::new(Mutex::new(pane)),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+}
+
+/// Persist a durable Session under the id `sample_active_agent_session` uses,
+/// so writes through `gwt_agent::update_session` have a file to update.
+fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
+    let mut session = gwt_agent::Session::new(worktree, "feature/test", gwt_agent::AgentId::Codex);
+    session.id = "session-1".to_string();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save durable test Session");
 }
 
 fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
@@ -25387,6 +25461,142 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
         "workspace must retain the stopped agent window"
     );
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+}
+
+// Issue #3341: an agent that dies mid-turn is only diagnosable if the exit
+// receipt outlives the pane. Every terminal-status branch below tears the
+// runtime down (and `mark_agent_session_stopped` drops the active session), so
+// the receipt has to be persisted on the way through. A clean `exit 0` is the
+// case that previously left no durable evidence anywhere.
+#[test]
+fn app_runtime_clean_agent_exit_persists_the_pty_exit_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    save_sample_agent_session_toml(&runtime, temp.path());
+    insert_exited_test_pane_runtime(&mut runtime, &window_id, 0);
+
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some("Process exited".to_string()),
+        true,
+    );
+
+    let reloaded = gwt_agent::Session::load(&runtime.sessions_dir.join("session-1.toml"))
+        .expect("reload persisted Session");
+    assert_eq!(
+        reloaded.last_exit_code,
+        Some(0),
+        "a clean exit 0 must still be recorded, it is the ambiguous case"
+    );
+    assert_eq!(reloaded.last_exit_signal, None);
+    assert!(
+        reloaded.last_exited_at.is_some(),
+        "the observation time must be persisted so the death is not dated by the write"
+    );
+    assert_eq!(
+        reloaded.status,
+        gwt_agent::AgentStatus::Stopped,
+        "the exit receipt must not displace the settled Stopped status"
+    );
+}
+
+// Issue #3341: `PaneStatus` collapses every failure to `Completed(1)`, so
+// without the receipt an Error window cannot report which code the agent
+// actually returned.
+#[test]
+fn app_runtime_agent_error_exit_persists_the_real_exit_code() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    save_sample_agent_session_toml(&runtime, temp.path());
+    insert_exited_test_pane_runtime(&mut runtime, &window_id, 7);
+
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+        true,
+    );
+
+    let reloaded = gwt_agent::Session::load(&runtime.sessions_dir.join("session-1.toml"))
+        .expect("reload persisted Session");
+    assert_eq!(reloaded.last_exit_code, Some(7));
+}
+
+// Issue #3341: a reader-thread read error reports `Error` without waiting on
+// the child, so there is no exit evidence yet. Recording one anyway would
+// invent a death that has not been observed.
+#[test]
+fn app_runtime_unconfirmed_agent_error_records_no_exit_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    save_sample_agent_session_toml(&runtime, temp.path());
+    insert_test_pane_runtime(&mut runtime, &window_id);
+
+    let _ = runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("read error".to_string()),
+        false,
+    );
+
+    let reloaded = gwt_agent::Session::load(&runtime.sessions_dir.join("session-1.toml"))
+        .expect("reload persisted Session");
+    assert_eq!(reloaded.last_exit_code, None);
+    assert_eq!(reloaded.last_exited_at, None);
+    if let Some(runtime) = runtime.runtimes.get(&window_id) {
+        if let Ok(pane) = runtime.pane.lock() {
+            let _ = pane.kill();
+        }
+    }
 }
 
 // Issue #3274 (SPEC-1921 exact session restore amendment): when a resumed

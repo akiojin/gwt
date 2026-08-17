@@ -438,7 +438,29 @@ pub struct Session {
     pub last_hook_event_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_stop_at: Option<DateTime<Utc>>,
+    /// Exit code reported by the agent's PTY child the last time it was reaped
+    /// (Issue #3341). `1` alongside [`Self::last_exit_signal`] means signal
+    /// death; `0` with no signal means the agent shut itself down cleanly,
+    /// which is what a mid-turn disappearance looks like from gwt's side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_code: Option<u32>,
+    /// Platform signal name that terminated the last PTY child, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_signal: Option<String>,
+    /// When the exit was observed, not when it was persisted — the gap between
+    /// the two has already been misread as a much later death.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exited_at: Option<DateTime<Utc>>,
     pub display_name: String,
+}
+
+/// Durable receipt of one agent PTY child exit, mirroring
+/// `gwt_terminal::PaneExit` across the crate boundary (Issue #3341).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionExitReceipt {
+    pub exit_code: u32,
+    pub signal: Option<String>,
+    pub exited_at: DateTime<Utc>,
 }
 
 /// Lightweight runtime state updated by hook events while the PTY is alive.
@@ -537,6 +559,9 @@ impl Session {
             last_hook_event: None,
             last_hook_event_at: None,
             last_completed_stop_at: None,
+            last_exit_code: None,
+            last_exit_signal: None,
+            last_exited_at: None,
             display_name,
         }
     }
@@ -635,6 +660,19 @@ impl Session {
         ) {
             self.last_activity_at = now;
         }
+    }
+
+    /// Record how this session's PTY child ended (Issue #3341).
+    ///
+    /// Deliberately leaves [`Self::status`] alone: the exit receipt is
+    /// evidence about the child process, while the status is decided by the
+    /// teardown path that also classifies recovery. Writing both here would
+    /// let a late receipt overwrite a status the runtime already settled.
+    pub fn record_process_exit(&mut self, receipt: &SessionExitReceipt) {
+        self.last_exit_code = Some(receipt.exit_code);
+        self.last_exit_signal = receipt.signal.clone();
+        self.last_exited_at = Some(receipt.exited_at);
+        self.updated_at = Utc::now();
     }
 
     /// Persist that a managed runtime hook was observed for this session.
@@ -1955,6 +1993,24 @@ pub fn persist_session_status(
     runtime.save(&runtime_path)
 }
 
+/// Persist how one session's PTY child ended (Issue #3341).
+///
+/// Separate from [`persist_session_status`] on purpose: the status write is
+/// decided by the teardown path and happens for explicit stops too, while this
+/// receipt is only written when a child was actually reaped. Both use
+/// [`update_session`], so calling them in either order preserves both values.
+pub fn persist_session_exit(
+    sessions_dir: &Path,
+    session_id: &str,
+    receipt: &SessionExitReceipt,
+) -> std::io::Result<()> {
+    update_session(sessions_dir, session_id, |session| {
+        session.record_process_exit(receipt);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 fn validate_exact_runtime_proof_request(
     expected: &SessionExecutionIdentity,
     runtime_incarnation: u64,
@@ -2458,6 +2514,105 @@ display_name = "Codex"
         session.repo_hash = Some("repo-hash-2359".to_string());
         session.linked_issue_number = Some(2359);
         session
+    }
+
+    /// Issue #3341: an agent that dies mid-turn leaves nothing behind once the
+    /// pane is gone. The exit receipt has to reach the durable Session so it
+    /// survives a gwt restart and can be read back during triage.
+    #[test]
+    fn record_process_exit_keeps_a_clean_exit_receipt() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let exited_at = Utc::now();
+
+        session.record_process_exit(&SessionExitReceipt {
+            exit_code: 0,
+            signal: None,
+            exited_at,
+        });
+
+        assert_eq!(session.last_exit_code, Some(0));
+        assert_eq!(session.last_exit_signal, None);
+        assert_eq!(session.last_exited_at, Some(exited_at));
+    }
+
+    #[test]
+    fn record_process_exit_keeps_the_terminating_signal() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+
+        session.record_process_exit(&SessionExitReceipt {
+            exit_code: 1,
+            signal: Some("Killed: 9".to_string()),
+            exited_at: Utc::now(),
+        });
+
+        assert_eq!(session.last_exit_signal.as_deref(), Some("Killed: 9"));
+    }
+
+    #[test]
+    fn new_session_has_no_exit_receipt() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+
+        assert_eq!(session.last_exit_code, None);
+        assert_eq!(session.last_exit_signal, None);
+        assert_eq!(session.last_exited_at, None);
+    }
+
+    /// Issue #3341: the receipt must round-trip through the TOML file, since
+    /// the whole point is evidence that outlives the process that observed it.
+    #[test]
+    fn persist_session_exit_round_trips_through_the_session_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = session_with_execution_owner();
+        session.save(dir.path()).expect("save Session");
+        let exited_at = Utc::now();
+
+        persist_session_exit(
+            dir.path(),
+            &session.id,
+            &SessionExitReceipt {
+                exit_code: 0,
+                signal: None,
+                exited_at,
+            },
+        )
+        .expect("persist exit receipt");
+
+        let reloaded = Session::load(&session_file_path(dir.path(), &session.id))
+            .expect("reload persisted Session");
+        assert_eq!(reloaded.last_exit_code, Some(0));
+        assert_eq!(reloaded.last_exit_signal, None);
+        assert_eq!(
+            reloaded.last_exited_at.map(|at| at.timestamp_millis()),
+            Some(exited_at.timestamp_millis())
+        );
+    }
+
+    /// Issue #3341: the exit receipt and the Stopped status are written by two
+    /// separate calls on the same teardown path, so neither may erase the
+    /// other.
+    #[test]
+    fn persist_session_exit_and_status_do_not_overwrite_each_other() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = session_with_execution_owner();
+        session.save(dir.path()).expect("save Session");
+
+        persist_session_exit(
+            dir.path(),
+            &session.id,
+            &SessionExitReceipt {
+                exit_code: 7,
+                signal: None,
+                exited_at: Utc::now(),
+            },
+        )
+        .expect("persist exit receipt");
+        persist_session_status(dir.path(), &session.id, AgentStatus::Stopped)
+            .expect("persist stopped status");
+
+        let reloaded = Session::load(&session_file_path(dir.path(), &session.id))
+            .expect("reload persisted Session");
+        assert_eq!(reloaded.status, AgentStatus::Stopped);
+        assert_eq!(reloaded.last_exit_code, Some(7));
     }
 
     #[test]

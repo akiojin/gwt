@@ -14,6 +14,17 @@ use crate::{
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
+/// `RUST_LOG` filter that turns on Codex's own file logging (Issue #3341).
+///
+/// Codex writes `$CODEX_HOME/log/codex-tui.log` (default
+/// `~/.codex/log/codex-tui.log`) through a `RUST_LOG`-driven filter. gwt used
+/// to launch Codex without setting it, so the directory stayed empty and an
+/// agent that vanished mid-turn left no provider-side evidence to correlate
+/// against gwt's own PTY exit record. `info` on the Codex crates is the level
+/// Codex documents for diagnostics; it names Codex crates only so the value
+/// cannot be confused with gwt's own logging filter.
+pub const CODEX_FILE_LOG_FILTER: &str = "codex_core=info,codex_tui=info";
+
 /// Build the Claude Code `--settings` inline JSON for session-level toggles.
 ///
 /// Both `fastMode` and `ultracode` ride the single `--settings` channel
@@ -1539,6 +1550,14 @@ impl AgentLaunchBuilder {
             "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
             "1".to_string(),
         );
+
+        // Issue #3341: Codex writes `$CODEX_HOME/log/codex-tui.log` only for
+        // the crates its `RUST_LOG` filter selects, so an unset (or
+        // gwt-inherited) value leaves the directory empty and the provider
+        // side of a mid-turn death unrecorded. Set the filter explicitly here;
+        // `env_overrides` is merged after agent-specific env, so an explicit
+        // caller override still wins.
+        env_vars.insert("RUST_LOG".to_string(), CODEX_FILE_LOG_FILTER.to_string());
 
         // SPEC-1921 FR-103 (2026-05-18 amendment): when a Codex Backend
         // Override profile is attached, materialize a worktree-local
@@ -4103,5 +4122,41 @@ mod tests {
             .env_vars
             .keys()
             .any(|k| k.starts_with("GWT_CODEX_BACKEND_API_KEY_")));
+    }
+
+    /// Issue #3341: Codex only writes `$CODEX_HOME/log/codex-tui.log` when
+    /// `RUST_LOG` selects its crates. Launching without it leaves the provider
+    /// side of a mid-turn death completely unrecorded.
+    #[test]
+    fn codex_launch_enables_provider_file_logging() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert_eq!(
+            config.env_vars.get("RUST_LOG").map(String::as_str),
+            Some(CODEX_FILE_LOG_FILTER)
+        );
+    }
+
+    /// An explicit caller override still wins, so a deeper provider trace can
+    /// be requested for one launch without editing gwt.
+    #[test]
+    fn codex_launch_honors_an_explicit_rust_log_override() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .env("RUST_LOG", "codex_core=trace")
+            .build();
+
+        assert_eq!(
+            config.env_vars.get("RUST_LOG").map(String::as_str),
+            Some("codex_core=trace")
+        );
+    }
+
+    /// The filter names Codex crates only. gwt's own `RUST_LOG` value would
+    /// silence Codex entirely, which is how `~/.codex/log/` stayed empty.
+    #[test]
+    fn other_agents_do_not_inherit_the_codex_log_filter() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+
+        assert!(!config.env_vars.contains_key("RUST_LOG"));
     }
 }

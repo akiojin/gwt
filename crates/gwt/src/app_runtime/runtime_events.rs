@@ -600,6 +600,21 @@ impl AppRuntime {
             .active_agent_sessions
             .get(&id)
             .map(|session| session.session_id.clone());
+        // Issue #3341: the exit receipt lives only on the pane, and every
+        // terminal branch below drops the runtime (and the active session that
+        // names the durable Session). Persist it here, while both are still
+        // reachable, so an agent that vanished mid-turn leaves evidence that
+        // outlives the window. `exit_confirmed` gates it because a
+        // reader-thread read error reports Error without ever waiting on the
+        // child.
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+            )
+        {
+            self.persist_agent_session_exit_receipt(&id);
+        }
         let approval_was_active = self.window_approval_waiting.contains_key(&id)
             || (status == WindowProcessStatus::Error
                 && self.current_screen_approval_prompt(&id).is_some());
@@ -841,15 +856,46 @@ impl AppRuntime {
     fn final_screen_tail(&self, id: &str) -> Option<String> {
         let runtime = self.runtimes.get(id)?;
         let pane = runtime.pane.lock().ok()?;
-        let contents = pane.screen().contents();
-        let lines: Vec<&str> = contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        let start = lines.len().saturating_sub(AGENT_ERROR_TAIL_LINES);
-        let tail = lines[start..].join(" ");
-        (!tail.is_empty()).then_some(tail)
+        pane.screen_tail(AGENT_ERROR_TAIL_LINES)
+    }
+
+    /// Copy this window's PTY exit receipt onto its durable Session
+    /// (Issue #3341).
+    ///
+    /// Best effort by design: a window with no agent session, no installed
+    /// runtime, or no observed child exit simply has nothing to record, and a
+    /// failed write must never change how the exit itself is handled.
+    fn persist_agent_session_exit_receipt(&self, window_id: &str) {
+        let Some(session_id) = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|session| session.session_id.clone())
+        else {
+            return;
+        };
+        let Some(exit) = self
+            .runtimes
+            .get(window_id)
+            .and_then(|runtime| runtime.pane.lock().ok())
+            .and_then(|pane| pane.last_exit().cloned())
+        else {
+            return;
+        };
+        let receipt = gwt_agent::SessionExitReceipt {
+            exit_code: exit.exit_code,
+            signal: exit.signal,
+            exited_at: exit.observed_at.into(),
+        };
+        if let Err(error) =
+            gwt_agent::persist_session_exit(&self.sessions_dir, &session_id, &receipt)
+        {
+            tracing::warn!(
+                window_id = %window_id,
+                session_id = %session_id,
+                error = %error,
+                "failed to persist the agent PTY exit receipt"
+            );
+        }
     }
 
     pub(crate) fn handle_runtime_hook_event(
