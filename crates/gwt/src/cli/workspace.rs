@@ -1219,7 +1219,130 @@ pub(super) fn run<E: CliEnv>(
                 out,
             )
         }
+        WorkspaceCommand::WorkPrune {
+            dry_run,
+            ids,
+            project_root,
+        } => {
+            let target = project_root
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or_else(|| env.repo_path());
+            run_work_prune(target, dry_run, &ids, out)
+        }
     }
+}
+
+/// Issue #3448 AC-1: settle incomplete Works whose owner Issue is already
+/// closed. Reads the local Issue cache for owner state, so a cache miss keeps
+/// the Work (fail-closed via [`classify_stale_works`]). Closing goes through
+/// the canonical `emit_workspace_done_event_if_absent`, which is idempotent
+/// and keeps `works.json` a pure fold of the event log.
+fn run_work_prune(
+    repo_path: &Path,
+    dry_run: bool,
+    ids: &[String],
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let all_works: Vec<WorkItem> = load_workspace_work_items_from_path(&work_items_path)
+        .map_err(core_error)?
+        .map(|projection| projection.work_items)
+        .unwrap_or_default();
+    let works: Vec<WorkItem> = if ids.is_empty() {
+        all_works
+    } else {
+        all_works
+            .into_iter()
+            .filter(|item| ids.iter().any(|id| id == &item.id))
+            .collect()
+    };
+
+    let cache =
+        crate::issue_cache::issue_cache_root_for_repo_path(repo_path).map(gwt_github::Cache::new);
+    let plan = classify_stale_works(&works, |number| {
+        let cache = cache.as_ref()?;
+        let entry = cache.load_entry(gwt_github::IssueNumber(number))?;
+        Some(entry.snapshot.state == gwt_github::client::IssueState::Open)
+    });
+
+    let mode = if dry_run { "DRY-RUN" } else { "APPLIED" };
+    let mut closed = 0usize;
+    let mut failed = 0usize;
+    for candidate in &plan.candidates {
+        out.push_str(&format!(
+            "  close {} — owner #{} (closed) — {}\n",
+            candidate.work_id, candidate.owner_number, candidate.title
+        ));
+        if dry_run {
+            continue;
+        }
+        match gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+            repo_path,
+            &candidate.work_id,
+            Utc::now(),
+        ) {
+            Ok(_) => closed += 1,
+            Err(error) => {
+                failed += 1;
+                out.push_str(&format!(
+                    "  ! {} could not be closed: {error}\n",
+                    candidate.work_id
+                ));
+            }
+        }
+    }
+
+    // Second pass: orphaned worktree-scan placeholders. They are discarded
+    // rather than completed — they never represented work.
+    let orphans = classify_orphaned_backfill_works(&works, |path| path.exists());
+    let mut discarded = 0usize;
+    for candidate in &orphans.candidates {
+        out.push_str(&format!(
+            "  discard {} — orphaned worktree placeholder — {}\n",
+            candidate.work_id, candidate.title
+        ));
+        if dry_run {
+            continue;
+        }
+        match gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
+            repo_path,
+            &candidate.work_id,
+            Utc::now(),
+        ) {
+            Ok(_) => discarded += 1,
+            Err(error) => {
+                failed += 1;
+                out.push_str(&format!(
+                    "  ! {} could not be discarded: {error}\n",
+                    candidate.work_id
+                ));
+            }
+        }
+    }
+
+    let mut reasons: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    for skip in &plan.skipped {
+        *reasons.entry(skip.reason.as_str()).or_default() += 1;
+    }
+    let skip_detail = reasons
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    out.push_str(&format!(
+        "{mode}: closed_candidates={} closed={} discard_candidates={} discarded={} failed={} skipped={} [{skip_detail}]\n",
+        plan.candidates.len(),
+        closed,
+        orphans.candidates.len(),
+        discarded,
+        failed,
+        plan.skipped.len(),
+    ));
+    if failed > 0 {
+        return Ok(1);
+    }
+    Ok(0)
 }
 
 /// SPEC-2359 US-41 (FR-153): implement `workspace.projection_list` over a
@@ -1394,9 +1517,14 @@ pub(super) fn ensure_workspace_for_agent(
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
     let probe = probe_workspace_ensure(repo_path, &input);
     if !probe.executable() {
+        let reason = probe.reason.as_deref().unwrap_or("unavailable");
+        let refusal = crate::cli::execution_state::terminal_recovery_refusal(
+            repo_path,
+            &input.agent_session,
+            reason,
+        );
         return Err(core_error(GwtError::Other(format!(
-            "workspace.ensure prerequisite probe refused: {}",
-            probe.reason.as_deref().unwrap_or("unavailable")
+            "workspace.ensure prerequisite probe refused: {refusal}",
         ))));
     }
     let recovery = crate::agent_project_state::validated_workspace_recovery_session(
@@ -1732,6 +1860,13 @@ fn workspace_ensure_agent_identity_matches(
     }
 }
 
+/// Canonicalize a stored Work owner onto the durable `SPEC-<n>` spelling.
+///
+/// Two legacy spellings reach the same SPEC owner and are safe to upgrade:
+/// `Issue #<n>` (a Work started as a plain Issue that later gained the
+/// `gwt-spec` label) and `SPEC #<n>` (SPEC #3431 FR-070 — the spelling the
+/// knowledge-launch wizard stamped before it was aligned with the binding).
+/// Both are one-way: nothing downgrades a durable SPEC owner.
 fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str>) -> bool {
     let Some(stored) = stored else {
         return false;
@@ -1739,16 +1874,21 @@ fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str
     let Some(durable) = durable else {
         return false;
     };
-    let stored_number = stored
-        .strip_prefix("Issue #")
-        .and_then(|number| number.parse::<u64>().ok());
-    let durable_number = durable
-        .strip_prefix("SPEC-")
-        .and_then(|number| number.parse::<u64>().ok());
-    let (Some(stored_number), Some(durable_number)) = (stored_number, durable_number) else {
+    let Some((prefix, stored_number)) = ["Issue #", "SPEC #"].into_iter().find_map(|prefix| {
+        stored
+            .strip_prefix(prefix)
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| (prefix, number))
+    }) else {
         return false;
     };
-    stored == format!("Issue #{stored_number}")
+    let Some(durable_number) = durable
+        .strip_prefix("SPEC-")
+        .and_then(|number| number.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    stored == format!("{prefix}{stored_number}")
         && durable == format!("SPEC-{durable_number}")
         && stored_number == durable_number
 }
@@ -1905,21 +2045,24 @@ fn validate_workspace_ensure_recovery_state(
         .iter()
         .filter(|agent| agent.session_id == input.agent_session)
         .collect::<Vec<_>>();
-    if session_refs.len() != 1 {
+    if session_refs.len() > 1 {
         return Err(GwtError::Other(format!(
             "canonical Work {canonical_id} has ambiguous Session agent refs"
         )));
     }
-    if !workspace_ensure_agent_identity_matches(
-        session_refs[0].agent_id.as_deref(),
-        &recovery.session.agent_id,
-    ) {
-        return Err(GwtError::Other(format!(
-            "Work agent identity mismatch for Session {}: durable={}, stored={}",
-            input.agent_session,
-            durable_agent_id,
-            session_refs[0].agent_id.as_deref().unwrap_or("<none>")
-        )));
+    let session_ref = session_refs.first().copied();
+    if let Some(session_ref) = session_ref {
+        if !workspace_ensure_agent_identity_matches(
+            session_ref.agent_id.as_deref(),
+            &recovery.session.agent_id,
+        ) {
+            return Err(GwtError::Other(format!(
+                "Work agent identity mismatch for Session {}: durable={}, stored={}",
+                input.agent_session,
+                durable_agent_id,
+                session_ref.agent_id.as_deref().unwrap_or("<none>")
+            )));
+        }
     }
     let matching_containers = item
         .execution_containers
@@ -1964,7 +2107,8 @@ fn validate_workspace_ensure_recovery_state(
         }
     }
     Ok(WorkspaceEnsureAuthorityState::ExactExisting {
-        canonicalize_work_agent_id: session_refs[0].agent_id.as_deref() != Some(durable_agent_id),
+        canonicalize_work_agent_id: session_ref.and_then(|agent| agent.agent_id.as_deref())
+            != Some(durable_agent_id),
         canonicalize_work_owner,
         canonical_id,
     })
@@ -2785,9 +2929,475 @@ fn string_error(error: String) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(error))
 }
 
+/// Issue #3448: one incomplete Work whose owner Issue is already closed, plus
+/// the evidence that made it a candidate. Reported before anything is written
+/// so a dry run can be reviewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleWorkCandidate {
+    pub(crate) work_id: String,
+    pub(crate) title: String,
+    pub(crate) owner: String,
+    pub(crate) owner_number: u64,
+}
+
+/// A Work that is deliberately left alone, with the reason. Every non-candidate
+/// lands here so the operator can audit why nothing happened to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedWork {
+    pub(crate) work_id: String,
+    pub(crate) reason: StaleWorkSkipReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaleWorkSkipReason {
+    /// Already Done or explicitly discarded — nothing to settle.
+    AlreadyTerminal,
+    /// No owner recorded, so there is no Issue whose state could justify a
+    /// close. Fail-closed: an ownerless Work is never auto-closed.
+    OwnerMissing,
+    /// The owner is recorded but its Issue state is unknown locally (absent
+    /// from the Issue cache). Fail-closed for the same reason.
+    OwnerStateUnknown,
+    /// The owner Issue is still open, so the Work is legitimately active.
+    OwnerOpen,
+    /// The Work carries real state (owner, attached agent, or non-backfill
+    /// history), so the placeholder rule does not apply to it.
+    CarriesRealState,
+    /// The placeholder still projects an existing worktree.
+    WorktreePresent,
+}
+
+impl StaleWorkSkipReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyTerminal => "already_terminal",
+            Self::OwnerMissing => "owner_missing",
+            Self::OwnerStateUnknown => "owner_state_unknown",
+            Self::OwnerOpen => "owner_open",
+            Self::CarriesRealState => "carries_real_state",
+            Self::WorktreePresent => "worktree_present",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StaleWorkPlan {
+    pub(crate) candidates: Vec<StaleWorkCandidate>,
+    pub(crate) skipped: Vec<SkippedWork>,
+}
+
+/// Issue #3448 AC-2: Work owners are recorded with drifting spellings — the
+/// same Issue appears as `3327`, `Issue #3327`, `SPEC-3327`, and `SPEC #3327`.
+/// Normalize to the Issue number so one Issue is one owner. Anything without a
+/// number resolves to `None` and is treated as ownerless.
+pub(crate) fn owner_issue_number(owner: Option<&str>) -> Option<u64> {
+    let owner = owner?.trim();
+    if owner.is_empty() {
+        return None;
+    }
+    let digits: String = owner
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse::<u64>().ok()
+}
+
+/// Issue #3448 AC-1/AC-5: decide which incomplete Works belong to an already
+/// closed owner Issue. Pure: `issue_is_open` answers "is Issue N open?" and
+/// returns `None` when the state cannot be determined locally.
+///
+/// Fail-closed by construction — a Work is a candidate only when its owner
+/// resolves to an Issue that is *known* to be closed. Missing owner, unknown
+/// state, and open owners all skip with a recorded reason, so a cache miss can
+/// never close live work.
+pub(crate) fn classify_stale_works<F>(works: &[WorkItem], issue_is_open: F) -> StaleWorkPlan
+where
+    F: Fn(u64) -> Option<bool>,
+{
+    let mut plan = StaleWorkPlan::default();
+    for work in works {
+        if work.is_terminal() {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::AlreadyTerminal,
+            });
+            continue;
+        }
+        let Some(number) = owner_issue_number(work.owner.as_deref()) else {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::OwnerMissing,
+            });
+            continue;
+        };
+        match issue_is_open(number) {
+            Some(false) => plan.candidates.push(StaleWorkCandidate {
+                work_id: work.id.clone(),
+                title: work.title.clone(),
+                owner: work.owner.clone().unwrap_or_default(),
+                owner_number: number,
+            }),
+            Some(true) => plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::OwnerOpen,
+            }),
+            None => plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::OwnerStateUnknown,
+            }),
+        }
+    }
+    plan
+}
+
+/// Issue #3448 / #3447: worktree scanning materializes one placeholder Work per
+/// branch (`kind: backfill`, title = branch name, no owner, no agents). When the
+/// worktree is later removed the placeholder survives as pure derived noise —
+/// 470 of 788 rows on real data. Such a row is `discarded`, not `done`: it never
+/// represented work, so marking it complete would be a lie.
+///
+/// Pure: `worktree_exists` answers "does this path still exist?". Fail-closed —
+/// an owner, an attached agent, any non-backfill event, or a still-present
+/// worktree each keeps the Work.
+pub(crate) fn classify_orphaned_backfill_works<F>(
+    works: &[WorkItem],
+    worktree_exists: F,
+) -> StaleWorkPlan
+where
+    F: Fn(&Path) -> bool,
+{
+    let mut plan = StaleWorkPlan::default();
+    for work in works {
+        if work.is_terminal() {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::AlreadyTerminal,
+            });
+            continue;
+        }
+        let placeholder = work
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+            && work.agents.is_empty()
+            && !work.events.is_empty()
+            && work
+                .events
+                .iter()
+                .all(|event| event.kind == WorkEventKind::Backfill);
+        if !placeholder {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::CarriesRealState,
+            });
+            continue;
+        }
+        let paths: Vec<&Path> = work
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.worktree_path.as_deref())
+            .collect();
+        // No recorded path means the placeholder cannot be proven orphaned.
+        if paths.is_empty() || paths.iter().any(|path| worktree_exists(path)) {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::WorktreePresent,
+            });
+            continue;
+        }
+        plan.candidates.push(StaleWorkCandidate {
+            work_id: work.id.clone(),
+            title: work.title.clone(),
+            owner: String::new(),
+            owner_number: 0,
+        });
+    }
+    plan
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use gwt_core::workspace_projection::WorkAgentRef;
+
+    // Issue #3448 AC-1/AC-2/AC-5: closed-owner Work stagnation. `classify_stale_works`
+    // is the pure decision core: it names which incomplete Works belong to an
+    // owner Issue that is already closed, and — fail-closed — which ones must be
+    // skipped because their owner cannot be resolved or an agent may still hold
+    // them. Owner spelling is normalized so `3327` / `Issue #3327` / `SPEC-3327`
+    // resolve to the same Issue (AC-2).
+    mod stale_work_classification {
+        use super::*;
+
+        fn work(id: &str, owner: Option<&str>, status: WorkspaceStatusCategory) -> WorkItem {
+            let now = Utc::now();
+            WorkItem {
+                id: id.to_string(),
+                title: id.to_string(),
+                intent: None,
+                summary: None,
+                progress_summary: None,
+                status_category: status,
+                owner: owner.map(str::to_string),
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+                agents: Vec::new(),
+                execution_containers: Vec::new(),
+                board_refs: Vec::new(),
+                related_work_item_ids: Vec::new(),
+                events: Vec::new(),
+                legacy_metadata_snapshot: None,
+                legacy_metadata_authoritative: false,
+                legacy_metadata_snapshot_at: None,
+                duplicate_event_containers: Default::default(),
+                discarded: false,
+                discarded_at: None,
+            }
+        }
+
+        #[test]
+        fn owner_spelling_variants_resolve_to_the_same_issue() {
+            for spelling in ["3327", "Issue #3327", "SPEC-3327", "SPEC #3327", "#3327"] {
+                assert_eq!(
+                    super::super::owner_issue_number(Some(spelling)),
+                    Some(3327),
+                    "owner spelling must normalize: {spelling}"
+                );
+            }
+            assert_eq!(super::super::owner_issue_number(None), None);
+            assert_eq!(super::super::owner_issue_number(Some("   ")), None);
+        }
+
+        #[test]
+        fn closed_owner_work_is_a_candidate_and_open_owner_is_kept() {
+            let works = vec![
+                work(
+                    "w-closed",
+                    Some("Issue #3327"),
+                    WorkspaceStatusCategory::Active,
+                ),
+                work("w-open", Some("2359"), WorkspaceStatusCategory::Active),
+            ];
+            let plan = super::super::classify_stale_works(&works, |number| match number {
+                3327 => Some(false),
+                2359 => Some(true),
+                _ => None,
+            });
+
+            let candidates: Vec<&str> = plan
+                .candidates
+                .iter()
+                .map(|item| item.work_id.as_str())
+                .collect();
+            assert_eq!(candidates, vec!["w-closed"]);
+            assert!(
+                plan.skipped.iter().any(|item| item.work_id == "w-open"),
+                "an open owner keeps its Work active"
+            );
+        }
+
+        #[test]
+        fn unresolvable_owner_fails_closed() {
+            let works = vec![
+                work("w-no-owner", None, WorkspaceStatusCategory::Active),
+                work(
+                    "w-unknown",
+                    Some("Issue #9999"),
+                    WorkspaceStatusCategory::Active,
+                ),
+            ];
+            let plan = super::super::classify_stale_works(&works, |_| None);
+
+            assert!(
+                plan.candidates.is_empty(),
+                "a Work whose owner cannot be resolved is never closed automatically"
+            );
+            assert_eq!(plan.skipped.len(), 2);
+        }
+
+        // Issue #3448 AC-5: the operation must never widen its own blast radius.
+        // A live-looking Work whose owner is closed is still a candidate, but a
+        // Work the caller did not name via `ids` must never be touched — the
+        // filter is applied before classification, not after.
+        // Issue #3448 / #3447: worktree scanning materializes a placeholder Work
+        // per branch (`kind: backfill`, title = branch, no owner, no agents).
+        // When the worktree is later removed the placeholder is left behind as
+        // pure derived noise — 470 of 788 rows on real data. They are discarded,
+        // not "done": they never represented work.
+        #[test]
+        fn orphaned_backfill_placeholder_is_a_discard_candidate() {
+            let mut item = work(
+                "work-work-issue-3403-bc4a663e",
+                None,
+                WorkspaceStatusCategory::Idle,
+            );
+            item.title = "work/issue-3403".to_string();
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3403".to_string()),
+                worktree_path: Some(std::path::PathBuf::from(
+                    "/definitely/absent/work/issue-3403",
+                )),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-work-issue-3403-bc4a663e",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_orphaned_backfill_works(&[item], |path| {
+                let _ = path;
+                false
+            });
+
+            assert_eq!(plan.candidates.len(), 1);
+            assert_eq!(plan.candidates[0].work_id, "work-work-issue-3403-bc4a663e");
+        }
+
+        // Fail-closed: while the worktree still exists the placeholder is the
+        // legitimate projection of a live worktree and must survive.
+        #[test]
+        fn backfill_placeholder_with_a_live_worktree_is_kept() {
+            let mut item = work(
+                "work-work-issue-3245-aaa",
+                None,
+                WorkspaceStatusCategory::Idle,
+            );
+            item.title = "work/issue-3245".to_string();
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3245".to_string()),
+                worktree_path: Some(std::path::PathBuf::from("/present/work/issue-3245")),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-work-issue-3245-aaa",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_orphaned_backfill_works(&[item], |_| true);
+
+            assert!(
+                plan.candidates.is_empty(),
+                "a live worktree keeps its placeholder"
+            );
+        }
+
+        // Real Work must never be swept by the placeholder rule, even when its
+        // worktree is gone: an owner, an agent, or any non-backfill event all
+        // prove it carried real state.
+        #[test]
+        fn real_work_is_never_swept_as_a_placeholder() {
+            let mut owned = work(
+                "w-owner",
+                Some("Issue #3327"),
+                WorkspaceStatusCategory::Idle,
+            );
+            owned.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "w-owner",
+                Utc::now(),
+            )];
+            let mut with_agent = work("w-agent", None, WorkspaceStatusCategory::Idle);
+            with_agent.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "w-agent",
+                Utc::now(),
+            )];
+            with_agent.agents = vec![WorkAgentRef {
+                session_id: "s1".to_string(),
+                agent_id: Some("codex".to_string()),
+                display_name: Some("Codex".to_string()),
+                updated_at: Utc::now(),
+                attached_by: None,
+            }];
+            let mut started = work("w-started", None, WorkspaceStatusCategory::Idle);
+            started.events = vec![
+                WorkEvent::new(WorkEventKind::Backfill, "w-started", Utc::now()),
+                WorkEvent::new(WorkEventKind::Start, "w-started", Utc::now()),
+            ];
+
+            let plan = super::super::classify_orphaned_backfill_works(
+                &[owned, with_agent, started],
+                |_| false,
+            );
+
+            assert!(
+                plan.candidates.is_empty(),
+                "owner / agent / non-backfill history each disqualify the placeholder rule"
+            );
+        }
+
+        #[test]
+        fn id_filter_scopes_the_plan_to_named_works() {
+            let works = [
+                work("w-a", Some("3327"), WorkspaceStatusCategory::Active),
+                work("w-b", Some("3327"), WorkspaceStatusCategory::Active),
+            ];
+            let named: Vec<WorkItem> = works
+                .iter()
+                .filter(|item| item.id == "w-a")
+                .cloned()
+                .collect();
+            let plan = super::super::classify_stale_works(&named, |_| Some(false));
+
+            assert_eq!(plan.candidates.len(), 1);
+            assert_eq!(plan.candidates[0].work_id, "w-a");
+            assert!(
+                !plan.skipped.iter().any(|item| item.work_id == "w-b"),
+                "an unnamed Work must not even appear in the plan"
+            );
+        }
+
+        // Issue #3448: the skip reasons are the audit trail. A cache miss and a
+        // genuinely open owner are different situations and must stay
+        // distinguishable in the report.
+        #[test]
+        fn skip_reasons_distinguish_unknown_state_from_open_owner() {
+            let works = vec![
+                work("w-unknown", Some("4242"), WorkspaceStatusCategory::Active),
+                work("w-open", Some("2359"), WorkspaceStatusCategory::Active),
+            ];
+            let plan = super::super::classify_stale_works(&works, |number| match number {
+                2359 => Some(true),
+                _ => None,
+            });
+
+            let reason = |id: &str| {
+                plan.skipped
+                    .iter()
+                    .find(|item| item.work_id == id)
+                    .map(|item| item.reason.as_str())
+            };
+            assert_eq!(reason("w-unknown"), Some("owner_state_unknown"));
+            assert_eq!(reason("w-open"), Some("owner_open"));
+        }
+
+        #[test]
+        fn already_terminal_work_is_not_reclosed() {
+            let mut done = work("w-done", Some("3327"), WorkspaceStatusCategory::Done);
+            done.completed_at = Some(Utc::now());
+            let mut discarded = work("w-discarded", Some("3327"), WorkspaceStatusCategory::Active);
+            discarded.discarded = true;
+            let works = vec![done, discarded];
+
+            let plan = super::super::classify_stale_works(&works, |_| Some(false));
+
+            assert!(
+                plan.candidates.is_empty(),
+                "terminal Works are already settled; closing them again emits nothing"
+            );
+        }
+    }
+
     use crate::cli::env::TestEnv;
     use gwt_core::workspace_projection::{
         load_workspace_projection, load_workspace_work_items, record_workspace_work_event,
@@ -3038,14 +3648,27 @@ pub(crate) mod tests {
         );
     }
 
+    /// A distinct `origin` per fixture project.
+    ///
+    /// #3466 scopes the project store to the repository identity, so every
+    /// fixture that shared one hard-coded remote would now share one store —
+    /// and, because the fixtures also share `BRANCH`, one canonical Work id.
+    /// Deriving the remote from the project root keeps unrelated fixtures
+    /// isolated while still exercising the real Nested Bare + Worktree layout.
+    fn fixture_origin_url(project_state_root: &Path) -> String {
+        let slug = gwt_core::repo_hash::compute_path_hash(project_state_root);
+        format!("https://example.invalid/acme/workspace-update-{slug}.git")
+    }
+
     fn initialize_session_git_layout(project_state_root: &Path, worktree_path: &Path) {
         const BRANCH: &str = "work/20260601-0934";
-        const REMOTE: &str = "https://example.invalid/acme/workspace-update.git";
         std::fs::create_dir_all(project_state_root).expect("project root");
+        let remote = fixture_origin_url(project_state_root);
+        let remote = remote.as_str();
         if project_state_root == worktree_path {
             crate::cli::trusted_store::init_git_repo_with_origin(worktree_path);
             run_git(&["checkout", "-b", BRANCH], worktree_path);
-            run_git(&["remote", "set-url", "origin", REMOTE], worktree_path);
+            run_git(&["remote", "set-url", "origin", remote], worktree_path);
             return;
         }
 
@@ -3060,7 +3683,7 @@ pub(crate) mod tests {
             &["clone", "--bare", bootstrap_arg, bare_arg],
             project_state_root,
         );
-        run_git(&["remote", "set-url", "origin", REMOTE], &bare);
+        run_git(&["remote", "set-url", "origin", remote], &bare);
         if worktree_path.exists() {
             std::fs::remove_dir(worktree_path).expect("remove empty worktree placeholder");
         }
@@ -3289,6 +3912,23 @@ pub(crate) mod tests {
 
     fn workspace_recovery_state_bytes(paths: &[PathBuf]) -> Vec<Option<Vec<u8>>> {
         paths.iter().map(|path| std::fs::read(path).ok()).collect()
+    }
+
+    /// Every `project-state/<name>` file that exists under the scoped `~/.gwt`
+    /// home. #3466 unified the layout root and worktree stores, so "no second
+    /// store" is asserted by enumerating what was actually written rather than
+    /// by comparing two paths that can no longer differ.
+    fn materialized_project_state_files(name: &str) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path().join("project-state").join(name))
+            .filter(|path| path.is_file())
+            .collect();
+        found.sort();
+        found
     }
 
     fn seed_exact_workspace_work(
@@ -4229,10 +4869,12 @@ pub(crate) mod tests {
             agent.current_focus.as_deref(),
             Some("Implement canonical Project State identity")
         );
-        assert!(
-            load_workspace_projection(&worktree)
-                .expect("load worktree projection")
-                .is_none(),
+        // #3466: the worktree resolves to the repository's single project
+        // store, so "no split Project State" means the worktree view *is* the
+        // canonical one rather than an absent second file.
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
             "agent workspace update must not create a split Project State under the worktree root"
         );
         assert!(
@@ -4451,6 +5093,11 @@ pub(crate) mod tests {
         );
     }
 
+    /// #3466 removed the condition this test used to guard: a worktree and its
+    /// project root resolve to one project store, so an "obsolete split
+    /// projection" is no longer constructible. The test now pins that
+    /// structural guarantee — one projection file, reached identically from
+    /// either root — instead of the repair behaviour it made necessary.
     #[test]
     fn workspace_update_does_not_run_split_state_repair() {
         let _guard = env_guard();
@@ -4474,13 +5121,11 @@ pub(crate) mod tests {
         ));
         save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
 
-        let mut split = WorkspaceProjection::default_for_project(&worktree);
-        let mut split_agent =
-            assigned_agent_with_window("session-1", "project::agent-1", &worktree);
-        split_agent.title_summary = Some("Split root title".to_string());
-        split_agent.current_focus = Some("Previously written to worktree root".to_string());
-        split.agents.push(split_agent);
-        save_workspace_projection(&worktree, &split).expect("save split projection");
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
+            "a worktree must not be able to address a second Project State"
+        );
 
         let mut env = TestEnv::new(worktree.clone());
         let mut out = String::new();
@@ -4514,21 +5159,16 @@ pub(crate) mod tests {
         assert_eq!(
             agent.title_summary.as_deref(),
             None,
-            "mutation must not import identity from the obsolete split projection"
+            "mutation must not invent identity the caller did not supply"
         );
         assert_eq!(
             agent.current_focus.as_deref(),
             Some("Continue from canonical Project State")
         );
-        let untouched_split = load_workspace_projection(&worktree)
-            .expect("load untouched split projection")
-            .expect("split projection remains present");
         assert_eq!(
-            untouched_split
-                .latest_agent_for_session("session-1")
-                .and_then(|agent| agent.title_summary.as_deref()),
-            Some("Split root title"),
-            "workspace.update must not mutate or repair the obsolete split projection"
+            materialized_project_state_files("current.json"),
+            vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
+            "workspace.update must leave exactly one Project State behind"
         );
     }
 
@@ -5406,10 +6046,11 @@ pub(crate) mod tests {
             container.branch.as_deref() == Some("work/20260601-0934")
                 && container.worktree_path.as_deref() == Some(expected_worktree.as_path())
         }));
-        assert!(
-            load_workspace_projection(&worktree)
-                .expect("load worktree projection")
-                .is_none(),
+        // #3466: the worktree shares the project root's store, so a split
+        // current projection can only show up as a *second* current.json.
+        assert_eq!(
+            materialized_project_state_files("current.json"),
+            vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
             "recovery must not create a split current projection"
         );
         assert!(
@@ -5440,6 +6081,86 @@ pub(crate) mod tests {
             std::fs::read(events_path).expect("event log after retry"),
             before_retry,
             "response-loss retry must not duplicate recovery events"
+        );
+    }
+
+    #[test]
+    fn workspace_ensure_rebinds_continued_session_to_existing_canonical_work_once() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let current_session = "session-continued-current";
+        write_bound_projectionless_session(current_session, &worktree, &project_root, 3412);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-continued-predecessor",
+            Some("Issue #3412"),
+            "codex",
+        );
+
+        let input = WorkspaceEnsureInput {
+            agent_session: current_session.to_string(),
+            title_summary: "Continue exact canonical Work".to_string(),
+            current_focus: Some("Rebind the continued Session".to_string()),
+            spec: None,
+            issue: None,
+            topic: None,
+            boundary: None,
+        };
+        let result = ensure_workspace_for_agent(&worktree, input.clone())
+            .expect("continued Session should rebind to the exact canonical Work");
+
+        assert_eq!(
+            result.disposition,
+            WorkspaceEnsureDisposition::AlreadyAssigned
+        );
+        assert_eq!(result.workspace_id, work_id);
+        let projection = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = projection
+            .latest_agent_for_session(current_session)
+            .expect("continued Session projection agent");
+        assert!(agent.is_assigned());
+        assert_eq!(agent.workspace_id.as_deref(), Some(work_id.as_str()));
+
+        let work_items = load_workspace_work_items(&project_root)
+            .expect("load WorkItems projection")
+            .expect("WorkItems projection");
+        let work = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .expect("existing canonical Work");
+        assert_eq!(
+            work.agents
+                .iter()
+                .filter(|agent| agent.session_id == current_session)
+                .count(),
+            1,
+            "continued Session must be attached exactly once"
+        );
+        assert!(work
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-continued-predecessor"));
+
+        let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+        let before_retry = std::fs::read(&events_path).expect("event log after rebind");
+        let retry = ensure_workspace_for_agent(&worktree, input).expect("idempotent rebind retry");
+        assert_eq!(
+            retry.disposition,
+            WorkspaceEnsureDisposition::AlreadyAssigned
+        );
+        assert_eq!(retry.workspace_id, work_id);
+        assert_eq!(
+            std::fs::read(events_path).expect("event log after retry"),
+            before_retry,
+            "continued Session retry must not duplicate the Claim event"
         );
     }
 
@@ -6149,6 +6870,32 @@ pub(crate) mod tests {
         }
     }
 
+    /// SPEC #3431 FR-070: heal Work items the knowledge-launch wizard stamped
+    /// with the non-canonical `SPEC #<n>` spelling. No resolver emits that
+    /// form, so without this bridge every such Work is permanently wedged at
+    /// `workspace.ensure` and its agent can never persist a title-summary.
+    #[test]
+    fn workspace_ensure_owner_upgrade_heals_legacy_spec_hash_spelling() {
+        assert!(workspace_ensure_can_upgrade_owner(
+            Some("SPEC #3412"),
+            Some("SPEC-3412")
+        ));
+        for (stored, durable) in [
+            (Some("SPEC #03412"), Some("SPEC-3412")),
+            (Some("SPEC #3412 "), Some("SPEC-3412")),
+            (Some("SPEC#3412"), Some("SPEC-3412")),
+            (Some("SPEC #3412"), Some("SPEC-9999")),
+            (Some("SPEC #3412"), Some("Issue #3412")),
+            (Some("SPEC-3412"), Some("SPEC #3412")),
+            (Some("SPEC #3412"), None),
+        ] {
+            assert!(
+                !workspace_ensure_can_upgrade_owner(stored, durable),
+                "unexpected owner upgrade: stored={stored:?}, durable={durable:?}"
+            );
+        }
+    }
+
     #[test]
     fn workspace_ensure_probe_advertises_owner_canonicalization_until_applied() {
         let _guard = env_guard();
@@ -6625,6 +7372,117 @@ pub(crate) mod tests {
 
         assert!(error.to_string().contains("terminal"), "{error}");
         assert_eq!(workspace_recovery_state_bytes(&paths), before);
+    }
+
+    #[test]
+    fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3587");
+        let session_id = "session-terminal-binding-guidance";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3587);
+        gwt_core::skill_state::save(
+            &worktree,
+            crate::cli::build::SKILL_NAME,
+            &gwt_core::skill_state::SkillState {
+                active: true,
+                owner_spec: Some(3587),
+                started_at: Utc::now(),
+                phase: Some("verify".to_string()),
+                session_id: session_id.to_string(),
+            },
+        )
+        .expect("save stranded build lifecycle");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &worktree,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle execution Blocked"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let paths = workspace_recovery_state_paths(&project_root, &worktree);
+        let before = workspace_recovery_state_bytes(&paths);
+
+        let ensure_input = WorkspaceEnsureInput {
+            agent_session: session_id.to_string(),
+            title_summary: "Recover terminal binding".to_string(),
+            current_focus: None,
+            spec: None,
+            issue: Some(3587),
+            topic: None,
+            boundary: None,
+        };
+        let error = ensure_workspace_for_agent(&worktree, ensure_input.clone())
+            .expect_err("terminal execution binding must refuse workspace.ensure");
+        let message = error.to_string();
+
+        assert!(message.contains("terminal"), "{message}");
+        assert!(message.contains("execution.status"), "{message}");
+        assert!(message.contains("recovery_probes"), "{message}");
+        assert!(message.contains("verify.plan"), "{message}");
+        assert!(
+            !message.contains("`build.abort`"),
+            "workspace.ensure must not unconditionally restart the build.abort loop: {message}"
+        );
+        assert_eq!(workspace_recovery_state_bytes(&paths), before);
+
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (plan_code, plan_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                commands: Vec::new(),
+                derive: true,
+            }),
+        )
+        .expect("derive the status-advertised verification plan");
+        assert_eq!(plan_code, 0, "{plan_out}");
+        let plan = crate::cli::verification_record::load_plan(&worktree)
+            .expect("load derived plan")
+            .expect("derived plan");
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (run_code, run_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands: plan.commands,
+            }),
+        )
+        .expect("run the status-advertised verification plan");
+        assert_eq!(run_code, 0, "{run_out}");
+        let mut env = crate::cli::TestEnv::new(worktree.clone());
+        let (reopen_code, reopen_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Reopen {
+                    reason: "status-derived verification is fresh".to_string(),
+                },
+            ),
+        )
+        .expect("run the status-advertised execution.reopen");
+        assert_eq!(reopen_code, 0, "{reopen_out}");
+
+        ensure_workspace_for_agent(&worktree, ensure_input)
+            .expect("workspace.ensure must become reachable after verified reopen");
+        let recovered = crate::cli::execution_state::diagnose(&worktree, Some(session_id));
+        assert_eq!(
+            recovered.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Bound
+        );
+        assert!(
+            recovered
+                .available_recoveries
+                .contains(&"workspace.update".to_string()),
+            "the finite recovery chain must reach the normal workspace path: {recovered:?}"
+        );
     }
 
     #[test]

@@ -308,7 +308,7 @@ pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
 
 pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
-        WindowPreset::Issue => Some(KnowledgeKind::Issue),
+        WindowPreset::Issue | WindowPreset::IssueMonitor => Some(KnowledgeKind::Issue),
         WindowPreset::Spec => Some(KnowledgeKind::Issue),
         WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
@@ -376,7 +376,7 @@ pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
     !worktree.prunable && worktree.path.exists()
 }
 
-pub use gwt::worktree_form::{is_ephemeral_intake_worktree, INTAKE_WORKTREE_PREFIX};
+pub use gwt::worktree_form::{is_ephemeral_worktree_path, EPHEMERAL_WORKTREE_PREFIX};
 
 /// SPEC-3214 (codex #3237): whether a worktree-relative status `entry` is a
 /// gwt MERGED hook config (`.claude/settings.local.json` / `.codex/hooks.json`)
@@ -916,6 +916,14 @@ mod tests {
     fn legacy_spec_preset_uses_unified_issue_knowledge_kind() {
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Spec),
+            Some(gwt::KnowledgeKind::Issue)
+        );
+    }
+
+    #[test]
+    fn legacy_issue_monitor_preset_uses_unified_issue_knowledge_kind() {
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::IssueMonitor),
             Some(gwt::KnowledgeKind::Issue)
         );
     }

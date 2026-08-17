@@ -160,9 +160,18 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
     );
     let projection =
         gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
-    Ok(title_summary_missing_in_projection(
-        projection.as_ref(),
-        &session.id,
+    if !title_summary_missing_in_projection(projection.as_ref(), &session.id) {
+        return Ok(false);
+    }
+    // Issue #3491: a detached-HEAD worktree has no branch, so it has no
+    // Workspace identity and every `workspace.update` against it is
+    // permanently rejected. Demanding a title-summary there re-injects an
+    // instruction the agent cannot follow on every single turn. gwt's own
+    // ephemeral intake worktrees are branchless by design, so this is a state
+    // gwt creates itself — stay silent instead of nagging. Probed only once
+    // the title is actually missing, so the common path costs no git call.
+    Ok(!crate::agent_project_state::worktree_head_is_detached(
+        &session.worktree_path,
     ))
 }
 
@@ -530,7 +539,12 @@ pub fn compute_plan(
     // Only a terminal delivery settlement still quiets them.
     let suppress_work_state_reminders =
         terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
-    let emit_work_state_reminders = !suppress_work_state_reminders;
+    // SPEC-3431 FR-064: the resident PM owns no Work item, its window title is
+    // fixed, and `workspace.update` cannot even succeed from its detached
+    // worktree (#3477). Suppress separately from the terminal-settlement path
+    // so the PM gets its own reminder rather than a settlement notice.
+    let is_resident_pm = crate::cli::hook::is_resident_pm_worktree(&session.worktree_path);
+    let emit_work_state_reminders = !suppress_work_state_reminders && !is_resident_pm;
 
     let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
@@ -547,6 +561,8 @@ pub fn compute_plan(
     if suppress_work_state_reminders {
         plan.output =
             replace_with_terminal_settlement_reminder(plan.output, intent_event, &language);
+    } else if is_resident_pm {
+        plan.output = replace_with_pm_reminder(plan.output, intent_event, &language);
     }
 
     if emit_work_state_reminders {
@@ -620,6 +636,45 @@ fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -
             record.primary_session_id == session_id
                 && record.status != crate::cli::execution_state::ExecutionControlStatus::Active
         })
+}
+
+/// SPEC-3431 FR-064: swap the implementation-agent reminder for the PM's.
+/// Shares [`replace_with_terminal_settlement_reminder`]'s substitution so both
+/// stay in step when a base reminder variant is added.
+fn replace_with_pm_reminder(
+    output: HookOutput,
+    _event: IntentBoundaryEvent,
+    language: &str,
+) -> HookOutput {
+    let replacement = match texts::reminder_language(language) {
+        texts::ReminderLanguage::Ja => texts::PM_REMINDER_JA,
+        texts::ReminderLanguage::En => texts::PM_REMINDER,
+    };
+    replace_base_reminders(output, replacement)
+}
+
+fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
+    let replace_base = |text: String| {
+        [
+            texts::USER_PROMPT_REMINDER,
+            texts::USER_PROMPT_REMINDER_SHORT,
+            texts::USER_PROMPT_REMINDER_JA,
+            texts::USER_PROMPT_REMINDER_SHORT_JA,
+            texts::STOP_REMINDER,
+            texts::STOP_REMINDER_SHORT,
+            texts::STOP_REMINDER_JA,
+            texts::STOP_REMINDER_SHORT_JA,
+        ]
+        .into_iter()
+        .fold(text, |text, base| text.replace(base, replacement))
+    };
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, replace_base(text))
+        }
+        HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
+        other => other,
+    }
 }
 
 fn replace_with_terminal_settlement_reminder(
@@ -764,6 +819,84 @@ mod tests {
         e.created_at = timestamp;
         e.updated_at = timestamp;
         e
+    }
+
+    /// SPEC-3431 FR-064: the resident PM gets no Work-state reminders.
+    ///
+    /// The title demand ("set title-summary as your first action, this is not
+    /// optional", re-issued every turn) outranks the PM's own contract in the
+    /// context it reads. It is also unsatisfiable: the PM runs in a detached
+    /// worktree where `workspace.update` fails with
+    /// `branch identity is unavailable` — the PM filed that as #3477 itself.
+    /// The progress-summary demand asks for an implementation/verification
+    /// digest the PM has no basis to write, and writing it would overwrite the
+    /// shared projection that belongs to the implementation agents.
+    #[test]
+    fn the_resident_pm_gets_no_work_state_reminders() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).expect("pm worktree");
+        let session = make_session(&pm_worktree, "work", "Project Manager");
+
+        let plan = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            "2026-08-06T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .expect("plan")
+        .expect("some plan");
+
+        let text = match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
+            other => panic!("expected additional context, got {other:?}"),
+        };
+        assert!(
+            !text.contains("title-summary"),
+            "the PM must not be told to set a work purpose:\n{text}"
+        );
+        assert!(
+            !text.contains("progress_summary"),
+            "the PM must not be told to write an implementation digest:\n{text}"
+        );
+        assert!(
+            !text.contains("branch / worktree"),
+            "the PM performs no git operations; the Work/Git guidance is noise:\n{text}"
+        );
+    }
+
+    /// The exemption is keyed on the PM worktree alone. An identical session
+    /// anywhere else keeps the ordinary reminder — a regression here would
+    /// silently disarm the coordination discipline for the whole fleet.
+    #[test]
+    fn an_ordinary_session_keeps_the_ordinary_reminder() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/ordinary", "Codex");
+
+        let plan = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            "2026-08-06T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .expect("plan")
+        .expect("some plan");
+
+        let text = match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
+            other => panic!("expected additional context, got {other:?}"),
+        };
+        assert!(
+            !text.contains("resident PM") && !text.contains("常駐 PM"),
+            "a non-PM worktree must never receive the PM reminder:\n{text}"
+        );
+        assert!(
+            text.contains("Board") || text.contains("board"),
+            "the ordinary coordination reminder must still be there:\n{text}"
+        );
     }
 
     #[test]
@@ -1157,6 +1290,59 @@ mod tests {
         assert!(
             !agent_title_summary_missing(&session).expect("title check"),
             "saved non-empty title_summary must satisfy the guard"
+        );
+    }
+
+    /// Issue #3491: a detached-HEAD worktree can never accept
+    /// `workspace.update` (it has no branch, so it has no Workspace identity),
+    /// which made the title reminder an instruction the agent had no way to
+    /// follow — re-injected every single turn. gwt's own ephemeral intake
+    /// worktrees are branchless by design, so this is a state gwt creates
+    /// itself. The reminder must stay silent there.
+    #[test]
+    fn agent_title_summary_missing_stays_silent_on_a_branchless_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/branchless"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output = gwt_core::process::run_git_logged(&args, Some(&repo)).expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        }
+        let repo = dunce::canonicalize(&repo).expect("canonical repo");
+        let session = make_session(&repo, "work/branchless", "Codex");
+
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut agent = workspace_agent(
+            &session.id,
+            None,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        agent.title_summary = None;
+        agent.worktree_path = Some(repo.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        assert!(
+            agent_title_summary_missing(&session).expect("attached branch title check"),
+            "an attached-branch agent without a title must still be reminded"
+        );
+
+        let output = gwt_core::process::run_git_logged(&["checkout", "--detach"], Some(&repo))
+            .expect("run git");
+        assert!(output.status.success(), "git checkout --detach failed");
+
+        assert!(
+            !agent_title_summary_missing(&session).expect("branchless title check"),
+            "a branchless worktree cannot record Work state, so it must not be asked to"
         );
     }
 

@@ -159,13 +159,9 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             return Ok(2);
         }
-        if let Some(refusal) =
-            crate::cli::verification_record::work_event_settlement_refusal(&worktree)
-        {
-            out.push_str(&refusal);
-            out.push('\n');
-            return Ok(2);
-        }
+        // SPEC-3590 FR-020: Work receipts are delivery bookkeeping, not PR
+        // mutation authority. Keep this path receipt-independent; execution
+        // authority, verification, and non-PR obligations remain gated here.
         // T-247: a Ready handoff with unsettled non-PR obligations is
         // premature — draft creation and edits stay available mid-work.
         if is_ready_handoff {
@@ -1192,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_mutation_rejects_missing_unsettled_or_unauthorized_receipt_before_dispatch() {
+    fn pr_mutations_allow_pushed_branch_without_generation_scoped_work_receipt() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1200,202 +1196,98 @@ mod tests {
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-        let session_id = "session-receipt-pretransport";
-        let active_identity = initialize_pr_generation_authority(&fixture.repo, session_id);
-        persist_pr_generation_session(&fixture.repo, session_id, active_identity.clone());
+        let session_id = "session-receipt-independent-pr";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
         let _session =
             gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        assert!(
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .expect("read absent Work receipt")
+                .is_none(),
+            "the acceptance fixture must start without a generation-scoped Work receipt",
+        );
+
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
-        env.seed_created_pr(seeded_pr());
-
-        let assert_refused_before_dispatch = |env: &mut crate::cli::TestEnv, case: &str| {
-            let mut out = String::new();
-            let code = run(
-                env,
-                PrCommand::CreateBody {
-                    base: s("develop"),
-                    head: None,
-                    title: format!("receipt case: {case}"),
-                    body: s("body"),
-                    labels: vec![],
-                    draft: true,
-                },
-                &mut out,
-            )
-            .expect("run receipt pretransport gate");
-            assert_eq!(code, 2, "{case}: {out}");
-            assert!(
-                env.pr_create_call_log.is_empty(),
-                "{case}: rejected receipt reached external PR dispatch",
-            );
-        };
-
-        let missing_diagnosis = crate::cli::execution_state::diagnose(&fixture.repo, None);
-        assert_eq!(missing_diagnosis.work_event_receipt_generation_id, None);
+        let mut verify_out = String::new();
         assert_eq!(
-            missing_diagnosis.work_event_receipt_matches_current_generation, None,
-            "status must represent the absence of a receipt without claiming authority",
+            crate::cli::verification_record::run(
+                &mut env,
+                crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: vec!["git --version".to_string()],
+                    derive: false,
+                },
+                &mut verify_out,
+            )
+            .expect("register receipt-independent PR verification plan"),
+            0,
+            "{verify_out}",
+        );
+        verify_out.clear();
+        assert_eq!(
+            crate::cli::verification_record::run(
+                &mut env,
+                crate::cli::verification_record::VerifyCommand::Run {
+                    commands: vec!["git --version".to_string()],
+                },
+                &mut verify_out,
+            )
+            .expect("run receipt-independent PR verification"),
+            0,
+            "{verify_out}",
         );
         assert!(
-            crate::cli::verification_record::work_event_settlement_refusal(&fixture.repo).is_some(),
-            "the mutation gate must refuse a missing receipt when the Work log exists",
+            crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
+                .expect("read Work receipt after verification")
+                .is_none(),
+            "verification must not manufacture the missing receipt used by this acceptance case",
         );
-        assert_refused_before_dispatch(&mut env, "missing");
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
 
-        let valid = crate::cli::verification_record::save_work_event_settlement_record(
-            &fixture.repo,
-            session_id,
-            false,
-        )
-        .expect("persist valid generation-scoped receipt");
-        assert!(valid.status.is_settled());
-        let mut cases = Vec::new();
-
-        let mut foreign = valid.clone();
-        foreign.session_id = "session-receipt-foreign".to_string();
-        cases.push(("foreign", foreign));
-
-        let mut different_generation = valid.clone();
-        different_generation
-            .execution_binding
-            .as_mut()
-            .expect("valid receipt is generation-bound")
-            .generation_id = "generation-foreign".to_string();
-        cases.push(("different-generation", different_generation));
-
-        let mut arbitrary_head = valid.clone();
-        arbitrary_head
-            .execution_binding
-            .as_mut()
-            .expect("valid receipt is generation-bound")
-            .ledger_head_hash = "arbitrary-ledger-head".to_string();
-        cases.push(("arbitrary-head", arbitrary_head));
-
-        let mut unbound = valid.clone();
-        unbound.execution_binding = None;
-        cases.push(("unbound", unbound));
-
-        for (case, receipt) in cases {
-            crate::cli::verification_record::persist_work_event_settlement_record(
-                &fixture.repo,
-                &receipt,
-            )
-            .expect("persist unauthorized receipt fixture");
-            assert_refused_before_dispatch(&mut env, case);
+        // Comment was already outside `is_pr_mutation`; keep it in this
+        // matrix because FR-020 defines receipt independence for the whole
+        // create/edit/ready/comment family.
+        let commands = [
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("ready without receipt"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("draft without receipt"),
+                body: s("body"),
+                labels: vec![],
+                draft: true,
+            },
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("updated without receipt")),
+                body: Some(s("updated body")),
+                add_labels: vec![],
+            },
+            PrCommand::Ready { number: 7 },
+            PrCommand::CommentBody {
+                number: 7,
+                body: s("receipt state is not PR authority"),
+            },
+        ];
+        for command in commands {
+            let mut out = String::new();
+            let code = run(&mut env, command, &mut out)
+                .expect("dispatch PR operation without a Work receipt");
+            assert_eq!(code, 0, "{out}");
         }
 
-        crate::cli::verification_record::persist_work_event_settlement_record(
-            &fixture.repo,
-            &valid,
-        )
-        .expect("restore valid receipt before unsettled case");
-        assert!(matches!(
-            crate::cli::execution_state::settle(
-                &fixture.repo,
-                session_id,
-                crate::cli::execution_state::ExecutionSettlement::Completed,
-            )
-            .expect("complete the receipt-owning generation"),
-            crate::cli::execution_state::SettleResult::Settled(_)
-        ));
-        assert_eq!(
-            crate::cli::execution_state::diagnose(&fixture.repo, Some(session_id))
-                .work_event_receipt_matches_current_generation,
-            Some(true),
-            "the unsettled case must start from an authentic Completed lifecycle prefix",
-        );
-        fixture.append_event("terminal-update-not-delivered");
-        assert_refused_before_dispatch(&mut env, "unsettled");
-        let unsettled_diagnosis = crate::cli::execution_state::diagnose(&fixture.repo, None);
-        assert_eq!(
-            unsettled_diagnosis.work_event_receipt_matches_current_generation,
-            Some(true),
-            "status must preserve authentic lifecycle-prefix authority while settlement is blocked",
-        );
-        assert_eq!(unsettled_diagnosis.settlement_severity, "blocked");
-    }
-
-    #[test]
-    fn pr_mutation_rejects_predecessor_receipt_before_dispatch() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("isolated gwt home");
-        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
-        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-        let predecessor_session = "session-receipt-predecessor";
-        initialize_pr_generation_authority(&fixture.repo, predecessor_session);
-        let receipt = crate::cli::verification_record::save_work_event_settlement_record(
-            &fixture.repo,
-            predecessor_session,
-            false,
-        )
-        .expect("persist predecessor Work receipt");
-        assert!(receipt.status.is_settled());
-        assert!(matches!(
-            crate::cli::execution_state::settle(
-                &fixture.repo,
-                predecessor_session,
-                crate::cli::execution_state::ExecutionSettlement::Completed,
-            )
-            .expect("complete predecessor generation"),
-            crate::cli::execution_state::SettleResult::Settled(_)
-        ));
-
-        let owner = crate::cli::execution_state::ExecutionOwnerKey {
-            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
-            number: 42,
-        };
-        let successor_session = "session-receipt-successor";
-        let request = crate::cli::execution_state::SuccessorRequest {
-            operation_id: "operation-receipt-successor".to_string(),
-            principal_id: "principal-receipt-successor".to_string(),
-            work_id: Some("work-receipt-successor".to_string()),
-            source: "continue-work".to_string(),
-            session_binding_id: "binding-receipt-successor".to_string(),
-            initial_session_id: successor_session.to_string(),
-            entrypoint: "continue-work".to_string(),
-            requested_at: chrono::Utc::now(),
-        };
-        crate::cli::execution_state::prepare_successor(&fixture.repo, owner, &request)
-            .expect("prepare successor generation");
-        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
-            .expect("activate successor generation");
-        let successor_identity =
-            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
-                .expect("read successor generation binding")
-                .expect("successor generation binding exists");
-        persist_pr_generation_session(&fixture.repo, successor_session, successor_identity);
-        let _session = gwt_core::test_support::ScopedEnvVar::set(
-            gwt_agent::GWT_SESSION_ID_ENV,
-            successor_session,
-        );
-        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
-        env.seed_created_pr(seeded_pr());
-
-        let mut out = String::new();
-        assert_eq!(
-            run(
-                &mut env,
-                PrCommand::CreateBody {
-                    base: s("develop"),
-                    head: None,
-                    title: s("predecessor receipt"),
-                    body: s("body"),
-                    labels: vec![],
-                    draft: true,
-                },
-                &mut out,
-            )
-            .expect("run predecessor receipt gate"),
-            2,
-            "{out}",
-        );
-        assert!(
-            env.pr_create_call_log.is_empty(),
-            "a predecessor receipt must be rejected before external dispatch",
-        );
+        assert_eq!(env.pr_create_call_log.len(), 2);
+        assert_eq!(env.pr_edit_call_log.len(), 1);
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+        assert_eq!(env.pr_comments.len(), 1);
     }
 
     #[test]
@@ -1605,112 +1497,6 @@ mod tests {
         .expect("run pr edit while blocked");
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
-    }
-
-    #[test]
-    fn work_event_settlement_gate_blocks_pr_mutations_but_keeps_recovery_surfaces() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("isolated gwt home");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-pr-settlement");
-        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-        crate::cli::execution_state::materialize_at_launch(
-            &fixture.repo,
-            crate::cli::execution_state::ExecutionOwnerKind::Issue,
-            42,
-            "sess-pr-settlement",
-            "launch",
-            false,
-        )
-        .unwrap();
-        crate::cli::verification_record::save_plan(
-            &fixture.repo,
-            &crate::cli::verification_record::VerificationPlanRecord {
-                session_id: "sess-pr-settlement".to_string(),
-                owner_number: Some(42),
-                execution_binding: None,
-                commands: vec!["git --version".to_string()],
-                derived: false,
-                worktree_fingerprint: String::new(),
-                surfaces: Vec::new(),
-                generated_outputs: Vec::new(),
-                created_at: chrono::Utc::now(),
-                content_hash: String::new(),
-            },
-        )
-        .unwrap();
-        crate::cli::verification_record::run_verification(
-            &fixture.repo,
-            "sess-pr-settlement",
-            &["git --version".to_string()],
-        )
-        .unwrap();
-        fixture.append_event("terminal-update-awaiting-delivery");
-
-        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
-        env.seed_pr(7, seeded_pr());
-        env.seed_created_pr(seeded_pr());
-        let blocked_commands = [
-            PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("ready"),
-                body: s("body"),
-                labels: vec![],
-                draft: false,
-            },
-            PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("draft"),
-                body: s("body"),
-                labels: vec![],
-                draft: true,
-            },
-            PrCommand::EditBody {
-                number: 7,
-                title: Some(s("updated")),
-                body: Some(s("updated body")),
-                add_labels: vec![],
-            },
-            PrCommand::Ready { number: 7 },
-        ];
-        for command in blocked_commands {
-            let mut out = String::new();
-            let code = run(&mut env, command, &mut out).expect("run PR settlement gate");
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
-            assert!(out.contains("commit"), "{out}");
-            assert!(out.contains("push"), "{out}");
-        }
-        assert!(
-            env.pr_create_call_log.is_empty(),
-            "create must not reach gh"
-        );
-        assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
-        assert!(env.pr_ready_call_log.is_empty(), "ready must not reach gh");
-
-        let mut out = String::new();
-        let code = run(&mut env, PrCommand::Draft { number: 7 }, &mut out)
-            .expect("run PR draft recovery surface");
-        assert_eq!(code, 0, "{out}");
-        assert_eq!(env.pr_draft_call_log, vec![7]);
-
-        let mut out = String::new();
-        let code = run(
-            &mut env,
-            PrCommand::CommentBody {
-                number: 7,
-                body: s("Work delivery is blocked; keeping the PR in Draft."),
-            },
-            &mut out,
-        )
-        .expect("run PR blocker comment recovery surface");
-        assert_eq!(code, 0, "{out}");
-        assert_eq!(env.pr_comments.len(), 1);
     }
 
     #[test]

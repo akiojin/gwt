@@ -167,9 +167,9 @@ root_js_modules! {
     "protocol-enums.js" => "WINDOW_RUNTIME_STATES",
     // SPEC-3015 — window runtime state normalization extracted from app.js.
     "window-runtime-state.js" => "normalizeWindowRuntimeState",
-    // SPEC-3214 — Intake/Execution lane identity shared by window
+    // SPEC-3245 — semantic worktree form presentation shared by window
     // titlebar, window list, and fleet minimap.
-    "window-lane-identity.js" => "windowLaneKind",
+    "window-worktree-form.js" => "windowWorktreeForm",
     // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface
     // (SPEC-2970) extracted from app.js.
     "provider-usage-surface.js" => "createProviderUsageSurface",
@@ -187,8 +187,10 @@ root_js_modules! {
     // interaction guard, field builders, transitions, renderLaunchWizard,
     // chrome listeners) extracted from app.js.
     "launch-wizard-surface.js" => "createLaunchWizardSurface",
-    // SPEC-3165 — Issue auto-improve monitor card, inbox, and toast surface.
-    "issue-monitor-surface.js" => "createIssueMonitorSurface",
+    // SPEC-3431 FR-026 — PM settings panel anchored to the rail launcher.
+    // app.js imports this at module top level, so the asset MUST be registered
+    // or the ES module load 404s and the splash hangs.
+    "pm-settings-panel.js" => "createPmSettingsPanel",
     // SPEC #3200 FR-034/FR-035 — autonomous Issue Monitor scrollable side-toast
     // notification stack. app.js imports this at module top level, so the asset
     // MUST be registered or the ES module load fails and the splash hangs.

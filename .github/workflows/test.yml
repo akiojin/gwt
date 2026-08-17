@@ -95,6 +95,7 @@ jobs:
         run: cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity
         timeout-minutes: 15
       - name: Run real Claude probe caller regressions
+        shell: bash
         run: |
           cargo test -p gwt-core --lib real_bun_global_placeholder_fixture
           cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture -- --test-threads=1
@@ -105,12 +106,65 @@ jobs:
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
+      - name: Run Issue Monitor scheduled driver contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
+          cargo test -p gwt --bin gwt scheduled_tick_drives_disabled_claim_cleanup_without_scanning -- --test-threads=1
+          cargo test -p gwt --bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1
+          cargo test -p gwt --bin gwt app_runtime_local_driver_ -- --test-threads=1
+          cargo test -p gwt --lib local_fallback_lease -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Issue Monitor launch_now control-path contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --lib cli::issue::tests::windows_launch_now_ -- --test-threads=1
+          cargo test -p gwt --lib cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1
+          cargo test -p gwt --lib cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
+          cargo test -p gwt --lib cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
+          cargo test -p gwt --bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
+          cargo test -p gwt --bin gwt authenticated_pm_scan_now_ -- --test-threads=1
+          cargo test -p gwt --bin gwt authenticated_scan_now_ -- --test-threads=1
+          cargo test -p gwt --test issue_monitor_protocol_test frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
+          cargo test -p gwt --test issue_monitor_protocol_test agent_issue_monitor_scan_ -- --test-threads=1
+        timeout-minutes: 15
       - name: Run agent process resolver caller contracts
         run: cargo test -p gwt --test agent_process_resolution_contract_test
         timeout-minutes: 15
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
+
+  test-windows-agent-launch-e2e:
+    name: Test (Windows agent launch, ${{ matrix.provider }}/${{ matrix.selector }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: codex
+            selector: latest
+          - provider: codex
+            selector: exact
+          - provider: claude
+            selector: latest
+          - provider: claude
+            selector: exact
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      - name: Run credential-free deterministic Windows agent launch E2E
+        env:
+          GWT_WINDOWS_AGENT_PROVIDER: ${{ matrix.provider }}
+          GWT_WINDOWS_AGENT_SELECTOR: ${{ matrix.selector }}
+          GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
+        run: cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture
+        timeout-minutes: 30
 
   test-frontend:
     name: Test (Frontend + WebView E2E)

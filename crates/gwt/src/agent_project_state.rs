@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION: u32 = 1;
 
@@ -134,6 +135,16 @@ pub struct AgentWorkTerminalizationRequest {
     pub claimed_session_id: String,
     pub observation: AgentRuntimeObservation,
     pub terminal_kind: AgentWorkTerminalKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentBuildAbortTerminalizationRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub owner_number: u64,
+    pub reason: String,
+    pub observation: AgentRuntimeObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -705,7 +716,6 @@ pub fn continue_authenticated_execution(
         exact_unbound,
         current_binding,
     } = authority;
-
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
         &worktree,
         owner,
@@ -1070,6 +1080,63 @@ fn validate_current_execution_binding_authority(
     Ok(validated)
 }
 
+fn validate_blocked_build_abort_execution_binding_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    terminal_kind: AgentWorkTerminalKind,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    let (validated, worktree, owner) = validate_execution_binding_authority_structure(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+    let blocked_build_abort = terminal_kind == AgentWorkTerminalKind::Discarded
+        && crate::cli::execution_state::blocked_build_abort_execution_binding_matches(
+            &worktree,
+            owner,
+            authenticated_session_id,
+            &validated.identity,
+        )
+        .map_err(|_| execution_binding_error("blocked_build_abort_state_unreadable"))?;
+    if !blocked_build_abort {
+        return Err(execution_binding_error(
+            "active_execution_binding_not_current",
+        ));
+    }
+    Ok(validated)
+}
+
+#[derive(Clone, Copy)]
+enum BoundWorkTerminalizationAuthority {
+    Active,
+    BlockedBuildAbort,
+}
+
+fn validate_bound_work_terminalization_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    terminal_kind: AgentWorkTerminalKind,
+    authority: BoundWorkTerminalizationAuthority,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    match authority {
+        BoundWorkTerminalizationAuthority::Active => validate_current_execution_binding_authority(
+            authenticated_project_root,
+            authenticated_session_id,
+            authenticated_binding,
+        ),
+        BoundWorkTerminalizationAuthority::BlockedBuildAbort => {
+            validate_blocked_build_abort_execution_binding_authority(
+                authenticated_project_root,
+                authenticated_session_id,
+                authenticated_binding,
+                terminal_kind,
+            )
+        }
+    }
+}
+
 fn validate_prepared_execution_binding_authority(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
@@ -1191,10 +1258,18 @@ pub fn observe_agent_runtime(
             "workspace.update runtime repository identity is unavailable",
         )
     })?;
-    let branch = git_branch(&git_toplevel, "cwd").map_err(|_| {
+    // Issue #3491: keep the rejection (a branchless worktree has no Workspace
+    // to record against) but never swallow why. The old `map_err(|_| ...)`
+    // reported a generic "branch identity is unavailable" that read like a
+    // transient failure, leaving both the agent and the user with no way to
+    // tell that a detached HEAD was the cause or what to do about it.
+    let branch = read_git_branch(&git_toplevel).map_err(|failure| {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::InvalidRequest,
-            "workspace.update runtime branch identity is unavailable",
+            format!(
+                "workspace.update runtime branch identity is unavailable: {}",
+                branch_identity_diagnosis(&failure, &git_toplevel)
+            ),
         )
     })?;
     Ok(AgentRuntimeObservation {
@@ -1618,8 +1693,69 @@ pub fn apply_bound_authenticated_work_terminalization(
         authenticated_binding,
         None,
         request,
+        BoundWorkTerminalizationAuthority::Active,
         |_| {},
     )
+}
+
+pub fn apply_bound_authenticated_blocked_build_abort_terminalization(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    request: AgentBuildAbortTerminalizationRequest,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION
+        || request.owner_number == 0
+        || request.reason.trim().is_empty()
+        || request.reason.trim() != request.reason
+        || request.reason.len() > 4096
+        || request.reason.chars().any(char::is_control)
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "Blocked build abort request is invalid",
+        ));
+    }
+    validate_mutation_session_id(authenticated_session_id)?;
+    if request.claimed_session_id != authenticated_session_id
+        || request.owner_number != authenticated_binding.owner_number
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
+            "Blocked build abort claim does not match the authenticated launch",
+        ));
+    }
+    let session_path =
+        gwt_core::paths::gwt_sessions_dir().join(format!("{authenticated_session_id}.toml"));
+    let session = Session::load(&session_path)
+        .map_err(|_| execution_binding_error("blocked_build_abort_session_unreadable"))?;
+    let expected = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|_| execution_binding_error("blocked_build_abort_identity_unreadable"))?
+        .filter(|identity| identity.execution_binding == *authenticated_binding)
+        .ok_or_else(|| execution_binding_error("blocked_build_abort_identity_mismatch"))?;
+    let terminal_request = AgentWorkTerminalizationRequest {
+        schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+        claimed_session_id: request.claimed_session_id,
+        observation: request.observation,
+        terminal_kind: AgentWorkTerminalKind::Discarded,
+    };
+    crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &expected,
+        |_| {
+            apply_bound_authenticated_work_terminalization_inner(
+                authenticated_project_root,
+                authenticated_session_id,
+                authenticated_binding,
+                None,
+                terminal_request,
+                BoundWorkTerminalizationAuthority::BlockedBuildAbort,
+                |_| {},
+            )
+        },
+    )
+    .map_err(|_| execution_binding_error("blocked_build_abort_lease_unavailable"))?
+    .ok_or_else(|| execution_binding_error("blocked_build_abort_authority_changed"))?
 }
 
 pub(crate) fn apply_bound_authenticated_work_terminalization_for_exact_work(
@@ -1636,6 +1772,26 @@ pub(crate) fn apply_bound_authenticated_work_terminalization_for_exact_work(
         authenticated_binding,
         Some((expected_work_id, policy)),
         request,
+        BoundWorkTerminalizationAuthority::Active,
+        |_| {},
+    )
+}
+
+fn apply_bound_authenticated_blocked_build_abort_for_exact_work(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    expected_work_id: &str,
+    policy: gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
+    request: AgentWorkTerminalizationRequest,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
+    apply_bound_authenticated_work_terminalization_inner(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+        Some((expected_work_id, policy)),
+        request,
+        BoundWorkTerminalizationAuthority::BlockedBuildAbort,
         |_| {},
     )
 }
@@ -1652,6 +1808,7 @@ fn apply_authenticated_work_terminalization_inner(
         None,
         None,
         request,
+        BoundWorkTerminalizationAuthority::Active,
         after_resolve,
     )
 }
@@ -1665,6 +1822,7 @@ fn apply_bound_authenticated_work_terminalization_inner(
         gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
     )>,
     request: AgentWorkTerminalizationRequest,
+    authority: BoundWorkTerminalizationAuthority,
     after_resolve: impl FnOnce(&SessionBoundWorkspaceTerminalTarget),
 ) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
     apply_authenticated_work_terminalization_with_binding(
@@ -1673,6 +1831,7 @@ fn apply_bound_authenticated_work_terminalization_inner(
         Some(authenticated_binding),
         exact_work,
         request,
+        authority,
         after_resolve,
     )
 }
@@ -1686,6 +1845,7 @@ fn apply_authenticated_work_terminalization_with_binding(
         gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
     )>,
     request: AgentWorkTerminalizationRequest,
+    authority: BoundWorkTerminalizationAuthority,
     after_resolve: impl FnOnce(&SessionBoundWorkspaceTerminalTarget),
 ) -> std::result::Result<AgentWorkTerminalizationReceipt, AgentWorkspaceUpdateError> {
     if request.schema_version != AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION {
@@ -1702,10 +1862,12 @@ fn apply_authenticated_work_terminalization_with_binding(
         ));
     }
     if let Some(binding) = authenticated_binding {
-        validate_current_execution_binding_authority(
+        validate_bound_work_terminalization_authority(
             authenticated_project_root,
             authenticated_session_id,
             binding,
+            request.terminal_kind,
+            authority,
         )?;
     }
 
@@ -1721,16 +1883,19 @@ fn apply_authenticated_work_terminalization_with_binding(
             gwt_core::workspace_projection::WorkCloseKind::Discarded
         }
     };
+    let terminal_kind = request.terminal_kind;
     let observation = request.observation;
     let mut revalidation_error_code = None;
     let revalidate =
         |_: &gwt_core::workspace_projection::WorkspaceProjection,
          _: &gwt_core::workspace_projection::WorkItemsProjection| {
             if let Some(binding) = authenticated_binding {
-                validate_current_execution_binding_authority(
+                validate_bound_work_terminalization_authority(
                     authenticated_project_root,
                     authenticated_session_id,
                     binding,
+                    terminal_kind,
+                    authority,
                 )
                 .map_err(|error| {
                     revalidation_error_code = Some(error.code);
@@ -2146,6 +2311,37 @@ pub(crate) struct BoundTerminalCompatibilityAuthority {
     disposition: BoundTerminalCompatibilityDisposition,
 }
 
+impl BoundTerminalCompatibilityAuthority {
+    pub(crate) fn requires_blocked_build_abort_bridge(&self) -> Result<bool> {
+        if self.requested_terminal != AgentWorkTerminalKind::Discarded {
+            return Ok(false);
+        }
+        let owner = execution_owner_from_session_binding(&self.identity.execution_binding)
+            .map_err(mutation_error)?;
+        crate::cli::execution_state::blocked_build_abort_execution_binding_matches(
+            &self.identity.worktree_path,
+            owner,
+            &self.identity.session_id,
+            &self.identity.execution_binding.identity,
+        )
+        .map_err(|error| mutation_error(error.to_string()))
+    }
+}
+
+fn execution_owner_from_session_binding(
+    binding: &SessionExecutionBinding,
+) -> std::result::Result<crate::cli::execution_state::ExecutionOwnerKey, String> {
+    let kind = match binding.owner_kind.as_str() {
+        "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => return Err("terminal compatibility authority has an invalid owner".to_string()),
+    };
+    Ok(crate::cli::execution_state::ExecutionOwnerKey {
+        kind,
+        number: binding.owner_number,
+    })
+}
+
 /// Snapshot the exact canonical Work authority before an authenticated Host
 /// terminalization request. Only a nonterminal Work or the already-requested
 /// terminal is eligible; opposite and ambiguous canonical terminals fail
@@ -2155,7 +2351,12 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
     session_id: &str,
     requested_terminal: AgentWorkTerminalKind,
 ) -> Result<Option<BoundTerminalCompatibilityAuthority>> {
-    let Some(recovery) = validated_workspace_recovery_session(invocation_cwd, session_id)? else {
+    let Some(recovery) = validated_workspace_recovery_session_with_terminal_kind(
+        invocation_cwd,
+        session_id,
+        Some(requested_terminal),
+    )?
+    else {
         return Ok(None);
     };
     let ValidatedWorkspaceEnsureSession::Host(recovery) = recovery else {
@@ -2260,42 +2461,47 @@ pub(crate) fn continue_bound_terminal_compatibility(
     };
     let session_path =
         gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", expected_identity.session_id));
-    let result =
-        crate::cli::execution_state::with_current_active_session_execution_identity_global_lease(
+    let use_blocked_build_abort =
+        authority
+            .requires_blocked_build_abort_bridge()
+            .map_err(|_| {
+                "terminal compatibility continuation could not inspect Blocked abort authority"
+                    .to_string()
+            })?;
+    let result = if use_blocked_build_abort {
+        crate::cli::execution_state::with_blocked_build_abort_session_execution_identity_global_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &expected_identity,
-            |_| -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
-                let current = Session::load(&session_path).map_err(|_| {
-                    "terminal compatibility continuation could not reload the durable Session"
-                        .to_string()
-                })?;
-                if current.runtime_target != LaunchRuntimeTarget::Host
-                    || current.docker_runtime_binding.is_some()
-                    || gwt_agent::SessionExecutionIdentity::from_session(&current)
-                        .ok()
-                        .flatten()
-                        .as_ref()
-                        != Some(&expected_identity)
-                {
-                    return Err(
-                        "terminal compatibility continuation authority changed before commit"
-                            .to_string(),
-                    );
-                }
-                apply_bound_authenticated_work_terminalization_for_exact_work(
+            |_| {
+                apply_terminal_compatibility_under_lease(
+                    &session_path,
+                    &expected_identity,
                     &project_state_root,
-                    &current.id,
-                    &expected_identity.execution_binding,
                     &work_id,
                     policy,
                     request,
+                    true,
                 )
-                .map_err(|error| {
-                    format!("terminal compatibility continuation was refused: {error}")
-                })
             },
         )
-        .map_err(|_| {
+    } else {
+        crate::cli::execution_state::with_current_active_session_execution_identity_global_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected_identity,
+            |_| {
+                apply_terminal_compatibility_under_lease(
+                    &session_path,
+                    &expected_identity,
+                    &project_state_root,
+                    &work_id,
+                    policy,
+                    request,
+                    false,
+                )
+            },
+        )
+    }
+    .map_err(|_| {
             "terminal compatibility continuation could not validate the durable authority"
                 .to_string()
         })?;
@@ -2312,6 +2518,52 @@ pub(crate) fn continue_bound_terminal_compatibility(
     }
 }
 
+fn apply_terminal_compatibility_under_lease(
+    session_path: &Path,
+    expected_identity: &gwt_agent::SessionExecutionIdentity,
+    project_state_root: &Path,
+    work_id: &str,
+    policy: gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
+    request: AgentWorkTerminalizationRequest,
+    blocked_build_abort: bool,
+) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+    let current = Session::load(session_path).map_err(|_| {
+        "terminal compatibility continuation could not reload the durable Session".to_string()
+    })?;
+    if current.runtime_target != LaunchRuntimeTarget::Host
+        || current.docker_runtime_binding.is_some()
+        || gwt_agent::SessionExecutionIdentity::from_session(&current)
+            .ok()
+            .flatten()
+            .as_ref()
+            != Some(expected_identity)
+    {
+        return Err(
+            "terminal compatibility continuation authority changed before commit".to_string(),
+        );
+    }
+    let result = if blocked_build_abort {
+        apply_bound_authenticated_blocked_build_abort_for_exact_work(
+            project_state_root,
+            &current.id,
+            &expected_identity.execution_binding,
+            work_id,
+            policy,
+            request,
+        )
+    } else {
+        apply_bound_authenticated_work_terminalization_for_exact_work(
+            project_state_root,
+            &current.id,
+            &expected_identity.execution_binding,
+            work_id,
+            policy,
+            request,
+        )
+    };
+    result.map_err(|error| format!("terminal compatibility continuation was refused: {error}"))
+}
+
 /// Load the exact durable Session identity used to recover a missing Work
 /// projection registration. Recovery intentionally stops before resolving a
 /// Work id: `workspace.ensure` is the operation that materializes that missing
@@ -2320,6 +2572,14 @@ pub(crate) fn continue_bound_terminal_compatibility(
 pub(crate) fn validated_workspace_recovery_session(
     invocation_cwd: &Path,
     session_id: &str,
+) -> Result<Option<ValidatedWorkspaceEnsureSession>> {
+    validated_workspace_recovery_session_with_terminal_kind(invocation_cwd, session_id, None)
+}
+
+fn validated_workspace_recovery_session_with_terminal_kind(
+    invocation_cwd: &Path,
+    session_id: &str,
+    terminal_kind: Option<AgentWorkTerminalKind>,
 ) -> Result<Option<ValidatedWorkspaceEnsureSession>> {
     gwt_agent::validate_session_id_path_component(session_id)
         .map_err(|error| mutation_error(format!("invalid or unsafe Session id: {error}")))?;
@@ -2357,12 +2617,38 @@ pub(crate) fn validated_workspace_recovery_session(
         ))
     })?;
     let identity = validate_host_session_identity(recovery_context.worktree(), &session)?;
-    validate_current_execution_binding_authority(&identity.project_state_root, session_id, binding)
-        .map_err(|error| {
-            mutation_error(format!(
+    let binding_validation = terminal_kind.map_or_else(
+        || {
+            validate_current_execution_binding_authority(
+                &identity.project_state_root,
+                session_id,
+                binding,
+            )
+        },
+        |terminal_kind| {
+            validate_current_execution_binding_authority(
+                &identity.project_state_root,
+                session_id,
+                binding,
+            )
+            .or_else(|active_error| {
+                if terminal_kind != AgentWorkTerminalKind::Discarded {
+                    return Err(active_error);
+                }
+                validate_blocked_build_abort_execution_binding_authority(
+                    &identity.project_state_root,
+                    session_id,
+                    binding,
+                    terminal_kind,
+                )
+            })
+        },
+    );
+    binding_validation.map_err(|error| {
+        mutation_error(format!(
             "durable Session execution binding is not current for Session {session_id}: {error}"
         ))
-        })?;
+    })?;
     if session.runtime_target == LaunchRuntimeTarget::Docker {
         return Ok(Some(ValidatedWorkspaceEnsureSession::Docker(
             ValidatedWorkspaceRecoverySession {
@@ -2789,31 +3075,97 @@ fn git_toplevel(path: &Path, identity: &str) -> Result<PathBuf> {
     canonicalize_mutation_path(&root, identity)
 }
 
-fn git_branch(path: &Path, identity: &str) -> Result<String> {
+/// Why a worktree has no usable branch identity.
+///
+/// Issue #3491: the previous code collapsed every `git symbolic-ref` failure
+/// into "has no attached branch", so a detached HEAD — permanent, and a state
+/// gwt itself creates for ephemeral intake worktrees — was indistinguishable
+/// from an unreadable repository. Callers need the distinction: only the
+/// former is a settled fact about the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BranchIdentityFailure {
+    /// `HEAD` is not a symbolic ref: the worktree is on a detached HEAD and
+    /// has no branch to identify a Workspace with.
+    DetachedHead,
+    /// The branch could not be read at all. Carries the underlying git
+    /// failure so it is never swallowed.
+    Unreadable(String),
+}
+
+fn read_git_branch(path: &Path) -> std::result::Result<String, BranchIdentityFailure> {
     let output = gwt_core::process::run_git_logged(
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
         Some(path),
     )
     .map_err(|error| {
-        mutation_error(format!(
-            "Session branch mismatch: git symbolic-ref failed for {identity} {}: {error}",
-            path.display()
-        ))
+        BranchIdentityFailure::Unreadable(format!("git symbolic-ref could not run: {error}"))
     })?;
     if !output.status.success() {
-        return Err(mutation_error(format!(
-            "Session branch mismatch: {identity} {} has no attached branch",
-            path.display()
-        )));
+        // With `--quiet`, git exits 1 exactly when HEAD is not a symbolic ref,
+        // which is the detached case. Any other status is a repository-level
+        // failure (a missing or unreadable Git worktree) and must not be
+        // reported as a branchless one.
+        return Err(if output.status.code() == Some(1) {
+            BranchIdentityFailure::DetachedHead
+        } else {
+            BranchIdentityFailure::Unreadable(format!(
+                "git symbolic-ref failed ({}): {}",
+                output
+                    .status
+                    .code()
+                    .map(|code| format!("exit {code}"))
+                    .unwrap_or_else(|| "terminated by signal".to_string()),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        });
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if branch.is_empty() {
-        return Err(mutation_error(format!(
-            "Session branch mismatch: {identity} {} returned an empty branch",
-            path.display()
-        )));
+        return Err(BranchIdentityFailure::Unreadable(
+            "git symbolic-ref returned an empty branch name".to_string(),
+        ));
     }
     Ok(branch)
+}
+
+/// The cause of a branch-identity failure plus the next action to take, so a
+/// rejection is actionable instead of merely final (Issue #3491).
+fn branch_identity_diagnosis(failure: &BranchIdentityFailure, path: &Path) -> String {
+    match failure {
+        BranchIdentityFailure::DetachedHead => format!(
+            "{} has a detached HEAD, so it has no branch and therefore no Workspace identity to record Work state against. \
+Attach a branch there with `git switch <branch>`, or relaunch this Work through gwt Start Work. \
+gwt's ephemeral intake worktrees are branchless by design and never hold Work state.",
+            path.display()
+        ),
+        BranchIdentityFailure::Unreadable(cause) => format!(
+            "the branch of {} could not be read: {cause}",
+            path.display()
+        ),
+    }
+}
+
+/// Whether `worktree` is definitively on a detached HEAD.
+///
+/// Issue #3491: every Work-state mutation against a branchless worktree is
+/// permanently rejected, so callers use this to avoid demanding an update the
+/// agent has no way to perform. An indeterminate answer (the branch could not
+/// be read at all) reports `false`, so only the settled case suppresses
+/// anything.
+pub fn worktree_head_is_detached(worktree: &Path) -> bool {
+    matches!(
+        read_git_branch(worktree),
+        Err(BranchIdentityFailure::DetachedHead)
+    )
+}
+
+fn git_branch(path: &Path, identity: &str) -> Result<String> {
+    read_git_branch(path).map_err(|failure| {
+        mutation_error(format!(
+            "Session branch mismatch for {identity}: {}",
+            branch_identity_diagnosis(&failure, path)
+        ))
+    })
 }
 
 fn repo_hash_for_mutation(path: &Path, identity: &str) -> Result<String> {
@@ -4063,6 +4415,59 @@ mod tests {
         }
     }
 
+    fn blocked_build_abort_request(
+        session: &Session,
+        owner_number: u64,
+    ) -> AgentBuildAbortTerminalizationRequest {
+        AgentBuildAbortTerminalizationRequest {
+            schema_version: AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+            claimed_session_id: session.id.clone(),
+            owner_number,
+            reason: "canonical verification cannot proceed".to_string(),
+            observation: observe_agent_runtime(&session.worktree_path)
+                .expect("runtime observation"),
+        }
+    }
+
+    fn prepare_terminal_build_abort_authority(
+        repo: &Path,
+        session: &Session,
+        completed: bool,
+        save_build_state: bool,
+    ) -> (Session, SessionExecutionBinding) {
+        let (session, binding) = bind_session_to_current_execution(repo, session);
+        seed_work_mutation_surfaces(repo, repo);
+        seed_unique_mutation_target(repo, repo, &session, "work-blocked-abort-negative");
+        if save_build_state {
+            gwt_core::skill_state::save(
+                repo,
+                "build-spec",
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(binding.owner_number),
+                    started_at: Utc::now(),
+                    phase: Some("verify".to_string()),
+                    session_id: session.id.clone(),
+                },
+            )
+            .expect("save build lifecycle");
+        }
+        let settlement = if completed {
+            crate::cli::execution_state::ExecutionSettlement::Completed
+        } else {
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "canonical verification is externally blocked".to_string(),
+                missing_verification: Some("full matrix".to_string()),
+            }
+        };
+        assert!(matches!(
+            crate::cli::execution_state::settle(repo, &session.id, settlement)
+                .expect("settle execution"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        (session, binding)
+    }
+
     fn assert_execution_binding_denial(error: &AgentWorkspaceUpdateError) {
         assert_eq!(
             error.code,
@@ -4071,6 +4476,95 @@ mod tests {
         assert_eq!(
             error.message,
             "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying"
+        );
+    }
+
+    /// Issue #3491: a branchless worktree stays rejected — SPEC-2359 Phase
+    /// W-15 (FR-381) already keeps detached worktrees out of the Workspace
+    /// projection, so there is no Workspace for Work state to land in — but
+    /// the rejection must now name its cause and the next action. The old
+    /// `map_err(|_| ...)` replaced the whole diagnosis with a generic
+    /// "runtime branch identity is unavailable", which read like a transient
+    /// failure and left the agent with no way to tell what to do.
+    #[test]
+    fn observe_agent_runtime_rejects_detached_head_with_actionable_cause() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "detached-runtime",
+            "https://example.com/detached-runtime.git",
+            "work/detached-runtime",
+        );
+        run_git(&["checkout", "--detach"], &repo);
+
+        let error =
+            observe_agent_runtime(&repo).expect_err("a branchless worktree must stay rejected");
+        assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::InvalidRequest);
+        let message = error.message.as_str();
+        assert!(
+            message.contains("detached HEAD"),
+            "the rejection must name the cause: {message}"
+        );
+        assert!(
+            message.contains("git switch"),
+            "the rejection must name the next action: {message}"
+        );
+        assert!(
+            message.contains(&repo.display().to_string()),
+            "the rejection must identify the offending worktree: {message}"
+        );
+    }
+
+    /// Issue #3491 (policy pair): an attached branch keeps observing normally,
+    /// so the regression fixes "detached is rejected, attached is accepted"
+    /// rather than leaving the decision implicit.
+    #[test]
+    fn observe_agent_runtime_accepts_attached_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "attached-runtime",
+            "https://example.com/attached-runtime.git",
+            "work/attached-runtime",
+        );
+
+        let observation = observe_agent_runtime(&repo).expect("attached branch observation");
+        assert_eq!(observation.branch, "work/attached-runtime");
+    }
+
+    /// Issue #3491: `git symbolic-ref` failing is not proof of a detached
+    /// HEAD. The old code reported every non-zero exit as "has no attached
+    /// branch", so an unreadable repository was misdiagnosed as a branchless
+    /// one. The two must stay distinguishable, and the underlying git error
+    /// must survive instead of being swallowed.
+    #[test]
+    fn branch_identity_failure_separates_detached_head_from_unreadable_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = init_git_repo(
+            temp.path(),
+            "branch-identity",
+            "https://example.com/branch-identity.git",
+            "work/branch-identity",
+        );
+        run_git(&["checkout", "--detach"], &repo);
+        assert_eq!(
+            read_git_branch(&repo),
+            Err(BranchIdentityFailure::DetachedHead)
+        );
+        assert!(worktree_head_is_detached(&repo));
+
+        let non_repo = temp.path().join("not-a-repo");
+        std::fs::create_dir_all(&non_repo).expect("non-repo dir");
+        match read_git_branch(&non_repo) {
+            Err(BranchIdentityFailure::Unreadable(cause)) => assert!(
+                !cause.trim().is_empty(),
+                "the underlying git failure must be carried, not swallowed"
+            ),
+            other => panic!("an unreadable repository must not read as detached: {other:?}"),
+        }
+        assert!(
+            !worktree_head_is_detached(&non_repo),
+            "only a definitive detached HEAD may be reported as branchless"
         );
     }
 
@@ -6355,6 +6849,20 @@ mod tests {
                     .set_execution_binding(Some(terminal_binding.clone()))
                     .expect("project terminal generation into durable Session");
                 save_session_fixture(&session);
+                if !completed {
+                    gwt_core::skill_state::save(
+                        repo,
+                        "build-spec",
+                        &gwt_core::skill_state::SkillState {
+                            active: true,
+                            owner_spec: Some(terminal_binding.owner_number),
+                            started_at: Utc::now(),
+                            phase: Some("verify".to_string()),
+                            session_id: session.id.clone(),
+                        },
+                    )
+                    .expect("save matching active build lifecycle");
+                }
                 let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
 
                 let probe_error = probe_authenticated_execution_binding(
@@ -6376,19 +6884,173 @@ mod tests {
                 .expect_err("terminal generation must not authorize workspace mutation");
                 assert_execution_binding_denial(&update_error);
 
+                let mut terminalization_request = bound_work_terminalization_request(&session);
+                if !completed {
+                    terminalization_request.terminal_kind = AgentWorkTerminalKind::Discarded;
+                }
                 let terminalization_error = apply_bound_authenticated_work_terminalization(
                     repo,
                     &session.id,
                     &terminal_binding,
-                    bound_work_terminalization_request(&session),
+                    terminalization_request,
                 )
-                .expect_err("terminal generation must not authorize Work terminalization");
+                .expect_err(
+                    "general Work terminalization must not inherit Blocked build.abort authority",
+                );
                 assert_execution_binding_denial(&terminalization_error);
 
                 assert_eq!(
                     ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
                     before,
                     "{terminal_label} generation denial must preserve authority and Work bytes"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn blocked_build_abort_uses_dedicated_leased_authority() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, mut binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            let work_id = "work-blocked-build-abort";
+            seed_unique_mutation_target(repo, repo, &session, work_id);
+            gwt_core::skill_state::save(
+                repo,
+                "build-spec",
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(binding.owner_number),
+                    started_at: Utc::now(),
+                    phase: Some("verify".to_string()),
+                    session_id: session.id.clone(),
+                },
+            )
+            .expect("save matching active build lifecycle");
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    repo,
+                    &session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                )
+                .expect("settle producing generation"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: binding.owner_number,
+            };
+            binding.identity = crate::cli::execution_state::current_execution_binding(repo, owner)
+                .expect("read Blocked generation identity")
+                .expect("Blocked generation identity");
+            binding.capability_generation += 1;
+            session
+                .set_execution_binding(Some(binding.clone()))
+                .expect("project Blocked generation into durable Session");
+            save_session_fixture(&session);
+
+            let receipt = apply_bound_authenticated_blocked_build_abort_terminalization(
+                repo,
+                &session.id,
+                &binding,
+                blocked_build_abort_request(&session, owner.number),
+            )
+            .expect("dedicated Blocked build abort authority");
+
+            assert_eq!(receipt.outcome, AgentWorkTerminalizationOutcome::Emitted);
+            let work_items = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .expect("load WorkItems")
+                .expect("WorkItems");
+            let work = work_items
+                .work_items
+                .iter()
+                .find(|work| work.id == work_id)
+                .expect("terminal Work");
+            assert!(work.is_terminal());
+            assert!(work.discarded);
+        });
+    }
+
+    #[test]
+    fn blocked_build_abort_refuses_foreign_or_invalid_authority_without_mutation() {
+        for case in [
+            "no-build",
+            "owner-mismatch",
+            "foreign-build-session",
+            "completed",
+            "corrupt-execution",
+            "claimed-owner-mismatch",
+            "claimed-session-mismatch",
+            "invalid-reason",
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let (session, binding) = prepare_terminal_build_abort_authority(
+                    repo,
+                    session,
+                    case == "completed",
+                    case != "no-build",
+                );
+                if matches!(case, "owner-mismatch" | "foreign-build-session") {
+                    gwt_core::skill_state::save(
+                        repo,
+                        "build-spec",
+                        &gwt_core::skill_state::SkillState {
+                            active: true,
+                            owner_spec: Some(if case == "owner-mismatch" {
+                                binding.owner_number + 1
+                            } else {
+                                binding.owner_number
+                            }),
+                            started_at: Utc::now(),
+                            phase: Some("verify".to_string()),
+                            session_id: if case == "foreign-build-session" {
+                                "foreign-session".to_string()
+                            } else {
+                                session.id.clone()
+                            },
+                        },
+                    )
+                    .expect("replace build lifecycle with mismatched authority");
+                }
+                if case == "corrupt-execution" {
+                    let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
+                        .expect("trusted execution directory");
+                    std::fs::write(trusted_dir.join("execution-control.json"), b"{corrupt")
+                        .expect("corrupt execution projection");
+                }
+                let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+                let mut request = blocked_build_abort_request(&session, binding.owner_number);
+                match case {
+                    "claimed-owner-mismatch" => request.owner_number += 1,
+                    "claimed-session-mismatch" => {
+                        request.claimed_session_id = "foreign-session".to_string()
+                    }
+                    "invalid-reason" => request.reason.clear(),
+                    _ => {}
+                }
+
+                let error = apply_bound_authenticated_blocked_build_abort_terminalization(
+                    repo,
+                    &session.id,
+                    &binding,
+                    request,
+                )
+                .err()
+                .unwrap_or_else(|| panic!("{case} must not gain Blocked build abort authority"));
+
+                assert!(matches!(
+                    error.code,
+                    AgentWorkspaceUpdateErrorCode::InvalidRequest
+                        | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
+                        | AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                ));
+                assert_eq!(
+                    ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                    before,
+                    "{case} refusal must preserve authority and Work bytes"
                 );
             });
         }
@@ -6516,6 +7178,7 @@ mod tests {
                 &binding,
                 None,
                 bound_work_terminalization_request(&session),
+                BoundWorkTerminalizationAuthority::Active,
                 |_| {
                     gwt_agent::rotate_session_execution_capability(&sessions_dir, &session_id)
                         .expect("rotate capability between resolve and commit");

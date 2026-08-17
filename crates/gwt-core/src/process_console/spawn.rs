@@ -205,6 +205,26 @@ async fn spawn_logged_inner(
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return Err(deadline_error());
     }
+    // Issue #3604 AC-3: an exhausted GitHub budget refuses the call here, so a
+    // rate-limited window stops producing spawns, log noise, and generic
+    // "network error" reports until its measured reset passes.
+    let gh_quota = matches!(kind, ProcessKind::Gh).then(|| gh_arg_strings(args));
+    if let Some(args) = &gh_quota {
+        if let Some(detail) = crate::github_quota::suppressed_spawn_detail(
+            crate::github_quota::global(),
+            args,
+            chrono::Utc::now(),
+        ) {
+            tracing::warn!(
+                target: SUMMARY_TARGET,
+                kind = kind.as_str(),
+                label = %options.label,
+                detail = %detail,
+                "gh call suppressed: GitHub budget exhausted"
+            );
+            return Err(std::io::Error::other(detail));
+        }
+    }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
@@ -430,6 +450,21 @@ async fn spawn_logged_inner(
         false,
     );
 
+    let stderr = if let Some(gh_args) = &gh_quota {
+        reconcile_github_quota(
+            hub,
+            &program,
+            &options,
+            gh_args,
+            status.success(),
+            stderr,
+            deadline,
+        )
+        .await
+    } else {
+        stderr
+    };
+
     Ok(SpawnOutput {
         exit_code,
         stdout,
@@ -437,6 +472,82 @@ async fn spawn_logged_inner(
         stdout_lines,
         stderr_lines,
     })
+}
+
+fn gh_arg_strings(args: &[impl AsRef<std::ffi::OsStr>]) -> Vec<String> {
+    args.iter()
+        .map(|arg| arg.as_ref().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Issue #3604 AC-1 / AC-2: turn a bare `gh` rate-limit refusal into an
+/// identified failure that carries its reset window, and remember the window so
+/// the pre-spawn gate can suppress the calls that would follow it.
+///
+/// `gh` never prints the reset time, so the window comes from `gh api
+/// rate_limit` — a free endpoint that spends neither budget, which is also why
+/// this reconcile is a structural no-op for [`crate::github_quota::GitHubQuota::Free`]
+/// argv and therefore cannot recurse.
+async fn reconcile_github_quota(
+    hub: &ProcessConsoleHub,
+    program: &OsString,
+    options: &SpawnOptions,
+    args: &[String],
+    success: bool,
+    stderr: String,
+    deadline: Option<Instant>,
+) -> String {
+    use crate::github_quota::{self, GitHubQuota};
+
+    let quota = github_quota::classify_gh_args(args);
+    if quota == GitHubQuota::Free {
+        return stderr;
+    }
+    if success {
+        // The budget answered, so any recorded block over-estimated its window.
+        github_quota::global().record_success(quota);
+        return stderr;
+    }
+    if !github_quota::is_rate_limit_stderr(&stderr) {
+        return stderr;
+    }
+
+    let now = chrono::Utc::now();
+    let probe = probe_rate_limit(hub, program, options, quota, deadline).await;
+    let block = github_quota::block_from_probe(quota, probe, now);
+    let annotated = github_quota::annotate_rate_limited_stderr(&block, &stderr, now);
+    github_quota::global().record_exhaustion(block);
+    annotated
+}
+
+async fn probe_rate_limit(
+    hub: &ProcessConsoleHub,
+    program: &OsString,
+    options: &SpawnOptions,
+    quota: crate::github_quota::GitHubQuota,
+    deadline: Option<Instant>,
+) -> Option<crate::github_quota::RateLimitBlock> {
+    let mut probe_options = SpawnOptions::new("gh api rate_limit").forward_output(false);
+    if let Some(dir) = &options.current_dir {
+        probe_options = probe_options.current_dir(dir.clone());
+    }
+    // Boxed so the (runtime-unreachable) self-reference stays finitely sized.
+    let output = Box::pin(spawn_logged_inner(
+        hub,
+        ProcessKind::Gh,
+        program.clone(),
+        crate::github_quota::RATE_LIMIT_PROBE_ARGS,
+        probe_options,
+        // The probe must not outlive its caller's operation budget: a scan
+        // stage that already ran out of time cannot afford one more spawn.
+        deadline,
+    ))
+    .await
+    .ok()?;
+    if !output.success() {
+        return None;
+    }
+    crate::github_quota::parse_rate_limit_probe(&output.stdout, quota)
 }
 
 fn trace_process_start(

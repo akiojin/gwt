@@ -29,6 +29,7 @@ fn issue(number: u64, labels: &[&str]) -> IssueMonitorIssue {
         readiness: IssueMonitorReadiness::NotApplicable,
         body: Some(format!("Body {number}")),
         url: Some(format!("https://github.com/example/repo/issues/{number}")),
+        updated_at: Some("2026-08-01T00:00:00Z".to_string()),
     }
 }
 
@@ -963,7 +964,16 @@ fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
         "a scan-time opt-out must not cancel a bound agent window"
     );
 
+    candidate.labels.retain(|label| label != "hold");
+    candidate.readiness = IssueMonitorReadiness::ReadyWithCompletedTasks;
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:01:45Z",
+    );
     monitor.record_merged(42);
+    candidate.labels.push("hold".to_string());
+    candidate.readiness = IssueMonitorReadiness::NotReady;
     scan_issue_monitor_candidates(
         &mut monitor,
         std::slice::from_ref(&candidate),
@@ -1555,7 +1565,10 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
     assert_eq!(after.max_active_agents, 4);
     assert_eq!(after.priority_order, vec![99, 45, 44, 43, 42]);
     assert_eq!(after.launching_issues[0].issue_number, 99);
-    assert_eq!(after.merged_issues, vec![88]);
+    assert!(
+        after.merged_issues.is_empty(),
+        "an absent legacy completion is tombstoned by a complete Live snapshot"
+    );
     assert!(after.autonomous_mode);
     assert_eq!(after.autonomous_tuning.max_attempts, 9);
     assert_eq!(after.autonomous_records[0].attempts, 6);

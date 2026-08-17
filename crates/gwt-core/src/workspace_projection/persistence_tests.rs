@@ -879,7 +879,7 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
 
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let legacy_works = legacy_workspace_work_items_path_for_repo_path(&project_state_root);
-    let topology_dependent_shadow = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    let linked_worktree_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let mut work_items = WorkItemsProjection::empty(now);
     let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-split", now);
     start.id = "event-legacy-split".to_string();
@@ -892,9 +892,11 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
     append_workspace_work_event_to_path(&single_root_events, &start)
         .expect("single-root event log");
     let split_root_events = gwt_repo_local_work_events_path(&work_event_root);
-    assert_ne!(repo_global_works, topology_dependent_shadow);
+    assert_eq!(
+        repo_global_works, linked_worktree_works,
+        "#3466: a layout root and its linked worktree resolve to one project store"
+    );
     assert_ne!(single_root_events, split_root_events);
-    assert!(!topology_dependent_shadow.exists());
     assert!(!canonical_current.exists());
     assert!(!repo_global_works.exists());
     assert!(!split_root_events.exists());
@@ -927,8 +929,9 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
             .title,
         "Single-root current"
     );
-    assert!(
-        !topology_dependent_shadow.exists(),
+    assert_eq!(
+        materialized_work_items_sots(),
+        vec![repo_global_works.clone()],
         "a real linked worktree must not acquire a second WorkItems SOT"
     );
     assert!(std::fs::read_to_string(&split_root_events)
@@ -957,7 +960,7 @@ fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
 
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
     let legacy_worktree_works = legacy_workspace_work_items_path_for_repo_path(&work_event_root);
-    let topology_dependent_shadow = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    let linked_worktree_works = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
     let mut work_items = WorkItemsProjection::empty(now);
     let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-worktree", now);
     start.id = "event-legacy-worktree".to_string();
@@ -968,7 +971,7 @@ fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
     let legacy_bytes = std::fs::read(&legacy_worktree_works).expect("legacy exact-worktree bytes");
 
     assert!(!repo_global_works.exists());
-    assert!(!topology_dependent_shadow.exists());
+    assert!(!linked_worktree_works.exists());
     transact_workspace_state_for_work_event_root(
         &project_state_root,
         &work_event_root,
@@ -996,8 +999,9 @@ fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
         std::fs::read(&legacy_worktree_works).expect("legacy source remains immutable"),
         legacy_bytes
     );
-    assert!(
-        !topology_dependent_shadow.exists(),
+    assert_eq!(
+        materialized_work_items_sots(),
+        vec![repo_global_works.clone()],
         "migration must not retain a second WorkItems SOT"
     );
 }
@@ -1014,7 +1018,11 @@ fn workspace_state_transaction_for_work_event_root_recovers_v1_single_root_marke
 
     let current_path = gwt_workspace_projection_path_for_repo_path(&project_state_root);
     let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
-    let topology_dependent_shadow = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    assert_eq!(
+        repo_global_works,
+        gwt_workspace_work_items_path_for_repo_path(&work_event_root),
+        "#3466: a layout root and its linked worktree resolve to one project store"
+    );
     let single_root_events = gwt_repo_local_work_events_path(&project_state_root);
     let split_root_events = gwt_repo_local_work_events_path(&work_event_root);
     let marker_path = pending_workspace_state_transaction_path(&current_path);
@@ -1070,8 +1078,9 @@ fn workspace_state_transaction_for_work_event_root_recovers_v1_single_root_marke
         .work_items
         .iter()
         .any(|item| item.id == "work-v1-recovery"));
-    assert!(
-        !topology_dependent_shadow.exists(),
+    assert_eq!(
+        materialized_work_items_sots(),
+        vec![repo_global_works.clone()],
         "v1 recovery must not materialize a worktree-specific WorkItems shadow"
     );
     assert!(std::fs::read_to_string(split_root_events)
@@ -9396,6 +9405,26 @@ fn init_test_workspace_home_with_linked_worktree(base: &Path) -> (PathBuf, PathB
         ],
     );
     (workspace_home, worktree)
+}
+
+/// Every WorkItems SOT currently materialized under the scoped `~/.gwt` home.
+///
+/// Issue #3466: a layout root and its linked worktrees used to hash to two
+/// different project stores, so "the worktree must not acquire a second
+/// WorkItems SOT" could be written as `!other_path.exists()`. Now that both
+/// resolve to one store those paths are equal by construction, so the same
+/// invariant is checked by enumerating the SOT files that actually exist.
+fn materialized_work_items_sots() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(crate::paths::gwt_projects_dir()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path().join("project-state").join("works.json"))
+        .filter(|path| path.exists())
+        .collect();
+    found.sort();
+    found
 }
 
 fn start_event(work_item_id: &str, at: DateTime<Utc>) -> WorkEvent {

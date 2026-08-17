@@ -26,6 +26,30 @@
 // - launchPending: shared Resume/Launch pending controller.
 import { createFocusTrap } from "/focus-trap.js";
 
+const MONITOR_STATE_VIEWS = Object.freeze({
+  queued: Object.freeze({ label: "Queued", tone: "idle" }),
+  not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
+  hold_excluded: Object.freeze({ label: "On hold", tone: "needs-input" }),
+  launching: Object.freeze({ label: "Launching", tone: "active" }),
+  launched: Object.freeze({ label: "Launched", tone: "active" }),
+  merged: Object.freeze({ label: "Merged", tone: "done" }),
+  released: Object.freeze({ label: "Released", tone: "done" }),
+  launch_failed: Object.freeze({ label: "Launch failed", tone: "blocked" }),
+  agent_failed: Object.freeze({ label: "Agent failed", tone: "blocked" }),
+  blocked_by_claim: Object.freeze({ label: "Blocked by claim", tone: "needs-input" }),
+  skipped: Object.freeze({ label: "Skipped", tone: "idle" }),
+  needs_human: Object.freeze({ label: "Needs human", tone: "needs-input" }),
+});
+
+export function monitorStateView(value) {
+  const state = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!state) return null;
+  const known = MONITOR_STATE_VIEWS[state];
+  return known
+    ? { state, label: known.label, tone: known.tone }
+    : { state, label: `Unknown (${state})`, tone: "needs-input" };
+}
+
 export function createKnowledgeKanbanSurface({
   send,
   // Semantic search must never use the reconnect queue. This dependency
@@ -51,6 +75,180 @@ export function createKnowledgeKanbanSurface({
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       let relatedWorkRefreshTimer = null;
+      let monitorProjectionRefreshTimer = null;
+      let issueMonitorStatus = {
+        enabled: false,
+        state: "disabled",
+        queue_len: 0,
+        active_count: 0,
+        max_active_agents: 1,
+        total_candidates: 0,
+        autonomous_mode: false,
+      };
+
+      function issueMonitorStateText(state) {
+        switch (String(state || "")) {
+          case "disabled":
+            return "Stopped";
+          case "auth_required":
+            return "Auth required";
+          case "settings_required":
+            return "Settings required";
+          default: {
+            const value = String(state || (issueMonitorStatus.enabled ? "idle" : "disabled"));
+            return value.charAt(0).toUpperCase() + value.slice(1);
+          }
+        }
+      }
+
+      function issueMonitorSettingsSourceLabel(source) {
+        switch (source) {
+          case "saved":
+            return "Saved";
+          case "last_settings":
+            return "Last settings";
+          default:
+            return "Missing saved profile";
+        }
+      }
+
+      function renderIssueMonitorControls(element) {
+        const panel = element?.querySelector(".knowledge-monitor-panel");
+        if (!panel) return;
+        const maxActive = Math.max(
+          1,
+          Number.parseInt(String(issueMonitorStatus.max_active_agents || 1), 10) || 1,
+        );
+        const summary = panel.querySelector(".knowledge-monitor-summary");
+        if (summary) {
+          const parts = [
+            issueMonitorStateText(issueMonitorStatus.state),
+            `Queue ${issueMonitorStatus.queue_len || 0}`,
+            `Active ${issueMonitorStatus.active_count || 0}/${maxActive}`,
+          ];
+          if (issueMonitorStatus.total_candidates) {
+            parts.push(`Total ${issueMonitorStatus.total_candidates}`);
+          }
+          summary.textContent = parts.join(" | ");
+        }
+        const settings = panel.querySelector(".knowledge-monitor-settings-copy");
+        if (settings) {
+          const source = issueMonitorSettingsSourceLabel(
+            issueMonitorStatus.launch_profile_source,
+          );
+          const profile =
+            issueMonitorStatus.launch_profile_summary || "configure before auto start";
+          settings.textContent = `Agent settings ${source}: ${profile}`;
+        }
+        const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
+        if (maxActiveInput && document.activeElement !== maxActiveInput) {
+          maxActiveInput.value = String(maxActive);
+        }
+        const toggle = panel.querySelector('[data-action="monitor-toggle"]');
+        if (toggle) {
+          const enabled = Boolean(issueMonitorStatus.enabled);
+          toggle.textContent = enabled ? "Stop" : "Start";
+          toggle.dataset.enabled = enabled ? "true" : "false";
+          toggle.classList.toggle("primary", !enabled);
+        }
+        const autonomous = panel.querySelector('[data-action="monitor-autonomous"]');
+        if (autonomous) {
+          const enabled = Boolean(issueMonitorStatus.autonomous_mode);
+          autonomous.textContent = enabled ? "Autonomous: ON" : "Autonomous: OFF";
+          autonomous.dataset.enabled = enabled ? "true" : "false";
+          autonomous.classList.toggle("primary", enabled);
+        }
+        const error = panel.querySelector(".knowledge-monitor-error");
+        if (error) {
+          error.textContent = issueMonitorStatus.last_error || "";
+          error.hidden = !issueMonitorStatus.last_error;
+        }
+      }
+
+      function renderAllIssueMonitorControls() {
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (normalizeKnowledgeKind(state.kind) !== "issue") continue;
+          renderIssueMonitorControls(windowMap.get(windowId));
+        }
+      }
+
+      function applyIssueMonitorStatus(nextStatus) {
+        issueMonitorStatus = { ...issueMonitorStatus, ...(nextStatus || {}) };
+        renderAllIssueMonitorControls();
+      }
+
+      function scheduleIssueMonitorProjectionRefresh() {
+        if (monitorProjectionRefreshTimer !== null) {
+          clearTimeout(monitorProjectionRefreshTimer);
+        }
+        monitorProjectionRefreshTimer = setTimeout(() => {
+          monitorProjectionRefreshTimer = null;
+          for (const [windowId, state] of knowledgeBridgeStateMap) {
+            if (
+              normalizeKnowledgeKind(state.kind) === "issue" &&
+              workspaceWindowById(windowId)
+            ) {
+              requestKnowledgeBridge(windowId, "issue", false);
+            }
+          }
+        }, 75);
+      }
+
+      function wireIssueMonitorControls(body) {
+        const panel = body.querySelector(".knowledge-monitor-panel");
+        if (!panel) return;
+        panel.addEventListener("mousedown", (event) => event.stopPropagation());
+        panel
+          .querySelector('[data-action="monitor-settings"]')
+          ?.addEventListener("click", () => {
+            send({ kind: "issue_monitor_configure_profile" });
+          });
+        const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
+        maxActiveInput?.addEventListener("change", () => {
+          const value = Math.max(
+            1,
+            Number.parseInt(String(maxActiveInput.value || "1"), 10) || 1,
+          );
+          maxActiveInput.value = String(value);
+          send({
+            kind: "set_issue_monitor_max_active_agents",
+            max_active_agents: value,
+          });
+        });
+        panel
+          .querySelector('[data-action="monitor-toggle"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_enabled",
+              enabled: !Boolean(issueMonitorStatus.enabled),
+            });
+          });
+        panel
+          .querySelector('[data-action="monitor-autonomous"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_autonomous_mode",
+              enabled: !Boolean(issueMonitorStatus.autonomous_mode),
+            });
+          });
+        const quickTitle = panel.querySelector(".knowledge-monitor-quick-title");
+        const submitQuickIssue = (launch) => {
+          const title = String(quickTitle?.value || "").trim();
+          if (!title) return;
+          send({ kind: "quick_register_issue", title, launch });
+          quickTitle.value = "";
+        };
+        quickTitle?.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          submitQuickIssue(false);
+        });
+        panel
+          .querySelector('[data-action="quick-register-launch"]')
+          ?.addEventListener("click", () => submitQuickIssue(true));
+        renderIssueMonitorControls(body);
+        send({ kind: "list_issue_monitor" });
+      }
 
 
       // SPEC-2017 US-9 — Kanban Drawer (slide-over detail). Reuses the
@@ -346,6 +544,13 @@ export function createKnowledgeKanbanSurface({
           }
         }
         knowledgeBridgeStateMap.delete(windowId);
+        if (
+          knowledgeBridgeStateMap.size === 0 &&
+          monitorProjectionRefreshTimer !== null
+        ) {
+          clearTimeout(monitorProjectionRefreshTimer);
+          monitorProjectionRefreshTimer = null;
+        }
       }
 
       function knowledgeEntriesAreEmpty(state) {
@@ -1806,10 +2011,13 @@ export function createKnowledgeKanbanSurface({
               "is-selected",
               selected && node.classList.contains("kanban-card"),
             );
+            const currentTarget = node.classList.contains("knowledge-row")
+              ? node.querySelector(".knowledge-row-select")
+              : node;
             if (selected) {
-              node.setAttribute("aria-current", "true");
+              currentTarget?.setAttribute("aria-current", "true");
             } else {
-              node.removeAttribute("aria-current");
+              currentTarget?.removeAttribute("aria-current");
             }
           }
         };
@@ -1856,14 +2064,72 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
+      function canonicalQueuedKnowledgeEntries(state) {
+        const source = Array.isArray(state.baseEntries) && state.baseEntries.length > 0
+          ? state.baseEntries
+          : state.entries;
+        return (Array.isArray(source) ? source : [])
+          .filter(
+            (entry) =>
+              entry?.monitor_state === "queued" &&
+              Number.isFinite(entry.queue_position),
+          )
+          .slice()
+          .sort(
+            (left, right) =>
+              Number(left.queue_position) - Number(right.queue_position) ||
+              Number(left.number) - Number(right.number),
+          );
+      }
+
+      function updateQueuedKnowledgePositions(entries, positions) {
+        if (!Array.isArray(entries)) return;
+        for (let index = 0; index < entries.length; index += 1) {
+          const entry = entries[index];
+          const queuePosition = positions.get(entry?.number);
+          if (queuePosition === undefined || entry.queue_position === queuePosition) {
+            continue;
+          }
+          entries[index] = { ...entry, queue_position: queuePosition };
+        }
+      }
+
+      function moveQueuedKnowledgeEntry(windowId, state, issueNumber, direction) {
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const index = queued.findIndex((entry) => entry.number === issueNumber);
+        const targetIndex = index + direction;
+        if (index < 0 || targetIndex < 0 || targetIndex >= queued.length) return;
+        [queued[index], queued[targetIndex]] = [queued[targetIndex], queued[index]];
+        const positions = new Map(
+          queued.map((entry, queueIndex) => [entry.number, queueIndex + 1]),
+        );
+        updateQueuedKnowledgePositions(state.baseEntries, positions);
+        updateQueuedKnowledgePositions(state.entries, positions);
+        send({
+          kind: "reorder_issue_monitor_issues",
+          issue_numbers: queued.map((entry) => entry.number),
+        });
+        renderKnowledgeBridge(windowId);
+      }
+
+      function issueMonitorActionButton(label, glyph, action, issueNumber) {
+        const button = createNode("button", "icon-button knowledge-row-action", glyph);
+        button.type = "button";
+        button.dataset.action = action;
+        button.setAttribute("aria-label", `${label} Issue #${issueNumber}`);
+        button.title = `${label} Issue #${issueNumber}`;
+        return button;
+      }
+
       function renderIssueRow(windowId, state, entry) {
-        const row = createNode("button", "knowledge-row");
-        row.type = "button";
+        const row = createNode("div", "knowledge-row");
         row.dataset.issueNumber = String(entry.number);
         row.setAttribute("role", "listitem");
+        const select = createNode("button", "knowledge-row-select");
+        select.type = "button";
         if (state.selectedNumber === entry.number) {
           row.classList.add("selected");
-          row.setAttribute("aria-current", "true");
+          select.setAttribute("aria-current", "true");
         }
 
         const main = createNode("div", "knowledge-row-main");
@@ -1883,9 +2149,38 @@ export function createKnowledgeKanbanSurface({
             rawState === "closed" ? "Closed" : "Open",
           ),
         );
-        row.appendChild(main);
+        select.appendChild(main);
 
         const meta = createNode("div", "knowledge-row-meta");
+        const monitorView = monitorStateView(entry.monitor_state);
+        if (monitorView) {
+          const chip = createNode(
+            "span",
+            "knowledge-monitor-chip",
+            monitorView.label,
+          );
+          chip.dataset.monitorState = monitorView.state;
+          chip.dataset.tone = monitorView.tone;
+          meta.appendChild(chip);
+        }
+        if (Number.isFinite(entry.queue_position)) {
+          meta.appendChild(
+            createNode(
+              "span",
+              "knowledge-meta-copy knowledge-monitor-position",
+              `Queue ${entry.queue_position}`,
+            ),
+          );
+        }
+        if (entry.exclusion_reason) {
+          meta.appendChild(
+            createNode(
+              "span",
+              "knowledge-monitor-reason",
+              entry.exclusion_reason,
+            ),
+          );
+        }
         for (const label of visibleKnowledgeLabels(entry.labels || [])) {
           meta.appendChild(createNode("span", "knowledge-chip", label));
         }
@@ -1908,12 +2203,74 @@ export function createKnowledgeKanbanSurface({
           meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
         }
         if (meta.childElementCount > 0) {
-          row.appendChild(meta);
+          select.appendChild(meta);
         }
 
-        row.addEventListener("click", () => {
+        row.addEventListener("click", (event) => {
+          if (event.target?.closest?.(".knowledge-row-actions")) return;
           requestKnowledgeDetail(windowId, state.kind, entry.number);
         });
+        row.appendChild(select);
+
+        const actions = createNode("div", "knowledge-row-actions");
+        actions.setAttribute("role", "group");
+        actions.setAttribute("aria-label", `Issue #${entry.number} monitor actions`);
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const queueIndex = queued.findIndex((queuedEntry) => queuedEntry.number === entry.number);
+        if (queueIndex >= 0) {
+          const moveUp = issueMonitorActionButton("Move up", "↑", "move-up", entry.number);
+          moveUp.disabled = queueIndex === 0;
+          moveUp.addEventListener("click", () => {
+            moveQueuedKnowledgeEntry(windowId, state, entry.number, -1);
+          });
+          const moveDown = issueMonitorActionButton(
+            "Move down",
+            "↓",
+            "move-down",
+            entry.number,
+          );
+          moveDown.disabled = queueIndex === queued.length - 1;
+          moveDown.addEventListener("click", () => {
+            moveQueuedKnowledgeEntry(windowId, state, entry.number, 1);
+          });
+          actions.appendChild(moveUp);
+          actions.appendChild(moveDown);
+        }
+        if (monitorView) {
+          const configure = issueMonitorActionButton(
+            "Project Agent settings for",
+            "⚙",
+            "configure-issue",
+            entry.number,
+          );
+          configure.addEventListener("click", () => {
+            send({
+              kind: "issue_monitor_configure_issue",
+              issue_number: entry.number,
+              linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+          });
+          actions.appendChild(configure);
+        }
+        if (["queued", "launch_failed", "agent_failed"].includes(monitorView?.state)) {
+          const launchNow = issueMonitorActionButton(
+            "Launch now",
+            "⚡",
+            "launch-now",
+            entry.number,
+          );
+          launchNow.addEventListener("click", () => {
+            send({
+              kind: "issue_monitor_launch_now",
+              issue_number: entry.number,
+              linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+          });
+          actions.appendChild(launchNow);
+        }
+        if (actions.childElementCount > 0) {
+          row.appendChild(actions);
+        }
         return row;
       }
 
@@ -2141,6 +2498,26 @@ export function createKnowledgeKanbanSurface({
                     <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached work items">↻</button>
                   </div>
                 </div>
+                <section class="knowledge-monitor-panel" aria-label="Issue execution monitor">
+                  <div class="knowledge-monitor-overview">
+                    <div class="knowledge-monitor-summary" aria-live="polite">Stopped | Queue 0 | Active 0/1</div>
+                    <div class="knowledge-monitor-settings-copy">Agent settings Missing saved profile: configure before auto start</div>
+                  </div>
+                  <div class="knowledge-monitor-controls">
+                    <button type="button" class="wizard-button" data-action="monitor-settings">Agent settings</button>
+                    <label class="knowledge-monitor-max-active">
+                      <span>Max active</span>
+                      <input type="number" min="1" step="1" value="1" />
+                    </label>
+                    <button type="button" class="wizard-button primary" data-action="monitor-toggle">Start</button>
+                    <button type="button" class="wizard-button" data-action="monitor-autonomous">Autonomous: OFF</button>
+                  </div>
+                  <div class="knowledge-monitor-quick">
+                    <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />
+                    <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
+                  </div>
+                  <div class="knowledge-monitor-error" role="alert" hidden></div>
+                </section>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">
@@ -2197,6 +2574,9 @@ export function createKnowledgeKanbanSurface({
                 windowData.id,
               );
             });
+          }
+          if (knowledgeKind === "issue") {
+            wireIssueMonitorControls(body);
           }
           // SPEC-2017 — Hide done toggle persists via localStorage so
           // reloads honour the user preference. The hidden state hides
@@ -2571,6 +2951,8 @@ export function createKnowledgeKanbanSurface({
         renderKanbanDrawerBody,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyIssueMonitorStatus,
+        scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
       };
 }

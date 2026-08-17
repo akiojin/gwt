@@ -100,13 +100,19 @@ printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
 /// Fake runner whose `search-multi` attempt spawns a descendant, records its
 /// pid, then outlives any reasonable deadline (T-IDX-418 deadline + tree
 /// reaping case). Non-search actions answer instantly with the payload.
+// The descendant fork and its pid file come first: the deadline reaper races
+// this script's cold start, and a reap that lands before the pid file exists
+// starves `wait_for_pid_file` (observed as a 1-in-3 flake under load).
 const FAKE_RUNNER_DEADLINE_TREE: &str = "#!/bin/sh\n\
-echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
 case \"$*\" in\n\
   *\"--action search-multi\"*)\n\
     sleep 60 &\n\
     echo $! > \"$GWT_FAKE_RUNNER_DESCENDANT\"\n\
+    echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
     sleep 20\n\
+    ;;\n\
+  *)\n\
+    echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
     ;;\n\
 esac\n\
 printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
@@ -699,8 +705,10 @@ fn runner_deadline_expiry_maps_to_search_unavailable_and_reaps_process_tree() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = setup_search_fixture_with_script(r#"{"ok": true}"#, FAKE_RUNNER_DEADLINE_TREE);
-    // Production default stays 30 seconds (FR-103); the test bounds it tight.
-    let _deadline_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "500");
+    // Production default stays 30 seconds (FR-103); the test bounds it tight
+    // but leaves the fake runner's cold start room to write the descendant
+    // pid file first — 500ms lost that race about once in three under load.
+    let _deadline_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "2000");
 
     let started = Instant::now();
     let error = gwt::search_project_index(

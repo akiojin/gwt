@@ -29,11 +29,12 @@ use std::thread;
 use super::{
     active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, cleanup_selected_branches_with_progress,
-    list_branch_entries_with_active_sessions, non_empty_workspace_text, work_session_index,
-    workspace_journal_entry_view_from_entry, workspace_work_item_view_from_item,
-    ActiveAgentSession, AppEventProxy, AppRuntime, BackendEvent, BranchCleanupOptions,
-    BranchEntriesPhase, ClientId, OutboundEvent, UserEvent, WindowPreset, WorkspaceResumeContext,
-    WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    list_branch_entries_with_active_sessions, non_empty_workspace_text,
+    resume_branch_refs_snapshot, work_session_index, workspace_journal_entry_view_from_entry,
+    workspace_work_item_view_from_item, ActiveAgentSession, AppEventProxy, AppRuntime,
+    BackendEvent, BranchCleanupOptions, BranchEntriesPhase, ClientId, OutboundEvent,
+    ResumeBranchIndex, UserEvent, WindowPreset, WorkspaceResumeContext, WORKSPACE_CLEANUP_EVENT_ID,
+    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 
 pub(super) fn active_agent_summary_from_session(
@@ -445,6 +446,11 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     let agent_sessions = crate::session_ledger_cache::SessionLedgerCache::new()
         .load(&gwt_core::paths::gwt_sessions_dir());
     let session_index = work_session_index(&agent_sessions);
+    // Issue #3611: this runs on the branch-cleanup worker, so one bulk ref
+    // snapshot is affordable — but a per-Session Git probe is not, and the
+    // event loop must never inherit one through this view builder.
+    let known_branch_refs = resume_branch_refs_snapshot(project_root);
+    let resume_branches = ResumeBranchIndex::scanned(Some(&known_branch_refs));
     let workspaces =
         gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
             .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
@@ -453,7 +459,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
             })
             .work_items
             .iter()
-            .map(|item| workspace_work_item_view_from_item(item, &session_index, project_root))
+            .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
             .collect::<Vec<_>>();
     Some(OutboundEvent::broadcast(
         BackendEvent::ActiveWorkProjection {

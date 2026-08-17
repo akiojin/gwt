@@ -745,7 +745,16 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
 
       surface.mountKnowledgeWindow({ id: "win-1", preset: "issue" }, body);
       assert.equal(intervals.length, 1, "mount must install one auto-refresh owner");
-      assert.equal(sent.length, 0, "the seeded surface must not need an initial load");
+      assert.equal(
+        sent.filter((message) => message.kind === "load_knowledge_bridge").length,
+        0,
+        "the seeded surface must not need an initial knowledge load",
+      );
+      assert.equal(
+        sent.filter((message) => message.kind === "list_issue_monitor").length,
+        1,
+        "the unified Issue surface must hydrate its monitor controls",
+      );
 
       const ownerCases = [
         ["semanticRetryTimer", 991],

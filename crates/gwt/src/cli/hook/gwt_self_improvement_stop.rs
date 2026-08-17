@@ -410,8 +410,12 @@ fn origin_remote_url(
     worktree_root: &Path,
     deadline: &ResolutionDeadline,
 ) -> Result<Option<String>, RepositoryProbeFailure> {
-    let root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
-    let root = root.to_str().ok_or(RepositoryProbeFailure::Routing)?;
+    // `git -C` accepts any path inside the worktree. Resolving the toplevel
+    // first would launch an additional, unbounded Git process before the
+    // strict Stop deadline can be enforced.
+    let root = worktree_root
+        .to_str()
+        .ok_or(RepositoryProbeFailure::Routing)?;
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
         &hub,

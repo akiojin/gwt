@@ -158,6 +158,58 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             issue_numbers,
         } => run_monitor_priority_set(env, project_root.as_deref(), &issue_numbers, out)?,
+        IssueCommand::MonitorLaunchNow {
+            project_root,
+            number,
+        } => run_monitor_launch_now(env, project_root.as_deref(), number, out)?,
+        IssueCommand::MonitorStop {
+            project_root,
+            number,
+            reason,
+            claim_id,
+            delivery_id,
+            window_id,
+        } => run_monitor_stop(
+            env,
+            project_root.as_deref(),
+            number,
+            &reason,
+            crate::IssueMonitorStopTarget {
+                issue_number: number,
+                claim_id,
+                delivery_id,
+                window_id,
+            },
+            out,
+        )?,
+        IssueCommand::MonitorFailover {
+            project_root,
+            number,
+            reason,
+            claim_id,
+            delivery_id,
+            window_id,
+        } => run_monitor_failover(
+            env,
+            project_root.as_deref(),
+            number,
+            &reason,
+            crate::IssueMonitorStopTarget {
+                issue_number: number,
+                claim_id,
+                delivery_id,
+                window_id,
+            },
+            out,
+        )?,
+        IssueCommand::MonitorQuestions { project_root } => {
+            run_monitor_questions(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorQuestionAnswer {
+            project_root,
+            handoff_id,
+            answer,
+        } => run_monitor_question_answer(env, project_root.as_deref(), &handoff_id, &answer, out)?,
         IssueCommand::MonitorConfigSet {
             project_root,
             enabled,
@@ -229,14 +281,93 @@ fn run_monitor_status<E: CliEnv>(
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
         .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "gwtd-status");
+    // Serialize through the same projection as the daemon branch above. The
+    // offline fallback used to hand-roll an equivalent JSON object, so every
+    // field added to the snapshot had to be added twice or the two branches
+    // would silently disagree about what a caller can rely on.
+    out.push_str(
+        &serde_json::to_string(&monitor.agent_status())
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?,
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3478 (AC-9): the questions autonomous executions are parked on.
+///
+/// Reads the control plane directly rather than the daemon status projection:
+/// this must answer "what is blocking the queue" even when no daemon is
+/// running, which is exactly when a human is most likely to be looking.
+fn run_monitor_questions<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let questions = prefs
+        .autonomous_handoffs
+        .iter()
+        .filter(|handoff| handoff.is_open())
+        .collect::<Vec<_>>();
+    out.push_str(
+        &serde_json::to_string(&serde_json::json!({ "questions": questions }))
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?,
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3478 (AC-5): register a human answer for one parked question.
+///
+/// Fail-closed on an unknown or already-answered handoff: reporting success for
+/// an answer that reaches nobody would leave the Issue parked forever while the
+/// human believes they unblocked it.
+fn run_monitor_question_answer<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    handoff_id: &str,
+    answer: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    if answer.trim().is_empty() {
+        return Err(io_as_api_error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "answer must not be empty",
+        )));
+    }
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (_, issue_number) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut candidate = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        if !candidate.answer_autonomous_handoff(handoff_id, answer, &now) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no open Issue Monitor question with handoff_id {handoff_id}"),
+            ));
+        }
+        let issue_number = candidate
+            .autonomous_handoffs()
+            .iter()
+            .find(|handoff| handoff.handoff_id == handoff_id)
+            .map(|handoff| handoff.issue_number);
+        // Only the handoff queue moves here. The driver owns un-parking the
+        // Issue and re-arming its launch, so an answer registered while the
+        // daemon is down is applied on its next scan instead of being lost.
+        prefs.autonomous_handoffs = candidate.prefs().autonomous_handoffs;
+        Ok(issue_number)
+    })
+    .map_err(io_as_api_error)?;
     out.push_str(
         &serde_json::json!({
-            "queue": monitor.queued_issue_numbers(),
-            "active_launches": monitor.active_issue_numbers(),
-            "max_active": prefs.max_active_agents.max(1),
-            "enabled": prefs.enabled,
-            "autonomous_mode": prefs.autonomous_mode,
-            "has_launch_profile": prefs.launch_profile.is_some(),
+            "handoff_id": handoff_id,
+            "issue_number": issue_number,
+            "answered_at": now,
         })
         .to_string(),
     );
@@ -295,13 +426,288 @@ fn run_monitor_priority_set<E: CliEnv>(
     Ok(0)
 }
 
+/// SPEC-3431 FR-006: the PM's launch instruction. It does exactly two things —
+/// move the issue to the head of `priority_order` (prefs is the SOT the scan
+/// driver re-reads) and ask the current platform authority for one immediate scan. The launch
+/// itself stays on the Monitor's claim/slot path, so this cannot produce a
+/// duplicate agent. Priority persistence and scan delivery are reported
+/// separately; no unacknowledged scheduler is presented as future delivery.
+fn run_monitor_launch_now<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.priority_order.retain(|existing| *existing != number);
+        prefs.priority_order.insert(0, number);
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "priority_order": prefs.priority_order,
+            "priority_updated": true,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(if delivery.scan_requested { 0 } else { 1 })
+}
+
+/// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
+///
+/// The stop is committed to prefs inside the same lock-protected mutation that
+/// evaluated the identity, so a scan running concurrently cannot observe a
+/// half-applied stop.
+///
+/// This operation does not tear the pane down, and deliberately so. Once the
+/// launch is revoked and held, `pane.close` on the returned window is inert —
+/// [`crate::IssueMonitorState::requeue_window_at`] finds no launch to requeue
+/// and the issue is terminal — so the safe teardown the PM already has under
+/// FR-066 composes with this stop instead of needing a second, redundant
+/// daemon→GUI channel that could disagree with it.
+fn run_monitor_stop<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    reason: &str,
+    target: crate::IssueMonitorStopTarget,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (_, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.stop_only(&target, reason, &now);
+        if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let (status, stopped_window_id) = match &outcome {
+        crate::IssueMonitorStopOutcome::Stopped { window_id } => {
+            ("stopped", Some(window_id.clone()))
+        }
+        crate::IssueMonitorStopOutcome::AlreadyStopped => ("already_stopped", None),
+        crate::IssueMonitorStopOutcome::Mismatch(mismatch) => {
+            // Fail closed: nothing was written, nothing is torn down, and the
+            // caller is told which component disagreed so it can re-read the
+            // snapshot rather than retry blindly.
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "mismatch": issue_monitor_stop_mismatch_label(*mismatch),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+
+    let stopped_window_id = stopped_window_id.filter(|window_id| !window_id.is_empty());
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": status,
+            "reason": reason,
+            "stopped_window_id": stopped_window_id,
+            // Say what is left to do rather than implying the pane is gone.
+            "pane_teardown": if stopped_window_id.is_some() {
+                "close the returned window with pane.close — the launch is already revoked, so the close cannot requeue or relaunch it"
+            } else {
+                "none"
+            },
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC-3431 FR-029〜031 / T-081: revoke one launch and requeue its issue for
+/// the currently saved launch profile.
+///
+/// Switching provider is therefore two steps the PM already owns: edit the
+/// launch profile, then call this. The relaunch itself still goes through the
+/// ordinary claim/slot path — this operation never spawns an agent directly,
+/// so `max_active` and the claim gate keep meaning what they meant.
+///
+/// An immediate scan is requested afterwards so the requeue takes effect now
+/// rather than at the next interval tick; that is the whole point of asking for
+/// a failover instead of just waiting.
+fn run_monitor_failover<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    reason: &str,
+    target: crate::IssueMonitorStopTarget,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.failover_restart(&target, reason, &now);
+        if matches!(
+            outcome,
+            crate::IssueMonitorFailoverOutcome::Restarting { .. }
+        ) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let stopped_window_id = match outcome {
+        crate::IssueMonitorFailoverOutcome::Restarting { stopped_window_id } => stopped_window_id,
+        crate::IssueMonitorFailoverOutcome::AuthorityExhausted => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "reason": "effect_authority_epoch_exhausted",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+        crate::IssueMonitorFailoverOutcome::Mismatch(mismatch) => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "mismatch": issue_monitor_stop_mismatch_label(mismatch),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "restarting",
+            "reason": reason,
+            "stopped_window_id": stopped_window_id,
+            "priority_order": prefs.priority_order,
+            "launch_profile": prefs.launch_profile.as_ref().map(|profile| &profile.agent_id),
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
+            "pane_teardown": if stopped_window_id.is_some() {
+                "close the returned window with pane.close — it is no longer bound to the issue, so the close cannot requeue it"
+            } else {
+                "none"
+            },
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    // The failover mutation itself is complete even when the follow-up scan
+    // authority is unavailable. Keep the established command success
+    // contract while reporting scan delivery truthfully in the JSON fields.
+    Ok(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IssueMonitorScanDelivery {
+    scan_requested: bool,
+    scan_delivery: &'static str,
+    scan_error: Option<String>,
+}
+
+fn issue_monitor_scan_delivery(result: Result<(), String>) -> IssueMonitorScanDelivery {
+    match result {
+        Ok(()) => IssueMonitorScanDelivery {
+            scan_requested: true,
+            scan_delivery: "immediate",
+            scan_error: None,
+        },
+        Err(error) => IssueMonitorScanDelivery {
+            scan_requested: false,
+            scan_delivery: "unavailable",
+            scan_error: Some(error),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "scan_now": {} }),
+        std::process::id(),
+    );
+    publish_monitor_config_set(project_root, payload).map_err(|error| match error {
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(_) => {
+            "daemon_control_unavailable".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_) => {
+            "scan_delivery_unknown".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Busy(_) => {
+            "scan_request_busy".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked => {
+            "authority_recovery_blocked".to_string()
+        }
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_) => {
+            "scan_request_rejected".to_string()
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn request_immediate_monitor_scan(project_root: &std::path::Path) -> Result<(), String> {
+    super::pane::request_issue_monitor_scan_now(project_root)
+}
+
+/// SPEC-3431 FR-031: a stable, greppable name for each refusal.
+fn issue_monitor_stop_mismatch_label(mismatch: crate::IssueMonitorStopMismatch) -> &'static str {
+    match mismatch {
+        crate::IssueMonitorStopMismatch::UnknownIssue => "unknown_issue",
+        crate::IssueMonitorStopMismatch::NotRunning => "not_running",
+        crate::IssueMonitorStopMismatch::ClaimMismatch => "claim_mismatch",
+        crate::IssueMonitorStopMismatch::DeliveryMismatch => "delivery_mismatch",
+        crate::IssueMonitorStopMismatch::WindowMismatch => "window_mismatch",
+    }
+}
+
 fn apply_monitor_config_set(
     prefs: &mut crate::IssueMonitorPrefs,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    pm_privileged: bool,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -325,6 +731,7 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    pm_privileged: bool,
 ) -> io::Result<()> {
     if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
         return Err(io::Error::new(
@@ -332,10 +739,12 @@ fn validate_monitor_config_set(
             "at least one Issue Monitor config field is required",
         ));
     }
-    if enabled == Some(true) || autonomous_mode == Some(true) {
+    // SPEC-3431 FR-008/FR-009: same rule as the parse layer — the registered
+    // PM may raise the switches; every other session must use the GUI.
+    if !pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "enabling Issue Monitor or autonomous mode requires an explicit GUI action",
+            "enabling Issue Monitor or autonomous mode requires an explicit GUI action              (only the project's registered PM agent may raise it from the CLI;              run `pm.status` to see the current PM)",
         ));
     }
     if max_active == Some(0) {
@@ -347,6 +756,23 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
+/// SPEC-3431 FR-008/FR-009: the asymmetric boundary from Issue #3357 stays in
+/// force for every agent session — only the project's registered PM may raise
+/// `enabled` / `autonomous_mode`. The privileged subject is resolved from the
+/// ambient `GWT_SESSION_ID` (the caller cannot claim someone else's id through
+/// params) matched against the durable PM registration. Raising the switch
+/// changes nothing about merges: SPEC #3200's fail-closed merge gate still
+/// decides every merge on its own.
+fn caller_is_registered_pm(project_root: &std::path::Path) -> bool {
+    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
+        return false;
+    };
+    crate::pm_registry::session_is_registered_pm(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(project_root),
+        session_id.trim(),
+    )
+}
+
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -355,8 +781,42 @@ fn run_monitor_config_set<E: CliEnv>(
     max_active: Option<usize>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
     let project_root = issue_monitor_project_root(env, project_root)?;
+    let pm_privileged = caller_is_registered_pm(&project_root);
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)
+        .map_err(io_as_api_error)?;
+
+    // SPEC-3431 FR-008: a PM raising a switch writes the prefs SOT directly
+    // and asks for an immediate rescan. The daemon control lane refuses ON in
+    // its own decoder (it cannot see who sent a frame), and prefs is the
+    // source the scan driver re-reads every pass — so this is the honest path
+    // rather than a second authority channel.
+    if pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, true)
+        })
+        .map_err(io_as_api_error)?;
+        let scan_now = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "scan_now": {} }),
+            std::process::id(),
+        );
+        let _ = publish_monitor_config_set(&project_root, scan_now);
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+        out.push_str(
+            &serde_json::json!({
+                "enabled": prefs.enabled,
+                "autonomous_mode": prefs.autonomous_mode,
+                "max_active": prefs.max_active_agents.max(1),
+                "applied_by": "pm",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(0);
+    }
+
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({
@@ -375,7 +835,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, pm_privileged)
         })
         .map_err(io_as_api_error)?;
     }
@@ -732,6 +1192,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 state
                 url
                 body
+                mergedAt
               }
             }
           }
@@ -744,6 +1205,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 state
                 url
                 body
+                mergedAt
               }
             }
           }
@@ -839,14 +1301,22 @@ pub(crate) fn parse_linked_pr_nodes(
         let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
+        let merged_at = pr
+            .get("mergedAt")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         if let Some(existing) = index.get(&pr_number) {
             out[*existing].will_close_target |= will_close_target;
+            if out[*existing].merged_at.is_none() {
+                out[*existing].merged_at = merged_at;
+            }
             continue;
         }
         index.insert(pr_number, out.len());
         out.push(LinkedPrSummary {
             number: pr_number,
             will_close_target,
+            merged_at,
             title: pr
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -945,7 +1415,7 @@ mod tests {
         // body (`Closes #N` — the gwt PR-body contract).
         let value = serde_json::json!({"data":{"repository":{"issue":{"timelineItems":{"nodes":[
             {"__typename":"CrossReferencedEvent","willCloseTarget":true,
-             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":""}},
+             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":"","mergedAt":"2026-08-10T00:00:00Z"}},
             {"__typename":"CrossReferencedEvent","willCloseTarget":false,
              "source":{"__typename":"PullRequest","number":11,"title":"refs only","state":"MERGED","url":"u11","body":"Related to #42 (no closing keyword)"}},
             {"__typename":"ConnectedEvent",
@@ -960,6 +1430,7 @@ mod tests {
         let prs = parse_linked_pr_nodes(&value, 42);
         let get = |n: u64| prs.iter().find(|pr| pr.number == n).expect("pr");
         assert!(get(10).will_close_target, "GraphQL willCloseTarget");
+        assert_eq!(get(10).merged_at.as_deref(), Some("2026-08-10T00:00:00Z"));
         assert!(!get(11).will_close_target, "plain reference must NOT close");
         assert!(
             get(12).will_close_target,
@@ -1085,6 +1556,257 @@ mod tests {
     }
 
     #[test]
+    fn immediate_scan_delivery_never_claims_an_unacknowledged_schedule() {
+        let immediate = issue_monitor_scan_delivery(Ok(()));
+        assert!(immediate.scan_requested);
+        assert_eq!(immediate.scan_delivery, "immediate");
+        assert_eq!(immediate.scan_error, None);
+
+        let unavailable = issue_monitor_scan_delivery(Err("gui_command_unavailable".to_string()));
+        assert!(!unavailable.scan_requested);
+        assert_eq!(unavailable.scan_delivery, "unavailable");
+        assert_eq!(
+            unavailable.scan_error.as_deref(),
+            Some("gui_command_unavailable")
+        );
+        assert_ne!(unavailable.scan_delivery, "next-scheduled-scan");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_now_persists_priority_and_reports_authenticated_gui_ack() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use gwt_core::test_support::ScopedEnvVar;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        let expected_scope = gwt_core::paths::project_scope_hash(&repo)
+            .as_str()
+            .to_string();
+        let (address_tx, address_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build Windows scan mock runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind Windows scan mock");
+                address_tx
+                    .send(listener.local_addr().expect("Windows scan mock address"))
+                    .expect("publish Windows scan mock address");
+                let (stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("Windows launch_now must connect to the GUI scan authority")
+                        .expect("accept scan client");
+                let mut socket = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio_tungstenite::accept_hdr_async(
+                        stream,
+                        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                            assert_eq!(request.uri().path(), "/internal/pane-ws");
+                            assert_eq!(
+                                request
+                                    .headers()
+                                    .get(
+                                        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+                                    )
+                                    .and_then(|value| value.to_str().ok()),
+                                Some("Bearer windows-scan-capability")
+                            );
+                            Ok(response)
+                        },
+                    ),
+                )
+                .await
+                .expect("Windows scan client must complete its WebSocket handshake")
+                .expect("accept authenticated scan WebSocket");
+                let message =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                        .await
+                        .expect("Windows scan client must send its request frame")
+                        .expect("scan request frame")
+                        .expect("valid scan request frame");
+                let text = message.into_text().expect("text scan request");
+                let request: serde_json::Value =
+                    serde_json::from_str(text.as_ref()).expect("scan request JSON");
+                assert_eq!(request["kind"], "agent_issue_monitor_scan_now");
+                assert_eq!(request["expected_project_scope"], expected_scope);
+                assert!(
+                    request.get("project_root").is_none(),
+                    "the Windows request must not claim project authority"
+                );
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "kind": "issue_monitor_scan_request_result",
+                            "accepted": true,
+                            "reason": null,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send immediate scan acknowledgement");
+            });
+        });
+        let address = address_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("Windows scan mock ready");
+        let pane_url = format!("ws://{address}/internal/pane-ws");
+        let _pane_url = ScopedEnvVar::set(gwt_agent::GWT_PANE_WS_URL_ENV, &pane_url);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "windows-scan-capability",
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("Windows launch_now result");
+        server.join().expect("Windows scan mock thread");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 0);
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], true);
+        assert_eq!(result["scan_delivery"], "immediate");
+        assert_eq!(result["scan_error"], serde_json::Value::Null);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order,
+            vec![42, 7]
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_now_reports_gui_unavailable_without_claiming_future_delivery() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("Windows launch_now unavailable result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1);
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], false);
+        assert_eq!(result["scan_delivery"], "unavailable");
+        assert_eq!(result["scan_error"], "gui_command_unavailable");
+        assert_ne!(result["scan_delivery"], "next-scheduled-scan");
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order,
+            vec![42, 7]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_now_persists_priority_but_fails_closed_without_scan_authority() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![7, 42],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(code, 1, "unaccepted immediate delivery is not success");
+        assert_eq!(result["priority_updated"], true);
+        assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
+        assert_eq!(result["scan_requested"], false);
+        assert_eq!(result["scan_delivery"], "unavailable");
+        assert_eq!(result["scan_error"], "daemon_control_unavailable");
+        assert!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("persisted prefs")
+                .priority_order
+                .starts_with(&[42]),
+            "the partial priority update remains explicit and durable"
+        );
+    }
+
+    #[test]
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -1146,8 +1868,80 @@ mod tests {
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
+                // SPEC-3431 FR-024: the offline fallback serializes the same
+                // projection as the daemon branch, so a caller sees one shape
+                // regardless of whether the daemon happens to be publishing.
+                "needs_human": [],
+                "inbox": [
+                    {
+                        "issue_number": 2,
+                        "state": "queued",
+                        "github_state": "open",
+                        "issue_updated_at": "2026-08-03T00:00:00Z",
+                        "readiness": "not_applicable",
+                        "recoverable_merged": false,
+                    },
+                    {
+                        "issue_number": 1,
+                        "state": "queued",
+                        "github_state": "open",
+                        "issue_updated_at": "2026-08-03T00:00:00Z",
+                        "readiness": "not_applicable",
+                        "recoverable_merged": false,
+                    },
+                ],
+                "last_scan_at": "gwtd-status",
             })
         );
+    }
+
+    #[test]
+    fn issue_monitor_status_exposes_recoverable_legacy_merged_evidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version: 0,
+                completion_records: Vec::new(),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save legacy prefs");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(42),
+                title: "Still open".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                updated_at: UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write cache");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(status["inbox"][0]["issue_number"], 42);
+        assert_eq!(status["inbox"][0]["github_state"], "open");
+        assert_eq!(status["inbox"][0]["state"], "merged");
+        assert_eq!(status["inbox"][0]["recoverable_merged"], true);
+        assert_eq!(status["inbox"][0]["completion_reason"], "legacy_unverified");
     }
 
     #[test]
@@ -1489,6 +2283,193 @@ mod tests {
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
     }
 
+    /// SPEC-3431 FR-033 / T-087b: the operation the PM actually calls.
+    ///
+    /// Drives the whole path a `gwtd` invocation takes — load prefs, evaluate
+    /// the identity, commit or refuse — because the unit matrix on
+    /// `IssueMonitorState` cannot catch a handler that writes prefs on a
+    /// refusal or reports success it did not achieve.
+    #[test]
+    fn monitor_stop_revokes_the_launch_and_refuses_a_stale_identity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        // A stale window id must change nothing on disk.
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-9".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 1, "a refused stop is not a success");
+        assert!(out.contains("\"status\":\"refused\""), "{out}");
+        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused stop must be zero-mutation"
+        );
+
+        // The exact identity releases the slot and holds the issue durably.
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"stopped\""), "{out}");
+        assert!(out.contains("tab-1::agent-1"), "{out}");
+        assert!(
+            out.contains("pane.close"),
+            "the caller must be told the pane is still theirs to close: {out}"
+        );
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(
+            prefs.launched_issues.is_empty(),
+            "the slot must be released on disk"
+        );
+        let reloaded =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            reloaded.stop_only_reason(42).as_deref(),
+            Some("provider rate limit"),
+            "FR-031: the reason must survive the prefs roundtrip"
+        );
+
+        // Repeating it is idempotent rather than an error.
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo),
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
+    }
+
+    /// SPEC-3431 FR-029〜031 / T-081: the failover the PM calls when a provider
+    /// runs out of quota.
+    #[test]
+    fn monitor_failover_requeues_at_the_head_and_refuses_a_stale_identity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![43, 42],
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorFailover {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "codex rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-9".to_string()),
+            },
+            &mut out,
+        )
+        .expect("failover runs");
+        assert_eq!(code, 1);
+        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused failover must be zero-mutation"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorFailover {
+                project_root: Some(repo),
+                number: 42,
+                reason: "codex rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("failover runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"restarting\""), "{out}");
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(
+            prefs.launched_issues.is_empty(),
+            "the old launch must be revoked on disk"
+        );
+        assert_eq!(
+            prefs.priority_order.first().copied(),
+            Some(42),
+            "the failed-over issue must be first in line for the new profile"
+        );
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "a failover is not a failure and must not leave a hold behind"
+        );
+    }
+
     // -------------------------------------------------------------------
     // SPEC-1942 SC-025 follow-up: issue-family helper tests relocated
     // from cli.rs.
@@ -1520,6 +2501,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://github.com/akiojin/gwt/pull/128".to_string(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         let linked =

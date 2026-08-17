@@ -13,7 +13,12 @@
  * GWT_PLAYWRIGHT_BASE_URL and stops before any real launch.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { gotoLiveGwt, openLiveGwtProject, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import {
+  clearLiveLaunchWizard,
+  gotoLiveGwt,
+  openLiveGwtProject,
+  sendLiveGwtEvent,
+} from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -28,6 +33,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
+    await clearLiveLaunchWizard(page);
   });
 
   test("Target is a segmented radiogroup that toggles agent settings", async ({
@@ -36,7 +42,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     await sendLiveGwtEvent(page, { kind: "open_intake_session" });
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await wizard.getByRole("button", { name: "Configure and start" }).click();
+    await enterIntakeSettings(page);
 
     const target = wizard.getByRole("radiogroup", { name: "Target" });
     await expect(target).toBeVisible();
@@ -46,12 +52,17 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
 
     await shell.click();
     await expect(shell).toHaveAttribute("aria-checked", "true");
+    // The interaction guard defers backend state frames while the segmented
+    // control owns focus. Blur before asserting the server-authoritative
+    // summary and conditional fields.
+    await blurActiveElement(page);
     await expect(targetSummaryValue(page)).toHaveText("Shell");
     // Agent-only controls disappear when Shell is the launch target.
     await expect(wizard.getByRole("radiogroup", { name: "Agent" })).toHaveCount(0);
 
     await agent.click();
     await expect(agent).toHaveAttribute("aria-checked", "true");
+    await blurActiveElement(page);
     await expect(targetSummaryValue(page)).toHaveText("Agent");
   });
 
@@ -61,7 +72,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     await sendLiveGwtEvent(page, { kind: "open_intake_session" });
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
-    await wizard.getByRole("button", { name: "Configure and start" }).click();
+    await enterIntakeSettings(page);
 
     await selectWizardAgent(page, "claude");
     // Pin an effort-capable model so the reasoning control is shown
@@ -85,7 +96,15 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     // Turning Auto off re-enables the slider parked at the middle ordinal
     // stop (Medium for Sonnet's Low / Medium / High scale).
     await auto.setChecked(false);
+    await blurActiveElement(page);
     await expect(range).toBeEnabled();
+
+    // Last-used effort is intentionally persistent. Drive the control to the
+    // middle ordinal explicitly so retries and prior live sessions cannot
+    // change the assertion's starting point.
+    await range.press("Home");
+    await range.press("ArrowRight");
+    await range.blur();
     await expect(effortSummaryValue(page)).toHaveText("medium");
 
     // ArrowRight snaps from Medium to High and reports the stored value.
@@ -100,6 +119,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     // Auto is a separate toggle, not a slider stop: re-enabling it suspends
     // the slider and reports "auto" again.
     await auto.setChecked(true);
+    await blurActiveElement(page);
     await expect(range).toBeDisabled();
     await expect(effortSummaryValue(page)).toHaveText("auto");
   });
@@ -118,6 +138,28 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   const option = wizard.locator(`.launch-segmented__option[data-value="${agentId}"]`);
   await option.click();
   await expect(option).toHaveAttribute("aria-checked", "true");
+  await blurActiveElement(page);
+}
+
+async function enterIntakeSettings(page: Page): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  const target = wizard.getByRole("radiogroup", { name: "Target" });
+  if (await target.isVisible().catch(() => false)) {
+    return;
+  }
+  await sendLiveGwtEvent(page, {
+    kind: "launch_wizard_action",
+    action: { kind: "set_launch_path", path: "manual_setup" },
+    bounds: null,
+  });
+  await expect(target).toBeVisible({ timeout: 10_000 });
+}
+
+async function blurActiveElement(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  });
 }
 
 function targetSummaryValue(page: Page) {

@@ -409,13 +409,28 @@ export function createWorkspaceKanbanSurface({
     };
   }
 
+  // Issue #3455: the projection is the *container* of its child Works, never
+  // their identity. Passing the whole projection as a child's fallback made
+  // every ownerless Work inherit the current Work's owner, agents, board refs,
+  // and PR — on real data 648 of 783 rows showed an owner they never had. Only
+  // container-scoped display state may cross that boundary, so children get an
+  // explicit allowlist: a field added to the projection later cannot leak
+  // by default.
+  function childWorkFallback(projection) {
+    return {
+      lifecycle_stage: projection.lifecycle_stage,
+      managed_hook_health: projection.managed_hook_health,
+    };
+  }
+
   function workspacesFromProjection(projection) {
     if (!projection) return [];
+    const childFallback = childWorkFallback(projection);
     const activeWorks = Array.isArray(projection.active_works)
       ? projection.active_works
       : [];
     if (activeWorks.length > 0) {
-      return activeWorks.map((item) => normalizeWorkspaceItem(item, projection));
+      return activeWorks.map((item) => normalizeWorkspaceItem(item, childFallback));
     }
     const sourceItems = Array.isArray(projection.works)
       ? projection.works
@@ -425,7 +440,7 @@ export function createWorkspaceKanbanSurface({
           ? projection.work_items
           : [];
     if (sourceItems.length > 0) {
-      return sourceItems.map((item) => normalizeWorkspaceItem(item, projection));
+      return sourceItems.map((item) => normalizeWorkspaceItem(item, childFallback));
     }
 
     const current = normalizeWorkspaceItem(projection, {

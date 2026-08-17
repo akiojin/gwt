@@ -325,6 +325,10 @@ impl AppRuntime {
         if let Some(windows_shell) = session.windows_shell {
             builder = builder.windows_shell(windows_shell);
         }
+        if let Some(provenance) = session.tool_runtime_provenance.clone() {
+            builder = builder.tool_runtime_provenance(provenance);
+        }
+        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         let mut config = builder.build();
         if !session.display_name.trim().is_empty() {

@@ -2150,7 +2150,7 @@ mod tests {
             .map(PathBuf::from)
             .expect("rebuild marker path");
         std::fs::write(marker, b"started").expect("write rebuild marker");
-        std::thread::sleep(Duration::from_secs(4));
+        std::thread::sleep(Duration::from_secs(12));
     }
 
     #[test]
