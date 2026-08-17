@@ -480,6 +480,56 @@ mod tests {
         );
     }
 
+    /// The exit warning is only useful if it carries the reason. A daemon that
+    /// dies during bind writes one diagnostic line and nothing else, and that
+    /// line is the whole difference between "it exited" and a diagnosis.
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_reason_is_the_last_thing_the_daemon_managed_to_say() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let endpoint_path = temp.path().join("worktree-hash.json");
+        let log_path = daemon_stderr_log_path(&endpoint_path);
+
+        assert_eq!(
+            last_daemon_stderr_line(&endpoint_path),
+            None,
+            "a daemon that never wrote anything reports no reason rather than an empty one"
+        );
+
+        std::fs::write(
+            &log_path,
+            "gwtd daemon start: bind=/tmp/x.sock\n\
+             gwtd daemon.start: failed to bind daemon socket: path must be shorter than SUN_LEN\n\
+             \n   \n",
+        )
+        .expect("write stderr log");
+
+        assert_eq!(
+            last_daemon_stderr_line(&endpoint_path).as_deref(),
+            Some(
+                "gwtd daemon.start: failed to bind daemon socket: path must be shorter than SUN_LEN"
+            ),
+            "trailing blank lines must not hide the reason"
+        );
+    }
+
+    /// A daemon that logs for weeks must not turn one warning into a
+    /// multi-megabyte line.
+    #[cfg(unix)]
+    #[test]
+    fn a_large_diagnostic_log_still_reports_only_its_last_line() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let endpoint_path = temp.path().join("worktree-hash.json");
+        let mut captured = "noise\n".repeat(20_000);
+        captured.push_str("the reason it died\n");
+        std::fs::write(daemon_stderr_log_path(&endpoint_path), captured).expect("write log");
+
+        assert_eq!(
+            last_daemon_stderr_line(&endpoint_path).as_deref(),
+            Some("the reason it died")
+        );
+    }
+
     fn supervisor_source_between(start: &str, end: &str) -> &'static str {
         let source = include_str!("daemon_supervisor.rs");
         let after = source
