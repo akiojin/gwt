@@ -34295,6 +34295,9 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
 
 #[test]
 fn app_runtime_logs_profile_save_user_action_without_env_values() {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let _config_home = ScopedEnvVar::set("GWT_CONFIG_HOME", temp.path());
