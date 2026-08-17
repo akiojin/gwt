@@ -36,8 +36,9 @@ use std::{
 };
 
 use gwt_core::daemon::{
-    persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
-    IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
+    persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
+    DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
+    RuntimeScope, DAEMON_PROTOCOL_VERSION, MAX_UNIX_SOCKET_PATH_LEN,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
@@ -94,7 +95,13 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     endpoint_path: PathBuf,
     writer: &mut W,
 ) -> Result<i32, SpecOpsError> {
-    let socket_path = derive_socket_path(&endpoint_path);
+    // Resolve before anything is persisted or announced: a runtime root
+    // longer than `sun_path` must surface as a diagnosis here rather than
+    // as a bare bind failure after the endpoint file already advertised an
+    // unusable socket (Issue #3476).
+    let socket =
+        resolve_daemon_socket_path(&endpoint_path).map_err(|err| config_error(err.to_string()))?;
+    let socket_path = socket.path;
     if let Err(err) = ensure_socket_parent(&socket_path) {
         return Err(config_error(format!(
             "failed to prepare daemon socket directory: {err}"
@@ -123,6 +130,17 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
         "gwtd daemon start: bind={socket}",
         socket = socket_path.display()
     );
+    if socket.placement == DaemonSocketPlacement::Shortened {
+        // The socket is not where an operator would look for it, so say
+        // why it moved.
+        let _ = writeln!(
+            writer,
+            "gwtd daemon start: socket shortened; {colocated} exceeds this platform's \
+             {limit}-byte sun_path limit",
+            colocated = endpoint_path.with_extension("sock").display(),
+            limit = MAX_UNIX_SOCKET_PATH_LEN
+        );
+    }
     let _ = writeln!(
         writer,
         "gwtd daemon start: pid={pid} version={version}",
@@ -3452,10 +3470,6 @@ where
         .await
         .map_err(|err| format!("write failed: {err}"))?;
     Ok(())
-}
-
-fn derive_socket_path(endpoint_path: &Path) -> PathBuf {
-    endpoint_path.with_extension("sock")
 }
 
 fn ensure_socket_parent(socket_path: &Path) -> std::io::Result<()> {
