@@ -50,13 +50,17 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-// Keep the integration fixture on the production StrictStop wall-clock scale.
-// Owner preflight now includes privacy-context subprocesses, so the old 900ms
-// scaled budget could expire before the loopback transport was reached. The
-// transport itself is synchronized to the absolute resolution deadline below;
-// using a realistic budget tests composition without testing host scheduling.
+#[cfg(not(windows))]
+const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
+#[cfg(windows)]
 const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(not(windows))]
+const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
+#[cfg(windows)]
 const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(windows))]
+const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+#[cfg(windows)]
 const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_secs(5);
 
 /// How long the loopback fixture server waits for the client to connect. The
