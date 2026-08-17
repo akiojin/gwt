@@ -38,6 +38,61 @@ use super::{
 
 const PM_DELIVERY_MAX_BODY_BYTES: usize = 16 * 1024;
 
+/// Reserved before the operation deadline for terminalizing the operation.
+/// The receipt commit takes a file lock and an fsync under the same scoped
+/// deadline, and the reply still has to reach the origin socket before the
+/// server's acceptance deadline — spending the budget down to the last
+/// millisecond would turn a clean `unverified` answer back into a timeout.
+const PM_DELIVERY_TERMINAL_MARGIN: Duration = Duration::from_millis(500);
+
+/// How often the durable receipt is re-read while waiting for the target's
+/// acknowledgement.
+const PM_DELIVERY_ACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The one reason text for a delivery whose acknowledgement never arrived.
+/// Both the body and its submit terminator reached the pane on this path, so
+/// it must not claim the body is staged (Issue #3608 AC-3); the durable
+/// receipt stays the authority, which is why a fresh operation is the wrong
+/// response.
+const PM_DELIVERY_UNVERIFIED_REASON: &str =
+    "PM pane submit was not acknowledged within the delivery window; the prompt was written and \
+     submitted to the pane, and the durable receipt records the final outcome — do not retry with \
+     a new operation";
+
+/// Wait for the target Session's acknowledgement to reach the durable receipt,
+/// and report the operation's latest durable status.
+///
+/// Verification is asynchronous and out-of-process: the acknowledgement is
+/// written by the target's own `UserPromptSubmit` hook, which has to start,
+/// run its steps, and commit — routinely far longer than the submit-retry
+/// budget. Issue #3608 recorded the consequence live (`prepared 02:40:38 →
+/// ambiguous 02:40:39 → verified 02:40:40`): a delivery that had already been
+/// submitted was terminalized as unverified one second before its
+/// acknowledgement landed, with most of the operation's budget still unspent.
+/// So the wait runs to the deadline and returns early only once the operation
+/// is durably terminal.
+fn await_pm_delivery_status(
+    receipt_path: &Path,
+    operation_id: &str,
+    poll_deadline: Instant,
+) -> Result<pm_registry::PmDeliveryReceiptStatus, String> {
+    loop {
+        let status = pm_registry::pm_delivery_receipt_for_operation(receipt_path, operation_id)
+            .map_err(|error| format!("PM delivery receipt is unavailable: {error}"))?
+            .map(|receipt| receipt.status)
+            .unwrap_or(pm_registry::PmDeliveryReceiptStatus::Prepared);
+        if status != pm_registry::PmDeliveryReceiptStatus::Prepared
+            || Instant::now() >= poll_deadline
+        {
+            return Ok(status);
+        }
+        thread::sleep(
+            PM_DELIVERY_ACK_POLL_INTERVAL
+                .min(poll_deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
     x: 96.0,
@@ -192,6 +247,25 @@ impl AppRuntime {
             );
             return Vec::new();
         }
+        if let Some(window_id) = prefs
+            .registration
+            .as_ref()
+            .and_then(|registration| self.live_pm_window_id(&registration.session_id))
+        {
+            // FR-019: the PM launcher must always land the user on the PM, so
+            // focusing frames it in the viewport rather than only raising it.
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+        }
+        // Issue #3607 AC-1/AC-2: the singleton is per *repository*, not per
+        // project store. One repository can own two stores after a scope split
+        // (#3466), and each store's `pm.json` — `auto_start` included — is
+        // invisible to the other, so both auto-started and two PMs ended up
+        // rewriting one repository's Issue Monitor order and launch orders.
+        // Refusing here rather than at registration keeps the second store from
+        // ever spawning the pane.
+        if let Some(window_id) = self.live_pm_window_id_in_another_store(&project_root) {
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+        }
         let Some(registration) = prefs.registration else {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -199,11 +273,6 @@ impl AppRuntime {
             );
             return self.spawn_pm_agent(tab_id, &project_root);
         };
-        if let Some(window_id) = self.live_pm_window_id(&registration.session_id) {
-            // FR-019: the PM launcher must always land the user on the PM, so
-            // focusing frames it in the viewport rather than only raising it.
-            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
-        }
         // FR-003 crash-loop damper: while the backoff floor is in the future
         // the automatic ladder must not respawn. Scoped to `Automatic` for the
         // same reason as the auto_start opt-out above — FR-021 requires the
@@ -897,6 +966,11 @@ impl AppRuntime {
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(2));
             let _operation_deadline =
                 gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            // The whole budget is available for the acknowledgement; only the
+            // terminal receipt commit and the reply are held back.
+            let ack_deadline = deadline
+                .checked_sub(PM_DELIVERY_TERMINAL_MARGIN)
+                .unwrap_or(deadline);
             let mut body_attempted = false;
             let mut receipt_prepared = false;
             let mut receipt_terminalized = false;
@@ -1093,33 +1167,11 @@ impl AppRuntime {
                     let target_session_id = durable_target_session_id
                         .as_ref()
                         .expect("existing Prepared has a target Session");
-                    let replay_poll_deadline = deadline
-                        .checked_sub(Duration::from_millis(250))
-                        .unwrap_or(deadline);
-                    let replay_status = (|| -> Result<_, String> {
-                        loop {
-                            let current = pm_registry::pm_delivery_receipt_for_operation(
-                                &receipt_path,
-                                &worker_operation_id,
-                            )
-                            .map_err(|error| {
-                                format!("PM delivery replay receipt is unavailable: {error}")
-                            })?;
-                            let status = current
-                                .map(|receipt| receipt.status)
-                                .unwrap_or(pm_registry::PmDeliveryReceiptStatus::Prepared);
-                            if status != pm_registry::PmDeliveryReceiptStatus::Prepared
-                                || Instant::now() >= replay_poll_deadline
-                            {
-                                return Ok(status);
-                            }
-                            thread::sleep(
-                                Duration::from_millis(25)
-                                    .min(replay_poll_deadline.saturating_duration_since(Instant::now())),
-                            );
-                        }
-                    })();
-                    match replay_status {
+                    match await_pm_delivery_status(
+                        &receipt_path,
+                        &worker_operation_id,
+                        ack_deadline,
+                    ) {
                         Err(error) => Err(error),
                         Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
                             receipt_terminalized = true;
@@ -1129,7 +1181,9 @@ impl AppRuntime {
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Ambiguous) => {
                             receipt_terminalized = true;
-                            Err("PM delivery may already have staged its prompt body".to_string())
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                                submit_attempts: 0,
+                            })
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Refused) => {
                             receipt_terminalized = true;
@@ -1154,7 +1208,9 @@ impl AppRuntime {
                         }
                         Ok(_) => {
                             receipt_terminalized = true;
-                            Err("PM delivery may already have staged its prompt body".to_string())
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                                submit_attempts: 0,
+                            })
                         }
                         Err(error) => Err(error),
                     },
@@ -1164,7 +1220,9 @@ impl AppRuntime {
                     pm_registry::PmDeliveryReceiptStatus::Ambiguous,
                 )) => {
                     receipt_terminalized = true;
-                    Err("PM delivery may already have staged its prompt body".to_string())
+                    Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                        submit_attempts: 0,
+                    })
                 }
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
                     pm_registry::PmDeliveryReceiptStatus::Refused,
@@ -1183,6 +1241,15 @@ impl AppRuntime {
                     let target_session_id = durable_target_session_id
                         .as_deref()
                         .expect("Prepared PM delivery has a target Session");
+                    // Issue #3608: exhausting the submit retries is not the end
+                    // of the operation. The acknowledgement crosses a process
+                    // boundary and regularly lands after them, so spend the
+                    // rest of the budget waiting for it before terminalizing.
+                    let _ = await_pm_delivery_status(
+                        &receipt_path,
+                        &worker_operation_id,
+                        ack_deadline,
+                    );
                     match pm_registry::finish_pm_delivery_receipt(
                         &receipt_path,
                         &worker_operation_id,
@@ -1195,11 +1262,8 @@ impl AppRuntime {
                             send_terminal("delivered", None)
                         }
                         _ => send_terminal(
-                            "failed",
-                            Some(
-                                "PM pane submit was not verified; prompt body may be staged — do not retry with a new operation"
-                                    .to_string(),
-                            ),
+                            "unverified",
+                            Some(PM_DELIVERY_UNVERIFIED_REASON.to_string()),
                         ),
                     }
                 }
@@ -1292,6 +1356,30 @@ impl AppRuntime {
                     Some(WindowProcessStatus::Stopped) | Some(WindowProcessStatus::Error) => None,
                     _ => Some(window_id.clone()),
                 }
+            })
+    }
+
+    /// Issue #3607 AC-1: window id of a live PM registered by *another* project
+    /// store of the same repository.
+    ///
+    /// Only a live one blocks. A dead registration in a split store must never
+    /// leave the repository without a PM — the gate exists to stop duplicates,
+    /// not to stop recovery.
+    pub(crate) fn live_pm_window_id_in_another_store(&self, project_root: &Path) -> Option<String> {
+        let repository_key = pm_registry::pm_repository_key(project_root)?;
+        let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root);
+        pm_registry::pm_registrations_for_repository(&repository_key)
+            .into_iter()
+            .filter(|record| record.project_dir != own_project_dir)
+            .find_map(|record| {
+                let window_id = self.live_pm_window_id(&record.registration.session_id)?;
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    other_store = %record.project_dir.display(),
+                    session_id = %record.registration.session_id,
+                    "PM ensure refused: this repository already has a live PM in another project store"
+                );
+                Some(window_id)
             })
     }
 
