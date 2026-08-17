@@ -11,19 +11,6 @@ use gwt::{
     BranchScope,
 };
 
-pub(crate) fn fetch_branch_inventory_origin(git_root: &Path) {
-    // Test repositories use a GitHub-shaped placeholder origin so repository
-    // identity stays realistic. Never let either detached branch-inventory
-    // refresh contact that public placeholder: a credential helper can outlive
-    // the test process and retain the verification runner's output pipe. Local
-    // fixture origins still exercise the real fetch path. Fail closed when a
-    // detached test thread races with fixture teardown and can no longer read
-    // the origin: starting a fetch after that point would lose the fixture's
-    // repository-local credential protections.
-    let manager = gwt_git::WorktreeManager::new(git_root);
-    let _ = crate::launch_runtime::run_origin_operation(git_root, || manager.fetch_origin());
-}
-
 pub fn spawn_branch_load_async(
     proxy: AppEventProxy,
     window_id: String,
@@ -67,7 +54,7 @@ pub fn spawn_remote_start_work_branches_async(
 ) {
     thread::spawn(move || {
         if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&project_root) {
-            fetch_branch_inventory_origin(&git_root);
+            let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
         }
         let branches =
             list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
@@ -121,7 +108,7 @@ fn dispatch_branch_load_progressive(
     // pushed by teammates or other machines. Best-effort: an offline fetch
     // failure still yields the cached refs below.
     if let Ok(git_root) = gwt_git::worktree::main_worktree_root(project_root) {
-        fetch_branch_inventory_origin(&git_root);
+        let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
     }
     // SPEC-2009 FR-067: one load id shared by this load's inventory + hydrated
     // events so the frontend can drop a stale earlier load delivered out of
@@ -319,7 +306,7 @@ mod tests {
     fn async_branch_load_results_are_broadcast_not_bound_to_a_stale_websocket_client() {
         let source = include_str!("repo_browser.rs");
         let production_source = source
-            .split("\nmod tests {")
+            .split("#[cfg(test)]")
             .next()
             .expect("production source before tests");
 
