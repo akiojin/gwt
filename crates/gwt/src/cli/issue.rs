@@ -280,18 +280,28 @@ fn run_monitor_status<E: CliEnv>(
     }
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
+    // Reaching this branch at all means no live daemon holds the projection.
+    let persisted_last_scan_at = prefs.last_scan_at.clone();
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
         .map_err(|error| io_as_api_error(io::Error::other(error)))?;
-    crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "gwtd-status");
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    crate::scan_issue_monitor_candidates(&mut monitor, &candidates, &now);
+    // Rebuilding the queue from the local Issue cache is a projection, not a
+    // scan: nothing was fetched and nothing was claimed. Stamping it as a scan
+    // (this used to report the literal string `gwtd-status`) told every reader
+    // the monitor had just run, which is exactly how a permanently stopped
+    // monitor kept looking healthy.
+    monitor.restore_persisted_last_scan_at(persisted_last_scan_at);
     // Serialize through the same projection as the daemon branch above. The
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
     // would silently disagree about what a caller can rely on.
     out.push_str(
-        &serde_json::to_string(&monitor.agent_status())
+        &serde_json::to_string(&monitor.agent_status_at(&now))
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
     );
     out.push('\n');
@@ -1989,8 +1999,54 @@ mod tests {
                         "recoverable_merged": false,
                     },
                 ],
-                "last_scan_at": "gwtd-status",
+                // Issue #3633 AC-5: this branch rebuilds the queue from the
+                // local Issue cache, which is a projection and not a scan. It
+                // used to stamp the literal string `gwtd-status` into
+                // `last_scan_at`, so a monitor no driver had ever scanned
+                // reported a cadence — the healthy-looking snapshot that made
+                // the stall unobservable. There is no scan to report, and the
+                // stall says why.
+                "scan_stall": "Issue Monitor has never completed a scan for this project; no driver is running",
             })
+        );
+    }
+
+    /// Issue #3633 AC-5: the offline branch must report the durable cadence,
+    /// not the age of its own cache rebuild.
+    #[test]
+    fn issue_monitor_status_reports_the_persisted_scan_time_without_a_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                last_scan_at: Some("2020-01-01T00:00:00Z".to_string()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(status["last_scan_at"], "2020-01-01T00:00:00Z");
+        assert!(
+            status["scan_stall"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
+            "a scan that last ran in 2020 must read as stalled: {status}"
         );
     }
 
