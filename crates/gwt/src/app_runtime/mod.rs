@@ -883,6 +883,12 @@ pub struct AppRuntime {
     /// blocking worker. Duplicate ticks are coalesced by dropping them while
     /// the same canonical project scope is in flight.
     pub(crate) issue_monitor_scheduled_scans_in_flight: HashSet<PathBuf>,
+    /// Issue #3633: the runtime daemons this GUI started. Nothing in
+    /// production used to start one, so the daemon-only control lane
+    /// (`scan_now`, `daemon.subscribe`) was permanently unavailable. The
+    /// supervisor is driven from the scheduled tick, which makes the restart
+    /// of a crashed daemon fall out of the same idempotent call.
+    pub(crate) daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor,
     /// Prepared producing continuations keyed by their pending/active window.
     /// The entry remains until an authenticated SessionStart finalizes the
     /// generation + Work transaction and promotes the same bearer.
@@ -2072,6 +2078,7 @@ impl AppRuntime {
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
+            daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
@@ -4576,6 +4583,62 @@ impl AppRuntime {
             }
         }
         events
+    }
+
+    /// Issue #3633 AC-1/AC-2: keep a runtime daemon alive for every project
+    /// whose Issue Monitor is enabled.
+    ///
+    /// The daemon is the single driver for the Issue Monitor control lane
+    /// (`scan_now`, `daemon.subscribe`), and nothing in the production
+    /// topology used to start one. Because the check is idempotent, "start it"
+    /// and "restart the one that died" are the same call; the caller only has
+    /// to keep calling.
+    pub(crate) fn ensure_runtime_daemons_for_enabled_projects(&mut self) {
+        let mut seen_prefs_paths = HashSet::new();
+        let project_roots: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .filter_map(|tab| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+                seen_prefs_paths
+                    .insert(prefs_path.clone())
+                    .then(|| (tab.project_root.clone(), prefs_path))
+            })
+            .filter(|(_, prefs_path)| {
+                gwt::load_issue_monitor_prefs(prefs_path)
+                    .map(|prefs| prefs.enabled)
+                    .unwrap_or(false)
+            })
+            .map(|(project_root, _)| project_root)
+            .collect();
+        for project_root in project_roots {
+            self.ensure_runtime_daemon_for(&project_root);
+        }
+    }
+
+    /// Make sure a runtime daemon serves `project_root`.
+    ///
+    /// A failure here is logged rather than surfaced as a toast: the GUI
+    /// fallback still scans, so a daemon that cannot start degrades the
+    /// control lane instead of stopping the monitor. AC-5's staleness
+    /// projection is what makes the degraded state visible to a reader.
+    pub(crate) fn ensure_runtime_daemon_for(&self, project_root: &Path) {
+        match self.daemon_supervisor.ensure_running(project_root) {
+            Ok(gwt::daemon_supervisor::DaemonEnsureOutcome::Spawned { pid }) => {
+                tracing::info!(
+                    pid,
+                    project_root = %project_root.display(),
+                    "started the runtime daemon for the Issue Monitor"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                project_root = %project_root.display(),
+                "could not start the runtime daemon; the Issue Monitor stays on the local fallback"
+            ),
+        }
     }
 
     fn enqueue_issue_monitor_scan_worker(
