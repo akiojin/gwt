@@ -2899,13 +2899,12 @@ async fn agent_pane_websocket_handler(
     let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match durable_agent_execution_authority_async(grant.principal().clone()).await {
-        AgentDurableAuthority::ObservationOnly | AgentDurableAuthority::Current => {}
-        AgentDurableAuthority::Stale => return StatusCode::CONFLICT.into_response(),
-        AgentDurableAuthority::Unavailable => {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-    }
+    // Issue #3667: no durable-authority check at connect. The transport
+    // carries observation for every authenticated capability — including a
+    // settled session whose durable binding is no longer current, which must
+    // not hold less authority than a session that never had a binding.
+    // Producing mutation is re-checked per request by the in-session durable
+    // fence below and again at runtime dispatch.
     ws.on_upgrade(move |socket| agent_pane_client_session(socket, state, grant))
 }
 
@@ -6169,6 +6168,153 @@ mod tests {
         server.shutdown();
     }
 
+    /// Issue #3667 AC-1/AC-2/AC-3/AC-4: a settled session (in-memory Active
+    /// binding whose durable record no longer matches) keeps pane observation
+    /// on the agent WebSocket while producing mutation stays refused on the
+    /// very same connection.
+    #[test]
+    fn settled_session_pane_socket_allows_observation_and_refuses_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The durable authority check runs on spawn_blocking threads where the
+        // thread-local ScopedGwtHome does not apply, so isolate HOME itself.
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        // No durable session file exists for this id, so every durable check
+        // resolves Stale — the same authority a session holds right after its
+        // Execution Control Record settles.
+        let session_id = "session-issue-3667-settled";
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            repo_hash: "repo-3667".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3667,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-3667".to_string(),
+                binding_id: "binding-3667".to_string(),
+                ledger_head_hash: "head-3667".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(project.path(), session_id, binding)
+            .expect("settled capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, response) = connect_async(request)
+                .await
+                .expect("settled session must keep the pane observation transport");
+            assert_eq!(
+                response.status().as_u16(),
+                StatusCode::SWITCHING_PROTOCOLS.as_u16()
+            );
+
+            socket
+                .send(WebSocketMessage::Text(
+                    r#"{"kind":"list_windows"}"#.to_string().into(),
+                ))
+                .await
+                .expect("send list_windows on settled socket");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if events
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .any(|event| {
+                            matches!(
+                                event,
+                                UserEvent::AgentFrontend {
+                                    request: AgentFrontendRequest::ListWindows,
+                                    ..
+                                }
+                            )
+                        })
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("settled observation request must reach runtime dispatch");
+
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "pane_send_input",
+                        "session_id": session_id,
+                        "text": "must-not-dispatch"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send pane input on settled socket");
+            let close = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match socket.next().await {
+                        Some(Ok(WebSocketMessage::Close(frame))) => break frame,
+                        Some(Ok(_)) => continue,
+                        other => {
+                            panic!("settled mutation must end in a close frame, got {other:?}")
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("settled mutation must be fenced")
+            .expect("explicit close frame");
+            assert_eq!(u16::from(close.code), 1008);
+            assert_eq!(close.reason, "execution binding is no longer current");
+            assert!(
+                !events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .any(|event| {
+                        matches!(
+                            event,
+                            UserEvent::AgentFrontend {
+                                request: AgentFrontendRequest::SendInput { .. },
+                                ..
+                            }
+                        )
+                    }),
+                "settled mutation must not reach AgentFrontend dispatch"
+            );
+        });
+
+        server.shutdown();
+    }
+
     #[test]
     fn connected_agent_pane_socket_stops_dispatching_after_rotation_and_revoke() {
         let runtime = Runtime::new().expect("tokio runtime");
@@ -6953,13 +7099,43 @@ mod tests {
                 .parse()
                 .expect("stale Host bearer"),
         );
-        match runtime.block_on(connect_async(stale_handshake)) {
-            Err(WebSocketError::Http(response)) => {
-                assert_eq!(response.status(), HttpStatusCode::CONFLICT);
-            }
-            Ok(_) => panic!("durably stale Host capability must not upgrade"),
-            Err(error) => panic!("unexpected stale Host handshake error: {error}"),
-        }
+        // Issue #3667: a durably stale capability keeps the observation
+        // transport, so the handshake upgrades; producing mutation on that
+        // socket is still fenced by the per-request durable check.
+        let (mut stale_socket, _) = runtime
+            .block_on(connect_async(stale_handshake))
+            .expect("durably stale Host capability keeps the observation transport");
+        runtime.block_on(async {
+            stale_socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "pane_send_input",
+                        "session_id": &session.id,
+                        "text": "must-not-dispatch-after-reconnect"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send input through the stale reconnect socket");
+            let close = tokio::time::timeout(Duration::from_secs(2), stale_socket.next())
+                .await
+                .expect("stale reconnect socket must be fenced")
+                .expect("stale reconnect close frame")
+                .expect("valid stale reconnect close frame");
+            let WebSocketMessage::Close(Some(close)) = close else {
+                panic!("stale reconnect socket must receive an explicit policy close");
+            };
+            assert_eq!(u16::from(close.code), 1008);
+            assert_eq!(close.reason, "execution binding is no longer current");
+        });
+        assert!(
+            events_a
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "stale reconnect input must be rejected before AgentFrontend dispatch"
+        );
 
         let pane_url_b = server_b
             .agent_capability_issuer()
