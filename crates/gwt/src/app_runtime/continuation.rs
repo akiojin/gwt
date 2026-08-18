@@ -3,6 +3,8 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use fs2::FileExt;
+
 #[cfg(test)]
 type DurableLaunchRecoveryDirectorySyncHook = Box<dyn Fn(&Path) -> std::io::Result<()> + 'static>;
 
@@ -1283,6 +1285,14 @@ fn durable_launch_recovery_path(sessions_dir: &Path, session_id: &str) -> Result
     Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
 }
 
+fn durable_launch_recovery_lock_path(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    gwt_agent::validate_session_id_path_component(session_id)?;
+    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.lock")))
+}
+
 #[cfg(test)]
 // Only the `#[cfg(unix)]` directory-sync tests install this hook.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -1437,6 +1447,54 @@ pub(super) fn persist_durable_launch_recovery_with_identity(
         .parent()
         .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     create_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())?;
+    let lock_path = durable_launch_recovery_lock_path(sessions_dir, session_id)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<DurableLaunchRecoveryRecord>(&bytes).map_err(|error| {
+                format!("existing launch recovery receipt is malformed: {error}")
+            })?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Some(existing) = existing.as_ref() {
+        existing.owner()?;
+        let same_operation = existing.kind == record.kind
+            && existing.session_id == record.session_id
+            && existing.project_root == record.project_root
+            && existing.worktree_path == record.worktree_path
+            && existing.repo_hash == record.repo_hash
+            && existing.owner_kind == record.owner_kind
+            && existing.owner_number == record.owner_number;
+        let monotonic = existing == &record
+            || (same_operation
+                && existing.expected_binding.is_none()
+                && record.expected_binding.is_some());
+        if same_operation
+            && existing.expected_binding.is_some()
+            && record.expected_binding.is_none()
+        {
+            // A retry begins from the base receipt even when a previous
+            // response-loss attempt already advanced this same operation to
+            // an exact bound receipt. Keep the stronger evidence byte-for-byte
+            // and let the coordinator replay its Prepared attempt.
+            return Ok(());
+        }
+        if !monotonic {
+            return Err("launch recovery receipt cannot be downgraded or retargeted".to_string());
+        }
+        if existing == &record {
+            return Ok(());
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
     gwt_github::cache::write_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     sync_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())
@@ -1447,14 +1505,25 @@ pub(super) fn clear_durable_launch_recovery(
     session_id: &str,
 ) -> Result<(), String> {
     let path = durable_launch_recovery_path(sessions_dir, session_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
+    if !parent.exists() {
+        return Ok(());
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(durable_launch_recovery_lock_path(sessions_dir, session_id)?)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     let durability_barrier = if parent.exists() {
         Some(parent)
     } else {
@@ -1483,6 +1552,43 @@ pub(super) fn durable_launch_recovery_session_identity(
         return Err("launch recovery Session id changed".to_string());
     }
     Ok(record.expected_session_identity)
+}
+
+pub(super) fn bind_durable_launch_recovery_session_identity(
+    sessions_dir: &Path,
+    session: &gwt_agent::Session,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let path = durable_launch_recovery_path(sessions_dir, &session.id)?;
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    let record: DurableLaunchRecoveryRecord =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let owner = record.owner()?;
+    if record.session_id != session.id
+        || record.worktree_path != session.worktree_path
+        || session.project_state_root.as_deref() != Some(record.project_root.as_path())
+        || session.repo_hash.as_deref() != Some(record.repo_hash.as_str())
+        || session.linked_issue_number != Some(owner.number)
+        || binding.owner_kind != owner.kind.as_str()
+        || binding.owner_number != owner.number
+    {
+        return Err(
+            "launch recovery candidate does not match its durable base receipt".to_string(),
+        );
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::for_binding(session, binding)?;
+    persist_durable_launch_recovery_with_identity(
+        sessions_dir,
+        record.kind,
+        &record.session_id,
+        &record.project_root,
+        &record.worktree_path,
+        owner,
+        Some(binding),
+        Some(&session.agent_id),
+        Some(&identity),
+    )?;
+    Ok(identity)
 }
 
 pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
@@ -2880,10 +2986,7 @@ impl AppRuntime {
             }
             return;
         };
-        if attempt.predecessor_status
-            != gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked
-            || attempt.request.source != gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE
-            || attempt.request.work_id.is_some()
+        if !gwt::cli::execution_state::is_owner_launch_successor_attempt(&attempt)
             || attempt.request.initial_session_id != receipt.session_id
             || attempt.request.operation_id != operation_id
         {

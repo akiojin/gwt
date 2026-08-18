@@ -1,9 +1,9 @@
 //! Read-only endpoint selection for Unix daemon subscriptions.
 //!
 //! Exact caller scope always wins. A same-repository sibling is eligible only
-//! when exact evidence is absent, definitely dead, or a GUI front-door marker
-//! that never listened on an IPC transport, and only one compatible live
-//! sibling exists.
+//! when exact evidence is absent, definitely dead, or a leftover GUI
+//! front-door sentinel that never listened on an IPC transport, and only one
+//! compatible live sibling exists.
 
 use std::{
     collections::BTreeMap,
@@ -222,12 +222,13 @@ where
                 )
             })?;
             if endpoint.scope == *requested_scope && endpoint.is_front_door() {
-                // A front-door marker announces that a GUI owns this scope's
-                // hook dispatch in-process and listens on nothing. That is an
-                // absence of IPC, not corrupt evidence, so same-repository
-                // sibling routing stays available (Issue #3492). The scope
-                // guard leaves a marker filed under someone else's worktree
-                // hash on the corruption path below, where it belongs.
+                // A front-door sentinel records that a GUI once claimed this
+                // scope without serving an IPC transport (Issue #2338). That
+                // is an absence of IPC, not corrupt evidence, so
+                // same-repository sibling routing stays available (Issue
+                // #3492). The scope guard leaves a sentinel filed under
+                // someone else's worktree hash on the corruption path below,
+                // where it belongs.
                 "front_door".to_string()
             } else if !is_live_pid(endpoint.pid, &is_process_alive) {
                 format!("dead(pid={})", endpoint.pid)
@@ -465,10 +466,10 @@ where
     } else if !endpoint.scope.project_root.is_absolute() {
         Some("invalid_project_root")
     } else if endpoint.is_front_door() {
-        // Checked ahead of the protocol version and the pid: a front door
-        // never listened, so reporting it as `protocol_mismatch` or `dead`
-        // describes a daemon that was never there and sends the reader toward
-        // pruning endpoint files instead of starting one (Issue #3492).
+        // Checked ahead of the protocol version and the pid: a front-door
+        // sentinel never listened, so reporting it as `protocol_mismatch` or
+        // `dead` describes a daemon that was never there and sends the reader
+        // toward pruning endpoint files instead of starting one (Issue #3492).
         Some("front_door")
     } else if endpoint.protocol_version != expected_protocol_version {
         Some("protocol_mismatch")
@@ -979,6 +980,9 @@ mod tests {
         assert!(diagnostic.contains("metadata_path_mismatch=1"));
     }
 
+    /// Issue #2338 stopped the GUI front door from writing this sentinel, but
+    /// gwt homes upgraded from an older build can still hold one on disk, so
+    /// the resolver must keep rejecting it instead of treating it as reachable.
     #[test]
     fn front_door_and_other_non_socket_transports_are_not_candidates() {
         let fixture = Fixture::new();
@@ -1006,12 +1010,12 @@ mod tests {
         );
     }
 
-    /// Issue #3492: the GUI claims the scope it was launched in with an
-    /// `internal://gwt-front-door` registration. That marker announces
-    /// in-process hook dispatch and no IPC transport, so it means "no daemon
-    /// listens here" — not "the evidence at this scope is corrupt". Reading it
-    /// as corruption fails the subscribe closed and permanently hides the live
-    /// same-repository daemon this Issue exists to reach.
+    /// Issue #3492: a gwt home upgraded from a pre-#2338 build still carries
+    /// an `internal://gwt-front-door` sentinel for the scope its GUI was
+    /// launched in. The sentinel serves no IPC transport, so it means "no
+    /// daemon listens here" — not "the evidence at this scope is corrupt".
+    /// Reading it as corruption fails the subscribe closed and permanently
+    /// hides the live same-repository daemon this Issue exists to reach.
     #[test]
     fn live_front_door_at_exact_scope_still_reaches_a_live_sibling() {
         let fixture = Fixture::new();
@@ -1038,7 +1042,7 @@ mod tests {
         );
     }
 
-    /// Issue #3492: a front-door marker at the caller's own scope must be
+    /// Issue #3492: a front-door sentinel at the caller's own scope must be
     /// named for what it is. Reporting it as `dead` or `invalid_evidence`
     /// describes a daemon that never existed at that scope.
     #[test]
@@ -1065,12 +1069,13 @@ mod tests {
         assert!(failure.to_string().contains("gwtd daemon start"));
     }
 
-    /// Issue #3492 post-release evidence: with only front-door markers
-    /// registered, the diagnostic reported `dead` and `protocol_mismatch`,
-    /// which reads as "stale daemons" and points the reader at pruning
-    /// endpoint files instead of starting a daemon. Transport eligibility is
-    /// a structural property of the registration, so it is classified before
-    /// the pid and protocol version of a daemon that was never there.
+    /// Issue #3492 post-release evidence: an upgraded gwt home holds only
+    /// front-door sentinels, and the diagnostic reported them as `dead` and
+    /// `protocol_mismatch`, which reads as "stale daemons" and points the
+    /// reader at pruning endpoint files instead of starting a daemon.
+    /// Transport eligibility is a structural property of the registration, so
+    /// it is classified before the pid and protocol version of a daemon that
+    /// was never there.
     #[test]
     fn front_door_siblings_are_reported_as_front_door_not_stale_daemons() {
         let fixture = Fixture::new();

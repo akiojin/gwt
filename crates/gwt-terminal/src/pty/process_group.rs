@@ -15,14 +15,10 @@ mod imp {
     }
 
     impl ProcessGroup {
-        pub fn attach(pid: u32) -> Self {
-            match gwt_core::process_tree::WindowsJobObject::attach_running(pid) {
-                Ok(job) => Self { job: Some(job) },
-                Err(error) => {
-                    tracing::debug!(pid, %error, "Windows Job attach failed");
-                    Self::default()
-                }
-            }
+        pub fn attach(pid: u32) -> Result<Self, String> {
+            gwt_core::process_tree::WindowsJobObject::attach_running(pid)
+                .map(|job| Self { job: Some(job) })
+                .map_err(|error| format!("Windows Job attach failed for child {pid}: {error}"))
         }
 
         /// Synchronously terminate every process in the group.
@@ -58,12 +54,12 @@ mod imp {
     }
 
     impl ProcessGroup {
-        pub fn attach(pid: u32) -> Self {
+        pub fn attach(pid: u32) -> Result<Self, String> {
             // portable_pty spawns each child in its own session via setsid,
             // so the child's pid is also its process group id.
-            Self {
+            Ok(Self {
                 pgid: Some(Pid::from_raw(pid as i32)),
-            }
+            })
         }
 
         /// Synchronously signal every process in the group.
@@ -101,6 +97,10 @@ mod tests {
     fn windows_process_group_reuses_shared_job_owner() {
         let source = include_str!("process_group.rs");
         assert!(source.contains("WindowsJobObject::attach_running(pid)"));
+        assert!(source.contains("pub fn attach(pid: u32) -> Result<Self, String>"));
+        assert!(
+            !source.contains("Windows Job attach failed\");\n                    Self::default()")
+        );
         assert!(!source.contains(concat!("Create", "JobObjectW")));
         assert!(!source.contains(concat!("AssignProcess", "ToJobObject")));
     }

@@ -110,31 +110,186 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     expect(inj.text).toBe("hello agent");
   });
 
-  test("a needs_input transition pops an attention toast that frames on click", async ({ page }) => {
+  test("manual and Monitor-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
     await page.goto(APP_URL);
 
-    await expect(page.locator('.workspace-window[data-id="agent-2"]')).toBeVisible({
-      timeout: 10_000,
+    const waitingCell = page.locator(".op-status-strip__cell--waiting");
+    const waitingCount = page.locator("#op-strip-waiting");
+    const completionToast = page.locator(
+      '.toast-alerts__item[data-toast-id="agent-completion"]',
+    );
+    const uiFor = (id: string) => {
+      const win = page.locator(`.workspace-window[data-id="${id}"]`);
+      const windowTab = win.locator(
+        `.window-tab[data-window-tab-id="${id}"]`,
+      );
+      return {
+        win,
+        statusChip: win.locator(".status-chip"),
+        windowTab,
+        windowTabCue: windowTab.locator(".window-tab-state"),
+        minimapCell: page.locator(
+          `.fleet-minimap__cell[data-window-id="${id}"]`,
+        ),
+        toast: page.locator(
+          `.toast-alerts__item[data-toast-id="attention-${id}"]`,
+        ),
+      };
+    };
+    const manual = uiFor("agent-2");
+    const monitor = uiFor("agent-3");
+    await expect(manual.win).toBeVisible({ timeout: 10_000 });
+    await expect(monitor.win).toBeHidden();
+
+    const emitStatePair = (id: string, state: string) =>
+      page.evaluate(
+        ({ id, state }) =>
+          (window as any).__killSwitchFixture.emitBatchAndWait([
+            { kind: "window_state", window_id: id, state },
+            { kind: "terminal_status", id, status: state },
+          ]),
+        { id, state },
+      );
+    const toastStats = () =>
+      page.evaluate(() => (window as any).__killSwitchToastStats);
+    const expectWaitingUi = async (ui) => {
+      await expect(ui.win).toHaveAttribute("data-agent-state", "waiting");
+      await expect(ui.statusChip).toHaveClass(/waiting/);
+      await expect(ui.statusChip.locator(".status-label")).toHaveText("Waiting");
+      await expect(ui.windowTab).toHaveAttribute("data-agent-state", "waiting");
+      await expect(ui.windowTabCue).toBeVisible();
+      await expect(ui.windowTabCue).toHaveText("WAIT");
+      await expect(ui.minimapCell).toHaveAttribute("data-telemetry", "waiting");
+    };
+    const expectRunningUi = async (ui) => {
+      await expect(ui.win).toHaveAttribute("data-agent-state", "running");
+      await expect(ui.statusChip).toHaveClass(/running/);
+      await expect(ui.statusChip.locator(".status-label")).toHaveText("Running");
+      await expect(ui.windowTab).toHaveAttribute("data-agent-state", "running");
+      await expect(ui.windowTabCue).toBeVisible();
+      await expect(ui.windowTabCue).toHaveText("RUN");
+      await expect(ui.minimapCell).toHaveAttribute("data-telemetry", "running");
+    };
+
+    // Count insertions as well as the final DOM. The shared toast host replaces
+    // duplicate ids, so a plain toHaveCount(1) would hide duplicate publishes.
+    await page.evaluate(() => {
+      const stats = { attentionAdds: {}, completionAdds: 0 };
+      (window as any).__killSwitchToastStats = stats;
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (!(node instanceof Element)) continue;
+            const items = node.matches(".toast-alerts__item")
+              ? [node]
+              : [...node.querySelectorAll(".toast-alerts__item")];
+            for (const item of items) {
+              const toastId = item.getAttribute("data-toast-id") || "";
+              if (toastId.startsWith("attention-")) {
+                const id = toastId.slice("attention-".length);
+                stats.attentionAdds[id] = (stats.attentionAdds[id] || 0) + 1;
+              } else if (toastId === "agent-completion") {
+                stats.completionAdds += 1;
+              }
+            }
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      (window as any).__killSwitchToastObserver = observer;
     });
 
-    // agent-2 enters waiting -> needs_input attention toast.
-    await page.evaluate(() => window.__emit({ kind: "window_state", window_id: "agent-2", state: "waiting" }));
+    // The daemon projection and authoritative PTY status may report the same
+    // transition. emitStatePair does not return until BOTH dispatches and the
+    // resulting controller/render work have crossed a two-frame barrier.
+    await emitStatePair("agent-2", "waiting");
 
     // SPEC #3206: attention renders in the shared alerts stack, deduped by
     // window via data-toast-id; needs_input maps to the warn level; the whole
     // card is the jump button (onActivate).
-    const toast = page.locator('.toast-alerts__item[data-toast-id="attention-agent-2"]');
-    await expect(toast).toBeVisible();
-    await expect(toast).toHaveAttribute("data-level", "warn");
+    await expect(manual.toast).toBeVisible();
+    await expect(manual.toast).toHaveAttribute("data-level", "warn");
+    await expect(manual.toast.locator(".toast-alerts__title")).toHaveText(
+      "Waiting for input",
+    );
+    await expect(completionToast).toHaveCount(0);
+    expect(await toastStats()).toEqual({
+      attentionAdds: { "agent-2": 1 },
+      completionAdds: 0,
+    });
+    await expectWaitingUi(manual);
+    await expect(waitingCount).toHaveText("1");
+    await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
 
     const stage = page.locator("#canvas-stage");
     const before = await stage.evaluate((el) => el.style.transform);
-    await toast.click();
-    await page.waitForTimeout(500);
+    await manual.toast.click();
     await expect.poll(() => stage.evaluate((el) => el.style.transform)).not.toBe(before);
-    await expect(toast).toHaveCount(0);
+    await expect(manual.toast).toHaveCount(0);
+
+    // Leaving waiting clears every persistent cue and rearms attention.
+    await emitStatePair("agent-2", "running");
+    await expectRunningUi(manual);
+    await expect(waitingCount).toHaveText("0");
+    await expect(waitingCell).not.toHaveClass(/op-status-strip__cell--alert/);
+
+    // A later waiting episode creates exactly one new attention item even
+    // when both backend event shapes carry the transition again.
+    await emitStatePair("agent-2", "waiting");
+    await expect(manual.toast).toHaveCount(1);
+    await expect(completionToast).toHaveCount(0);
+    expect(await toastStats()).toEqual({
+      attentionAdds: { "agent-2": 2 },
+      completionAdds: 0,
+    });
+    await expectWaitingUi(manual);
+    await expect(waitingCount).toHaveText("1");
+    await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
+
+    await manual.toast.locator(".toast-alerts__dismiss").click();
+    await emitStatePair("agent-2", "running");
+    await expectRunningUi(manual);
+    await expect(waitingCount).toHaveText("0");
+    await expect(waitingCell).not.toHaveClass(/op-status-strip__cell--alert/);
+
+    // `agent-3` models a pane launched by Issue Monitor. WindowState has no
+    // launch-source field by design, so the fixture deliberately uses the same
+    // Agent window schema and exact event projection as the manual pane. Switch
+    // to it through the real tab-group interaction before exercising its cues.
+    await manual.win
+      .locator('.window-tab[data-window-tab-id="agent-3"]')
+      .click();
+    await expect(monitor.win).toBeVisible();
+    await expect(manual.win).toBeHidden();
+    await emitStatePair("agent-3", "waiting");
+    await expect(monitor.toast).toHaveCount(1);
+    await expect(monitor.toast.locator(".toast-alerts__title")).toHaveText(
+      "Waiting for input",
+    );
+    await expectWaitingUi(monitor);
+    await expect(waitingCount).toHaveText("1");
+    await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
+    expect(await toastStats()).toEqual({
+      attentionAdds: { "agent-2": 2, "agent-3": 1 },
+      completionAdds: 0,
+    });
+
+    await emitStatePair("agent-3", "running");
+    await expectRunningUi(monitor);
+    await expect(waitingCount).toHaveText("0");
+    await expect(waitingCell).not.toHaveClass(/op-status-strip__cell--alert/);
+    await emitStatePair("agent-3", "waiting");
+    await expectWaitingUi(monitor);
+    await expect(monitor.toast).toHaveCount(1);
+    await expect(waitingCount).toHaveText("1");
+    await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
+    expect(await toastStats()).toEqual({
+      attentionAdds: { "agent-2": 2, "agent-3": 2 },
+      completionAdds: 0,
+    });
+    await expect(completionToast).toHaveCount(0);
   });
 });
 
@@ -143,7 +298,7 @@ async function installKillSwitchBackend(page) {
     window.__sent = [];
     window.__sentKinds = [];
 
-    function agentWindow(id, x, y, z) {
+    function agentWindow(id, x, y, z, overrides = {}) {
       return {
         id,
         title: id,
@@ -161,12 +316,26 @@ async function installKillSwitchBackend(page) {
         tab_group_id: null,
         tab_group_active: false,
         session_id: `session-${id}`,
+        ...overrides,
       };
     }
 
     const windows = [
       agentWindow("agent-1", 120, 100, 1),
-      agentWindow("agent-2", 1600, 1200, 2),
+      agentWindow("agent-2", 1600, 1200, 2, {
+        title: "Manual Agent",
+        tab_group_id: "approval-agent-tabs",
+        tab_group_active: true,
+      }),
+      // Issue Monitor launches an ordinary Agent window; its issue linkage is
+      // session metadata and is intentionally not copied into the frontend
+      // window schema. This second pane therefore exercises source parity
+      // without inventing a frontend-only `source` discriminator.
+      agentWindow("agent-3", 1600, 1200, 2, {
+        title: "Monitor-linked Agent",
+        agent_color: "violet",
+        tab_group_id: "approval-agent-tabs",
+      }),
     ];
 
     function stateMsg() {
@@ -228,6 +397,17 @@ async function installKillSwitchBackend(page) {
             this.emit(stateMsg());
           }
         }
+        if (msg.kind === "activate_window_tab") {
+          const target = windows.find((w) => w.id === msg.id);
+          if (target?.tab_group_id) {
+            for (const candidate of windows) {
+              if (candidate.tab_group_id === target.tab_group_id) {
+                candidate.tab_group_active = candidate.id === target.id;
+              }
+            }
+            this.emit(stateMsg());
+          }
+        }
       }
 
       close() {
@@ -236,17 +416,33 @@ async function installKillSwitchBackend(page) {
       }
 
       emit(payload) {
-        setTimeout(() => {
-          this.dispatchEvent(
-            new MessageEvent("message", { data: JSON.stringify(payload) }),
-          );
-        }, 0);
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            this.dispatchEvent(
+              new MessageEvent("message", { data: JSON.stringify(payload) }),
+            );
+            queueMicrotask(resolve);
+          }, 0);
+        });
       }
     }
 
     // Lets a test push backend events (e.g. window_state transitions) directly.
     window.__emit = (payload) => {
       if (socketRef) socketRef.emit(payload);
+    };
+    window.__killSwitchFixture = {
+      async emitBatchAndWait(payloads) {
+        if (!socketRef) throw new Error("fixture socket is not connected");
+        for (const payload of payloads) {
+          await socketRef.emit(payload);
+        }
+        // Dispatch handlers are synchronous today. Two animation frames also
+        // cover MutationObserver delivery and render work if that changes.
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        );
+      },
     };
 
     Object.defineProperty(window, "WebSocket", {

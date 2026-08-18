@@ -255,9 +255,10 @@ fn daemon_endpoint_is_usable_returns_false_for_mismatched_protocol() {
     assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION + 1, |_| true));
 }
 
-/// Issue #3492: the GUI front door is identified by its `bind` value alone.
-/// Its pid and protocol version belong to a GUI process, so a marker written
-/// by an old release is still a front door and never a stale daemon.
+/// Issue #3492: a front-door sentinel is identified by its `bind` value
+/// alone. Its pid and protocol version belong to a GUI process, so a sentinel
+/// left behind by an old release is still a front door and never a stale
+/// daemon.
 #[test]
 fn daemon_endpoint_recognises_the_front_door_marker_by_bind_alone() {
     // Pins the on-disk value: endpoint files written by earlier releases are
