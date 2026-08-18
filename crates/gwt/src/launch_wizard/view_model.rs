@@ -35,6 +35,7 @@ impl LaunchWizardState {
                 _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
+            holder_decision: self.holder_decision.clone(),
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
             open_branch_candidates: self.open_branch_candidates.clone(),
@@ -641,6 +642,7 @@ impl LaunchWizardState {
             || self.runtime_resolution_pending
             || self.launch_materialization_pending
             || self.show_start_methods()
+            || self.holder_decision.is_some()
         {
             return false;
         }
@@ -963,6 +965,81 @@ mod tests {
             .launch_summary
             .iter()
             .any(|item| item.label == "Effort" && item.value == "high"));
+    }
+
+    #[test]
+    fn normal_wizard_view_has_no_holder_decision() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let view = state.view();
+
+        assert!(view.holder_decision.is_none());
+        assert_eq!(
+            serde_json::to_value(&view).expect("serialize normal wizard view")["holder_decision"],
+            serde_json::Value::Null,
+        );
+    }
+
+    #[test]
+    fn holder_decision_state_is_projected_into_the_view() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1:agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: false,
+            move_unavailable_reason: Some("The holder is in another runtime".to_string()),
+        });
+
+        let view = state.view();
+        let decision = view.holder_decision.expect("holder decision view");
+
+        assert_eq!(decision.fingerprint, "repo:/tmp/gwt:work/issue-3547");
+        assert_eq!(decision.holder_session_id, "session-holder");
+        assert_eq!(
+            decision.holder_window_id.as_deref(),
+            Some("tab-1:agent-holder")
+        );
+        assert_eq!(decision.holder_summary, "Codex · work/issue-3547");
+        assert!(decision.stop_available);
+        assert!(decision.stop_unavailable_reason.is_none());
+        assert!(!decision.move_available);
+        assert_eq!(
+            decision.move_unavailable_reason.as_deref(),
+            Some("The holder is in another runtime")
+        );
+    }
+
+    #[test]
+    fn holder_decision_disables_legacy_primary_launch_action() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "exact-holder".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1::agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: true,
+            move_unavailable_reason: None,
+        });
+
+        assert!(!state.view().primary_action_enabled);
     }
 
     #[test]
@@ -1625,6 +1702,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1664,6 +1742,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.2-codex".to_string()),
@@ -1715,6 +1794,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1789,6 +1869,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1830,6 +1911,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2225,6 +2307,7 @@ mod tests {
             ),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "proxy-agent".to_string(),
                 tool_label: "Claude Proxy".to_string(),
                 model: None,

@@ -27,8 +27,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+    AgentBuildAbortTerminalizationRequest, AgentWorkTerminalizationRequest,
+    AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest,
+    BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
@@ -770,6 +771,7 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 #[derive(Clone)]
 pub(crate) enum AgentFrontendRequest {
     Ready,
+    ListWindows,
     CloseWindow {
         id: String,
         request_id: Option<String>,
@@ -784,12 +786,16 @@ pub(crate) enum AgentFrontendRequest {
         text: String,
         responder: Option<AgentPmSendResponder>,
     },
+    IssueMonitorScanNow {
+        expected_project_scope: String,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
+            Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
@@ -799,6 +805,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::PmSendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::PmSendInput(<redacted>)")
             }
+            Self::IssueMonitorScanNow { .. } => {
+                formatter.write_str("AgentFrontendRequest::IssueMonitorScanNow")
+            }
         }
     }
 }
@@ -807,7 +816,10 @@ impl AgentFrontendRequest {
     pub(crate) fn mutates_host_state(&self) -> bool {
         matches!(
             self,
-            Self::CloseWindow { .. } | Self::SendInput { .. } | Self::PmSendInput { .. }
+            Self::CloseWindow { .. }
+                | Self::SendInput { .. }
+                | Self::PmSendInput { .. }
+                | Self::IssueMonitorScanNow { .. }
         )
     }
 
@@ -1063,6 +1075,18 @@ struct AgentCapabilityRegistryState {
     token_by_project_session: HashMap<(PathBuf, String), String>,
     closing_by_ticket: HashMap<String, ClosingAgentCapability>,
     closing_ticket_by_project_session: HashMap<(PathBuf, String), String>,
+    manual_handoff_reservations: HashMap<String, ManualExecutionHandoffState>,
+}
+
+struct ManualExecutionHandoffState {
+    binding: gwt_agent::SessionExecutionBinding,
+    suspended: Option<SuspendedManualExecutionCapability>,
+}
+
+struct SuspendedManualExecutionCapability {
+    token: String,
+    principal: AgentSessionPrincipal,
+    principal_key: (PathBuf, String),
 }
 
 struct ClosingAgentCapability {
@@ -1085,6 +1109,23 @@ impl std::fmt::Debug for AgentSelfCloseCapabilityTicket {
 impl AgentSelfCloseCapabilityTicket {
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+}
+
+/// Opaque process-local fence held while the coordinator settles one exact
+/// manual-launch predecessor. It contains no durable or bearer authority.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ManualExecutionHandoffReservation {
+    id: String,
+    /// A committed stop fence may be claimed by the immediate successor
+    /// preparation. Failed replay must retain that fence instead of reopening
+    /// the predecessor capability issuance path.
+    inherited_committed_fence: bool,
+}
+
+impl std::fmt::Debug for ManualExecutionHandoffReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ManualExecutionHandoffReservation(<redacted>)")
     }
 }
 
@@ -1148,12 +1189,25 @@ impl AgentPmSendResponder {
         oneshot::Receiver<BackendEvent>,
         AgentPmSendCancellation,
     ) {
+        Self::channel_with_acceptance_window(AGENT_PM_SEND_ACCEPTANCE_DEADLINE)
+    }
+
+    /// The same channel with an explicit acceptance window. Tests that drive
+    /// the acknowledgement wait to its end use this so they cost their own
+    /// budget rather than the production one.
+    pub(crate) fn channel_with_acceptance_window(
+        acceptance_window: Duration,
+    ) -> (
+        Self,
+        oneshot::Receiver<BackendEvent>,
+        AgentPmSendCancellation,
+    ) {
         let (sender, receiver) = oneshot::channel();
         let mutation_state = Arc::new(AtomicU8::new(AGENT_PM_MUTATION_PENDING));
         let responder = Self {
             sender: Arc::new(Mutex::new(Some(sender))),
             mutation_state: Arc::clone(&mutation_state),
-            deadline: Instant::now() + AGENT_PM_SEND_ACCEPTANCE_DEADLINE,
+            deadline: Instant::now() + acceptance_window,
         };
         (
             responder,
@@ -1355,6 +1409,17 @@ impl AgentCapabilityRegistry {
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.manual_handoff_reservations.values().any(|reserved| {
+            reserved
+                .suspended
+                .as_ref()
+                .is_some_and(|suspended| suspended.principal_key == principal_key)
+                || principal
+                    .active_execution_binding()
+                    .is_some_and(|binding| reserved.binding == *binding)
+        }) {
+            return Err("agent capability is reserved for manual execution handoff".to_string());
+        }
         if state
             .closing_ticket_by_project_session
             .contains_key(&principal_key)
@@ -1382,6 +1447,188 @@ impl AgentCapabilityRegistry {
         }
         state.principals_by_token.insert(token.clone(), principal);
         Ok(token)
+    }
+
+    fn reserve_manual_execution_handoff(
+        &self,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .principals_by_token
+            .values()
+            .any(|principal| principal.active_execution_binding() == Some(expected_binding))
+        {
+            return Err(
+                "manual execution handoff refuses an active predecessor capability".to_string(),
+            );
+        }
+        if let Some((id, reserved)) = state
+            .manual_handoff_reservations
+            .iter()
+            .find(|(_, reserved)| reserved.binding == *expected_binding)
+        {
+            if reserved.suspended.is_some() {
+                return Err("manual execution handoff is already reserved".to_string());
+            }
+            return Ok(ManualExecutionHandoffReservation {
+                id: id.clone(),
+                inherited_committed_fence: true,
+            });
+        }
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: None,
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn begin_manual_execution_handoff(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("manual execution handoff is already reserved".to_string());
+        }
+        let issued_token = state
+            .principals_by_token
+            .keys()
+            .find(|candidate| constant_time_token_eq(token, candidate))
+            .cloned()
+            .ok_or_else(|| "exact holder capability is missing or no longer current".to_string())?;
+        let principal = state
+            .principals_by_token
+            .get(&issued_token)
+            .cloned()
+            .ok_or_else(|| "exact holder capability is missing or no longer current".to_string())?;
+        if principal.active_execution_binding() != Some(expected_binding) {
+            return Err("exact holder capability binding changed".to_string());
+        }
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if !state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&issued_token, current))
+        {
+            return Err("exact holder capability is missing or no longer current".to_string());
+        }
+        state.principals_by_token.remove(&issued_token);
+        state.token_by_project_session.remove(&principal_key);
+        let id = loop {
+            let candidate = format!("gwt_manual_handoff_{}", Uuid::new_v4());
+            if !state.manual_handoff_reservations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.manual_handoff_reservations.insert(
+            id.clone(),
+            ManualExecutionHandoffState {
+                binding: expected_binding.clone(),
+                suspended: Some(SuspendedManualExecutionCapability {
+                    token: issued_token,
+                    principal,
+                    principal_key,
+                }),
+            },
+        );
+        Ok(ManualExecutionHandoffReservation {
+            id,
+            inherited_committed_fence: false,
+        })
+    }
+
+    fn release_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .manual_handoff_reservations
+            .remove(&reservation.id)
+            .is_some()
+    }
+
+    fn rollback_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reservation.inherited_committed_fence {
+            return state
+                .manual_handoff_reservations
+                .get(&reservation.id)
+                .is_some_and(|handoff| handoff.suspended.is_none());
+        }
+        let Some(mut handoff) = state.manual_handoff_reservations.remove(&reservation.id) else {
+            return false;
+        };
+        let Some(suspended) = handoff.suspended.take() else {
+            return true;
+        };
+        if state.principals_by_token.contains_key(&suspended.token)
+            || state
+                .token_by_project_session
+                .contains_key(&suspended.principal_key)
+        {
+            handoff.suspended = Some(suspended);
+            state
+                .manual_handoff_reservations
+                .insert(reservation.id.clone(), handoff);
+            return false;
+        }
+        state
+            .token_by_project_session
+            .insert(suspended.principal_key, suspended.token.clone());
+        state
+            .principals_by_token
+            .insert(suspended.token, suspended.principal);
+        true
+    }
+
+    fn commit_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(handoff) = state.manual_handoff_reservations.get_mut(&reservation.id) else {
+            return false;
+        };
+        handoff.suspended = None;
+        true
     }
 
     fn promote_prepared(
@@ -1440,6 +1687,13 @@ impl AgentCapabilityRegistry {
             .is_some_and(|current| constant_time_token_eq(&issued_token, current))
         {
             return Err("agent capability is missing or no longer current".to_string());
+        }
+        if state
+            .manual_handoff_reservations
+            .values()
+            .any(|reserved| reserved.binding == *expected_binding)
+        {
+            return Err("agent capability is reserved for manual execution handoff".to_string());
         }
         match &principal.execution_authority {
             AgentExecutionAuthority::Inspection if allow_inspection => {
@@ -1882,6 +2136,44 @@ impl AgentCapabilityIssuer {
             && grant.principal().active_execution_binding() == Some(expected_binding)
     }
 
+    pub(crate) fn reserve_manual_execution_handoff(
+        &self,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .reserve_manual_execution_handoff(expected_binding)
+    }
+
+    pub(crate) fn begin_manual_execution_handoff(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<ManualExecutionHandoffReservation, String> {
+        self.registry
+            .begin_manual_execution_handoff(token, expected_binding)
+    }
+
+    pub(crate) fn release_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.release_manual_execution_handoff(reservation)
+    }
+
+    pub(crate) fn rollback_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.rollback_manual_execution_handoff(reservation)
+    }
+
+    pub(crate) fn commit_manual_execution_handoff(
+        &self,
+        reservation: &ManualExecutionHandoffReservation,
+    ) -> bool {
+        self.registry.commit_manual_execution_handoff(reservation)
+    }
+
     pub(crate) fn revoke_token(&self, token: &str) -> bool {
         self.registry.revoke_token(token)
     }
@@ -2233,6 +2525,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
         .route(
             "/internal/work-terminalization",
             post(work_terminalization_handler),
+        )
+        .route(
+            "/internal/build-abort-terminalization",
+            post(build_abort_terminalization_handler),
         )
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -2752,6 +3048,61 @@ async fn work_terminalization_handler(
     }
 }
 
+async fn build_abort_terminalization_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentBuildAbortTerminalizationRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "build_abort_terminalization_requires_bound_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::apply_bound_authenticated_blocked_build_abort_terminalization(
+            &mutation_project_root,
+            &session_id,
+            &execution_binding,
+            request,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::Internal,
+                message: "Host build abort mutation task failed before a response was produced"
+                    .to_string(),
+            },
+        ),
+    }
+}
+
 fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusCode {
     match code {
         AgentWorkspaceUpdateErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
@@ -2948,6 +3299,7 @@ impl AgentPaneSessionScope {
     fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
+            FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
             FrontendEvent::CloseWindow { id, request_id }
                 if self.allowed_window_ids.contains(&id)
                     && (self.grant.principal().authorizes_producing_mutation()
@@ -2979,6 +3331,11 @@ impl AgentPaneSessionScope {
                     responder: None,
                 })
             }
+            FrontendEvent::AgentIssueMonitorScanNow {
+                expected_project_scope,
+            } => Some(AgentFrontendRequest::IssueMonitorScanNow {
+                expected_project_scope,
+            }),
             _ => None,
         }
     }
@@ -3000,6 +3357,7 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
+            "issue_monitor_scan_request_result" => Some(payload),
             _ => None,
         }
     }
@@ -3528,10 +3886,19 @@ async fn client_session_with_scope(
                                                 let mutation_committed = cancellation.cancel();
                                                 BackendEvent::PmMessageSendResult {
                                                     operation_id,
-                                                    status: "failed".to_string(),
+                                                    // Issue #3608 (AC-2/AC-3): a committed input
+                                                    // whose worker never answered is unverified,
+                                                    // not failed, and nothing here observed the
+                                                    // body sitting unsubmitted — only the durable
+                                                    // receipt knows how it ended.
+                                                    status: if mutation_committed {
+                                                        "unverified".to_string()
+                                                    } else {
+                                                        "failed".to_string()
+                                                    },
                                                     window_id: Some(window_id),
                                                     reason: Some(if mutation_committed {
-                                                        "PM delivery may already have staged its prompt body — do not retry with a new operation"
+                                                        "PM delivery returned no terminal result before the server acceptance deadline; the input was committed to the pane and the durable receipt records the final outcome — do not retry with a new operation"
                                                             .to_string()
                                                     } else if timed_out {
                                                         "PM delivery exceeded the server acceptance deadline"
@@ -3659,7 +4026,18 @@ fn handle_frontend_message(
         }
     };
 
+    let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
+    let mut resolution_marked = false;
     if let Some(pty) = pty_handle {
+        if approval_resolution {
+            // `EventLoopProxy::send_event` completes the tao channel enqueue
+            // synchronously. Enqueue the causal marker before the PTY write so
+            // provider output cannot overtake it on the event-loop receiver.
+            state
+                .proxy
+                .send(UserEvent::RuntimeApprovalResolutionStarted { id: id.clone() });
+            resolution_marked = true;
+        }
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
@@ -3675,14 +4053,20 @@ fn handle_frontend_message(
                 return;
             }
             Err(_error) => {
+                if resolution_marked {
+                    state
+                        .proxy
+                        .send(UserEvent::RuntimeApprovalResolutionCancelled { id: id.clone() });
+                }
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "fast_path_write_err",
                     client_id = %client_id,
                     seq,
                     window_id = %id,
-                    "fast-path PTY write failed; forwarding to event loop for error handling"
+                    "fast-path PTY write failed; dropping input to preserve the generation fence"
                 );
+                return;
             }
         }
     } else {
@@ -3696,13 +4080,7 @@ fn handle_frontend_message(
         );
     }
 
-    state.proxy.send(UserEvent::Frontend {
-        client_id: client_id.to_string(),
-        event: FrontendEvent::TerminalInput {
-            id: id.clone(),
-            data,
-        },
-    });
+    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data);
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_dispatch",
@@ -3712,6 +4090,18 @@ fn handle_frontend_message(
         ok = true,
         "terminal_input forwarded to event loop proxy (fallback)"
     );
+}
+
+fn forward_terminal_input_to_event_loop(
+    state: &ServerState,
+    client_id: &str,
+    id: String,
+    data: String,
+) {
+    state.proxy.send(UserEvent::Frontend {
+        client_id: client_id.to_string(),
+        event: FrontendEvent::TerminalInput { id, data },
+    });
 }
 
 #[cfg(test)]
@@ -3925,6 +4315,7 @@ mod tests {
     #[test]
     fn agent_session_principal_canonicalizes_project_and_redacts_debug() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let aliased_project = project.path().join("child").join("..");
         std::fs::create_dir_all(project.path().join("child")).expect("project child");
 
@@ -3950,6 +4341,7 @@ mod tests {
     #[test]
     fn agent_session_principal_preserves_exact_project_state_scope() {
         let project_state_root = tempfile::tempdir().expect("Project State root");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project_state_root.path());
         let child_bare = project_state_root.path().join("project.git");
         let request = gwt_core::process::ProcessPlanRequest::new("git")
             .args(["init", "--bare"])
@@ -3982,6 +4374,7 @@ mod tests {
     #[test]
     fn agent_session_principal_separates_inspection_from_exact_execution_authority() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
             session_id: "session-current".to_string(),
@@ -4040,6 +4433,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_rotates_same_project_session_atomically() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
 
         let stale = registry
@@ -4062,6 +4456,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_promotes_prepared_authority_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4120,8 +4515,162 @@ mod tests {
     }
 
     #[test]
+    fn manual_handoff_reservation_refuses_an_existing_active_predecessor() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-reserved-active".to_string(),
+            repo_hash: "repo-reserved-active".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-active".to_string(),
+                binding_id: "binding-reserved-active".to_string(),
+                ledger_head_hash: "head-reserved-active".to_string(),
+            },
+            capability_generation: 4,
+        };
+        issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("active predecessor capability");
+
+        let error = issuer
+            .reserve_manual_execution_handoff(&binding)
+            .expect_err("an active predecessor handshake must refuse reservation");
+
+        assert_eq!(
+            error,
+            "manual execution handoff refuses an active predecessor capability"
+        );
+        assert!(!format!("{error:?}").contains(&binding.identity.binding_id));
+    }
+
+    #[test]
+    fn manual_handoff_reservation_blocks_matching_issue_and_promotion_only() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let predecessor = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-reserved-predecessor".to_string(),
+            repo_hash: "repo-reserved".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-predecessor".to_string(),
+                binding_id: "binding-reserved-predecessor".to_string(),
+                ledger_head_hash: "head-reserved-predecessor".to_string(),
+            },
+            capability_generation: 7,
+        };
+        let prepared = issuer
+            .issue_prepared(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect("Prepared predecessor capability");
+        let reservation = issuer
+            .reserve_manual_execution_handoff(&predecessor)
+            .expect("reserve exact predecessor handoff");
+
+        let issue_error = issuer
+            .issue_bound(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect_err("matching Active issue must be fenced");
+        assert_eq!(
+            issue_error,
+            "agent capability is reserved for manual execution handoff"
+        );
+        let promotion_error = issuer
+            .promote_prepared(&prepared.token, &predecessor)
+            .expect_err("matching promotion must be fenced");
+        assert_eq!(
+            promotion_error,
+            "agent capability is reserved for manual execution handoff"
+        );
+
+        let successor = gwt_agent::SessionExecutionBinding {
+            session_id: "session-reserved-successor".to_string(),
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-reserved-successor".to_string(),
+                binding_id: "binding-reserved-successor".to_string(),
+                ledger_head_hash: "head-reserved-successor".to_string(),
+            },
+            capability_generation: 1,
+            ..predecessor.clone()
+        };
+        let successor_session_id = successor.session_id.clone();
+        issuer
+            .issue_prepared(project.path(), &successor_session_id, successor)
+            .expect("a distinct Prepared successor is not fenced");
+
+        assert!(issuer.release_manual_execution_handoff(&reservation));
+        issuer
+            .promote_prepared(&prepared.token, &predecessor)
+            .expect("exact promotion is allowed after release");
+        issuer
+            .issue_bound(project.path(), &predecessor.session_id, predecessor.clone())
+            .expect("exact Active issue is allowed after release");
+        assert!(!issuer.release_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
+    fn manual_handoff_begin_suspends_exact_active_capability_and_can_rollback_or_commit() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45155/internal/hook-live",
+            "ws://127.0.0.1:46255/ws",
+            "ws://127.0.0.1:45155/internal/pane-ws",
+        );
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-stop-handoff".to_string(),
+            repo_hash: "repo-stop-handoff".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3547,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-stop-handoff".to_string(),
+                binding_id: "binding-stop-handoff".to_string(),
+                ledger_head_hash: "head-stop-handoff".to_string(),
+            },
+            capability_generation: 9,
+        };
+        let active = issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .expect("issue exact active holder");
+
+        let reservation = issuer
+            .begin_manual_execution_handoff(&active.token, &binding)
+            .expect("suspend exact active holder");
+        assert!(!issuer.active_token_is_current(&active.token, &binding));
+        assert!(issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .is_err());
+        assert!(issuer.rollback_manual_execution_handoff(&reservation));
+        assert!(issuer.active_token_is_current(&active.token, &binding));
+
+        let reservation = issuer
+            .begin_manual_execution_handoff(&active.token, &binding)
+            .expect("suspend exact active holder again");
+        assert!(issuer.commit_manual_execution_handoff(&reservation));
+        assert!(!issuer.active_token_is_current(&active.token, &binding));
+        assert!(issuer
+            .issue_bound(project.path(), &binding.session_id, binding.clone())
+            .is_err());
+        assert!(issuer.release_manual_execution_handoff(&reservation));
+    }
+
+    #[test]
     fn agent_capability_registry_promotes_legacy_inspection_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4168,6 +4717,7 @@ mod tests {
     #[test]
     fn continuation_promotion_can_replace_only_the_current_bearers_active_binding() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let predecessor = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4220,6 +4770,7 @@ mod tests {
     #[test]
     fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4277,6 +4828,7 @@ mod tests {
     #[test]
     fn agent_capability_issue_preflight_is_non_issuing_and_rejects_closing_principal() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:1/hook",
             "ws://127.0.0.1:1/pane",
@@ -4332,6 +4884,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_keeps_same_session_separate_across_projects() {
         let project_a = tempfile::tempdir().expect("project A tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project_a.path());
         let project_b = tempfile::tempdir().expect("project B tempdir");
         let registry = AgentCapabilityRegistry::default();
 
@@ -4359,6 +4912,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_exact_token_revoke_preserves_rotated_and_foreign_grants() {
         let project_a = tempfile::tempdir().expect("project A tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project_a.path());
         let project_b = tempfile::tempdir().expect("project B tempdir");
         let registry = AgentCapabilityRegistry::default();
         let stale_a = registry
@@ -4387,6 +4941,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_revoke_survives_project_deletion() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let token = registry
             .issue(project.path(), "session-1")
@@ -4405,6 +4960,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let token = registry
             .issue(project.path(), "session-permission-loss")
@@ -4430,6 +4986,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_exact_revoke_ignores_symlink_retargeting() {
         let root = tempfile::tempdir().expect("root tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let project_a = root.path().join("project-a");
         let project_b = root.path().join("project-b");
         let alias = root.path().join("project-link");
@@ -4486,6 +5043,7 @@ mod tests {
     #[test]
     fn agent_capability_issuer_debug_never_contains_secret_or_principal() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let issuer = AgentCapabilityIssuer::new(
             "http://127.0.0.1:43123/internal/hook-live".to_string(),
@@ -4506,6 +5064,7 @@ mod tests {
     #[test]
     fn agent_pane_scope_filters_project_output_and_frontend_authority() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign = tempfile::tempdir().expect("foreign tempdir");
         let principal =
             AgentSessionPrincipal::new(project.path(), "session-1").expect("agent principal");
@@ -4554,6 +5113,10 @@ mod tests {
             filtered["workspace"]["recent_projects"],
             serde_json::json!([])
         );
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::ListWindows),
+            Some(super::AgentFrontendRequest::ListWindows)
+        ));
 
         assert!(scope
             .filter_outbound(
@@ -4631,6 +5194,24 @@ mod tests {
                 .is_some(),
             "canonical PM replays must reach the runtime's durable project gate even when the target is absent from the current projection"
         );
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::AgentIssueMonitorScanNow {
+                expected_project_scope: "scope-123".to_string(),
+            }),
+            Some(AgentFrontendRequest::IssueMonitorScanNow {
+                expected_project_scope,
+            }) if expected_project_scope == "scope-123"
+        ));
+        assert!(scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "issue_monitor_scan_request_result",
+                    "accepted": false,
+                    "reason": "scan_already_in_flight"
+                })
+                .to_string()
+            )
+            .is_some());
         assert!(scope
             .filter_inbound(FrontendEvent::TerminalInput {
                 id: "tab-owned::agent-1".to_string(),
@@ -4933,6 +5514,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "session-1")
@@ -5113,6 +5695,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "pm-session")
@@ -5260,6 +5843,112 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let decoy = clients.register_pane("decoy-client".to_string());
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue(project.path(), "pm-session")
+            .expect("PM capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let expected_project_scope = gwt_core::paths::project_scope_hash(project.path())
+            .as_str()
+            .to_string();
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "agent_issue_monitor_scan_now",
+                        "expected_project_scope": expected_project_scope,
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send Monitor scan request");
+
+            let client_id = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let dispatched = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::AgentFrontend { .. }));
+                        position.map(|position| recorded.remove(position))
+                    };
+                    if let Some(UserEvent::AgentFrontend {
+                        client_id,
+                        grant,
+                        request:
+                            AgentFrontendRequest::IssueMonitorScanNow {
+                                expected_project_scope: routed_scope,
+                            },
+                    }) = dispatched
+                    {
+                        assert_eq!(grant.principal().session_id(), "pm-session");
+                        assert_eq!(routed_scope, expected_project_scope);
+                        break client_id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("Monitor scan runtime dispatch");
+
+            clients.dispatch(vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorScanRequestResult {
+                    accepted: true,
+                    reason: None,
+                },
+            )]);
+            let response = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("origin Monitor result")
+                .expect("Monitor result frame")
+                .expect("valid Monitor result frame");
+            let WebSocketMessage::Text(response) = response else {
+                panic!("Monitor result must be text");
+            };
+            let response: serde_json::Value =
+                serde_json::from_str(response.as_ref()).expect("Monitor result JSON");
+            assert_eq!(response["kind"], "issue_monitor_scan_request_result");
+            assert_eq!(response["accepted"], true);
+            assert!(
+                decoy.try_recv().is_none(),
+                "the Monitor result must not reach another pane client"
+            );
+        });
+        server.shutdown();
+    }
+
+    #[test]
     fn correlated_agent_self_close_is_rejected_before_enqueue_after_rotation() {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, events) = AppEventProxy::stub();
@@ -5273,6 +5962,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let original = issuer
             .issue(project.path(), "session-1")
@@ -5389,6 +6079,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "session-1")
@@ -5491,6 +6182,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let original = issuer
             .issue(project.path(), "session-1")
@@ -5606,6 +6298,7 @@ mod tests {
     #[test]
     fn accepted_self_close_makes_grant_non_current_until_ticket_finishes() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = super::AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:1/internal/hook-live",
             "ws://127.0.0.1:1/ws",
@@ -5672,6 +6365,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
         let issuer = server.agent_capability_issuer();
         let pane_websocket_url = issuer.pane_websocket_url().to_string();
@@ -5792,6 +6486,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
         let issuer = server.agent_capability_issuer();
         let stale = issuer
@@ -5888,6 +6583,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let target = server
             .agent_capability_issuer()
             .issue(project.path(), "session-inspection")
@@ -6418,6 +7114,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let target = server
             .agent_capability_issuer()
             .issue(project.path(), "session-1")
@@ -6474,6 +7171,301 @@ mod tests {
     }
 
     #[test]
+    fn blocked_build_abort_route_is_dedicated_and_authenticates_before_mutation() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let target = server
+            .agent_capability_issuer()
+            .issue(project.path(), "session-1")
+            .expect("build abort target");
+        let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+        url.set_path("/internal/build-abort-terminalization");
+        let request = serde_json::json!({
+            "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+            "claimed_session_id": "session-1",
+            "owner_number": 3580,
+            "reason": "canonical verification cannot proceed",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let browser_response = client
+            .post(format!(
+                "{}internal/build-abort-terminalization",
+                server.url()
+            ))
+            .json(&request)
+            .send()
+            .expect("browser build abort request");
+        assert_eq!(browser_response.status(), HttpStatusCode::NOT_FOUND);
+
+        let unauthorized = client
+            .post(url.clone())
+            .json(&request)
+            .send()
+            .expect("unauthorized build abort request");
+        assert_eq!(unauthorized.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let authenticated = client
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&request)
+            .send()
+            .expect("authenticated build abort request");
+        assert_eq!(authenticated.status(), HttpStatusCode::CONFLICT);
+        let error: serde_json::Value = authenticated.json().expect("build abort error body");
+        assert_eq!(error["code"], "execution_binding_mismatch");
+        assert!(events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn blocked_build_abort_route_discards_exact_bound_work_under_terminal_execution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repository");
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/blocked-build-abort"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/blocked-build-abort.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output =
+                gwt_core::process::run_git_logged(&args, Some(&repo)).expect("run fixture git");
+            assert!(output.status.success(), "git {args:?} failed");
+        }
+        let repo = dunce::canonicalize(repo).expect("canonical repository");
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3580,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/blocked-build-abort", gwt_agent::AgentId::Codex);
+        session.id = "session-blocked-build-abort-http".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save unbound Session");
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize execution control");
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize generation ledger");
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().expect("repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .expect("read active binding")
+                .expect("active binding"),
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Session");
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save bound Session");
+
+        let work_id = "work-blocked-build-abort-http";
+        let now = chrono::Utc::now();
+        let mut current =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        current
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: session.id.clone(),
+                window_id: Some("project::blocked-build-abort-http".to_string()),
+                agent_id: session.agent_id.command().to_string(),
+                display_name: session.agent_id.display_name().to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: None,
+                title_summary: None,
+                worktree_path: Some(repo.clone()),
+                branch: Some(session.branch.clone()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: Some(work_id.to_string()),
+                updated_at: now,
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &current)
+            .expect("save current projection");
+        gwt_core::workspace_projection::update_workspace_projection_with_journal_for_work_event_root(
+            &repo,
+            &repo,
+            gwt_core::workspace_projection::WorkspaceProjectionUpdate {
+                title: Some("Blocked build abort".to_string()),
+                status_category: Some(
+                    gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                ),
+                status_text: None,
+                owner: Some(format!("Issue #{}", owner.number)),
+                next_action: None,
+                summary: Some("active build".to_string()),
+                progress_summary: None,
+                agent_session_id: Some(session.id.clone()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+            gwt_core::workspace_projection::TrackedWorkEventPolicy::Persist,
+        )
+        .expect("seed Work event surfaces");
+        let mut works = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            now,
+        );
+        start.title = Some("Blocked build abort".to_string());
+        start.owner = Some(format!("Issue #{}", owner.number));
+        start.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        start.agent_session_id = Some(session.id.clone());
+        start.agent_id = Some(session.agent_id.command().to_string());
+        start.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(session.branch.clone()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        works.apply_event(start);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            &works,
+        )
+        .expect("save WorkItems");
+        gwt_core::skill_state::save(
+            &repo,
+            "build-spec",
+            &gwt_core::skill_state::SkillState {
+                active: true,
+                owner_spec: Some(owner.number),
+                started_at: now,
+                phase: Some("verify".to_string()),
+                session_id: session.id.clone(),
+            },
+        )
+        .expect("save active build lifecycle");
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let target = server
+            .agent_capability_issuer()
+            .issue_bound(&repo, &session.id, binding)
+            .expect("issue active Host capability");
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &repo,
+                &session.id,
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "canonical verification is externally blocked".to_string(),
+                    missing_verification: Some("full matrix".to_string()),
+                },
+            )
+            .expect("settle execution"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+        url.set_path("/internal/build-abort-terminalization");
+        let response = reqwest::blocking::Client::new()
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&serde_json::json!({
+                "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+                "claimed_session_id": session.id,
+                "owner_number": owner.number,
+                "reason": "canonical verification cannot proceed",
+                "observation": gwt::observe_agent_runtime(&repo).expect("observe runtime")
+            }))
+            .send()
+            .expect("send dedicated build abort");
+
+        assert_eq!(response.status(), HttpStatusCode::OK);
+        let receipt: gwt::AgentWorkTerminalizationReceipt =
+            response.json().expect("build abort receipt");
+        assert_eq!(
+            receipt.outcome,
+            gwt::AgentWorkTerminalizationOutcome::Emitted
+        );
+        let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load WorkItems")
+            .expect("WorkItems")
+            .work_items
+            .into_iter()
+            .find(|work| work.id == work_id)
+            .expect("terminal Work");
+        assert!(work.is_terminal());
+        assert!(work.discarded);
+        assert_eq!(
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+        server.shutdown();
+    }
+
+    #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
         let (state, events) = sample_server_state();
 
@@ -6518,6 +7510,119 @@ mod tests {
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalidated_fast_path_generation_cancels_resolution_without_fallback_input() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "stale-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running stale pane");
+        let stale_generation = pane.shared_pty();
+        stale_generation.invalidate_input_generation();
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::agent-1".to_string(), stale_generation);
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "1\r".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                UserEvent::RuntimeApprovalResolutionStarted { id: started },
+                UserEvent::RuntimeApprovalResolutionCancelled { id: cancelled },
+            ] if started == "tab-1::agent-1" && cancelled == "tab-1::agent-1"
+        ));
+        assert!(recorded.iter().all(|event| !matches!(
+            event,
+            UserEvent::Frontend {
+                event: FrontendEvent::TerminalInput { .. },
+                ..
+            }
+        )));
+        drop(recorded);
+        drop(pane);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_frontend_message_fast_path_marks_submit_before_write_and_ignores_navigation() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "test-pane".to_string(),
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null".to_string()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("long-running test pane");
+        state
+            .pty_writers
+            .write()
+            .expect("writer registry")
+            .insert("tab-1::agent-1".to_string(), pane.shared_pty());
+
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "1\r".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(1),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "\u{1b}[A".to_string(),
+            },
+        );
+        handle_frontend_message(
+            &state,
+            "client-1",
+            &AtomicU64::new(2),
+            FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "x".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            recorded.as_slice(),
+            [UserEvent::RuntimeApprovalResolutionStarted { id }]
+                if id == "tab-1::agent-1"
+        ));
+        drop(recorded);
+        drop(pane);
     }
 
     fn terminal_output(pane: &str, data: &str) -> BackendEvent {
@@ -7625,6 +8730,8 @@ mod tests {
         workspace_update_url.set_path("/internal/workspace-update");
         let mut work_terminalization_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         work_terminalization_url.set_path("/internal/work-terminalization");
+        let mut build_abort_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        build_abort_url.set_path("/internal/build-abort-terminalization");
         let mut execution_binding_probe_url =
             reqwest::Url::parse(&hook.url).expect("agent hook URL");
         execution_binding_probe_url.set_path("/internal/execution-binding-probe");
@@ -7655,6 +8762,18 @@ mod tests {
             "operation_id": "operation-access-log",
             "nonce": "nonce-access-log"
         });
+        let build_abort_request = serde_json::json!({
+            "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+            "claimed_session_id": "session-1",
+            "owner_number": 3580,
+            "reason": "blocked",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            }
+        });
         let client = reqwest::blocking::Client::new();
 
         let hook_response = client
@@ -7684,6 +8803,14 @@ mod tests {
             HttpStatusCode::UNAUTHORIZED
         );
 
+        let build_abort_response = client
+            .post(build_abort_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&build_abort_request)
+            .send()
+            .expect("unauthorized build abort request");
+        assert_eq!(build_abort_response.status(), HttpStatusCode::UNAUTHORIZED);
+
         let binding_probe_response = client
             .post(execution_binding_probe_url)
             .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
@@ -7701,6 +8828,7 @@ mod tests {
             "/internal/execution-binding-probe",
             "/internal/workspace-update",
             "/internal/work-terminalization",
+            "/internal/build-abort-terminalization",
         ] {
             let record = records
                 .iter()

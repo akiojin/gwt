@@ -170,7 +170,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
         "  issue.monitor.launch_now | issue.monitor.stop",
-        "  issue.monitor.failover",
+        "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
         "",
         "Key params:",
@@ -181,6 +181,8 @@ fn format_issue_help() -> String {
         "  project_root                          Optional Issue Monitor project scope",
         "  number, position                      Move one priority (head or numeric index)",
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
+        "  number, reason                        issue.monitor.requeue releases a dead",
+        "                                        agent_failed / launch_failed hold",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -440,6 +442,8 @@ fn format_verify_help() -> String {
         "",
         "Operations:",
         "  verify.plan | verify.run",
+        "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
+        "  verify.lease.status",
         "",
         "Notes:",
         "  Register the derived matrix with verify.plan first; a run must cover it.",
@@ -447,6 +451,14 @@ fn format_verify_help() -> String {
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
         "  evidence. execution.complete and Ready PR handoffs require a fresh,",
         "  all-passing record.",
+        "",
+        "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
+        "  take the lease before cargo test --all-features / cargo llvm-cov /",
+        "  headed Playwright, then release it. acquire answers immediately —",
+        "  granted, or unavailable with the current holder and its remaining",
+        "  TTL, so no agent polls another agent's process. Default TTL is 45",
+        "  minutes (params.ttl_minutes); the holder self-releases when it",
+        "  lapses, and a killed holder releases at once.",
         "",
     ]
     .join("
@@ -474,7 +486,7 @@ fn format_register_help() -> String {
 
 fn format_pm_help() -> String {
     [
-        "pm.* — PM agent diagnostics via JSON envelope (SPEC-3431).",
+        "pm.* — PM agent diagnostics and control via JSON envelope (SPEC-3431).",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -483,11 +495,21 @@ fn format_pm_help() -> String {
         "",
         "Operations:",
         "  pm.status    Report the per-project PM registration, auto-start setting,",
-        "               and a stale hint from the durable session store (read-only,",
-        "               ownerless-safe).",
+        "               a stale hint from the durable session store, and every PM",
+        "               registration in this repository including other project",
+        "               stores (read-only, ownerless-safe).",
+        "  pm.stop      Clear a PM registration in this repository and mark its",
+        "               Session unrestorable. Only a registered PM of the same",
+        "               repository may call it; `session_id` defaults to the",
+        "               caller's own registration (Issue #3607).",
         "",
         "Key params:",
         "  project_root (optional; defaults to the current repository path)",
+        "  session_id   (pm.stop; defaults to the calling PM's own Session)",
+        "",
+        "Notes:",
+        "  - pm.stop ends PM authority and the resident loop; it does not close",
+        "    the pane. Take the session_id from pm.status repository_registrations.",
     ]
     .join("\n")
 }
@@ -899,6 +921,10 @@ mod tests {
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",
+            // Issue #3645 / #3628: the only recovery for a row with no live
+            // launch. If it is not discoverable here, the operator falls back
+            // to hand-editing the state file, which is the bug.
+            "issue.monitor.requeue",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",

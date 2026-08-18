@@ -206,7 +206,9 @@ fn handle_stop(
         // the loop continuation must not be shadowed by one of them.
         (
             "pm-loop-stop-check",
-            Box::new(|| pm_loop_stop_check::handle_with_input(worktree_root, input)),
+            Box::new(|| {
+                pm_loop_stop_check::handle_with_input(worktree_root, input, current_session)
+            }),
         ),
         (
             "skill-discussion-stop-check",

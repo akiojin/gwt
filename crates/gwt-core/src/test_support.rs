@@ -22,7 +22,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     process::{Child, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     thread::JoinHandle,
@@ -209,6 +209,7 @@ pub struct WindowsNpmRegistryFixture {
     pub bunx_marker: PathBuf,
     pub registry_url: String,
     pub exact_version: String,
+    accepted_connections: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<NpmRegistryRequest>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -247,6 +248,8 @@ impl WindowsNpmRegistryFixture {
         )?;
 
         let packages = Arc::new(phase75_packages(&registry_url, &exact_version)?);
+        let accepted_connections = Arc::new(AtomicUsize::new(0));
+        let thread_accepted_connections = Arc::clone(&accepted_connections);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let thread_requests = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
@@ -257,6 +260,7 @@ impl WindowsNpmRegistryFixture {
                 while !thread_stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            thread_accepted_connections.fetch_add(1, Ordering::AcqRel);
                             let connection_packages = Arc::clone(&packages);
                             let connection_requests = Arc::clone(&thread_requests);
                             let _ = std::thread::Builder::new()
@@ -294,6 +298,7 @@ impl WindowsNpmRegistryFixture {
             bunx_marker,
             registry_url,
             exact_version,
+            accepted_connections,
             requests,
             stop,
             thread: Some(thread),
@@ -347,6 +352,96 @@ impl WindowsNpmRegistryFixture {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Number of sockets accepted, including clients that never completed an
+    /// HTTP request header. This test-only observation distinguishes npm
+    /// startup failures from request parsing stalls.
+    pub fn accepted_connection_count(&self) -> usize {
+        self.accepted_connections.load(Ordering::Acquire)
+    }
+
+    /// Probes the fixture's own HTTP boundary without touching package
+    /// metadata or tarballs.
+    pub fn probe_registry_health(&self, timeout: Duration) -> std::io::Result<()> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "loopback registry healthcheck timeout exceeds the clock range",
+            )
+        })?;
+        let remaining_timeout = || {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| *remaining >= Duration::from_millis(1))
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "loopback registry healthcheck deadline elapsed",
+                    )
+                })?;
+            Ok::<Duration, std::io::Error>(remaining)
+        };
+        let normalize_timeout_error = |error: std::io::Error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("loopback registry healthcheck deadline elapsed: {error}"),
+                )
+            } else {
+                error
+            }
+        };
+
+        let connect_timeout = remaining_timeout()?;
+        let mut stream = TcpStream::connect_timeout(&self.address, connect_timeout)
+            .map_err(&normalize_timeout_error)?;
+        let request = format!(
+            "GET /-/gwt-health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.address
+        );
+        let mut written = 0;
+        while written < request.len() {
+            let write_timeout = remaining_timeout()?;
+            stream.set_write_timeout(Some(write_timeout))?;
+            let count = stream
+                .write(&request.as_bytes()[written..])
+                .map_err(&normalize_timeout_error)?;
+            if count == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "loopback registry healthcheck request write made no progress",
+                ));
+            }
+            written += count;
+        }
+
+        let mut response = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read_timeout = remaining_timeout()?;
+            stream.set_read_timeout(Some(read_timeout))?;
+            let count = stream.read(&mut buffer).map_err(&normalize_timeout_error)?;
+            if count == 0 {
+                break;
+            }
+            response.extend_from_slice(&buffer[..count]);
+        }
+        remaining_timeout()?;
+        let response = String::from_utf8(response).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        if response.lines().next() == Some("HTTP/1.1 200 OK") {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("loopback registry healthcheck returned an invalid response: {response:?}"),
+            ))
+        }
     }
 }
 
@@ -710,15 +805,29 @@ fn serve_npm_request(
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut raw = Vec::new();
     let mut buffer = [0_u8; 4096];
+    let mut header_complete = false;
     loop {
         let count = stream.read(&mut buffer)?;
         if count == 0 {
             break;
         }
         raw.extend_from_slice(&buffer[..count]);
-        if raw.windows(4).any(|window| window == b"\r\n\r\n") || raw.len() > 64 * 1024 {
+        if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+            header_complete = true;
             break;
         }
+        if raw.len() > 64 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "loopback npm request header exceeded 64 KiB before completion",
+            ));
+        }
+    }
+    if !header_complete {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "loopback npm client closed before completing its request header",
+        ));
     }
     let request = String::from_utf8_lossy(&raw);
     let mut lines = request.split("\r\n");
@@ -740,16 +849,23 @@ fn serve_npm_request(
         });
 
     let decoded = percent_decode_registry_path(&path);
-    let response = packages.values().find_map(|package| {
-        if decoded == package.tarball_path {
-            Some((
-                "200 OK",
-                "application/octet-stream",
-                package.tarball.as_slice(),
-            ))
-        } else {
-            None
-        }
+    let response = (decoded == "/-/gwt-health").then_some((
+        "200 OK",
+        "application/json",
+        b"{\"ok\":true}".as_slice(),
+    ));
+    let response = response.or_else(|| {
+        packages.values().find_map(|package| {
+            if decoded == package.tarball_path {
+                Some((
+                    "200 OK",
+                    "application/octet-stream",
+                    package.tarball.as_slice(),
+                ))
+            } else {
+                None
+            }
+        })
     });
     let response = response.or_else(|| {
         packages.iter().find_map(|(name, package)| {

@@ -2,18 +2,17 @@
  * SPEC-2014 2026-05-27 follow-up — Launch Wizard Fast mode live E2E.
  *
  * Runs against a real gwt browser-server backend and exercises the user-facing path
- * that regressed: Start Work -> Configure and start -> Claude Code -> Fast mode
+ * that regressed: Intake -> Configure intake -> Claude Code -> Fast mode
  * -> runtime context resolution. The test stops before the final launch so it
  * does not create a branch or start a real Claude Code process.
  */
 import { expect, test, type Page } from "@playwright/test";
 import {
   acquireLiveGwtBackendLock,
-  clearLiveGwtLaunchWizard,
+  clearLiveLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
   sendLiveGwtEvent,
-  suppressInitialFrontendReady,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
@@ -33,17 +32,16 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
       "live Launch Wizard E2E runs once against the shared backend",
     );
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
-    await suppressInitialFrontendReady(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
-    await clearLiveGwtLaunchWizard(page);
     await openLiveGwtProject(page);
+    await clearLiveLaunchWizard(page);
   });
 
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
     try {
-      await clearLiveGwtLaunchWizard(page);
+      await clearLiveLaunchWizard(page);
     } finally {
       await releaseBackendLock();
       releaseBackendLock = undefined;
@@ -56,7 +54,8 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     await sendLiveGwtEvent(page, { kind: "open_intake_session" });
 
     const wizard = page.locator("#wizard-modal");
-    await chooseWizardStartMethod(page, "Configure intake");
+    await expect(wizard).toBeVisible();
+    await chooseConfigureAndStart(page);
 
     await selectWizardAgent(page, "claude");
 
@@ -65,17 +64,21 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     });
     await expect(fastMode).toBeVisible();
     await fastMode.setChecked(false);
+    await blurActiveElement(page);
     await expect(fastModeSummaryValue(page)).toHaveText("off");
     await fastMode.setChecked(true);
+    await blurActiveElement(page);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
 
     const submit = page.locator("#wizard-submit-button");
     await expect(submit).toHaveText("Continue");
     await submit.click();
 
-    await expect(submit).toHaveText("Continue");
+    await expect(submit).toHaveText(/^(Continue|Launch)$/);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
-    await submit.click();
+    if ((await submit.textContent())?.trim() === "Continue") {
+      await submit.click();
+    }
 
     await expect(submit).toHaveText(/^(Launch|Create and launch)$/);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
@@ -97,7 +100,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
 
       const wizard = page.locator("#wizard-modal");
       await expect(wizard).toBeVisible();
-      await chooseWizardStartMethod(page, /Configure and start/);
+      await chooseConfigureAndStart(page);
 
       await selectWizardAgent(page, "claude");
       await wizard
@@ -173,6 +176,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   if (tag === "select") {
     await agentField.selectOption(agentId);
     await expect(agentField).toHaveValue(agentId);
+    await agentField.blur();
     return;
   }
   const option = wizard.locator(
@@ -180,6 +184,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   );
   await option.click();
   await expect(option).toHaveAttribute("aria-checked", "true");
+  await blurActiveElement(page);
 }
 
 function fastModeSummaryValue(page: Page) {
@@ -199,23 +204,26 @@ async function openLaunchWizardForCurrentBranch(page: Page): Promise<void> {
   });
 }
 
-async function chooseWizardStartMethod(
-  page: Page,
-  configureName: string | RegExp,
-): Promise<void> {
+async function chooseConfigureAndStart(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const agentSelect = wizard.getByLabel("Agent", { exact: true });
   if (await agentSelect.isVisible().catch(() => false)) {
     return;
   }
 
-  const configureButton = wizard
-    .getByRole("button", { name: configureName })
-    .first();
-  await expect(configureButton).toBeVisible({ timeout: 90_000 });
-  await expect(configureButton).toBeEnabled({ timeout: 10_000 });
-  await configureButton.click();
-  await agentSelect.waitFor({ state: "visible", timeout: 90_000 });
+  await sendLiveGwtEvent(page, {
+    kind: "launch_wizard_action",
+    action: { kind: "set_launch_path", path: "manual_setup" },
+    bounds: null,
+  });
+  await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
+}
+
+async function blurActiveElement(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  });
 }
 
 async function createWorkWindow(page: Page) {

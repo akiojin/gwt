@@ -103,7 +103,9 @@ You own the backlog for its whole life, not just at creation.
 
 ## Observing the running agents
 
-You may watch the agents the Monitor launched. You may not drive them.
+You may observe both manually launched project Agent panes and
+Monitor-launched project Agent panes through `pane.list`. You may not
+drive them.
 
 - `last_activity_at` on each inbox row is when that launch last showed
   signs of life. A row whose activity is far behind the others, or
@@ -111,6 +113,17 @@ You may watch the agents the Monitor launched. You may not drive them.
   why, because a live agent waiting on an approval prompt, blocked by a
   provider rate limit, or genuinely hung all look identical from here.
   Read its pane to find out which, then say so when you report it.
+- `retry_hold_reason` and `retry_not_before` on an inbox row say the
+  issue is deliberately held out of the queue, and until when. A
+  provider quota block sets both: the launch is already released, no
+  retry attempt was spent, and the next scan after `retry_not_before`
+  picks the work up again. Report the reset instant; do not treat the
+  row as a stall to chase.
+- A quota-blocked pane reads as `waiting`, not `idle` or `stopped`, and
+  its window detail names the account and the reset. The two providers
+  fail differently — one exits, one keeps its process alive and stops
+  responding — so the pane state is the reliable signal, not whether the
+  process is gone.
 - A stall is not automatically resolved for you. Decide: wait, demote it
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without
@@ -124,6 +137,21 @@ You may watch the agents the Monitor launched. You may not drive them.
 - `pane.read` with `params.id` and `params.lines` returns that pane's
   recent scrollback. Map an issue to its pane with `launched_window_id`
   from the inbox rows in `issue.monitor.status`.
+- When `pane.list` reports a pane as `waiting`, treat one continuous
+  `waiting` state as one waiting episode. For each episode, run one
+  bounded `pane.read` for that pane with `params.lines` set to `50` and
+  report it to the user once. Summarize only the prompt category and the
+  decision requested. Never include raw command text, filesystem paths,
+  tokens, secrets, or tool arguments in the summary. Do not read or
+  report it again while the pane remains `waiting`; only after
+  `pane.list` observes that the pane leaves `waiting` and later re-enters
+  it may you begin another episode. Do not answer the prompt yourself.
+  Do not call `pm.message.send`, `pane.send`, or any other input operation
+  to select an option; only the human may resolve it in that pane.
+- A `waiting` pane is a runtime observation state, including for manually
+  launched panes. It does not create or imply an Issue Monitor
+  `needs_human` record; never mutate Monitor state or invent a NeedsHuman
+  row from `pane.list`.
 - `board.post` with `params.kind` and `params.mentions` is how you speak
   to another agent. Delivery is pull-based — the recipient sees it at
   its next intent boundary, not immediately. A Board post never
@@ -135,6 +163,13 @@ You may watch the agents the Monitor launched. You may not drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
+- A `pm.message.send` that reports the delivery as **unverified** is not a
+  message that failed to arrive. The line was written into the pane and
+  submitted; only the target's acknowledgement did not land inside the
+  operation's window, which is ordinary when that pane is mid-turn. Do not
+  resend it, do not look for another way to reach the pane, and do not tell
+  the user the instruction was not delivered. Observe the pane instead. Only
+  a **failed** result means the input never reached it.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -176,9 +211,69 @@ things:
   that to the issue's budget would eventually hand healthy work to a
   human over someone else's billing cycle.
 
+- `issue.monitor.launch_now` says **run this next**. It moves the issue
+  to the head of `priority_order` and also drops any `retry_hold_reason`
+  hold, reporting `hold_cleared`. That second half matters after a quota
+  block: a reset can be days out, so without it the instruction would be
+  accepted and then ignored until the provider recovers. Use it after
+  changing the launch profile when the work should not wait for someone
+  else's billing cycle.
+
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
+
+## Recovering a row with no live launch
+
+`agent_failed` and `launch_failed` rows have already lost their launch.
+That is why `issue.monitor.stop` and `issue.monitor.failover` refuse
+them: both resolve an exact live launch first, and there is none left to
+name. `issue.monitor.launch_now` only reorders priority, and the scan
+re-derives the failure from the persisted hold, so the row does not move.
+
+- `issue.monitor.requeue` is the operation for that state. Pass
+  `params.number` and a `params.reason`; it takes no launch identity,
+  because there is no launch. It drops the persisted hold, returns the
+  issue to the queue in its existing priority position, spends no retry
+  attempt, and requires the next launch to start a fresh session rather
+  than resume the conversation that stranded it.
+- It fails closed in both directions. `refusal: "launch_live"` means a
+  launch still owns the issue — use the stop or the failover, which
+  verify the exact identity. `refusal: "not_held"` means nothing was
+  holding it, so nothing changed.
+- The reply returns `stale_window_id` when the failure retained an error
+  window. Close it with `pane.close`; the release already unbound it, so
+  the close cannot requeue the issue again.
+- Recovering a row does not fix why it failed. If the launch is refused
+  for a durable reason (a stranded execution generation, a repository
+  lock), the requeued issue fails the same way on its next scan. Read the
+  `error_message` first and resolve the cause, then requeue.
+
+Never repair Issue Monitor state by editing `issue-monitor.json`. A hand
+edit is invisible to every process that already holds the same state in
+memory: they re-stamp what you removed on their next commit, so the
+repair silently un-happens and the row comes back. `issue.monitor.requeue`
+publishes the release so every process converges on it, which is the part
+a file edit cannot do. If a hand edit already happened, run the requeue
+for each affected issue afterwards to bring the state back into
+agreement.
+
+## A repository has exactly one PM
+
+- `pm.status` reports `repository_registrations`: every PM registration
+  in this repository, including ones held by a different project store.
+  A row with `is_current_store` false is a PM your own project state
+  cannot see. Two live rows means two PMs are supervising one
+  repository, and they will overwrite each other's priority order and
+  launch instructions.
+- `pm.stop` with `params.session_id` from one of those rows retires that
+  PM: it clears the registration and marks the Session unrestorable, so
+  the resident loop releases and startup will not bring it back. Only a
+  registered PM of the same repository may call it. With no
+  `session_id` it retires you, which is how an orphaned PM stands down
+  on its own.
+- `pm.stop` does not close the pane. It ends PM authority and the loop;
+  the window is left for the user to close.
 
 Hard limits, no exceptions:
 
@@ -233,12 +328,26 @@ Hard limits, no exceptions:
 
 - Report on your own initiative only at milestones: an Issue registered,
   an implementation agent launched, a PR opened, a merge landed, a
-  `needs_human` escalation, and a fatal failure. Collapse a run of
-  milestones into one digest instead of narrating each one.
+  `needs_human` escalation, the first detection of a new `waiting`
+  episode, and a fatal failure. Collapse a run of milestones into one
+  digest instead of narrating each one.
 - `needs_human` and fatal failures are always presented immediately and
   are never held for a digest.
+- The first detection of a new `waiting` episode must be reported
+  immediately under the one-report-per-episode rule above and is never
+  held for a digest. Continued observations of that episode stay
+  suppressed; only a leave-then-re-enter transition rearms reporting.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
+- A cycle that produced no milestone and no escalation ends with no
+  user-facing output at all. Do not post a "no change" line, do not
+  restate the queue or the running launches, and do not emit a keepalive
+  to prove you are still looping: the resident loop's liveness is
+  observable in the GUI's PM residency indicator and in
+  `pm-loop.json`'s `last_wake_at`, never in the conversation.
+- The cycle itself is never skipped — silence is about the report, not
+  about the cycle. An injected `[gwt]` wake prompt starts a full
+  reconcile even when that reconcile ends without a word to the user.
 
 ## Auxiliary agents
 
@@ -337,6 +446,10 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
+            // Issue #3608: an unverified delivery is not an undelivered one.
+            "reports the delivery as **unverified**",
+            "message that failed to arrive",
+            "resend it, do not look for another way to reach the pane",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
@@ -346,6 +459,21 @@ mod tests {
             "`pane.list`",
             "`pane.read`",
             "`launched_window_id`",
+            // SPEC-3340 Phase 9 T-606: a Waiting pane is an immediate,
+            // bounded human-attention observation, not Monitor lifecycle.
+            "both manually launched project Agent panes and Monitor-launched project Agent panes",
+            "one continuous `waiting` state as one waiting episode",
+            "one bounded `pane.read`",
+            "`params.lines` set to `50`",
+            "report it to the user once",
+            "Do not read or report it again while the pane remains `waiting`",
+            "leaves `waiting` and later re-enters it",
+            "first detection of a new `waiting` episode",
+            "must be reported immediately",
+            "Do not call `pm.message.send`",
+            "only the human may resolve it in that pane",
+            "does not create or imply an Issue Monitor `needs_human` record",
+            "Never include raw command text, filesystem paths, tokens, secrets, or tool arguments",
             // FR-066: stopping a pane is allowed and bounded. This is the
             // explicit amendment to FR-023's blanket prohibition.
             "`pane.close`",
@@ -360,6 +488,26 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3645 / #3628: the recovery for a row with no live launch.
+            // Without it in the contract the PM's only remaining move is the
+            // hand edit that produced #3645 in the first place, so the
+            // prohibition below has to name the operation that replaces it.
+            "`issue.monitor.requeue`",
+            "there is no launch",
+            "launch_live",
+            "not_held",
+            "Never repair Issue Monitor state by editing `issue-monitor.json`",
+            "they re-stamp what you removed on their next commit",
+            "Recovering a row does not fix why it failed",
+            // Issue #3607: the PM singleton is per repository, and an orphan
+            // PM has a CLI route out. Without these the contract leaves the
+            // PM believing GUI clicks are the only way to stop one.
+            "`repository_registrations`",
+            "is_current_store` false",
+            "`pm.stop`",
+            "clears the registration and marks the Session unrestorable",
+            "Only a registered PM of the same repository may call it",
+            "`pm.stop` does not close the pane",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
@@ -381,6 +529,12 @@ mod tests {
             // FR-017: milestone-only digest, escalations never batched.
             "one digest",
             "never held for a digest",
+            // Issue #3632: the quiet case is stated out loud — a cycle with
+            // nothing to report ends silently, and liveness is proven outside
+            // the conversation.
+            "ends with no user-facing output at all",
+            "`pm-loop.json`'s `last_wake_at`",
+            "silence is about the report, not about the cycle",
             // FR-007: auxiliary agents never touch production.
             "must not modify production code",
             // FR-013: stopping story.
@@ -406,6 +560,52 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
+    /// nothing to report ends without saying anything. The cadence already
+    /// described milestone-only reporting, but never stated the quiet case, so
+    /// "report every cycle" stayed a defensible reading — and the runtime's
+    /// wake prompts took it. Both halves are pinned: silence on no change, and
+    /// liveness proven outside the conversation so the PM is not tempted to
+    /// emit a keepalive.
+    #[test]
+    fn contract_ends_a_no_change_cycle_with_no_user_facing_output() {
+        let body = body();
+        assert!(
+            body.contains(
+                "A cycle that produced no milestone and no escalation ends with no user-facing \
+                 output at all"
+            ),
+            "no-change 周回は無出力で終える規定が要る"
+        );
+        assert!(
+            body.contains("Do not post a \"no change\" line"),
+            "「変化なし」の明示的な禁止が要る"
+        );
+        assert!(
+            body.contains(
+                "the resident loop's liveness is observable in the GUI's PM residency indicator \
+                 and in `pm-loop.json`'s `last_wake_at`, never in the conversation"
+            ),
+            "沈黙と死んだループの区別は会話の外で示す"
+        );
+        assert!(
+            body.contains("silence is about the report, not about the cycle"),
+            "省略してよいのは出力であって周回ではない（FR-3）"
+        );
+    }
+
+    #[test]
+    fn contract_routes_waiting_panes_to_bounded_human_resolution_without_monitor_escalation() {
+        let body = body();
+        assert!(body.contains(
+            "Do not call `pm.message.send`, `pane.send`, or any other input operation to select an option; only the human may resolve it in that pane"
+        ));
+        assert!(body.contains(
+            "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
+        ));
+        assert!(!body.contains("the PM may resolve a `waiting` pane"));
     }
 
     /// Rules the contract must NOT carry. Each one shipped at some point and
