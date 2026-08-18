@@ -76,6 +76,67 @@ Primary kinds:
 - `kind:"blocked"` - unblock request
 - `kind:"handoff"` - concrete handoff
 
+### Blocked: escalating to the PM
+
+The moment you conclude you cannot proceed in this window - a refused
+operation, a decision only the owner can make, a missing tool, an
+environment you cannot repair - post `kind:"blocked"` immediately. Do
+not wait for the Stop gate. The routine
+"ready for the next instruction" notice does not stand in for it: that
+notice is a `status` post, it cannot say why you stopped, and while an
+unblock request is open gwt withholds it entirely.
+
+A blocked body MUST carry these four labelled lines, or `board.post`
+refuses it:
+
+    事象: <what happened; paste the refused operation and its exact error text>
+    原因: <why you cannot proceed; say so plainly if the cause is unknown>
+    依頼: <what you need from the PM: fresh launch / spec ruling / tool fix / ...>
+    再開条件: <what has to be true before work can resume>
+
+`Symptom:` / `Cause:` / `Request:` / `Resume:` are accepted in place of
+the Japanese labels. Attach the owning Issue with `params.owners`; a
+blocked post inherits your session's Issue when you omit it, and an
+escalation with no owner cannot reach `issue.monitor.status`
+`needs_human`.
+
+Posting `blocked` also mirrors the same text onto the owning Issue as a
+comment, because the Board scrolls and a closed pane takes its
+transcript with it. If the mirror fails, the output tells you so - record
+it yourself with `issue.comment`, so the next agent does not repeat your
+investigation.
+
+gwt files a `blocked` post on your behalf in two cases: when an
+operation is refused on permission, immutability, or authority grounds
+(for example `execution.reopen` on a completed record, or
+`workspace.ensure` with a mismatched authority), and when you settle the
+execution with `execution.blocked`, whose `params.reason` becomes the
+escalation. Add the context gwt could not know; do not post a second
+escalation for the same operation.
+
+When the blocker clears, close the escalation explicitly - nothing else
+does. Post with `params.resolves` naming the blocked entry id, which the
+posting output and every PM-facing surface repeat back to you:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
+    JSON
+
+### Proposing new Issues to the PM
+
+Do not call `issue.create`. When you find something that deserves its own
+Issue, post `kind:"decision"` mentioning the PM and let the PM register it,
+so duplicates are caught before two Issues exist rather than after. The
+proposal body MUST carry four items: 事象 (with primary evidence), 既存
+Issue で扱えない根拠 (including your duplicate-search result), 提案 AC,
+and 緊急度 (whether it blocks another PR or agent). The PM replies on the
+Board with the registered Issue number, threaded under your proposal via
+`params.parent`, so watch for a reply carrying your proposal's entry id.
+
+Commenting on an existing Issue with `issue.comment` is never restricted
+- add evidence, propose acceptance criteria, and share analysis freely.
+Only creating a new Issue routes through the PM.
+
 ## Work (current state)
 
 The Board is history; Work is current state. Update Work with a JSON
@@ -264,6 +325,62 @@ mentions 由来の audience に scope されます。mention 省略を broadcast
 - `kind:"next"` — 次の作業を broadcast
 - `kind:"blocked"` — unblock 要請
 - `kind:"handoff"` — 具体的な引き継ぎ
+
+### Blocked: PM へのエスカレーション
+
+この window では進められないと結論した瞬間（operation の拒否、owner に
+しかできない判断、欠けているツール、自力で直せない環境）に
+`kind:"blocked"` を投稿します。Stop gate を待たないでください。定型の
+"ready for the next instruction" は `status` 投稿であり停止理由を表現
+できないため代用になりません。未解決の unblock 要請がある間、gwt はその
+定型投稿自体を抑止します。
+
+blocked の本文には次の 4 項目を必ずラベル行として含めます。欠けている
+場合 `board.post` は投稿を拒否します:
+
+    事象: <何が起きたか。拒否された operation とエラー文言をそのまま貼る>
+    原因: <なぜ進めないのか。未判明ならそう書く>
+    依頼: <PM に何をしてほしいか: fresh launch / 仕様裁定 / ツール修正 など>
+    再開条件: <何が満たされれば作業を再開できるか>
+
+`Symptom:` / `Cause:` / `Request:` / `Resume:` も受け付けます。担当 Issue
+は `params.owners` で付けます（省略時は session の Issue を継承）。owner の
+無い escalation は `issue.monitor.status` の `needs_human` に届きません。
+
+blocked 投稿は同じ本文を担当 Issue のコメントにも自動でミラーします。
+Board は流れ、pane は閉じれば transcript ごと消えるためです。ミラーに
+失敗した場合は出力にその旨が出るので、`issue.comment` で自分で記録し、
+次の担当が同じ調査をやり直さないようにします。
+
+次の 2 つのケースでは gwt が代わりに `blocked` を起票します: permission /
+immutability / authority 由来で operation が拒否された場合（例: 完了済み
+record への `execution.reopen`、authority 不整合の `workspace.ensure`）と、
+`execution.blocked` で execution を終端させた場合（`params.reason` が
+escalation 本文になります）。gwt が知り得ない文脈を補足し、同じ operation
+について二重に起票しないでください。
+
+blocker が解消したら、必ず明示的に escalation を閉じます（他の投稿では
+閉じません）。投稿出力と PM 向けの各面が entry id を提示するので、
+`params.resolves` にその id を指定して投稿します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
+    JSON
+
+### Issue 化は PM へ提案する
+
+`issue.create` を直接呼ばないでください。Issue 化すべき事象を見つけたら
+PM を mention した `kind:"decision"` を投稿し、登録は PM が行います。
+登録主体を 1 つにすることで、重複を「登録後」ではなく「登録前」に検出
+できます。提案本文には 4 項目を必ず含めます: 事象（一次証拠つき）、既存
+Issue で扱えない根拠（重複検索の結果を含む）、提案 AC、緊急度（他の PR /
+agent をブロックしているか）。PM は登録した Issue 番号を返すので、Board
+の返信を確認してください。
+
+既存 Issue への `issue.comment` は一切制限しません。証拠の追記、AC の提案、
+分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
+PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
+指定した Board 返信で返します。
 
 ## Work (current state)
 
@@ -492,7 +609,93 @@ mod tests {
             "`params.status:\"done\"`",
             "exact `chore(work):` prefix",
             "gwt never commits or pushes",
+            // Issue #3655 AC-7: the escalation contract is only as reliable as
+            // its presence in the guidance every gwt-managed session loads.
+            "事象:",
+            "原因:",
+            "依頼:",
+            "再開条件:",
+            "params.resolves",
+            "issue.monitor.status",
+            "needs_human",
+            "Do not call `issue.create`",
         ]
+    }
+
+    /// Issue #3655 AC-7 / AC-10 / AC-12: both bodies and the generated file
+    /// must carry the escalation and Issue-proposal contracts, or an agent
+    /// reading only the skill has no way to know either rule exists.
+    #[test]
+    fn escalation_and_issue_proposal_contracts_are_in_both_bodies_and_the_generated_file() {
+        for phrase in [
+            "事象:",
+            "原因:",
+            "依頼:",
+            "再開条件:",
+            "params.resolves",
+            "needs_human",
+            "issue.comment",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn guidance_states_that_the_routine_stop_notice_is_not_an_escalation() {
+        let rendered = render_skill_md();
+        assert!(
+            rendered.contains("ready for the next instruction"),
+            "the guidance must name the notice agents mistook for an escalation"
+        );
+        assert!(
+            rendered.contains("gwt withholds it entirely"),
+            "the guidance must state that an open escalation suppresses the routine notice"
+        );
+    }
+
+    #[test]
+    fn guidance_routes_new_issue_registration_through_the_pm() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(
+                body.contains("issue.create"),
+                "the guidance must name the operation it is redirecting"
+            );
+        }
+        assert!(
+            SKILL_BODY_EN.contains("Do not call `issue.create`"),
+            "English guidance must state the prohibition"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("`issue.create` を直接呼ばないでください"),
+            "Japanese guidance must state the prohibition"
+        );
+        // AC-12: the prohibition covers registration only.
+        assert!(
+            SKILL_BODY_EN.contains("is never restricted"),
+            "English guidance must keep issue.comment unrestricted"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("一切制限しません"),
+            "Japanese guidance must keep issue.comment unrestricted"
+        );
+    }
+
+    #[test]
+    fn guidance_requires_an_explicit_resolution_to_close_an_escalation() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(
+                body.contains("\"resolves\":[\"<blocked-entry-id>\"]"),
+                "the guidance must show the exact resolution envelope"
+            );
+        }
     }
 
     #[test]

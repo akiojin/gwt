@@ -259,6 +259,37 @@ fn issue_monitor_project_root<E: CliEnv>(
     Ok(gwt_core::paths::resolve_current_worktree_root(&canonical))
 }
 
+/// Issue #3655 AC-4 / AC-9: fold Board escalations into `needs_human`.
+///
+/// The autonomous lifecycle only knows about the issues *it* parked, so an
+/// agent that stopped because an operation refused it was invisible in the one
+/// field a PM reads to find work needing a human. Merging here — after the
+/// snapshot is obtained, not inside either branch — means the daemon
+/// projection and the offline fallback cannot disagree, and it deliberately
+/// reads a file rather than a pane, so it still answers while `pane.read` is
+/// failing under GUI event-loop saturation (#3629).
+fn merge_board_escalations_into_needs_human(
+    project_root: &std::path::Path,
+    status: &mut crate::IssueMonitorAgentStatus,
+) {
+    let escalated = match gwt_core::coordination::load_escalation_store(project_root) {
+        Ok(store) => store.open_owner_issue_numbers(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not read the Board escalation index for issue.monitor.status"
+            );
+            return;
+        }
+    };
+    for issue_number in escalated {
+        if !status.needs_human.contains(&issue_number) {
+            status.needs_human.push(issue_number);
+        }
+    }
+    status.needs_human.sort_unstable();
+}
+
 fn run_monitor_status<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -269,8 +300,9 @@ fn run_monitor_status<E: CliEnv>(
     if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(&project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
-        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+        let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        merge_board_escalations_into_needs_human(&project_root, &mut status);
         out.push_str(
             &serde_json::to_string(&status)
                 .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -300,8 +332,10 @@ fn run_monitor_status<E: CliEnv>(
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
     // would silently disagree about what a caller can rely on.
+    let mut status = monitor.agent_status_at(&now);
+    merge_board_escalations_into_needs_human(&project_root, &mut status);
     out.push_str(
-        &serde_json::to_string(&monitor.agent_status_at(&now))
+        &serde_json::to_string(&status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
     );
     out.push('\n');
@@ -1982,6 +2016,90 @@ mod tests {
             .expect("the record survives");
         assert_eq!(record.retry_not_before, None);
         assert_eq!(record.retry_hold_reason, None);
+    }
+
+    /// Issue #3655 AC-4: an open unblock request has to be visible in the one
+    /// field the PM reads to find work that needs a human.
+    #[test]
+    fn issue_monitor_status_surfaces_an_open_board_escalation_as_needs_human() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let escalation = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Claude Code",
+            gwt_core::coordination::BoardEntryKind::Blocked,
+            "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        gwt_core::coordination::post_entry(&repo, escalation).expect("post escalation");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("status json: {out}");
+        assert_eq!(
+            status["needs_human"],
+            serde_json::json!([2338]),
+            "an agent blocked on #2338 must be findable without reading its pane: {out}"
+        );
+    }
+
+    /// ...and disappear again the moment somebody resolves it.
+    #[test]
+    fn issue_monitor_status_drops_the_escalation_once_it_is_resolved() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let escalation = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Claude Code",
+            gwt_core::coordination::BoardEntryKind::Blocked,
+            "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        let escalation_id = escalation.id.clone();
+        gwt_core::coordination::post_entry(&repo, escalation).expect("post escalation");
+        let mut resolution = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::User,
+            "You",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            "fresh launch を手配しました",
+            None,
+            None,
+            vec![],
+            vec!["2338".to_string()],
+        );
+        resolution.resolves_entry_ids = vec![escalation_id];
+        gwt_core::coordination::post_entry(&repo, resolution).expect("post resolution");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("status json: {out}");
+        assert_eq!(status["needs_human"], serde_json::json!([]), "{out}");
     }
 
     #[test]

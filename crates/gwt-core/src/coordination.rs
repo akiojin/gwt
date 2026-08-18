@@ -26,7 +26,12 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::BareProjectConfig, paths::gwt_project_dir_for_repo_path, GwtError, Result};
+use crate::{
+    board_escalation::{BoardEscalation, BoardEscalationStore, ESCALATIONS_FILE_NAME},
+    config::BareProjectConfig,
+    paths::gwt_project_dir_for_repo_path,
+    GwtError, Result,
+};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -321,6 +326,16 @@ pub struct BoardEntry {
     pub state: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Board entry ids this post closes (Issue #3655). Only a `blocked` entry
+    /// can be named here; anything else is ignored by the escalation fold.
+    ///
+    /// Deliberately separate from `parent_id`: threading says "this reply
+    /// belongs under that post", which is true of any follow-up including the
+    /// ones that report the block is still standing. Resolution is a much
+    /// stronger claim and needs its own explicit word, or an agent chatting in
+    /// a thread would silently retire the request it was discussing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves_entry_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -440,6 +455,7 @@ impl BoardEntry {
             title_summary: None,
             state,
             parent_id,
+            resolves_entry_ids: Vec::new(),
             created_at: now,
             updated_at: now,
             related_topics,
@@ -519,6 +535,8 @@ pub struct BoardEntryDraft {
     pub title: Option<String>,
     pub title_summary: Option<String>,
     pub parent_id: Option<String>,
+    /// Escalation ids this post closes (Issue #3655).
+    pub resolves_entry_ids: Vec<String>,
     pub related_topics: Vec<String>,
     pub related_owners: Vec<String>,
     pub target_owners: Vec<String>,
@@ -542,6 +560,7 @@ impl BoardEntryDraft {
             title: None,
             title_summary: None,
             parent_id: None,
+            resolves_entry_ids: Vec::new(),
             related_topics: Vec::new(),
             related_owners: Vec::new(),
             target_owners: Vec::new(),
@@ -580,6 +599,7 @@ impl BoardEntryDraft {
         );
         entry.title = trimmed_or_none(self.title);
         entry.title_summary = trimmed_or_none(self.title_summary);
+        entry.resolves_entry_ids = sanitize_board_terms(&self.resolves_entry_ids);
         entry.target_owners = sanitize_board_terms(&self.target_owners);
         entry.mentions = normalize_board_mentions(&self.mentions);
         entry.audience = normalize_board_audience(self.audience);
@@ -890,6 +910,10 @@ pub fn coordination_board_projection_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(BOARD_PROJECTION_FILE_NAME)
 }
 
+pub fn coordination_escalations_path(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join(ESCALATIONS_FILE_NAME)
+}
+
 fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(".lock")
 }
@@ -927,6 +951,109 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
         return with_coordination_lock(worktree_root, || repair_snapshot_locked(worktree_root));
     }
     Ok(CoordinationSnapshot { board: projection })
+}
+
+/// Read the blocked-escalation index (Issue #3655).
+///
+/// The index is a derived file, so a missing or unreadable one is repaired by
+/// replaying the event log rather than reported as an error: a reader asking
+/// "who is blocked?" must never be told "the index is broken" when the answer
+/// is recoverable from history that is already on disk.
+pub fn load_escalation_store(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    ensure_repo_local_files(worktree_root)?;
+    let path = coordination_escalations_path(worktree_root);
+    if path.exists() {
+        match load_json_or_default::<BoardEscalationStore>(&path) {
+            Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+                return Ok(store)
+            }
+            Ok(store) => {
+                tracing::warn!(
+                    version = store.version,
+                    "board escalation index has an unknown version; rebuilding from the event log"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "board escalation index is unreadable; rebuilding from the event log"
+                );
+            }
+        }
+    }
+    with_coordination_lock(worktree_root, || {
+        rebuild_escalation_store_locked(worktree_root)
+    })
+}
+
+/// Every unblock request that is still standing, oldest first.
+pub fn load_open_escalations(worktree_root: &Path) -> Result<Vec<BoardEscalation>> {
+    Ok(load_escalation_store(worktree_root)?.open_escalations())
+}
+
+/// Open escalations concerning one owner (an Issue number as text).
+pub fn load_open_escalations_for_owner(
+    worktree_root: &Path,
+    owner: &str,
+) -> Result<Vec<BoardEscalation>> {
+    Ok(load_escalation_store(worktree_root)?
+        .open_for_owner(owner)
+        .into_iter()
+        .cloned()
+        .collect())
+}
+
+/// How long a closed escalation stays in the index.
+///
+/// Long enough to explain a recently resolved blocker, short enough that a
+/// years-old repository does not carry every unblock request it ever had. Open
+/// escalations are never pruned at any age — an unanswered request is the most
+/// important row in the file.
+const RESOLVED_ESCALATION_RETENTION_DAYS: i64 = 30;
+
+fn resolved_escalation_cutoff() -> DateTime<Utc> {
+    Utc::now() - chrono::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
+}
+
+fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let coordination_root = coordination_dir(worktree_root);
+    let mut entries = load_board_entries_from_segments_root(&coordination_root)?;
+    entries.sort_by_key(|entry| entry.created_at);
+    let mut store = BoardEscalationStore::from_entries(entries.iter());
+    store.prune_resolved_before(resolved_escalation_cutoff());
+    write_atomic_json(&coordination_escalations_path(worktree_root), &store)?;
+    Ok(store)
+}
+
+/// Fold one freshly appended entry into the index, already holding the
+/// coordination lock.
+///
+/// A never-written index is rebuilt from the whole log instead of started from
+/// this single entry, so upgrading an existing repository does not silently
+/// discard the escalations that were already open.
+fn update_escalation_store_locked(worktree_root: &Path, entry: &BoardEntry) -> Result<()> {
+    let path = coordination_escalations_path(worktree_root);
+    if !path.exists() {
+        rebuild_escalation_store_locked(worktree_root)?;
+        return Ok(());
+    }
+    let mut store: BoardEscalationStore = match load_json_or_default(&path) {
+        Ok(store) => store,
+        Err(_) => {
+            rebuild_escalation_store_locked(worktree_root)?;
+            return Ok(());
+        }
+    };
+    if store.version != crate::board_escalation::ESCALATION_STORE_VERSION {
+        rebuild_escalation_store_locked(worktree_root)?;
+        return Ok(());
+    }
+    let applied = store.apply_entry(entry);
+    let pruned = store.prune_resolved_before(resolved_escalation_cutoff());
+    if applied || pruned {
+        write_atomic_json(&path, &store)?;
+    }
+    Ok(())
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
@@ -988,6 +1115,23 @@ fn arbitrate_coordination_lock_result<T>(
     operation_result
 }
 
+/// Fold a committed entry into the escalation index, best-effort.
+///
+/// The entry is already durable at this point, so an index failure must not
+/// turn a successful post into an error the caller might retry — that would
+/// duplicate the very unblock request the index exists to track. The index is
+/// derived and self-heals on the next read.
+fn update_escalation_store_after_commit(worktree_root: &Path, event: &CoordinationEvent) {
+    let CoordinationEvent::MessageAppended { entry } = event;
+    if let Err(error) = update_escalation_store_locked(worktree_root, entry) {
+        tracing::warn!(
+            entry_id = %entry.id,
+            %error,
+            "board entry committed but the escalation index could not be updated"
+        );
+    }
+}
+
 fn append_event_locked_outcome(
     worktree_root: &Path,
     event: &CoordinationEvent,
@@ -1004,12 +1148,14 @@ fn append_event_locked_outcome(
     )? {
         EventAppendOutcome::ManifestUpdated(manifest) => manifest,
         EventAppendOutcome::CommittedWithoutManifest { error } => {
+            update_escalation_store_after_commit(worktree_root, event);
             return Ok(BoardPostOutcome::CommittedWithoutSnapshot {
                 entry_id,
                 refresh_error: error,
             });
         }
     };
+    update_escalation_store_after_commit(worktree_root, event);
 
     let refresh_result = (|| -> Result<CoordinationSnapshot> {
         let mut projection: BoardProjection =
@@ -3729,6 +3875,7 @@ mod tests {
             vec![
                 ".lock".to_string(),
                 "board.latest.json".to_string(),
+                ESCALATIONS_FILE_NAME.to_string(),
                 "events".to_string(),
                 "events.manifest.json".to_string(),
             ]
@@ -4644,5 +4791,250 @@ mod tests {
             assert_eq!(kind.as_str(), value);
         }
         assert!(BoardEntryKind::from_str("mystery").is_err());
+    }
+
+    // ---- Issue #3655: durable blocked-escalation index -------------------
+
+    fn escalation_entry(kind: BoardEntryKind, owner: &str, body: &str) -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            kind,
+            body,
+            None,
+            None,
+            vec![],
+            vec![owner.to_string()],
+        )
+    }
+
+    #[test]
+    fn posting_a_blocked_entry_opens_a_persisted_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        post_entry(dir.path(), blocked.clone()).unwrap();
+
+        assert!(
+            coordination_escalations_path(dir.path()).exists(),
+            "the escalation index must be written next to the board projection"
+        );
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].entry_id, blocked.id);
+        assert_eq!(open[0].body, "事象: 実行不能");
+        assert_eq!(
+            load_escalation_store(dir.path())
+                .unwrap()
+                .open_owner_issue_numbers(),
+            vec![2338]
+        );
+    }
+
+    #[test]
+    fn an_explicit_resolution_post_closes_the_persisted_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_routine_status_post_leaves_the_escalation_standing() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(
+                BoardEntryKind::Status,
+                "2338",
+                "Claude Code is ready for the next instruction on Issue #2338",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            1,
+            "the Stop-gate status post must never retire an unblock request"
+        );
+    }
+
+    #[test]
+    fn the_escalation_survives_scrolling_out_of_the_hot_projection() {
+        // The production failure this index exists for: on a busy board the
+        // blocked post leaves the 500-entry projection within hours, and every
+        // reader that derives "who is blocked" from the timeline goes blind.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.kind == BoardEntryKind::Blocked),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+        assert_eq!(
+            load_open_escalations_for_owner(dir.path(), "2338")
+                .unwrap()
+                .len(),
+            1,
+            "the index must answer independently of the hot projection window"
+        );
+    }
+
+    #[test]
+    fn a_lost_escalation_index_is_rebuilt_from_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::remove_file(coordination_escalations_path(dir.path())).unwrap();
+
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1, "a derived file must self-heal from history");
+        assert!(
+            coordination_escalations_path(dir.path()).exists(),
+            "the rebuild must persist so the next read is cheap"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_escalation_index_is_rebuilt_rather_than_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::write(coordination_escalations_path(dir.path()), "{ not json").unwrap();
+
+        let open = load_open_escalations(dir.path()).unwrap();
+        assert_eq!(open.len(), 1);
+    }
+
+    #[test]
+    fn an_index_written_before_this_feature_is_backfilled_on_first_post() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate an existing repository: board history exists, no index does.
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能"),
+        )
+        .unwrap();
+        std::fs::remove_file(coordination_escalations_path(dir.path())).unwrap();
+
+        post_entry(
+            dir.path(),
+            escalation_entry(BoardEntryKind::Status, "2338", "unrelated"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_open_escalations(dir.path()).unwrap().len(),
+            1,
+            "backfilling must replay history instead of starting from the new entry"
+        );
+    }
+
+    #[test]
+    fn resolves_entry_ids_round_trip_through_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = escalation_entry(BoardEntryKind::Decision, "2338", "解消しました");
+        entry.resolves_entry_ids = vec!["some-entry-id".to_string()];
+        post_entry(dir.path(), entry).unwrap();
+
+        let snapshot = rebuild_snapshot_from_segments(dir.path()).unwrap();
+        assert_eq!(
+            snapshot.board.entries[0].resolves_entry_ids,
+            vec!["some-entry-id".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_index_forgets_old_resolved_rows_but_never_an_open_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 古い blocker");
+        stale.created_at = Utc::now() - chrono::Duration::days(120);
+        stale.updated_at = stale.created_at;
+        let stale_id = stale.id.clone();
+        post_entry(dir.path(), stale).unwrap();
+
+        let mut resolution = escalation_entry(BoardEntryKind::Decision, "2338", "解消済み");
+        resolution.created_at = Utc::now() - chrono::Duration::days(119);
+        resolution.updated_at = resolution.created_at;
+        resolution.resolves_entry_ids = vec![stale_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let mut fresh = escalation_entry(BoardEntryKind::Blocked, "3645", "事象: 未解決");
+        fresh.created_at = Utc::now() - chrono::Duration::days(200);
+        fresh.updated_at = fresh.created_at;
+        post_entry(dir.path(), fresh).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        assert!(
+            !store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == stale_id),
+            "a long-closed escalation must not accumulate forever"
+        );
+        assert_eq!(
+            store.open_owner_issue_numbers(),
+            vec![3645],
+            "an unanswered request survives pruning at any age"
+        );
+    }
+
+    #[test]
+    fn a_legacy_entry_without_the_field_still_deserializes() {
+        let entry: BoardEntry = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "blocked",
+            "body": "legacy body",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z",
+        }))
+        .unwrap();
+        assert!(entry.resolves_entry_ids.is_empty());
     }
 }

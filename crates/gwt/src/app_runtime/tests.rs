@@ -51302,6 +51302,117 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
     );
 }
 
+/// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
+///
+/// The production failure: the Board showed the routine "ready for the next
+/// instruction" line and nothing else, so the PM had no way to tell a finished
+/// agent from one that had concluded it could not proceed, and resorted to
+/// reading panes one at a time — the channel that fails under GUI event-loop
+/// saturation. This reads the escalation index instead, so no pane is involved.
+fn seed_open_escalation(repo: &std::path::Path, owner: &str, body: &str) -> String {
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::Agent,
+        "Claude Code",
+        gwt_core::coordination::BoardEntryKind::Blocked,
+        body,
+        None,
+        None,
+        vec![],
+        vec![owner.to_string()],
+    );
+    let id = entry.id.clone();
+    gwt_core::coordination::post_entry(repo, entry).expect("post escalation");
+    id
+}
+
+#[test]
+fn both_wake_prompts_carry_the_open_escalation_bodies() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let entry_id = seed_open_escalation(
+        &repo,
+        "2338",
+        "事象: execution.reopen が immutable で拒否\n\
+         原因: Completed ECR\n\
+         依頼: fresh launch を手配してほしい\n\
+         再開条件: #2338 に紐づく新しい pane",
+    );
+
+    // The delta wake: baseline first, then one genuinely new signal.
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-18T01:00:00Z")
+        .is_none());
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    let delta = runtime
+        .pm_wake_decision_at(&repo, &escalated, "2026-08-18T01:01:00Z")
+        .expect("a fresh signal must wake the quiet PM");
+
+    // The periodic wake, standing on the escalation alone: no queue, no active
+    // launch, no autonomous needs_human row.
+    let periodic = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+        .expect("an open escalation is standing supervision work on its own");
+
+    for (prompt, label) in [(&delta.prompt, "delta"), (&periodic.prompt, "periodic")] {
+        assert!(
+            prompt.contains("UNRESOLVED BLOCKED ESCALATIONS (1)"),
+            "{label} wake must name the standing blockers; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("fresh launch を手配してほしい"),
+            "{label} wake must carry the body, not just a count; got: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("params.resolves:[\"{entry_id}\"]")),
+            "{label} wake must hand back the handle that closes it; got: {prompt}"
+        );
+        assert!(
+            !prompt.trim_end_matches('\r').contains('\n'),
+            "{label} wake is typed into a pane and must stay one line; got: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn a_resolved_escalation_leaves_the_wake_prompts_unchanged() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let entry_id = seed_open_escalation(
+        &repo,
+        "2338",
+        "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+    );
+    let mut resolution = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::User,
+        "You",
+        gwt_core::coordination::BoardEntryKind::Decision,
+        "fresh launch を手配しました",
+        None,
+        None,
+        vec![],
+        vec!["2338".to_string()],
+    );
+    resolution.resolves_entry_ids = vec![entry_id];
+    gwt_core::coordination::post_entry(&repo, resolution).expect("post resolution");
+
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+            .is_none(),
+        "a resolved escalation must stop counting as supervision work"
+    );
+}
+
 #[test]
 fn wake_prompts_ask_for_a_report_only_when_the_cycle_changed_something() {
     let _env_lock = env_test_lock()
