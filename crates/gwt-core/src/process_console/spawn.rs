@@ -228,6 +228,11 @@ async fn spawn_logged_inner(
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
+    if matches!(kind, ProcessKind::Git) {
+        // Issue #3629 AC-7: feed the per-thread git spawn counter so "must
+        // not spawn git" regression assertions cover this route too.
+        crate::process::note_thread_git_spawn();
+    }
 
     trace_process_start(kind, spawn_id, &options, &program);
 

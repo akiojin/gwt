@@ -443,7 +443,7 @@ fn format_verify_help() -> String {
         "",
         "Usage:",
         "  gwtd <<'JSON'",
-        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt -- --check\",\"cargo test -p gwt --lib\"]}}",
+        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
         "  JSON",
         "",
         "Operations:",

@@ -445,6 +445,19 @@ pub fn gwt_workspace_work_events_intake_state_path_for_repo_path(repo_path: &Pat
 /// non-repository directory), the input path is returned unchanged so the
 /// caller still gets a deterministic, non-failing repo-local location.
 pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
+    // Issue #3629 AC-1/AC-2: the workspace-home layout (a directory holding
+    // child bare repos and worktrees, itself not a git work tree) is gwt's
+    // standard project layout, and asking git first burned a guaranteed
+    // exit-128 subprocess on every call. Resolve by filesystem inspection
+    // when git discovery cannot possibly succeed.
+    if !git_repository_discovery_possible(repo_path) {
+        return first_child_bare_repository(repo_path)
+            .map(|bare| {
+                let bare = std::fs::canonicalize(&bare).unwrap_or(bare);
+                normalize_windows_child_process_path(&bare)
+            })
+            .unwrap_or_else(|| repo_path.to_path_buf());
+    }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         Some(repo_path),
@@ -477,6 +490,24 @@ pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
     normalize_windows_child_process_path(&common_dir)
 }
 
+/// Whether git repository discovery could possibly succeed for `path` —
+/// without spawning git.
+///
+/// Git resolves a repository from a path by (a) honoring an explicit
+/// `GIT_DIR` override, (b) treating a directory that itself looks like a git
+/// directory (`HEAD` + `objects` + `refs`) as the repository, or (c) walking
+/// the ancestry for a `.git` entry (directory or linked-worktree file). When
+/// none of those hold, every `git rev-parse` is a guaranteed exit-128 spawn
+/// (Issue #3629 AC-1): callers should resolve the workspace-home layout by
+/// filesystem inspection instead.
+pub fn git_repository_discovery_possible(path: &Path) -> bool {
+    std::env::var_os("GIT_DIR").is_some()
+        || (path.join("HEAD").exists()
+            && path.join("objects").exists()
+            && path.join("refs").exists())
+        || path.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 /// Return the first child bare repository directory under `repo_path`, if any.
 ///
 /// A bare repository is identified by the presence of `HEAD`, `objects`, and
@@ -505,6 +536,11 @@ fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
 /// worktree, the only place a git-tracked file can actually live. Falls back to
 /// `repo_path` when git cannot resolve a toplevel (non-repository directory).
 pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
+    // Issue #3629 AC-1/AC-2: see `resolve_main_worktree_root` — never spawn a
+    // git subprocess that is guaranteed to fail with exit 128.
+    if !git_repository_discovery_possible(repo_path) {
+        return repo_path.to_path_buf();
+    }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
         Some(repo_path),
@@ -1012,6 +1048,76 @@ mod tests {
             .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    /// Issue #3629 AC-1/AC-2: the nested-bare workspace-home layout (gwt's
+    /// standard project layout) must resolve by filesystem inspection alone.
+    /// Asking git first burned a doomed exit-128 subprocess on every call —
+    /// thousands per minute under the periodic Work scans.
+    #[test]
+    fn resolve_main_worktree_root_resolves_nested_bare_layout_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(bare.join("objects")).expect("objects");
+        std::fs::create_dir_all(bare.join("refs")).expect("refs");
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_main_worktree_root(tmp.path());
+
+        assert_eq!(
+            resolved,
+            normalize_windows_child_process_path(
+                &std::fs::canonicalize(&bare).expect("canonical bare")
+            )
+        );
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "nested-bare layout resolution must not spawn git (Issue #3629)"
+        );
+    }
+
+    /// Issue #3629 AC-1/AC-2: same contract for the current-worktree resolver —
+    /// a layout root has no working tree, so the answer is the input path and
+    /// git has nothing to add.
+    #[test]
+    fn resolve_current_worktree_root_returns_layout_root_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(bare.join("objects")).expect("objects");
+        std::fs::create_dir_all(bare.join("refs")).expect("refs");
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_current_worktree_root(tmp.path());
+
+        assert_eq!(resolved, tmp.path());
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "layout-root resolution must not spawn git (Issue #3629)"
+        );
+    }
+
+    /// A plain directory with no `.git` anywhere up its ancestry and no child
+    /// bare repository cannot be a repository; git would only confirm that
+    /// with an exit-128 spawn.
+    #[test]
+    fn resolve_main_worktree_root_returns_plain_non_repo_dir_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("plain dir");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_main_worktree_root(&plain);
+
+        assert_eq!(resolved, plain);
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "non-repo resolution must not spawn git (Issue #3629)"
+        );
     }
 
     #[test]
