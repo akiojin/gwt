@@ -1845,6 +1845,8 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                             &mut monitor,
                             project_root,
+                            &owner,
+                            &repo,
                         )
                         .err()
                         .map(|error| {
@@ -4378,6 +4380,8 @@ impl AppRuntime {
                             gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                                 &mut monitor,
                                 &project_root,
+                                &owner,
+                                &repo,
                             )
                             .err()
                             .map(|error| {

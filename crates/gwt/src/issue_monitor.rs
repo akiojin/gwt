@@ -545,6 +545,20 @@ pub struct IssueMonitorPrefs {
     pub queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
+    /// Issue #3645 / #3628: failure holds an operator released.
+    ///
+    /// Removing an entry from `failed_issues` says nothing to a process that
+    /// still holds the same failure in memory: the disk merge only ever *adds*
+    /// disk failures, so the stale holder re-stamps the row on its next commit
+    /// and the recovery silently un-happens. A release therefore has to be a
+    /// published fact rather than the absence of one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub released_failures: Vec<IssueMonitorReleasedFailure>,
+    /// Monotonic counter for the releases above. A process adopts only releases
+    /// issued after the snapshot it already observed, so a release cannot erase
+    /// a failure that was recorded later.
+    #[serde(default)]
+    pub failure_release_version: u64,
     /// Compatibility projection of Issue-wide completed records. Kept for old
     /// readers; `completion_records` is the current source of truth.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -614,6 +628,8 @@ impl Default for IssueMonitorPrefs {
             pending_launch_deliveries: Vec::new(),
             queued_launch_session_strategies: BTreeMap::new(),
             failed_issues: Vec::new(),
+            released_failures: Vec::new(),
+            failure_release_version: 0,
             merged_issues: Vec::new(),
             issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
             completion_records: Vec::new(),
@@ -837,6 +853,20 @@ pub struct IssueMonitorFailedIssue {
     /// for failures that never opened a window (e.g. pre-launch errors).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+}
+
+/// Issue #3645 / #3628: one operator recovery, published so every process
+/// converges on it. Kept until the same issue fails again, at which point the
+/// newer failure supersedes the release and the entry is dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorReleasedFailure {
+    pub issue_number: u64,
+    /// Value of [`IssueMonitorPrefs::failure_release_version`] when this
+    /// release was issued. A reader adopts it only when it is newer than the
+    /// snapshot the reader already observed.
+    pub release_version: u64,
+    pub released_at: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1143,6 +1173,23 @@ pub enum IssueMonitorFailoverOutcome {
     Mismatch(IssueMonitorStopMismatch),
 }
 
+/// Issue #3645 / #3628: the result of an operator recovery for a row that a
+/// failure is holding out of the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorRequeueOutcome {
+    /// The hold was released and the issue is queued again. `stale_window_id`
+    /// is the error window the failure retained, if any, so the caller can reap
+    /// it — the release already unbound it from the issue.
+    Requeued { stale_window_id: Option<String> },
+    /// A launch still owns this issue. Recovering it here would mint a second
+    /// claim for one issue, so the exact-identity operations `stop_only` and
+    /// `failover_restart` own that case instead.
+    LaunchLive,
+    /// No failure is holding this issue. Nothing was changed, and reporting a
+    /// recovery would tell the operator the state moved when it did not.
+    NotHeld,
+}
+
 /// SPEC-3431 FR-033: marks an inbox error as a deliberate stop rather than a
 /// failure, so FR-031 diagnostics can tell "the PM stopped this" apart from
 /// "this ran out of retries".
@@ -1359,6 +1406,14 @@ pub struct IssueMonitorState {
     /// #3165 error-window lifecycle: the stale agent window id retained per
     /// failed issue, so an explicit Launch Now can close it before relaunching.
     failed_windows: BTreeMap<u64, String>,
+    /// Issue #3645 / #3628: operator recoveries published for other processes.
+    /// Mutually exclusive with `failed_issues` per issue — a newer failure
+    /// always supersedes the release that preceded it.
+    #[serde(default)]
+    released_failures: BTreeMap<u64, IssueMonitorReleasedFailure>,
+    /// Highest release version this process has issued or observed.
+    #[serde(default)]
+    failure_release_version: u64,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
     /// Durable ACK-driven deliveries. Unlike `pending_launches`, this queue is
@@ -2385,6 +2440,8 @@ impl IssueMonitorState {
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
             failed_windows: BTreeMap::new(),
+            released_failures: BTreeMap::new(),
+            failure_release_version: 0,
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_launch_deliveries: VecDeque::new(),
@@ -2450,6 +2507,19 @@ impl IssueMonitorState {
                 state.failed_windows.insert(failed.issue_number, window_id);
             }
         }
+        state.failure_release_version = prefs.failure_release_version;
+        for release in prefs.released_failures {
+            // A failure and a release for the same issue cannot both be true.
+            // Trust the failure: it is the state that keeps work out of the
+            // queue, so believing a contradictory release would relaunch work
+            // that a live process just reported as broken.
+            if state.failed_issues.contains_key(&release.issue_number) {
+                continue;
+            }
+            state
+                .released_failures
+                .insert(release.issue_number, release);
+        }
         state.issue_completion_migration_version = prefs.issue_completion_migration_version;
         for record in prefs.completion_records {
             state.merge_completion_record(record);
@@ -2514,6 +2584,8 @@ impl IssueMonitorState {
                     window_id: self.failed_windows.get(issue_number).cloned(),
                 })
                 .collect(),
+            released_failures: self.released_failures.values().cloned().collect(),
+            failure_release_version: self.failure_release_version,
             merged_issues: self.merged_issues.iter().copied().collect(),
             issue_completion_migration_version: self.issue_completion_migration_version,
             completion_records: self.completion_records.values().cloned().collect(),
@@ -3048,6 +3120,7 @@ impl IssueMonitorState {
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
         self.set_active_launch_id(issue_number, None);
         self.failed_issues.insert(issue_number, reason.clone());
+        self.released_failures.remove(&issue_number);
         self.last_error = Some(format!("issue #{issue_number}: {reason}"));
         if let Some(item) = self
             .inbox
@@ -3466,6 +3539,12 @@ impl IssueMonitorState {
         {
             self.merge_older_marker_disk_failures(disk);
         }
+        // Issue #3645: applied after the failure merges above, which otherwise
+        // restore the very hold the operator released — leaving this process
+        // convinced the issue is still broken and writing that view back over
+        // the recovery on its next commit.
+        self.adopt_failure_releases_from_prefs(disk);
+        self.drop_releases_for_failed_issues();
         self.refresh_disk_owned_prefs(disk);
         let terminal_issue_numbers = self
             .merged_issues
@@ -3525,6 +3604,7 @@ impl IssueMonitorState {
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
         self.set_active_launch_id(issue_number, None);
         self.failed_issues.insert(issue_number, message.clone());
+        self.released_failures.remove(&issue_number);
         if let Some(item) = self
             .inbox
             .iter_mut()
@@ -5785,6 +5865,63 @@ impl IssueMonitorState {
         to_merge
     }
 
+    /// Issue #3645 AC-3/AC-4: issues whose completion the launch tracking
+    /// cannot see, nominated from the merged-branch list alone.
+    ///
+    /// [`Self::reconcile_merged_branches`] resolves branches through
+    /// `active_launched_branches`, so a launch the tracking lost — which is
+    /// exactly what emptying `launched_issues` produces — can merge without the
+    /// Monitor ever noticing. This nominates the same work from the other side:
+    /// a non-terminal row that is not currently launched, whose work branch has
+    /// merged.
+    ///
+    /// Nomination is deliberately not completion. A branch merged for a
+    /// *previous* generation of a reopened issue is also in that list forever,
+    /// so the caller decides with the generation-aware linked-PR probe. Keeping
+    /// the cheap local filter and the authoritative remote check separate is
+    /// what bounds the probe to branch matches instead of the whole queue.
+    pub fn untracked_merged_branch_candidates(
+        &self,
+        merged_branches: &BTreeSet<String>,
+    ) -> Vec<IssueMonitorIssue> {
+        self.inbox
+            .iter()
+            .filter(|item| {
+                !item.state.is_terminal()
+                    && item.issue.state == IssueMonitorIssueState::Open
+                    && !self.merged_issues.contains(&item.issue.number)
+                    && !self.active_launches.contains(&item.issue.number)
+            })
+            .filter(|item| {
+                item.launch_plan
+                    .as_ref()
+                    .is_some_and(|plan| merged_branches.contains(&plan.branch_name))
+            })
+            .map(|item| item.issue.clone())
+            .collect()
+    }
+
+    /// Whether any row could be nominated by
+    /// [`Self::untracked_merged_branch_candidates`] at all. Lets the caller skip
+    /// the merged-branch query entirely on a monitor with nothing to reconcile.
+    pub fn has_open_launch_plan_candidates(&self) -> bool {
+        self.inbox.iter().any(|item| {
+            !item.state.is_terminal()
+                && item.issue.state == IssueMonitorIssueState::Open
+                && item.launch_plan.is_some()
+                && !self.merged_issues.contains(&item.issue.number)
+                && !self.active_launches.contains(&item.issue.number)
+        })
+    }
+
+    /// Record a completion that the launch tracking never saw, once the caller's
+    /// generation-aware probe confirmed it. Returns `false` when the shared
+    /// completion policy decides the Issue still has open work, in which case
+    /// the Issue returns to the queue rather than becoming terminal.
+    pub fn record_untracked_completion(&mut self, issue_number: u64) -> bool {
+        self.record_issue_completion(issue_number, IssueCompletionEvidence::LinkedPr)
+    }
+
     /// An agent window closed without the work completing. Frees the active
     /// slot and returns the Issue to pending (`Queued`) — never a fabricated
     /// "done" state. Terminal states (Merged/Released/failed) are preserved.
@@ -6068,6 +6205,128 @@ impl IssueMonitorState {
         }
     }
 
+    /// Issue #3645 / #3628: release the failure holding one issue out of the
+    /// queue, without a live launch to name.
+    ///
+    /// [`Self::stop_only`] and [`Self::failover_restart`] both resolve an exact
+    /// live launch first, which is right for them and fatal here: a row that
+    /// reached `AgentFailed` has *already* lost its launch, so every path that
+    /// demands one refuses it and the only remaining recovery is a hand edit of
+    /// the state file. This operation is deliberately separate rather than a
+    /// relaxation of the failover gate, because relaxing that gate would make
+    /// one call sometimes kill a running agent and sometimes resurrect a dead
+    /// row — the exact ambiguity the exact-identity match exists to prevent.
+    ///
+    /// It consumes no retry attempt: nothing about the work failed, an operator
+    /// decided the hold was wrong.
+    pub fn requeue_failed_issue(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorRequeueOutcome {
+        // Fail closed on anything a launch still owns. `record_failed_issue`
+        // clears active tracking, so a genuinely failed row never trips this;
+        // a row that does trip it is live, and killing a running agent is the
+        // one mistake no later compensation can undo.
+        if self.active_launches.contains(&issue_number)
+            || self.launched_windows.contains_key(&issue_number)
+            || self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+        {
+            return IssueMonitorRequeueOutcome::LaunchLive;
+        }
+        if !self.failed_issues.contains_key(&issue_number) {
+            return IssueMonitorRequeueOutcome::NotHeld;
+        }
+
+        let stale_window_id = self.failed_windows.get(&issue_number).cloned();
+        self.failure_release_version += 1;
+        let release = IssueMonitorReleasedFailure {
+            issue_number,
+            release_version: self.failure_release_version,
+            released_at: now.to_string(),
+            reason: reason.to_string(),
+        };
+        self.released_failures.insert(issue_number, release);
+        self.apply_failure_release(issue_number);
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} requeued by operator: {reason}"),
+        );
+        IssueMonitorRequeueOutcome::Requeued { stale_window_id }
+    }
+
+    /// Apply one released hold. Shared by [`Self::requeue_failed_issue`] and by
+    /// the cross-process adoption of a release another process committed, so a
+    /// converged process cannot land in a different state than the one that
+    /// issued the recovery.
+    fn apply_failure_release(&mut self, issue_number: u64) {
+        let removed_banner = self
+            .failed_issues
+            .get(&issue_number)
+            .map(|message| format!("issue #{issue_number}: {message}"));
+        self.failed_issues.remove(&issue_number);
+        self.failed_windows.remove(&issue_number);
+        // The abandoned conversation is what stranded this issue; resuming it
+        // would reproduce the failure the recovery is undoing.
+        self.require_fresh_launch_session(issue_number);
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.retry_not_before = None;
+            record.active_launch_id = None;
+            if record.phase == AutonomousPhase::NeedsHuman {
+                record.phase = AutonomousPhase::Idle;
+            }
+        }
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+        }
+        self.apply_priority_order_to_queue();
+        if removed_banner
+            .as_ref()
+            .is_some_and(|banner| self.last_error.as_ref() == Some(banner))
+        {
+            self.last_error = self.first_failed_issue_banner();
+        }
+    }
+
+    /// Converge on operator recoveries committed by another process.
+    ///
+    /// Only releases issued *after* the snapshot this process already observed
+    /// are adopted. Without that watermark a release would also erase failures
+    /// recorded after it — the process that just discovered a real failure would
+    /// undo its own finding on the next rebase.
+    fn adopt_failure_releases_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        let observed = self.failure_release_version;
+        for release in &disk.released_failures {
+            if release.release_version <= observed {
+                continue;
+            }
+            // A completed issue is terminal; re-queueing it would relaunch
+            // delivered work.
+            if self.merged_issues.contains(&release.issue_number) {
+                continue;
+            }
+            self.released_failures
+                .insert(release.issue_number, release.clone());
+            self.apply_failure_release(release.issue_number);
+        }
+        self.failure_release_version = observed.max(disk.failure_release_version);
+    }
+
+    /// Restore the invariant that one issue is never both failed and released.
+    /// Called after every path that can adopt a failure from disk, so a stale
+    /// release can never be republished alongside the failure that superseded
+    /// it.
+    fn drop_releases_for_failed_issues(&mut self) {
+        self.released_failures
+            .retain(|issue_number, _| !self.failed_issues.contains_key(issue_number));
+    }
+
     /// Recover an AgentFailed writer conflict only when the reporting window
     /// is still the exact launched window for the hinted issue.
     pub fn requeue_agent_resume_writer_conflict(
@@ -6306,6 +6565,9 @@ impl IssueMonitorState {
             self.failed_windows.insert(issue_number, window_id);
         }
         self.failed_issues.insert(issue_number, message.clone());
+        // A newer failure supersedes the recovery that preceded it, or the
+        // stale release would erase this hold on the next cross-process rebase.
+        self.released_failures.remove(&issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
@@ -8683,6 +8945,195 @@ mod tests {
         }
     }
 
+    /// An `agent_failed` row exactly as the 2026-08-17 outage left it: the
+    /// launch is gone, the hold is persisted, and the issue is out of the queue.
+    fn agent_failed_monitor(number: u64, message: &str) -> IssueMonitorState {
+        let mut monitor = launched_monitor(number, "tab-1::agent-1");
+        monitor.record_agent_issue_failed(number, message);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(!monitor.queued_issue_numbers().contains(&number));
+        assert_eq!(
+            monitor.inbox_item(number).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+        monitor
+    }
+
+    /// Issue #3645 AC-1 / #3628 AC-1: an `agent_failed` row holds no live
+    /// launch, so every exact-identity operation (`stop_only`,
+    /// `failover_restart`) refuses it and the operator has nothing left but a
+    /// hand edit of the state file. This is the operation that ends that.
+    #[test]
+    fn requeue_failed_issue_returns_an_agent_failed_row_to_the_queue() {
+        let mut monitor = agent_failed_monitor(42, "an execution generation already exists");
+        let attempts_before = monitor.attempt_count(42);
+
+        assert_eq!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
+            IssueMonitorRequeueOutcome::Requeued {
+                stale_window_id: Some("tab-1::agent-1".to_string()),
+            }
+        );
+
+        assert!(
+            monitor.queued_issue_numbers().contains(&42),
+            "the recovered issue must be launchable again"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(monitor.inbox_item(42).unwrap().error_message.is_none());
+        assert!(
+            !monitor
+                .prefs()
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == 42),
+            "the persisted hold must be gone, not just the in-memory row"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            attempts_before,
+            "an operator recovery is not a retry, so it spends no attempt"
+        );
+        assert_eq!(
+            monitor.prefs().queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired),
+            "the abandoned session must not be resumed by the recovered launch"
+        );
+    }
+
+    /// Issue #3628 AC-6: the recovery exists for rows no launch can reach.
+    /// Applying it to a running agent would fabricate a second claim for the
+    /// same issue, which no later compensation can undo.
+    #[test]
+    fn requeue_failed_issue_refuses_a_live_launch() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let before = monitor.prefs();
+
+        assert_eq!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
+            IssueMonitorRequeueOutcome::LaunchLive
+        );
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "a refused recovery must leave the live launch untouched"
+        );
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    /// Saying "recovered" about a row nobody was holding would tell the operator
+    /// the state changed when it did not.
+    #[test]
+    fn requeue_failed_issue_reports_when_nothing_is_held() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
+        let before = monitor.prefs();
+
+        assert_eq!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
+            IssueMonitorRequeueOutcome::NotHeld
+        );
+        assert_eq!(monitor.prefs(), before);
+    }
+
+    /// Issue #3645: the manual recovery that produced this Issue was undone
+    /// because removing a failure does not propagate. Every other process keeps
+    /// the failure in memory and re-stamps it on its next commit, which is why
+    /// the PM's hand edit "did not stick". A release therefore has to be a
+    /// published fact, not the absence of one.
+    #[test]
+    fn requeue_failed_issue_release_survives_a_cross_process_rebase() {
+        let mut recovering = agent_failed_monitor(42, "an execution generation already exists");
+        assert!(matches!(
+            recovering.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        let disk = recovering.prefs();
+
+        for rebase in [
+            IssueMonitorState::rebase_gui_observer_prefs
+                as fn(&mut IssueMonitorState, &IssueMonitorPrefs),
+            IssueMonitorState::rebase_daemon_driver_prefs,
+        ] {
+            let mut observer = agent_failed_monitor(42, "an execution generation already exists");
+            rebase(&mut observer, &disk);
+            assert!(
+                !observer
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == 42),
+                "a process that still holds the failure must converge on the release"
+            );
+            assert!(
+                observer.queued_issue_numbers().contains(&42),
+                "converging on the release must put the issue back in line"
+            );
+            assert_eq!(
+                observer.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::Queued)
+            );
+            // And the converged state must itself publish the release, or the
+            // next process to rebase on it would re-stamp the failure again.
+            let mut third = agent_failed_monitor(42, "an execution generation already exists");
+            third.rebase_gui_observer_prefs(&observer.prefs());
+            assert!(
+                !third
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == 42),
+                "the release must remain published across a second hop"
+            );
+        }
+    }
+
+    /// A release is not permanent immunity. Work that fails again after being
+    /// recovered must hold exactly like any other failure.
+    #[test]
+    fn a_failure_recorded_after_a_release_is_not_erased_by_it() {
+        let mut monitor = agent_failed_monitor(42, "first failure");
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        let released = monitor.prefs();
+
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+        monitor.record_agent_issue_failed(42, "second failure");
+        let refailed = monitor.prefs();
+
+        assert!(
+            refailed
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == 42),
+            "the newer failure is persisted"
+        );
+
+        // A process still carrying the older release snapshot must not undo it.
+        let mut observer = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                failed_issues: Vec::new(),
+                ..released.clone()
+            },
+        );
+        observer.record_candidate(issue(42));
+        observer.rebase_gui_observer_prefs(&refailed);
+        assert!(
+            observer
+                .prefs()
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == 42),
+            "a stale release must not erase a failure recorded after it"
+        );
+    }
+
     /// SPEC-3431 FR-030 / T-080: after a failover the issue has exactly one
     /// active pane, and the delayed close of the abandoned one does not add a
     /// second.
@@ -8936,6 +9387,96 @@ mod tests {
         let merged: BTreeSet<String> = ["work/some-other-branch".to_string()].into_iter().collect();
         assert!(monitor.reconcile_merged_branches(&merged).is_empty());
         assert_eq!(monitor.active_count(), 1, "unmerged work stays launched");
+    }
+
+    /// Issue #3645 AC-3/AC-4: emptying `launched_issues` — the repair the
+    /// 2026-08-17 outage required — makes every in-flight launch invisible to
+    /// [`IssueMonitorState::reconcile_merged_branches`], which only ever looks
+    /// at `active_launched_branches`. Completion detection therefore has to have
+    /// a second entrance that does not depend on the tracking at all.
+    #[test]
+    fn untracked_merged_work_is_still_a_completion_candidate() {
+        let monitor = launched_monitor(42, "tab-1::agent-1");
+        let branch = monitor
+            .active_launched_branches()
+            .into_iter()
+            .find(|(number, _)| *number == 42)
+            .map(|(_, branch)| branch)
+            .expect("launched branch");
+        let merged: BTreeSet<String> = [branch].into_iter().collect();
+
+        // The launch tracking is wiped exactly as a hand repair wipes it.
+        let mut untracked = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: Vec::new(),
+                launching_issues: Vec::new(),
+                ..monitor.prefs()
+            },
+        );
+        scan_issue_monitor_candidates(&mut untracked, &[issue(42)], "2026-08-17T16:00:00Z");
+        assert!(
+            untracked.reconcile_merged_branches(&merged).is_empty(),
+            "the tracked path cannot see a launch that is no longer tracked"
+        );
+
+        assert_eq!(
+            untracked
+                .untracked_merged_branch_candidates(&merged)
+                .iter()
+                .map(|issue| issue.number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "the merged work branch alone must be enough to nominate the issue"
+        );
+        assert!(untracked.record_untracked_completion(42));
+        assert_eq!(
+            untracked.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+        assert!(
+            !untracked.queued_issue_numbers().contains(&42),
+            "delivered work must stop being a relaunch candidate"
+        );
+    }
+
+    /// A work branch merged for an earlier generation must never park work that
+    /// was reopened after it. Nominating is cheap and local; the caller's
+    /// generation-aware probe is what decides, so a candidate is never a
+    /// completion on its own.
+    #[test]
+    fn untracked_candidates_exclude_terminal_and_active_rows() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let branch = monitor
+            .active_launched_branches()
+            .into_iter()
+            .find(|(number, _)| *number == 42)
+            .map(|(_, branch)| branch)
+            .expect("launched branch");
+        let merged: BTreeSet<String> = [branch].into_iter().collect();
+
+        assert!(
+            monitor
+                .untracked_merged_branch_candidates(&merged)
+                .is_empty(),
+            "an active launch belongs to the tracked path, not this one"
+        );
+
+        monitor.record_agent_issue_failed(42, "boom");
+        assert!(
+            monitor
+                .untracked_merged_branch_candidates(&merged)
+                .is_empty(),
+            "a terminal row is recovered by requeue, not silently completed"
+        );
+
+        monitor.record_merged(42);
+        assert!(
+            monitor
+                .untracked_merged_branch_candidates(&merged)
+                .is_empty(),
+            "already-complete work is not nominated again"
+        );
     }
 
     fn spec_issue(
