@@ -20,6 +20,27 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+/// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
+/// injects into the resident PM must end.
+///
+/// Three separate injection points drive a PM cycle — the delta wake, the
+/// periodic wake, and the Stop-gate forced continuation — and each used to
+/// phrase the reporting expectation itself. Injected text outranks the gwt-pm
+/// skill body for the reading agent, so those three sentences, not the
+/// milestone-only cadence in `gwt_skills::pm_guidance`, decided what the PM
+/// actually did: both wakes closed with a flat "report the milestone digest"
+/// and produced a digest on every tick, change or no change.
+///
+/// One canonical clause, used verbatim by all three, keeps the wordings from
+/// drifting apart again. It constrains the *report* and never the cycle: the
+/// reconcile still runs in full, and the wake that drove it is recorded in
+/// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
+/// distinguishable from a dead one without a keepalive line in the
+/// conversation (FR-4).
+pub const PM_CYCLE_REPORTING_CLAUSE: &str =
+    "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
+     changed, end the cycle with no user-facing output.";
+
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmRegistration {

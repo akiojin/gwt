@@ -230,11 +230,12 @@ fn handle_at(
          on the `issue_monitor` channel with `params.timeout_seconds:{interval_secs}`; if the \
          subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
          mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
-         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, check the \
-         running agents' `last_activity_at`, and report milestones to the user as a digest. \
+         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
+         running agents' `last_activity_at`. {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
-         failures do not count as empty)."
+         failures do not count as empty).",
+        clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
     ))
 }
 
@@ -376,8 +377,46 @@ mod tests {
         assert!(reason.contains("issue.monitor.status"));
     }
 
+    /// Issue #3632 AC-1/AC-6: the forced continuation is the highest-frequency
+    /// injection there is — it lands on every Stop of the resident loop — so it
+    /// carries the same reporting clause as the two wake prompts rather than its
+    /// own wording. Three differently-phrased report instructions were how
+    /// "report every cycle" survived a milestone-only skill body in the first
+    /// place.
+    #[test]
+    fn the_forced_continuation_reports_only_when_the_cycle_changed_something() {
+        let (home, _repo, worktree) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+
+        let output = handle_at(
+            &worktree,
+            "2026-08-17T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected the loop to continue, got {output:?}");
+        };
+        assert!(
+            reason.contains(pm_registry::PM_CYCLE_REPORTING_CLAUSE),
+            "the forced continuation must carry the shared clause; got: {reason}"
+        );
+        assert!(
+            !reason.contains("report milestones to the user as a digest"),
+            "the continuation must not carry its own report wording; got: {reason}"
+        );
+        assert!(
+            reason.contains("issue.monitor.status"),
+            "FR-3: the cycle itself is still driven in full; got: {reason}"
+        );
+    }
+
     #[test]
     fn exact_target_user_prompt_submit_verifies_the_delivery_receipt() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
@@ -416,6 +455,9 @@ mod tests {
 
     #[test]
     fn wrong_session_or_body_hash_cannot_verify_a_delivery_receipt() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
