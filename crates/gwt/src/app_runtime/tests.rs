@@ -3685,6 +3685,7 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
 #[test]
 fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     let mut tab = sample_project_tab_with_window_at(

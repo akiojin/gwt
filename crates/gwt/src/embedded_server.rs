@@ -5381,6 +5381,7 @@ mod tests {
     #[test]
     fn owner_less_principal_closes_peer_panes_while_superseded_generation_stays_fenced() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign = tempfile::tempdir().expect("foreign tempdir");
         let workspace = serde_json::json!({
             "kind": "workspace_state",
@@ -5867,6 +5868,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         // No linked owner, so no execution binding — exactly the PM's shape.
         let target = issuer
