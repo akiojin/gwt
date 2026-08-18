@@ -922,6 +922,21 @@ fn to_tracking_ref(remote_ref: &str) -> Option<String> {
 
 /// Resolve the main worktree root for a repository or linked worktree path.
 pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
+    // Issue #3629 AC-1/AC-2: the workspace-home layout root has no `.git`
+    // anywhere up its ancestry, so asking git first is a guaranteed exit-128
+    // subprocess — and this resolver runs behind most periodic scans.
+    // Resolve the layout by filesystem inspection when git discovery cannot
+    // possibly succeed.
+    if !gwt_core::paths::git_repository_discovery_possible(repo_path) {
+        if let Some(bare_child) = first_child_bare_repository(repo_path) {
+            let bare_child = std::fs::canonicalize(&bare_child).unwrap_or(bare_child);
+            return Ok(normalize_windows_child_process_path(&bare_child));
+        }
+        return Err(GwtError::Git(format!(
+            "not a git repository (no .git ancestor, no child bare repository): {}",
+            repo_path.display()
+        )));
+    }
     let output = run_git_observing_operation_deadline(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         repo_path,
@@ -971,6 +986,19 @@ fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
                 && path.join("refs").exists()
         })
         .min()
+}
+
+/// The directory git commands for `repo_path`'s repository should run in.
+///
+/// A repository or worktree path is returned unchanged; a workspace-home
+/// layout root resolves to its nested bare repository — without spawning git
+/// (Issue #3629 AC-4). Falls back to the input when nothing resolves so the
+/// caller's subsequent git call reports the real failure.
+pub fn effective_repo_root(repo_path: &Path) -> PathBuf {
+    if gwt_core::paths::git_repository_discovery_possible(repo_path) {
+        return repo_path.to_path_buf();
+    }
+    main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf())
 }
 
 /// Derive a sibling worktree path from the repo root and branch name.
@@ -1533,6 +1561,29 @@ prunable gitdir file points to non-existent location
         assert_eq!(
             comparable_path(&layout_root),
             comparable_path(&std::fs::canonicalize(&bare_repo_path).unwrap())
+        );
+    }
+
+    /// Issue #3629 AC-1/AC-2: the workspace-home layout has no `.git` anywhere
+    /// up its ancestry, so asking git first is a guaranteed exit-128 spawn.
+    /// The layout must resolve by filesystem inspection alone.
+    #[test]
+    fn main_worktree_root_resolves_workspace_home_without_git_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_repo_path = tmp.path().join("gwt.git");
+        init_bare_git_repo(&bare_repo_path);
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        let layout_root = main_worktree_root(tmp.path()).unwrap();
+
+        assert_eq!(
+            comparable_path(&layout_root),
+            comparable_path(&std::fs::canonicalize(&bare_repo_path).unwrap())
+        );
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count(),
+            before,
+            "workspace-home resolution must not spawn git (Issue #3629)"
         );
     }
 

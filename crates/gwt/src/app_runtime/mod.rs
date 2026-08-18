@@ -2340,6 +2340,11 @@ impl AppRuntime {
                 return;
             }
             let live_process_branches = work_branches_with_live_processes(&targets);
+            // Issue #3629 AC-4: a workspace-home project root is not a git
+            // work tree — run the per-branch merge/readiness git work in the
+            // resolved repository so it does not fail (or spawn doomed
+            // processes) for the nested-bare layout.
+            let git_root = gwt_git::worktree::effective_repo_root(&project_root);
             let tip_times = match tip_times {
                 Ok(tip_times) => tip_times,
                 Err(error) => {
@@ -2370,7 +2375,7 @@ impl AppRuntime {
             for target in &targets {
                 let branch = target.branch.clone();
                 let readiness = gwt_git::branch::cleanup_readiness_base_target_with_known_refs(
-                    &project_root,
+                    &git_root,
                     &branch,
                     &known_refs,
                 )

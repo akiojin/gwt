@@ -1166,6 +1166,12 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
+    // through git — skip the guaranteed exit-128 spawn and use the child
+    // bare repository directly.
+    if !crate::paths::git_repository_discovery_possible(worktree_root) {
+        return coordination_child_bare_repo(worktree_root);
+    }
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
