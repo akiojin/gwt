@@ -29,6 +29,17 @@ fn default_schema_version() -> u64 {
 struct ParsedEnvelope {
     operation: String,
     command: CliCommand,
+    /// Issue #3655 AC-1: the reason an agent gave when it declared itself
+    /// unable to proceed, carried past parsing so the escalation can be raised
+    /// from the same call rather than from a Board post the agent also has to
+    /// remember to write.
+    declared_block: Option<DeclaredBlock>,
+}
+
+/// An agent's own `execution.blocked` declaration, as escalation material.
+pub(crate) struct DeclaredBlock {
+    pub reason: String,
+    pub missing_verification: Option<String>,
 }
 
 pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
@@ -47,6 +58,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         }
     };
     let operation = parsed.operation.clone();
+    let declared_block = parsed.declared_block;
     match super::run_collect(env, parsed.command) {
         Ok((code, output)) => {
             let payload = serde_json::json!({
@@ -56,6 +68,11 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "output": output,
             });
             let _ = writeln!(env.stdout(), "{}", payload);
+            match (code, declared_block) {
+                (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
+                (0, None) => {}
+                _ => super::board::auto_file_operation_refusal(env, &operation, &output),
+            }
             code
         }
         // Issue #3510: a failure still answers on the JSON-only operation
@@ -63,14 +80,20 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // could not distinguish "the operation failed at stage X" from "the
         // process never answered". The stderr line stays for humans.
         Err(err) => {
+            let message = err.to_string();
             let payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
-                "error": err.to_string(),
+                "error": message,
             });
             let _ = writeln!(env.stdout(), "{payload}");
-            let _ = writeln!(env.stderr(), "{prog} {operation}: {err}");
+            let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
+            // Issue #3655 AC-2: a governance refusal reaches the PM without
+            // depending on the agent noticing it is stuck. Answering the caller
+            // comes first — the escalation must never delay or replace the
+            // operation's own reply.
+            super::board::auto_file_operation_refusal(env, &operation, &message);
             1
         }
     }
@@ -558,9 +581,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
     };
+    let declared_block = match (
+        envelope.operation.as_str(),
+        optional_string(params, "reason"),
+    ) {
+        ("execution.blocked", Ok(Some(reason))) => Some(DeclaredBlock {
+            reason,
+            missing_verification: optional_string(params, "missing_verification")
+                .ok()
+                .flatten(),
+        }),
+        _ => None,
+    };
     Ok(ParsedEnvelope {
         operation: envelope.operation,
         command,
+        declared_block,
     })
 }
 
@@ -669,6 +705,10 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
             owners: optional_string_vec(params, "owners")?,
             targets: optional_string_vec(params, "targets")?,
             mentions: optional_string_vec(params, "mentions")?,
+            // Issue #3655: accepts a single id or a list, because the common
+            // case is closing exactly one escalation and quoting it as an
+            // array is the kind of ceremony agents get wrong.
+            resolves: optional_string_or_string_vec(params, "resolves")?,
             broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
         },
     ))))
@@ -1385,6 +1425,21 @@ fn optional_string_vec(
         _ => Err(CliParseError::InvalidJson(format!(
             "{key} must be an array of strings"
         ))),
+    }
+}
+
+/// Like [`optional_string_vec`], but a bare string is accepted as a one-element
+/// list. Used where the single-item case dominates (Issue #3655 `resolves`).
+fn optional_string_or_string_vec(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<Vec<String>, CliParseError> {
+    match params.get(key) {
+        Some(Value::String(text)) if !text.trim().is_empty() => Ok(vec![text.clone()]),
+        Some(Value::String(_)) => Err(CliParseError::InvalidJson(format!(
+            "{key} must not be an empty string"
+        ))),
+        _ => optional_string_vec(params, key),
     }
 }
 
