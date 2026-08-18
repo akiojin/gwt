@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.83.1] - 2026-08-18
+
+### Bug Fixes
+
+- **verify:** Derive を CI gate の package 絞り込みへ統一し未検証 target を塞ぐ
+- **coordination:** Agent の blocked を PM へ届く経路に配線する
+- **execution:** Settle 済み session の pane 観測を接続時 409 で拒否しない (#3667)
+- **issue-monitor:** Resume が launch_profile を無視して未認証 provider へ再束縛するのを防ぐ
+- **pane:** Gwtd pane.close を全 window で機能させ close 結果を明示応答にする
+
+### Miscellaneous Tasks
+
+- **work:** #3640 の終端 Work event shard を追加
+- **work:** Issue #3655 の Work event を記録する
+- **work:** Issue #3655 の terminal Work event を記録する
+- **work:** Issue #3667 の Work event を記録する
+- **work:** Issue #3676 の Work event を記録する
+- **work:** Issue #3676 の done 遷移 Work event を記録する
+- Cargo fmt を適用する
+- **work:** Issue #3629 の Work event を記録する
+
+### Performance
+
+- **git:** Workspace-home layout の解決を fs 判定にして失敗確定 spawn を根絶する
+
+
 ## [9.83.0] - 2026-08-18
 
 ### Bug Fixes
