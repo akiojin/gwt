@@ -66,7 +66,7 @@ pub fn detect_provider_limit_notice<Tz: TimeZone>(
 
 /// The account-limit half of a notice, across every wording both providers are
 /// known to use: Codex's "hit your usage limit", Claude's "hit your weekly
-/// limit", and the "<window> limit reached" family.
+/// limit", and the "`<window>` limit reached" family.
 fn states_a_limit_was_reached(haystack: &str) -> bool {
     const HIT: [&str; 4] = [
         "hit your usage limit",

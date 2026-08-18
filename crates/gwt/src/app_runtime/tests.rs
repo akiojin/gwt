@@ -26762,9 +26762,19 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         panic!("expected a provider usage limit hold, got {hold:?}");
     };
     assert_eq!(provider, "claude");
+    // The provider prints a bare local wall clock, so production resolves it in
+    // the machine's zone. Deriving the expectation the same way keeps this exact
+    // without asserting the machine is in any particular zone — the first
+    // version hard-coded the author's +09:00 and failed on a UTC CI runner.
+    let expected_reset = chrono::Local
+        .with_ymd_and_hms(2026, 8, 20, 6, 0, 0)
+        .earliest()
+        .expect("6am on Aug 20 exists in the local zone")
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     assert_eq!(
         resets_at.as_deref(),
-        Some("2026-08-19T21:00:00Z"),
+        Some(expected_reset.as_str()),
         "the reset instant survives the pty round trip"
     );
     assert!(
