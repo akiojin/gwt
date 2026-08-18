@@ -3021,6 +3021,9 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            // Issue #3676 AC-2: fail-open in tests so ambient credential
+            // state never decides a launch.
+            issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
             issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
             pending_workspace_resume_contexts: HashMap::new(),
