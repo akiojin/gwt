@@ -3388,6 +3388,8 @@ fn scan_issue_monitor_once_blocking(
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
                 &mut monitor,
                 &scope.project_root,
+                &owner,
+                &repo,
             )
         },
     )?;

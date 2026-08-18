@@ -235,6 +235,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             delivery_id: optional_string(params, "delivery_id")?,
             window_id: optional_string(params, "window_id")?,
         }),
+        "issue.monitor.requeue" => CliCommand::Issue(IssueCommand::MonitorRequeue {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            // An unexplained release of a recorded failure is not auditable.
+            reason: required_string(params, "reason")?,
+        }),
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -2076,6 +2082,36 @@ mod tests {
         ));
         assert!(matches!(
             err("issue.monitor.failover", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// Issue #3645 / #3628: the recovery takes no launch identity, because the
+    /// row it recovers has no launch left to name — that is precisely why the
+    /// stop and failover operations cannot reach it. A reason stays mandatory:
+    /// releasing a hold that something recorded for a cause is auditable work.
+    #[test]
+    fn issue_monitor_requeue_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.requeue",
+                json!({
+                    "number": 3624,
+                    "reason": "manual recovery after the launch-fence outage",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorRequeue {
+                project_root: None,
+                number: 3624,
+                reason: "manual recovery after the launch-fence outage".to_string(),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.requeue", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.requeue", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
         ));
     }
