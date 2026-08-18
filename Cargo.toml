@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.82.0"
+version = "9.83.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
