@@ -1347,6 +1347,129 @@ fn exhausted_account_for_agent<'accounts>(
         .find(|account| account.provider == provider && account.limit_reached)
 }
 
+/// Issue #3676 AC-2: whether the CLI backing an agent holds usable
+/// credentials, judged only from durable on-disk / environment facts.
+///
+/// `Unknown` is deliberate fail-open: providers that keep credentials where
+/// this process cannot look (for example Claude Code's macOS Keychain entry)
+/// must never be reported as unauthenticated. Only a definitive "this CLI
+/// would boot into its login screen" observation may block a launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderAuthState {
+    Authenticated,
+    Unauthenticated,
+    Unknown,
+}
+
+/// Ambient credential facts for [`provider_auth_state`], captured at the edge
+/// so the decision itself stays pure and testable without environment reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProviderAuthProbe<'facts> {
+    pub codex_home: Option<&'facts Path>,
+    pub claude_home: Option<&'facts Path>,
+    pub openai_api_key: Option<&'facts str>,
+    pub anthropic_api_key: Option<&'facts str>,
+}
+
+/// Credential verdict for `agent_id` from the supplied ambient facts.
+pub fn provider_auth_state(agent_id: &str, probe: &ProviderAuthProbe) -> ProviderAuthState {
+    match agent_id.trim().to_ascii_lowercase().as_str() {
+        "codex" => {
+            if probe
+                .openai_api_key
+                .is_some_and(|key| !key.trim().is_empty())
+            {
+                return ProviderAuthState::Authenticated;
+            }
+            let Some(home) = probe.codex_home else {
+                return ProviderAuthState::Unknown;
+            };
+            match fs::read_to_string(home.join("auth.json")) {
+                Ok(body) => codex_auth_state_from_body(&body),
+                // A Codex CLI without auth.json boots into its login screen.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    ProviderAuthState::Unauthenticated
+                }
+                Err(_) => ProviderAuthState::Unknown,
+            }
+        }
+        "claude" | "claude-code" => {
+            if probe
+                .anthropic_api_key
+                .is_some_and(|key| !key.trim().is_empty())
+            {
+                return ProviderAuthState::Authenticated;
+            }
+            let Some(home) = probe.claude_home else {
+                return ProviderAuthState::Unknown;
+            };
+            if home.join(".credentials.json").exists() {
+                ProviderAuthState::Authenticated
+            } else {
+                ProviderAuthState::Unknown
+            }
+        }
+        _ => ProviderAuthState::Unknown,
+    }
+}
+
+/// Credential verdict from a Codex `auth.json` body: either an API key or a
+/// non-empty OAuth token must be present. An unparseable body is treated as
+/// unauthenticated because the Codex CLI itself cannot use it either.
+fn codex_auth_state_from_body(body: &str) -> ProviderAuthState {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return ProviderAuthState::Unauthenticated;
+    };
+    let api_key_present = value
+        .get("OPENAI_API_KEY")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|key| !key.trim().is_empty());
+    let tokens_present = value.get("tokens").is_some_and(|tokens| {
+        ["access_token", "refresh_token"].iter().any(|field| {
+            tokens
+                .get(*field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|token| !token.trim().is_empty())
+        })
+    });
+    if api_key_present || tokens_present {
+        ProviderAuthState::Authenticated
+    } else {
+        ProviderAuthState::Unauthenticated
+    }
+}
+
+/// Edge wrapper reading the ambient credential facts from the environment.
+/// Production launch paths install this as the Monitor's auth probe; tests
+/// inject their own probe instead of mutating process state.
+pub fn provider_auth_state_from_env(agent_id: &str) -> ProviderAuthState {
+    let codex_home = gwt_core::usage::codex::codex_home();
+    let claude_home = gwt_core::usage::claude::claude_home();
+    let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+    let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    provider_auth_state(
+        agent_id,
+        &ProviderAuthProbe {
+            codex_home: codex_home.as_deref(),
+            claude_home: claude_home.as_deref(),
+            openai_api_key: openai_api_key.as_deref(),
+            anthropic_api_key: anthropic_api_key.as_deref(),
+        },
+    )
+}
+
+/// Identifiable launch-refusal message for an unauthenticated provider CLI
+/// (Issue #3676 AC-2). The `provider_unauthenticated:` prefix is the machine
+/// marker; the rest tells the operator how to restore the provider.
+pub fn provider_unauthenticated_message(agent_id: &str) -> String {
+    format!(
+        "provider_unauthenticated: the '{agent_id}' CLI has no usable credentials, so the \
+         Issue Monitor refused this launch before starting a terminal. Log the CLI in \
+         (codex: run `codex login`) or point the Monitor launch profile at an \
+         authenticated provider, then retry."
+    )
+}
+
 /// One inbox row, reduced to the facts an agent acts on. The full
 /// [`IssueMonitorInboxItem`] carries the whole GitHub issue payload, which
 /// would dwarf the rest of the snapshot.
@@ -6993,6 +7116,132 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #3676 AC-2: the auth verdict must be definitive before it may
+    /// block a launch — every ambiguous shape stays fail-open (`Unknown`).
+    #[test]
+    fn provider_auth_state_codex_verdicts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let codex_home = temp.path().join("codex-home");
+        fs::create_dir_all(&codex_home).expect("create codex home");
+        fn probe<'facts>(
+            home: Option<&'facts Path>,
+            key: Option<&'facts str>,
+        ) -> ProviderAuthProbe<'facts> {
+            ProviderAuthProbe {
+                codex_home: home,
+                claude_home: None,
+                openai_api_key: key,
+                anthropic_api_key: None,
+            }
+        }
+
+        // No auth.json: the CLI would boot into its login screen.
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), None)),
+            ProviderAuthState::Unauthenticated,
+        );
+        // An API key in the environment authenticates without auth.json.
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), Some("sk-test"))),
+            ProviderAuthState::Authenticated,
+        );
+        // Whitespace-only keys are not credentials.
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), Some("  "))),
+            ProviderAuthState::Unauthenticated,
+        );
+        // Unknown home: nothing definitive to say.
+        assert_eq!(
+            provider_auth_state("codex", &probe(None, None)),
+            ProviderAuthState::Unknown,
+        );
+
+        let auth_path = codex_home.join("auth.json");
+        fs::write(&auth_path, "{corrupt").expect("write corrupt auth");
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), None)),
+            ProviderAuthState::Unauthenticated,
+        );
+        fs::write(&auth_path, r#"{"auth_mode":"chatgpt","tokens":{}}"#).expect("write empty auth");
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), None)),
+            ProviderAuthState::Unauthenticated,
+        );
+        fs::write(
+            &auth_path,
+            r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"tok","refresh_token":"ref","account_id":"acct"}}"#,
+        )
+        .expect("write chatgpt auth");
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), None)),
+            ProviderAuthState::Authenticated,
+        );
+        fs::write(
+            &auth_path,
+            r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-file"}"#,
+        )
+        .expect("write apikey auth");
+        assert_eq!(
+            provider_auth_state("codex", &probe(Some(&codex_home), None)),
+            ProviderAuthState::Authenticated,
+        );
+        // Agent id casing/whitespace must not change the verdict.
+        assert_eq!(
+            provider_auth_state(" Codex ", &probe(Some(&codex_home), None)),
+            ProviderAuthState::Authenticated,
+        );
+    }
+
+    /// Issue #3676 AC-2: Claude Code may keep credentials in the macOS
+    /// Keychain, so a missing credentials file is `Unknown`, never a blocker.
+    #[test]
+    fn provider_auth_state_claude_fails_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let claude_home = temp.path().join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        fn probe<'facts>(
+            home: &'facts Path,
+            key: Option<&'facts str>,
+        ) -> ProviderAuthProbe<'facts> {
+            ProviderAuthProbe {
+                codex_home: None,
+                claude_home: Some(home),
+                openai_api_key: None,
+                anthropic_api_key: key,
+            }
+        }
+
+        assert_eq!(
+            provider_auth_state("claude", &probe(&claude_home, None)),
+            ProviderAuthState::Unknown,
+        );
+        assert_eq!(
+            provider_auth_state("claude", &probe(&claude_home, Some("sk-ant"))),
+            ProviderAuthState::Authenticated,
+        );
+        fs::write(claude_home.join(".credentials.json"), "{}").expect("write credentials");
+        assert_eq!(
+            provider_auth_state("claude", &probe(&claude_home, None)),
+            ProviderAuthState::Authenticated,
+        );
+        assert_eq!(
+            provider_auth_state("claude-code", &probe(&claude_home, None)),
+            ProviderAuthState::Authenticated,
+        );
+        // Unmapped agents have no observable credential surface.
+        assert_eq!(
+            provider_auth_state("opencode", &ProviderAuthProbe::default()),
+            ProviderAuthState::Unknown,
+        );
+    }
+
+    #[test]
+    fn provider_unauthenticated_message_is_identifiable() {
+        let message = provider_unauthenticated_message("codex");
+        assert!(message.starts_with("provider_unauthenticated:"));
+        assert!(message.contains("codex"));
+    }
 
     fn issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {

@@ -18,13 +18,21 @@ pub fn close_window_from_workspace(
     window_details: &mut HashMap<String, String>,
     id: &str,
 ) -> bool {
-    let Some(address) = window_lookup.get(id).cloned() else {
-        return false;
-    };
-    let Some(tab) = tabs.iter_mut().find(|tab| tab.id == address.tab_id) else {
-        return false;
-    };
-    if !tab.workspace.close_window(&address.raw_id) {
+    let removed_via_lookup = window_lookup.get(id).cloned().is_some_and(|address| {
+        tabs.iter_mut()
+            .find(|tab| tab.id == address.tab_id)
+            .is_some_and(|tab| tab.workspace.close_window(&address.raw_id))
+    });
+    // Issue #3629 AC-9: a window restored from an older app generation can
+    // survive in a tab's workspace without a lookup entry (or with a stale
+    // one). Resolve the combined `{tab_id}::{raw_id}` against the tabs
+    // directly so close still lands instead of no-opping forever.
+    let removed = removed_via_lookup
+        || tabs.iter_mut().any(|tab| {
+            id.strip_prefix(&format!("{}::", tab.id))
+                .is_some_and(|raw_id| tab.workspace.close_window(raw_id))
+        });
+    if !removed {
         return false;
     }
     window_lookup.remove(id);

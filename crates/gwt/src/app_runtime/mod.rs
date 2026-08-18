@@ -888,6 +888,11 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_materializer_id: String,
+    /// Issue #3676 AC-2: credential preflight consulted before any Issue
+    /// Monitor launch spawns a terminal. Injected at construction so tests
+    /// control ambient credential facts without mutating process state; only
+    /// a definitive `Unauthenticated` verdict refuses a launch.
+    pub(crate) issue_monitor_provider_auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
     /// Issue #3505: prefs-path scoped scheduled scans currently running in a
     /// blocking worker. Duplicate ticks are coalesced by dropping them while
     /// the same canonical project scope is in flight.
@@ -2110,6 +2115,7 @@ impl AppRuntime {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
+            issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
             pending_continue_work: HashMap::new(),
@@ -2340,6 +2346,11 @@ impl AppRuntime {
                 return;
             }
             let live_process_branches = work_branches_with_live_processes(&targets);
+            // Issue #3629 AC-4: a workspace-home project root is not a git
+            // work tree — run the per-branch merge/readiness git work in the
+            // resolved repository so it does not fail (or spawn doomed
+            // processes) for the nested-bare layout.
+            let git_root = gwt_git::worktree::effective_repo_root(&project_root);
             let tip_times = match tip_times {
                 Ok(tip_times) => tip_times,
                 Err(error) => {
@@ -2370,7 +2381,7 @@ impl AppRuntime {
             for target in &targets {
                 let branch = target.branch.clone();
                 let readiness = gwt_git::branch::cleanup_readiness_base_target_with_known_refs(
-                    &project_root,
+                    &git_root,
                     &branch,
                     &known_refs,
                 )
@@ -6044,17 +6055,32 @@ impl AppRuntime {
                 self.accept_agent_self_close(grant, id, request_id, responder),
             ),
             AgentFrontendRequest::CloseWindow {
+                id,
                 request_id: Some(_),
                 ..
             }
             | AgentFrontendRequest::CloseWindow {
-                responder: Some(_), ..
+                id,
+                responder: Some(_),
+                ..
             } => {
                 tracing::warn!(
                     target: "gwt_security",
                     "correlated agent self-close rejected without an origin response channel"
                 );
-                AgentFrontendDispatchOutcome::Dispatched(Vec::new())
+                // Issue #3629 AC-12: even this should-never-happen refusal
+                // answers explicitly instead of silently producing no events.
+                AgentFrontendDispatchOutcome::Dispatched(vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneCloseResult {
+                        ok: false,
+                        window_id: id,
+                        reason: Some(
+                            "a correlated self-close was not routed with its response channel"
+                                .to_string(),
+                        ),
+                    },
+                )])
             }
             AgentFrontendRequest::PmSendInput {
                 operation_id,
@@ -6105,19 +6131,34 @@ impl AppRuntime {
                 request_id,
                 responder,
             } => {
+                // Issue #3629 AC-10/AC-12: every close outcome answers the
+                // requesting client explicitly; a silent empty event list is
+                // indistinguishable from success on the wire.
+                let refusal = |reason: &str| {
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::PaneCloseResult {
+                            ok: false,
+                            window_id: id.clone(),
+                            reason: Some(reason.to_string()),
+                        },
+                    )]
+                };
                 if request_id.is_some() || responder.is_some() {
                     tracing::warn!(
                         target: "gwt_security",
                         "correlated agent self-close bypassed generation-aware dispatch"
                     );
-                    return Vec::new();
+                    return refusal(
+                        "a correlated self-close was not routed with its response channel",
+                    );
                 }
                 if !self.agent_principal_authorizes_window(&principal, &id) {
                     tracing::warn!(
                         target: "gwt_security",
                         "cross-project pane lifecycle request denied"
                     );
-                    return Vec::new();
+                    return refusal("window is outside the authenticated project scope");
                 }
                 let closes_own_session = self
                     .window_lookup
@@ -6131,9 +6172,23 @@ impl AppRuntime {
                         target: "gwt_security",
                         "uncorrelated agent self-close rejected"
                     );
-                    return Vec::new();
+                    return refusal(
+                        "closing the calling session requires a correlated acceptance (request_id)",
+                    );
                 }
-                self.close_window_events(&id)
+                let outcome = self.close_window_outcome(&id);
+                let reason = (!outcome.closed)
+                    .then(|| "the backend did not remove the window record".to_string());
+                let mut events = vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneCloseResult {
+                        ok: outcome.closed,
+                        window_id: id,
+                        reason,
+                    },
+                )];
+                events.extend(outcome.events);
+                events
             }
             AgentFrontendRequest::SendInput { text } => {
                 let window_id = match self.agent_principal_session_window(&principal) {
@@ -6292,10 +6347,22 @@ impl AppRuntime {
         principal: &AgentSessionPrincipal,
         window_id: &str,
     ) -> bool {
-        self.window_lookup
-            .get(window_id)
-            .and_then(|address| self.tab(&address.tab_id))
-            .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root))
+        if let Some(address) = self.window_lookup.get(window_id) {
+            return self
+                .tab(&address.tab_id)
+                .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root));
+        }
+        // Issue #3629 AC-9: a husk window (workspace record without a lookup
+        // entry, left behind by an app restart) resolves through the combined
+        // `{tab_id}::{raw_id}` form so it can still be closed.
+        self.tabs.iter().any(|tab| {
+            window_id
+                .strip_prefix(&format!("{}::", tab.id))
+                .is_some_and(|raw_id| {
+                    tab.workspace.window(raw_id).is_some()
+                        && principal.authorizes_project_root(&tab.project_root)
+                })
+        })
     }
 
     /// Resolve the authenticated Session only inside its capability project.
