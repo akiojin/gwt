@@ -58,7 +58,18 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             let _ = writeln!(env.stdout(), "{}", payload);
             code
         }
+        // Issue #3510: a failure still answers on the JSON-only operation
+        // surface. Without this, stdout stayed empty and a machine caller
+        // could not distinguish "the operation failed at stage X" from "the
+        // process never answered". The stderr line stays for humans.
         Err(err) => {
+            let payload = serde_json::json!({
+                "ok": false,
+                "operation": operation,
+                "exit_code": 1,
+                "error": err.to_string(),
+            });
+            let _ = writeln!(env.stdout(), "{payload}");
             let _ = writeln!(env.stderr(), "{prog} {operation}: {err}");
             1
         }
@@ -105,6 +116,24 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
+            })
+        }
+        "workspace.store_consolidate" | "workspace.store-consolidate" => {
+            // Issue #3524 (folded into #3606): this operation moves durable
+            // state, so a parameter it does not understand is a refusal rather
+            // than something to ignore. A silently-dropped `project_root` used
+            // to leave the apply targeting whatever cwd it happened to run in.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "manifest_hash"],
+                "workspace.store_consolidate",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::StoreConsolidate {
+                project_root: optional_path(params, "project_root")?,
+                // Consolidation moves durable state, so it dry-runs unless the
+                // caller explicitly opts out (#3466 AC-8).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
             })
         }
         "board.show" => board_show(params)?,
@@ -1162,6 +1191,27 @@ fn optional_path(
     Ok(optional_string(params, key)?.map(std::path::PathBuf::from))
 }
 
+/// Refuse a parameter this operation does not understand.
+///
+/// Only for operations where ignoring an unrecognised key would change what
+/// the caller believes it authorized — a mistyped `project_root` that silently
+/// falls back to the process cwd is exactly the failure #3524 recorded.
+fn reject_unknown_params(
+    params: &Map<String, Value>,
+    allowed: &[&str],
+    operation: &str,
+) -> Result<(), CliParseError> {
+    for key in params.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(CliParseError::InvalidJson(format!(
+                "{operation} does not accept the parameter {key}; accepted: {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
     optional_u64(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
@@ -1357,6 +1407,7 @@ mod tests {
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
+    use crate::cli::TestEnv;
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -1384,6 +1435,38 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    /// Issue #3510: a failed operation used to leave stdout empty and report
+    /// only a bare stderr line, so a machine caller could not tell an
+    /// operation failure apart from a crashed process — let alone which stage
+    /// failed. The JSON-only operation surface answers with an `ok:false`
+    /// envelope carrying the same stage-qualified message.
+    #[test]
+    fn operation_failures_answer_with_an_ok_false_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = envelope("issue.view", json!({ "number": 4242 }));
+
+        let code = super::dispatch(&mut env, "gwtd");
+
+        assert_eq!(code, 1);
+        let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+        let payload: Value = serde_json::from_str(stdout.trim()).expect("error envelope JSON");
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["operation"], json!("issue.view"));
+        assert_eq!(payload["exit_code"], json!(1));
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error| !error.trim().is_empty()),
+            "error envelope must carry the failure reason: {payload}"
+        );
+        let stderr = String::from_utf8(env.stderr.clone()).expect("stderr utf8");
+        assert!(
+            stderr.contains("gwtd issue.view:"),
+            "the human-readable stderr line must stay: {stderr}"
+        );
     }
 
     #[test]

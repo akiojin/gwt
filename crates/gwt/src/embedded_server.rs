@@ -771,6 +771,7 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 #[derive(Clone)]
 pub(crate) enum AgentFrontendRequest {
     Ready,
+    ListWindows,
     CloseWindow {
         id: String,
         request_id: Option<String>,
@@ -794,6 +795,7 @@ impl std::fmt::Debug for AgentFrontendRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
+            Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
@@ -3297,6 +3299,7 @@ impl AgentPaneSessionScope {
     fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
+            FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
             FrontendEvent::CloseWindow { id, request_id }
                 if self.allowed_window_ids.contains(&id)
                     && (self.grant.principal().authorizes_producing_mutation()
@@ -4312,6 +4315,7 @@ mod tests {
     #[test]
     fn agent_session_principal_canonicalizes_project_and_redacts_debug() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let aliased_project = project.path().join("child").join("..");
         std::fs::create_dir_all(project.path().join("child")).expect("project child");
 
@@ -4337,6 +4341,7 @@ mod tests {
     #[test]
     fn agent_session_principal_preserves_exact_project_state_scope() {
         let project_state_root = tempfile::tempdir().expect("Project State root");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project_state_root.path());
         let child_bare = project_state_root.path().join("project.git");
         let request = gwt_core::process::ProcessPlanRequest::new("git")
             .args(["init", "--bare"])
@@ -4369,6 +4374,7 @@ mod tests {
     #[test]
     fn agent_session_principal_separates_inspection_from_exact_execution_authority() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
             session_id: "session-current".to_string(),
@@ -4427,6 +4433,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_rotates_same_project_session_atomically() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
 
         let stale = registry
@@ -4449,6 +4456,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_promotes_prepared_authority_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4509,6 +4517,7 @@ mod tests {
     #[test]
     fn manual_handoff_reservation_refuses_an_existing_active_predecessor() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45155/internal/hook-live",
             "ws://127.0.0.1:46255/ws",
@@ -4545,6 +4554,7 @@ mod tests {
     #[test]
     fn manual_handoff_reservation_blocks_matching_issue_and_promotion_only() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45155/internal/hook-live",
             "ws://127.0.0.1:46255/ws",
@@ -4613,6 +4623,7 @@ mod tests {
     #[test]
     fn manual_handoff_begin_suspends_exact_active_capability_and_can_rollback_or_commit() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45155/internal/hook-live",
             "ws://127.0.0.1:46255/ws",
@@ -4659,6 +4670,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_promotes_legacy_inspection_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4705,6 +4717,7 @@ mod tests {
     #[test]
     fn continuation_promotion_can_replace_only_the_current_bearers_active_binding() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let predecessor = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4757,6 +4770,7 @@ mod tests {
     #[test]
     fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -4814,6 +4828,7 @@ mod tests {
     #[test]
     fn agent_capability_issue_preflight_is_non_issuing_and_rejects_closing_principal() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:1/hook",
             "ws://127.0.0.1:1/pane",
@@ -4869,6 +4884,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_keeps_same_session_separate_across_projects() {
         let project_a = tempfile::tempdir().expect("project A tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project_a.path());
         let project_b = tempfile::tempdir().expect("project B tempdir");
         let registry = AgentCapabilityRegistry::default();
 
@@ -4896,6 +4912,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_exact_token_revoke_preserves_rotated_and_foreign_grants() {
         let project_a = tempfile::tempdir().expect("project A tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project_a.path());
         let project_b = tempfile::tempdir().expect("project B tempdir");
         let registry = AgentCapabilityRegistry::default();
         let stale_a = registry
@@ -4924,6 +4941,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_revoke_survives_project_deletion() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let token = registry
             .issue(project.path(), "session-1")
@@ -4942,6 +4960,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let token = registry
             .issue(project.path(), "session-permission-loss")
@@ -4967,6 +4986,7 @@ mod tests {
     #[test]
     fn agent_capability_registry_exact_revoke_ignores_symlink_retargeting() {
         let root = tempfile::tempdir().expect("root tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let project_a = root.path().join("project-a");
         let project_b = root.path().join("project-b");
         let alias = root.path().join("project-link");
@@ -5023,6 +5043,7 @@ mod tests {
     #[test]
     fn agent_capability_issuer_debug_never_contains_secret_or_principal() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let registry = AgentCapabilityRegistry::default();
         let issuer = AgentCapabilityIssuer::new(
             "http://127.0.0.1:43123/internal/hook-live".to_string(),
@@ -5043,6 +5064,7 @@ mod tests {
     #[test]
     fn agent_pane_scope_filters_project_output_and_frontend_authority() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign = tempfile::tempdir().expect("foreign tempdir");
         let principal =
             AgentSessionPrincipal::new(project.path(), "session-1").expect("agent principal");
@@ -5091,6 +5113,10 @@ mod tests {
             filtered["workspace"]["recent_projects"],
             serde_json::json!([])
         );
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::ListWindows),
+            Some(super::AgentFrontendRequest::ListWindows)
+        ));
 
         assert!(scope
             .filter_outbound(
@@ -5488,6 +5514,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "session-1")
@@ -5668,6 +5695,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "pm-session")
@@ -5829,6 +5857,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "pm-session")
@@ -5933,6 +5962,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let original = issuer
             .issue(project.path(), "session-1")
@@ -6049,6 +6079,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let target = issuer
             .issue(project.path(), "session-1")
@@ -6151,6 +6182,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = server.agent_capability_issuer();
         let original = issuer
             .issue(project.path(), "session-1")
@@ -6266,6 +6298,7 @@ mod tests {
     #[test]
     fn accepted_self_close_makes_grant_non_current_until_ticket_finishes() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = super::AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:1/internal/hook-live",
             "ws://127.0.0.1:1/ws",
@@ -6332,6 +6365,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
         let issuer = server.agent_capability_issuer();
         let pane_websocket_url = issuer.pane_websocket_url().to_string();
@@ -6452,6 +6486,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
         let issuer = server.agent_capability_issuer();
         let stale = issuer
@@ -6548,6 +6583,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let target = server
             .agent_capability_issuer()
             .issue(project.path(), "session-inspection")
@@ -7078,6 +7114,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let target = server
             .agent_capability_issuer()
             .issue(project.path(), "session-1")
@@ -7146,6 +7183,7 @@ mod tests {
         )
         .expect("embedded server");
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let target = server
             .agent_capability_issuer()
             .issue(project.path(), "session-1")
