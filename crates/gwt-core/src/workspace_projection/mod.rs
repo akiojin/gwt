@@ -34,9 +34,9 @@ pub use lifecycle::{
 };
 pub use persistence::{
     append_workspace_journal_entry_to_path, append_workspace_work_event_to_path, apply_prune_plan,
-    classify_workspace_projections, decompose_legacy_multi_branch_work_items,
-    decompose_legacy_multi_branch_work_items_paths, emit_workspace_discard_event_for_session,
-    emit_workspace_discard_event_for_session_outcome,
+    classify_workspace_projections, decode_workspace_work_event_line,
+    decompose_legacy_multi_branch_work_items, decompose_legacy_multi_branch_work_items_paths,
+    emit_workspace_discard_event_for_session, emit_workspace_discard_event_for_session_outcome,
     emit_workspace_discard_event_for_session_outcome_paths,
     emit_workspace_discard_event_for_session_paths, emit_workspace_discard_event_if_absent,
     emit_workspace_discard_event_if_absent_paths, emit_workspace_done_event_for_branch,
@@ -82,7 +82,7 @@ pub use persistence::{
     update_workspace_projection_with_journal_paths_at, workspace_projection_stale_reason,
     workspace_state_external_commit_resolution, workspace_state_external_commit_resolution_at,
     workspace_work_event_from_board_entry, worktree_sources_needing_backfill, ClassifiedProjection,
-    ExactWorkspaceTerminalPolicy, ExternalWorkspaceCommitDecision,
+    DecodedWorkspaceWorkEvent, ExactWorkspaceTerminalPolicy, ExternalWorkspaceCommitDecision,
     ExternalWorkspaceCommitResolution, PruneAction, PruneSkipReason, PruneSummary,
     ResumeOwnerBleedRepairReport, SessionBoundWorkspaceMutationTarget,
     SessionBoundWorkspaceTerminalTarget, StaleReason, TrackedWorkEventPolicy, WorkItemsCache,
@@ -91,8 +91,7 @@ pub use persistence::{
     WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
-    decode_workspace_work_event_line, with_workspace_current_and_work_items_lock,
-    with_workspace_work_items_lock, write_atomic, DecodedWorkspaceWorkEvent,
+    with_workspace_current_and_work_items_lock, with_workspace_work_items_lock, write_atomic,
 };
 pub use projection::{
     workspace_projection_default_created_at, GitDetails, WorkspaceCleanupCandidate,

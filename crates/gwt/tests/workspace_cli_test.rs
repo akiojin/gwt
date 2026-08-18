@@ -10,6 +10,7 @@
 //! real `gwtd` binary through the stdin JSON envelope with an isolated HOME.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     net::TcpListener as StdTcpListener,
@@ -68,6 +69,118 @@ fn real_host_mutation_test_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedWorkEventStoreSnapshot {
+    legacy: Option<Vec<u8>>,
+    shards: BTreeMap<String, Vec<u8>>,
+}
+
+fn tracked_work_event_store_snapshot(repo: &Path) -> TrackedWorkEventStoreSnapshot {
+    let legacy = fs::read(gwt_core::paths::gwt_repo_local_work_events_path(repo)).ok();
+    let events_dir = gwt_core::paths::gwt_repo_local_work_events_dir(repo);
+    let mut shards = BTreeMap::new();
+    match fs::read_dir(&events_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.expect("read tracked Work event shard entry");
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 tracked Work event shard name");
+                let file_type = entry
+                    .file_type()
+                    .expect("read tracked Work event shard entry type");
+                if file_type.is_file() {
+                    // Flat W-33 compatibility shard.
+                    shards.insert(
+                        name,
+                        fs::read(entry.path()).expect("read tracked Work event shard"),
+                    );
+                } else if file_type.is_dir() {
+                    // Canonical W-33b digest bucket.
+                    for bucket_entry in
+                        fs::read_dir(entry.path()).expect("read Work event shard bucket")
+                    {
+                        let bucket_entry =
+                            bucket_entry.expect("read bucketed Work event shard entry");
+                        let bucket_name = bucket_entry
+                            .file_name()
+                            .into_string()
+                            .expect("UTF-8 bucketed Work event shard name");
+                        assert!(
+                            bucket_entry
+                                .file_type()
+                                .expect("read bucketed Work event shard entry type")
+                                .is_file(),
+                            "tracked Work event bucket entries must be files: {}",
+                            bucket_entry.path().display()
+                        );
+                        shards.insert(
+                            format!("{name}/{bucket_name}"),
+                            fs::read(bucket_entry.path()).expect("read bucketed Work event shard"),
+                        );
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read {}: {error}", events_dir.display()),
+    }
+    TrackedWorkEventStoreSnapshot { legacy, shards }
+}
+
+fn load_tracked_work_events(repo: &Path) -> Vec<WorkEvent> {
+    let snapshot = tracked_work_event_store_snapshot(repo);
+    let mut by_id = BTreeMap::<String, WorkEvent>::new();
+    let sources = snapshot
+        .legacy
+        .iter()
+        .chain(snapshot.shards.values())
+        .flat_map(|bytes| bytes.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
+    for line in sources {
+        let event = serde_json::from_slice::<WorkEvent>(line).expect("tracked Work event JSON");
+        if let Some(existing) = by_id.insert(event.id.clone(), event.clone()) {
+            assert_eq!(
+                existing, event,
+                "duplicate tracked Work event identity must be semantic equivalent"
+            );
+        }
+    }
+    let mut events = by_id.into_values().collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    events
+}
+
+fn newly_persisted_work_events<'a>(
+    before: &[WorkEvent],
+    after: &'a [WorkEvent],
+) -> Vec<&'a WorkEvent> {
+    let before_ids = before
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<BTreeSet<_>>();
+    after
+        .iter()
+        .filter(|event| !before_ids.contains(event.id.as_str()))
+        .collect()
+}
+
+fn assert_tracked_work_events_preserved(before: &[WorkEvent], after: &[WorkEvent]) {
+    for expected in before {
+        assert_eq!(
+            after.iter().find(|event| event.id == expected.id),
+            Some(expected),
+            "existing tracked Work event {} changed or disappeared",
+            expected.id,
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -1468,11 +1581,10 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
         let host_current_path = host_state_dir.join("current.json");
         let host_works_path = host_state_dir.join("works.json");
         let host_journal_path = host_state_dir.join("journal.jsonl");
-        let tracked_events_path = project_root.join(".gwt/work/events.jsonl");
         let host_session_before = fs::read(&host_session_path).expect("Host Session before");
         let host_current_before = fs::read(&host_current_path).expect("Host current before");
         let host_works_before = fs::read(&host_works_path).expect("Host works before");
-        let tracked_events_before = fs::read(&tracked_events_path).expect("tracked events before");
+        let tracked_events_before = load_tracked_work_events(&project_root);
         assert!(
             !host_journal_path.exists(),
             "{case}: Host journal must start absent"
@@ -1583,18 +1695,16 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
             .filter(|value| !value.is_empty())
             .expect("Host mutation receipt id");
 
-        let tracked_events_after = fs::read(&tracked_events_path).expect("tracked events after");
-        assert!(
-            tracked_events_after.starts_with(&tracked_events_before)
-                && tracked_events_after.len() > tracked_events_before.len(),
-            "{case}: the real Host commit must append exactly through the tracked event surface"
+        let tracked_events_after = load_tracked_work_events(&project_root);
+        assert_tracked_work_events_preserved(&tracked_events_before, &tracked_events_after);
+        let appended_events =
+            newly_persisted_work_events(&tracked_events_before, &tracked_events_after);
+        assert_eq!(
+            appended_events.len(),
+            1,
+            "{case}: the real Host commit must append exactly one tracked Work event"
         );
-        let appended_event = String::from_utf8(tracked_events_after)
-            .expect("tracked events UTF-8")
-            .lines()
-            .rfind(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked Work event JSON"))
-            .expect("appended tracked Work event");
+        let appended_event = appended_events[0];
         assert_eq!(appended_event.work_item_id, WORK_ID);
         assert_eq!(appended_event.kind, WorkEventKind::Update);
         assert_eq!(
@@ -2194,12 +2304,7 @@ fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
     let observation = server.receive();
     assert_eq!(observation.work_id, exact.work_id);
 
-    let events = fs::read_to_string(fixture.project.path().join(".gwt/work/events.jsonl"))
-        .expect("tracked events after applied response loss")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked Work event JSON"))
-        .collect::<Vec<_>>();
+    let events = load_tracked_work_events(fixture.project.path());
     let delivered = events
         .iter()
         .filter(|event| {
@@ -2548,8 +2653,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         ),
         "the positive fixture must pass through real durable Session bootstrap: {ensure}"
     );
-    let events_after_first_ensure = fs::read(fixture.project.path().join(".gwt/work/events.jsonl"))
-        .expect("tracked Start event after first ensure");
+    let events_after_first_ensure = tracked_work_event_store_snapshot(fixture.project.path());
     let ensure_retry = run_ws(
         &fixture,
         &format!(
@@ -2567,8 +2671,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         "an ensure retry after a potentially lost response must reuse the assignment: {ensure_retry}"
     );
     assert_eq!(
-        fs::read(fixture.project.path().join(".gwt/work/events.jsonl"))
-            .expect("tracked event after ensure retry"),
+        tracked_work_event_store_snapshot(fixture.project.path()),
         events_after_first_ensure,
         "response-loss retry must not duplicate the ensured Start event"
     );
@@ -2582,8 +2685,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         .latest_agent_for_session(SESSION)
         .and_then(|agent| agent.workspace_id.clone())
         .expect("workspace.ensure canonical Work assignment");
-    let events_path = project_root.join(".gwt/work/events.jsonl");
-    let events_before = fs::read_to_string(&events_path).expect("tracked events before");
+    let events_before = load_tracked_work_events(&project_root);
     let server = CaptureServer::start(
         StatusCode::CONFLICT,
         serde_json::json!({
@@ -2643,13 +2745,9 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         Some("typed compatibility continuation")
     );
 
-    let events_after = fs::read_to_string(&events_path).expect("tracked events after");
-    assert!(events_after.starts_with(&events_before));
-    let events = events_after
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked event JSON"))
-        .collect::<Vec<_>>();
+    let events = load_tracked_work_events(&project_root);
+    assert_tracked_work_events_preserved(&events_before, &events);
+    let additions = newly_persisted_work_events(&events_before, &events);
     assert_eq!(
         events
             .iter()
@@ -2659,13 +2757,16 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         "compatibility continuation must not duplicate Start delivery"
     );
     assert_eq!(events.len(), 2, "the original request must be applied once");
-    assert_eq!(events[1].kind, WorkEventKind::Done);
-    assert_eq!(events[1].work_item_id, canonical_work_id);
-    assert_eq!(events[1].agent_session_id.as_deref(), Some(SESSION));
     assert_eq!(
-        events[1].status_category,
-        Some(WorkspaceStatusCategory::Done)
+        additions.len(),
+        1,
+        "the original request must add one event"
     );
+    let done = additions[0];
+    assert_eq!(done.kind, WorkEventKind::Done);
+    assert_eq!(done.work_item_id, canonical_work_id);
+    assert_eq!(done.agent_session_id.as_deref(), Some(SESSION));
+    assert_eq!(done.status_category, Some(WorkspaceStatusCategory::Done));
 
     let _env_lock = gwt_core::test_support::env_lock()
         .lock()
@@ -3008,8 +3109,7 @@ fn workspace_update_exact_rejection_rejects_duplicate_session_projection_rows() 
         .path()
         .canonicalize()
         .expect("canonical project root");
-    let events_path = project_root.join(".gwt/work/events.jsonl");
-    let events_before = fs::read(&events_path).expect("tracked events before duplicate");
+    let events_before = tracked_work_event_store_snapshot(&project_root);
     let settlement_before = work_event_settlement_state_snapshot(&fixture);
     let server = CaptureServer::start_with_projection_duplicate(
         StatusCode::CONFLICT,
@@ -3042,7 +3142,7 @@ fn workspace_update_exact_rejection_rejects_duplicate_session_projection_rows() 
     server.recv();
     server.assert_no_additional_request();
     assert_eq!(
-        fs::read(&events_path).expect("tracked events after duplicate"),
+        tracked_work_event_store_snapshot(&project_root),
         events_before,
         "an ambiguous projection must not append a Done event"
     );

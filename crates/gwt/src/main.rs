@@ -1452,6 +1452,7 @@ mod tests {
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_config::{Profile, Settings};
     use gwt_core::logging::{LogEvent, LogLevel};
+    use gwt_core::test_support::ScopedGwtHome;
     use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
@@ -2153,6 +2154,7 @@ mod tests {
     #[test]
     fn pane_send_input_replies_explicit_result_for_session_binding() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let mut window = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
         window.id = "claude-1".to_string();
         window.agent_id = Some("claude".to_string());
@@ -2281,6 +2283,7 @@ mod tests {
     #[test]
     fn logging_dir_for_startup_path_uses_project_scoped_fallback() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let log_dir = logging_dir_for_startup_path(temp.path());
         let project_hash = gwt_core::repo_hash::compute_path_hash(temp.path());
 
@@ -2404,6 +2407,7 @@ mod tests {
     #[test]
     fn project_index_status_check_delegates_project_root_to_bootstrap_path() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (proxy, events) = AppEventProxy::stub();
         let captured_root = Arc::new(Mutex::new(None));
         let captured_root_for_closure = captured_root.clone();
@@ -2470,6 +2474,7 @@ mod tests {
     #[test]
     fn write_browser_url_handoff_file_persists_url_to_target_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(tmp.path());
         let target = tmp.path().join("gwt-browser-url");
         let url = "http://127.0.0.1:44557/";
 
@@ -2492,6 +2497,7 @@ mod tests {
         // it should be reported as Failed so callers can log without
         // aborting startup.
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(tmp.path());
         let missing = tmp.path().join("does/not/exist/gwt-browser-url");
 
         let outcome =
@@ -3181,6 +3187,7 @@ mod tests {
     #[test]
     fn frontend_sync_events_replay_status_wizard_and_pending_update() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -3288,6 +3295,7 @@ mod tests {
     #[test]
     fn update_available_event_records_pending_update_before_broadcast() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let tab = sample_project_tab(
             "tab-1",
             "Repo",
@@ -3368,6 +3376,7 @@ mod tests {
     #[test]
     fn open_project_path_reuses_existing_tab_and_adds_new_tab() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let other = temp.path().join("other");
         let scratch = temp.path().join("scratch");
@@ -3419,6 +3428,7 @@ mod tests {
     #[test]
     fn select_and_close_project_tabs_emit_workspace_and_wizard_updates() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let other = temp.path().join("other");
         fs::create_dir_all(&repo).expect("create repo");
@@ -3476,6 +3486,7 @@ mod tests {
     #[test]
     fn window_management_events_cover_canvas_operations() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
@@ -3572,6 +3583,7 @@ mod tests {
     #[test]
     fn non_agent_window_presets_open_and_focus_at_normal_floating_size() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -3719,6 +3731,7 @@ mod tests {
     #[test]
     fn loaders_and_wizard_entrypoints_cover_success_and_error_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         fs::create_dir_all(repo.join("src")).expect("create src");
@@ -4060,6 +4073,7 @@ mod tests {
     #[test]
     fn file_tree_load_uses_selected_linked_worktree_root() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
 
@@ -4327,6 +4341,7 @@ mod tests {
     #[test]
     fn runtime_status_missing_window_cleans_active_agent_session() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -4361,6 +4376,7 @@ mod tests {
     #[test]
     fn app_runtime_window_helpers_cover_lookup_status_and_seeded_details() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, _recorded_events) = sample_runtime_with_events(
@@ -4412,6 +4428,7 @@ mod tests {
     #[test]
     fn async_main_helpers_emit_proxy_events_without_gui_runtime() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         let default_branch = current_git_branch(&repo).expect("current branch");
@@ -4510,6 +4527,7 @@ mod tests {
     #[test]
     fn frontend_event_dispatch_routes_canvas_knowledge_and_async_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let scratch = temp.path().join("scratch");
         init_git_repo(&repo);
@@ -4829,6 +4847,7 @@ mod tests {
     #[test]
     fn test_backend_connection_replies_through_async_dispatch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
 
         let immediate_events = runtime.handle_frontend_event(
@@ -4868,6 +4887,7 @@ mod tests {
     #[test]
     fn test_agent_backend_connection_replies_through_async_dispatch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
 
         let immediate_events = runtime.handle_frontend_event(
@@ -4929,6 +4949,7 @@ mod tests {
     #[test]
     fn agent_backend_connection_probe_drops_older_reverse_completion_per_client_and_agent() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
         let codex = gwt_agent::BuiltinAgentId::Codex;
         let claude = gwt_agent::BuiltinAgentId::ClaudeCode;
@@ -5005,6 +5026,7 @@ mod tests {
     #[test]
     fn wizard_handler_helpers_cover_preparation_focus_and_error_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, recorded_events) = sample_runtime_with_events(
@@ -5213,6 +5235,7 @@ mod tests {
     #[test]
     fn launch_wizard_action_flow_launches_agent_when_selected_index_is_stale() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, recorded_events) = sample_runtime_with_events(
@@ -5334,6 +5357,7 @@ mod tests {
     #[test]
     fn launch_completion_and_project_target_error_paths_are_reported() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let mut runtime = sample_runtime(
@@ -5613,6 +5637,7 @@ mod tests {
     #[test]
     fn resolve_project_target_uses_selected_directory_name_for_git_subdir_title() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("demo-repo");
         fs::create_dir_all(repo.join("apps/frontend")).expect("create repo dirs");
         let status = gwt_core::process::hidden_command("git")
@@ -5637,6 +5662,7 @@ mod tests {
     #[test]
     fn local_branch_exists_surfaces_git_errors_for_invalid_repo() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let err = super::local_branch_exists(temp.path(), "feature/missing")
             .expect_err("non-repo path should surface git failure");
 
@@ -5817,6 +5843,7 @@ mod tests {
     #[test]
     fn build_shell_process_launch_for_host_uses_worktree_env() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -5853,6 +5880,7 @@ mod tests {
     #[test]
     fn build_shell_process_launch_for_host_uses_selected_windows_shell() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -5889,6 +5917,7 @@ mod tests {
         // replaces the detected interactive shell while keeping the worktree
         // env and GWT_PROJECT_ROOT.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -6200,6 +6229,7 @@ mod tests {
     #[test]
     fn recent_project_and_path_helpers_dedupe_and_fallback() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("repo");
         fs::create_dir_all(&project).expect("project dir");
         let project_dot = project.join(".");
@@ -6345,6 +6375,7 @@ mod tests {
     #[test]
     fn docker_defaults_and_mount_helpers_prefer_devcontainer_settings() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
         let devcontainer_dir = project_root.join(".devcontainer");
         fs::create_dir_all(&devcontainer_dir).expect("devcontainer dir");
@@ -6413,6 +6444,7 @@ mod tests {
     #[test]
     fn docker_launch_plan_merges_devcontainer_compose_files_and_rebases_relative_mounts() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("project");
         let devcontainer_dir = project.join(".devcontainer");
         fs::create_dir_all(&devcontainer_dir).expect("create devcontainer dir");
@@ -6451,6 +6483,7 @@ mod tests {
     #[test]
     fn worktree_git_and_misc_helpers_cover_repo_paths_and_defaults() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         let init = gwt_core::process::hidden_command("git")
@@ -6552,6 +6585,7 @@ mod tests {
         // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
         // are reaped — clean ones removed, dirty ones kept, capped per run.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -6618,6 +6652,7 @@ mod tests {
     #[test]
     fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -6648,6 +6683,7 @@ mod tests {
         // `.intake-*` worktree (no branch) and sets working_dir; the existing
         // branch-based launch path is untouched.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -6708,6 +6744,7 @@ mod tests {
         // develop after the clone; the resolved intake worktree must contain
         // the new commit.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
 
@@ -6758,6 +6795,7 @@ mod tests {
         // #3374: a repo with no origin remote cannot fetch; an `origin/*` base
         // must fall back to HEAD instead of failing the intake launch.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         for args in [
@@ -6794,6 +6832,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_helpers_cover_short_circuits_existing_and_remote_creation() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -7079,6 +7118,7 @@ mod tests {
         // mint a new work/* branch. This locks the routing contract that both
         // entry points (Branches row + Launch Wizard picker) reuse.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -7180,6 +7220,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let branch = "feature/existing";
@@ -7230,6 +7271,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_recreates_remote_develop_when_start_work_ref_is_stale() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
 
@@ -7307,6 +7349,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_prunes_missing_existing_worktree_before_recreating() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let branch = "feature/stale-worktree";
@@ -7676,6 +7719,7 @@ mod tests {
         assert_eq!(super::knowledge_kind_for_preset(WindowPreset::Shell), None);
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
         fs::create_dir_all(&project_root).expect("create project root");
         assert!(super::mount_source_matches_project_root(".", &project_root));
@@ -7761,6 +7805,7 @@ mod tests {
         );
 
         let profile_temp = tempdir().expect("profile tempdir");
+        let _gwt_home = ScopedGwtHome::set(profile_temp.path());
         let config_path = profile_temp.path().join("profile-config.toml");
         let mut settings = Settings::default();
         settings
@@ -8003,8 +8048,8 @@ fn main() -> std::io::Result<()> {
         })
         .ok();
 
-    if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
-        eprintln!("gwt daemon bootstrap: {error}");
+    if let Err(error) = gwt::cli::hook::prepare_front_door_for_path(&startup_dir) {
+        eprintln!("gwt front door preparation: {error}");
     }
 
     // SPEC #2920 Phase 4 / FR-011: acquire the per-user tray

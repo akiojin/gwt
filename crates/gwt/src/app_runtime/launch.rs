@@ -4993,6 +4993,7 @@ mod docker_session_persistence_tests {
     #[test]
     fn production_docker_session_reload_matches_finalized_process_worktree() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project = temp.path().join("project");
         let sessions_dir = temp.path().join("sessions");
         std::fs::create_dir_all(&project).expect("create project");
@@ -5158,6 +5159,7 @@ mod agent_endpoint_env_tests {
     #[test]
     fn finalized_bound_session_persistence_retains_same_id_replacement() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let sessions_dir = temp.path().join("sessions");
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "prepared-candidate");
         let mut candidate = gwt_agent::Session::new(
@@ -5218,6 +5220,7 @@ mod agent_endpoint_env_tests {
     #[test]
     fn finalized_unbound_session_persistence_retains_same_id_replacement() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let sessions_dir = temp.path().join("sessions");
         let mut candidate = gwt_agent::Session::new(
             temp.path().join("worktree"),
@@ -5251,6 +5254,7 @@ mod agent_endpoint_env_tests {
     #[test]
     fn finalized_session_sidecar_failure_marks_durable_session_interrupted() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let sessions_dir = temp.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("create Sessions directory");
         let runtime_root = sessions_dir.join("runtime");
@@ -5281,6 +5285,7 @@ mod agent_endpoint_env_tests {
     #[test]
     fn finalized_session_unknown_save_outcome_marks_visible_running_session_interrupted() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let sessions_dir = temp.path().join("sessions");
         let mut candidate = gwt_agent::Session::new(
             temp.path().join("worktree"),
@@ -6851,6 +6856,7 @@ mod agent_endpoint_env_tests {
     #[test]
     fn launch_injects_the_runtime_specific_pane_websocket_endpoint() {
         let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45123/internal/hook-live",
             "ws://127.0.0.1:46234/ws",
@@ -6910,6 +6916,7 @@ mod agent_endpoint_env_tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let wrapper = temp.path().join("stateful-container-wrapper");
         std::fs::write(
             &wrapper,
@@ -6992,6 +6999,7 @@ mod fr001_capability_cache_tests {
     #[test]
     fn caches_claude_capabilities_for_reuse_without_reprobe() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
 
         let on = LaunchWizardMemoryCache::load_with_agent_options_and_capabilities(
             dir.path(),
@@ -7031,6 +7039,7 @@ mod tool_runtime_integration_tests {
     #[test]
     fn quick_start_source_session_hydrates_tool_runtime_provenance_before_prepare() {
         let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
         let worktree = tempfile::tempdir().expect("worktree");
         let mut session = gwt_agent::Session::new(
             worktree.path(),
@@ -7057,6 +7066,7 @@ mod tool_runtime_integration_tests {
     #[test]
     fn legacy_source_session_migration_is_staged_until_authenticated_commit() {
         let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
         let worktree = tempfile::tempdir().expect("worktree");
         let mut session = gwt_agent::Session::new(
             worktree.path(),
@@ -7115,6 +7125,7 @@ mod tool_runtime_integration_tests {
     #[test]
     fn unresolved_provenance_skips_the_legacy_migration_instead_of_failing_the_launch() {
         let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
         let worktree = tempfile::tempdir().expect("worktree");
         let session = gwt_agent::Session::new(
             worktree.path(),
@@ -7158,6 +7169,7 @@ mod tool_runtime_integration_tests {
     #[test]
     fn missing_explicit_source_session_fails_closed_before_package_resolution() {
         let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .tool_runtime_source_session_id("missing-session")
             .tool_runtime_provenance(provenance())
@@ -7174,6 +7186,7 @@ mod tool_runtime_integration_tests {
     #[test]
     fn lazy_provenance_migration_cas_failure_preserves_current_session_bytes() {
         let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(sessions_dir.path());
         let worktree = tempfile::tempdir().expect("worktree");
         let session = gwt_agent::Session::new(
             worktree.path(),
