@@ -590,6 +590,37 @@ pub fn is_pm_worktree(path: &Path) -> bool {
     pm_worktree_store_dir(path).is_some()
 }
 
+/// [`is_pm_worktree`] for callers holding an already-canonicalized path.
+///
+/// The Work mutation paths canonicalize every path they touch, while
+/// [`gwt_projects_dir`](gwt_core::paths::gwt_projects_dir) is built from `HOME`
+/// verbatim. When `HOME` traverses a symlink — macOS `/var` -> `/private/var`
+/// is the everyday case under a temporary home — the two spellings disagree
+/// and the plain shape test rejects a genuine PM worktree. Comparing both
+/// spellings keeps the answer about the path, not about how it was spelled.
+pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    if is_pm_worktree(path) {
+        return true;
+    }
+    let Some(canonical_projects_dir) =
+        dunce::canonicalize(gwt_core::paths::gwt_projects_dir()).ok()
+    else {
+        return false;
+    };
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
+    pm_dir
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|projects_dir| projects_dir == canonical_projects_dir)
+}
+
 /// The project store that owns `path`, when `path` is that store's PM
 /// worktree: `<gwt projects dir>/<repo hash>` for
 /// `<gwt projects dir>/<repo hash>/pm/worktree`.
@@ -917,6 +948,48 @@ pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
         prefs
             .registration
             .is_some_and(|registration| registration.session_id == session_id)
+    })
+}
+
+/// SPEC-3431 FR-032 (Issue #3477): is `session_id` this project's registered
+/// PM, running in this project's canonical PM worktree?
+///
+/// The Work mutation paths use this to grant a branchless identity to the one
+/// Session that has no branch by design. It is stricter than
+/// [`session_is_registered_pm`] on purpose: PM privilege over conversational
+/// operations only needs the subject, but rewriting Work state also needs the
+/// *container* to be the exact worktree this project's PM was given. Three
+/// facts must agree, and any disagreement is not privileged (fail-closed):
+///
+/// 1. the durable registration names `session_id`,
+/// 2. the registration's worktree is `worktree`, and
+/// 3. `worktree` is the canonical PM worktree derived from
+///    `project_state_root` itself.
+///
+/// (3) is what keeps a stale registration pointing at some other directory —
+/// or a foreign project's PM path — from authorizing anything here. Paths are
+/// compared canonically because callers hand us an already-canonicalized
+/// worktree while the derived and stored paths may still contain symlinks.
+pub fn registered_pm_worktree_authority(
+    project_state_root: &Path,
+    session_id: &str,
+    worktree: &Path,
+) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let canonical = |path: &Path| dunce::canonicalize(path).ok();
+    let Some(worktree) = canonical(worktree) else {
+        return false;
+    };
+    if canonical(&pm_worktree_path_for_repo_path(project_state_root)).as_ref() != Some(&worktree) {
+        return false;
+    }
+    load_pm_prefs(&pm_prefs_path_for_repo_path(project_state_root)).is_ok_and(|prefs| {
+        prefs.registration.is_some_and(|registration| {
+            registration.session_id == session_id
+                && canonical(Path::new(&registration.worktree_path)).as_ref() == Some(&worktree)
+        })
     })
 }
 
