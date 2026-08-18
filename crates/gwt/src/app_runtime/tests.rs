@@ -3791,8 +3791,8 @@ fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
         .workspace
         .set_session_id("agent-project", Some("session-project".to_string())));
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let principal = AgentSessionPrincipal::for_test(&project, "session-project")
-        .expect("self-owned principal");
+    let principal =
+        AgentSessionPrincipal::for_test(&project, "session-project").expect("self-owned principal");
 
     let refused = runtime.handle_agent_frontend_event(
         "pane-client".to_string(),
@@ -3843,8 +3843,7 @@ fn agent_pane_close_removes_husk_window_missing_from_lookup() {
     );
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     runtime.window_lookup.remove("tab-project::agent-husk");
-    let principal =
-        AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
 
     let events = runtime.handle_agent_frontend_event(
         "pane-client".to_string(),

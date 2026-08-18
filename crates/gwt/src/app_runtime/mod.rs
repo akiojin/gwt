@@ -6143,7 +6143,9 @@ impl AppRuntime {
                         target: "gwt_security",
                         "correlated agent self-close bypassed generation-aware dispatch"
                     );
-                    return refusal("a correlated self-close was not routed with its response channel");
+                    return refusal(
+                        "a correlated self-close was not routed with its response channel",
+                    );
                 }
                 if !self.agent_principal_authorizes_window(&principal, &id) {
                     tracing::warn!(

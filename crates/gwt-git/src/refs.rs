@@ -239,8 +239,7 @@ mod tests {
             ])
             .current_dir(layout.path()));
 
-        let times =
-            branch_tip_committer_times(layout.path()).expect("tip times from layout root");
+        let times = branch_tip_committer_times(layout.path()).expect("tip times from layout root");
         assert!(times.contains_key("main"));
         assert!(times.contains_key("work/x"));
     }

@@ -502,7 +502,9 @@ pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
 /// filesystem inspection instead.
 pub fn git_repository_discovery_possible(path: &Path) -> bool {
     std::env::var_os("GIT_DIR").is_some()
-        || (path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists())
+        || (path.join("HEAD").exists()
+            && path.join("objects").exists()
+            && path.join("refs").exists())
         || path.ancestors().any(|dir| dir.join(".git").exists())
 }
 
