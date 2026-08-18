@@ -36,8 +36,9 @@ use std::{
 };
 
 use gwt_core::daemon::{
-    persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
-    IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
+    persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
+    DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
+    RuntimeScope, DAEMON_PROTOCOL_VERSION, MAX_UNIX_SOCKET_PATH_LEN,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
@@ -94,7 +95,13 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     endpoint_path: PathBuf,
     writer: &mut W,
 ) -> Result<i32, SpecOpsError> {
-    let socket_path = derive_socket_path(&endpoint_path);
+    // Resolve before anything is persisted or announced: a runtime root
+    // longer than `sun_path` must surface as a diagnosis here rather than
+    // as a bare bind failure after the endpoint file already advertised an
+    // unusable socket (Issue #3476).
+    let socket =
+        resolve_daemon_socket_path(&endpoint_path).map_err(|err| config_error(err.to_string()))?;
+    let socket_path = socket.path;
     if let Err(err) = ensure_socket_parent(&socket_path) {
         return Err(config_error(format!(
             "failed to prepare daemon socket directory: {err}"
@@ -123,6 +130,17 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
         "gwtd daemon start: bind={socket}",
         socket = socket_path.display()
     );
+    if socket.placement == DaemonSocketPlacement::Shortened {
+        // The socket is not where an operator would look for it, so say
+        // why it moved.
+        let _ = writeln!(
+            writer,
+            "gwtd daemon start: socket shortened; {colocated} exceeds this platform's \
+             {limit}-byte sun_path limit",
+            colocated = endpoint_path.with_extension("sock").display(),
+            limit = MAX_UNIX_SOCKET_PATH_LEN
+        );
+    }
     let _ = writeln!(
         writer,
         "gwtd daemon start: pid={pid} version={version}",
@@ -3370,6 +3388,8 @@ fn scan_issue_monitor_once_blocking(
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
                 &mut monitor,
                 &scope.project_root,
+                &owner,
+                &repo,
             )
         },
     )?;
@@ -3488,8 +3508,12 @@ fn publish_issue_monitor_read_only_payloads(
 }
 
 fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::IssueMonitorState) {
+    // Issue #3633 AC-5: publish through the scan-cadence projection so a
+    // daemon whose worker has stopped scanning cannot keep serving a snapshot
+    // that reads healthy.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     hub.set_issue_monitor_status(
-        serde_json::to_value(monitor.agent_status())
+        serde_json::to_value(monitor.agent_status_at(&now))
             .expect("Issue Monitor agent status serializes"),
     );
 }
@@ -3841,10 +3865,6 @@ where
         .await
         .map_err(|err| format!("write failed: {err}"))?;
     Ok(())
-}
-
-fn derive_socket_path(endpoint_path: &Path) -> PathBuf {
-    endpoint_path.with_extension("sock")
 }
 
 fn ensure_socket_parent(socket_path: &Path) -> std::io::Result<()> {
@@ -4801,9 +4821,21 @@ exit 0
                 .expect("retry ACK retains the live agent projection"),
         )
         .expect("deserialize retry projection");
+        // Issue #3633 AC-5: the published projection also carries the
+        // scan-cadence check, which `agent_status` deliberately leaves out
+        // because it needs a clock. This worker has never completed a scan.
+        assert!(
+            projected
+                .scan_stall
+                .as_deref()
+                .is_some_and(|reason| reason.contains("never")),
+            "the ACKed projection must report the scan cadence: {:?}",
+            projected.scan_stall
+        );
+        let mut reconciled = monitor.agent_status();
+        reconciled.scan_stall = projected.scan_stall.clone();
         assert_eq!(
-            projected,
-            monitor.agent_status(),
+            projected, reconciled,
             "retry ACK follows the reconciled agent projection"
         );
 

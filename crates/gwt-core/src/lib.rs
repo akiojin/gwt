@@ -9,6 +9,7 @@ pub mod config;
 pub mod coordination;
 pub mod daemon;
 pub mod error;
+pub mod github_quota;
 pub mod index;
 pub mod index_coordinator;
 pub mod logging;

@@ -152,6 +152,13 @@ drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
+- A `pm.message.send` that reports the delivery as **unverified** is not a
+  message that failed to arrive. The line was written into the pane and
+  submitted; only the target's acknowledgement did not land inside the
+  operation's window, which is ordinary when that pane is mid-turn. Do not
+  resend it, do not look for another way to reach the pane, and do not tell
+  the user the instruction was not delivered. Observe the pane instead. Only
+  a **failed** result means the input never reached it.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -196,6 +203,58 @@ things:
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
+
+## Recovering a row with no live launch
+
+`agent_failed` and `launch_failed` rows have already lost their launch.
+That is why `issue.monitor.stop` and `issue.monitor.failover` refuse
+them: both resolve an exact live launch first, and there is none left to
+name. `issue.monitor.launch_now` only reorders priority, and the scan
+re-derives the failure from the persisted hold, so the row does not move.
+
+- `issue.monitor.requeue` is the operation for that state. Pass
+  `params.number` and a `params.reason`; it takes no launch identity,
+  because there is no launch. It drops the persisted hold, returns the
+  issue to the queue in its existing priority position, spends no retry
+  attempt, and requires the next launch to start a fresh session rather
+  than resume the conversation that stranded it.
+- It fails closed in both directions. `refusal: "launch_live"` means a
+  launch still owns the issue — use the stop or the failover, which
+  verify the exact identity. `refusal: "not_held"` means nothing was
+  holding it, so nothing changed.
+- The reply returns `stale_window_id` when the failure retained an error
+  window. Close it with `pane.close`; the release already unbound it, so
+  the close cannot requeue the issue again.
+- Recovering a row does not fix why it failed. If the launch is refused
+  for a durable reason (a stranded execution generation, a repository
+  lock), the requeued issue fails the same way on its next scan. Read the
+  `error_message` first and resolve the cause, then requeue.
+
+Never repair Issue Monitor state by editing `issue-monitor.json`. A hand
+edit is invisible to every process that already holds the same state in
+memory: they re-stamp what you removed on their next commit, so the
+repair silently un-happens and the row comes back. `issue.monitor.requeue`
+publishes the release so every process converges on it, which is the part
+a file edit cannot do. If a hand edit already happened, run the requeue
+for each affected issue afterwards to bring the state back into
+agreement.
+
+## A repository has exactly one PM
+
+- `pm.status` reports `repository_registrations`: every PM registration
+  in this repository, including ones held by a different project store.
+  A row with `is_current_store` false is a PM your own project state
+  cannot see. Two live rows means two PMs are supervising one
+  repository, and they will overwrite each other's priority order and
+  launch instructions.
+- `pm.stop` with `params.session_id` from one of those rows retires that
+  PM: it clears the registration and marks the Session unrestorable, so
+  the resident loop releases and startup will not bring it back. Only a
+  registered PM of the same repository may call it. With no
+  `session_id` it retires you, which is how an orphaned PM stands down
+  on its own.
+- `pm.stop` does not close the pane. It ends PM authority and the loop;
+  the window is left for the user to close.
 
 Hard limits, no exceptions:
 
@@ -261,6 +320,15 @@ Hard limits, no exceptions:
   suppressed; only a leave-then-re-enter transition rearms reporting.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
+- A cycle that produced no milestone and no escalation ends with no
+  user-facing output at all. Do not post a "no change" line, do not
+  restate the queue or the running launches, and do not emit a keepalive
+  to prove you are still looping: the resident loop's liveness is
+  observable in the GUI's PM residency indicator and in
+  `pm-loop.json`'s `last_wake_at`, never in the conversation.
+- The cycle itself is never skipped — silence is about the report, not
+  about the cycle. An injected `[gwt]` wake prompt starts a full
+  reconcile even when that reconcile ends without a word to the user.
 
 ## Auxiliary agents
 
@@ -359,6 +427,10 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
+            // Issue #3608: an unverified delivery is not an undelivered one.
+            "reports the delivery as **unverified**",
+            "message that failed to arrive",
+            "resend it, do not look for another way to reach the pane",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
@@ -397,6 +469,26 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3645 / #3628: the recovery for a row with no live launch.
+            // Without it in the contract the PM's only remaining move is the
+            // hand edit that produced #3645 in the first place, so the
+            // prohibition below has to name the operation that replaces it.
+            "`issue.monitor.requeue`",
+            "there is no launch",
+            "launch_live",
+            "not_held",
+            "Never repair Issue Monitor state by editing `issue-monitor.json`",
+            "they re-stamp what you removed on their next commit",
+            "Recovering a row does not fix why it failed",
+            // Issue #3607: the PM singleton is per repository, and an orphan
+            // PM has a CLI route out. Without these the contract leaves the
+            // PM believing GUI clicks are the only way to stop one.
+            "`repository_registrations`",
+            "is_current_store` false",
+            "`pm.stop`",
+            "clears the registration and marks the Session unrestorable",
+            "Only a registered PM of the same repository may call it",
+            "`pm.stop` does not close the pane",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
@@ -418,6 +510,12 @@ mod tests {
             // FR-017: milestone-only digest, escalations never batched.
             "one digest",
             "never held for a digest",
+            // Issue #3632: the quiet case is stated out loud — a cycle with
+            // nothing to report ends silently, and liveness is proven outside
+            // the conversation.
+            "ends with no user-facing output at all",
+            "`pm-loop.json`'s `last_wake_at`",
+            "silence is about the report, not about the cycle",
             // FR-007: auxiliary agents never touch production.
             "must not modify production code",
             // FR-013: stopping story.
@@ -443,6 +541,40 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
+    /// nothing to report ends without saying anything. The cadence already
+    /// described milestone-only reporting, but never stated the quiet case, so
+    /// "report every cycle" stayed a defensible reading — and the runtime's
+    /// wake prompts took it. Both halves are pinned: silence on no change, and
+    /// liveness proven outside the conversation so the PM is not tempted to
+    /// emit a keepalive.
+    #[test]
+    fn contract_ends_a_no_change_cycle_with_no_user_facing_output() {
+        let body = body();
+        assert!(
+            body.contains(
+                "A cycle that produced no milestone and no escalation ends with no user-facing \
+                 output at all"
+            ),
+            "no-change 周回は無出力で終える規定が要る"
+        );
+        assert!(
+            body.contains("Do not post a \"no change\" line"),
+            "「変化なし」の明示的な禁止が要る"
+        );
+        assert!(
+            body.contains(
+                "the resident loop's liveness is observable in the GUI's PM residency indicator \
+                 and in `pm-loop.json`'s `last_wake_at`, never in the conversation"
+            ),
+            "沈黙と死んだループの区別は会話の外で示す"
+        );
+        assert!(
+            body.contains("silence is about the report, not about the cycle"),
+            "省略してよいのは出力であって周回ではない（FR-3）"
+        );
     }
 
     #[test]

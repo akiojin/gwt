@@ -144,6 +144,12 @@ pub struct WindowRuntime {
     status_thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorktreeFormProjection {
+    Resolve,
+    Persisted,
+}
+
 struct RuntimeStopThreads {
     output_thread: Option<JoinHandle<()>>,
     status_thread: Option<JoinHandle<()>>,
@@ -224,12 +230,13 @@ use workspace::{
 use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, agent_launch_purpose_title,
-    linked_issue_workspace_context, non_empty_workspace_text, save_resumed_workspace_projection,
-    save_start_work_workspace_projection, session_exact_resume_materializable, work_session_index,
+    linked_issue_workspace_context, non_empty_workspace_text, resume_branch_refs_snapshot,
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    session_exact_resume_materializable, work_session_index,
     workspace_journal_entry_view_from_entry, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
-    workspace_resume_owner_issue_number, workspace_work_item_view_from_item,
+    workspace_resume_owner_issue_number, workspace_work_item_view_from_item, ResumeBranchIndex,
     WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 #[cfg(test)]
@@ -588,7 +595,7 @@ pub(crate) struct ManualLaunchHolderIntent {
     pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
     pub(crate) local_window_id: Option<String>,
     pub(crate) local_runtime_incarnation: Option<u64>,
-    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub(crate) operation_id: String,
 }
 
@@ -617,7 +624,7 @@ pub(crate) struct ManualLaunchPreparation {
     pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
     pub(crate) expected_binding: gwt_agent::ExecutionBindingIdentity,
     pub(crate) expected_session: Option<gwt_agent::SessionExecutionIdentity>,
-    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
     pub(crate) operation_id: String,
 }
@@ -742,6 +749,19 @@ pub struct ProjectOpenTarget {
 /// scan, bounding both the git calls and the AI prompt size for large repos.
 const AI_SUMMARY_BRANCH_CAP: usize = 40;
 
+/// Issue #3604: minimum spacing between two repository-wide PR-title
+/// enumerations for the same project.
+///
+/// Each enumeration is a `gh pr list --state all --limit 999` — up to ten
+/// GraphQL requests out of a 5000-point hourly budget — and it used to ride the
+/// 30s ingest throttle, so a GUI in ordinary use re-enumerated every PR in the
+/// repository twice a minute. Bounded staleness is the right trade here: the
+/// rail falls back to the branch's tip commit subject until the title arrives,
+/// and a project-open refresh bypasses the window entirely
+/// ([`AppRuntime::spawn_work_events_ingest`]).
+pub(crate) const WORK_PR_TITLES_SCAN_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
 /// SPEC-3075 FR-006: a tip commit subject that carries no real purpose — merge
 /// commits and release-version bumps. These are the cases the AI polish targets
 /// (it reads the underlying feature commits instead).
@@ -863,6 +883,12 @@ pub struct AppRuntime {
     /// blocking worker. Duplicate ticks are coalesced by dropping them while
     /// the same canonical project scope is in flight.
     pub(crate) issue_monitor_scheduled_scans_in_flight: HashSet<PathBuf>,
+    /// Issue #3633: the runtime daemons this GUI started. Nothing in
+    /// production used to start one, so the daemon-only control lane
+    /// (`scan_now`, `daemon.subscribe`) was permanently unavailable. The
+    /// supervisor is driven from the scheduled tick, which makes the restart
+    /// of a crashed daemon fall out of the same idempotent call.
+    pub(crate) daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor,
     /// Prepared producing continuations keyed by their pending/active window.
     /// The entry remains until an authenticated SessionStart finalizes the
     /// generation + Work transaction and promotes the same bearer.
@@ -928,6 +954,13 @@ pub struct AppRuntime {
     /// process cwd according to the latest background merge scan. Projection
     /// consumes only this cache and never enumerates OS processes.
     pub(crate) work_live_process_branches: HashMap<PathBuf, HashSet<String>>,
+    /// Issue #3611: short branch names (`work/x`, `origin/work/x`) present in
+    /// the latest background ref snapshot, per project. The projection resolves
+    /// Session resumability from this set instead of spawning
+    /// `git rev-parse --git-common-dir` + `git show-ref` per Session on the
+    /// event loop. Absent until the first scan lands; see
+    /// [`workspace_views::ResumeBranchIndex`] for the unscanned semantics.
+    pub(crate) work_known_branch_refs: HashMap<PathBuf, HashSet<String>>,
     /// SPEC-2359 US-84: per-project cleanup-ready branches and their reason.
     /// This includes merged branches and branches with no effective tree diff
     /// from the canonical base. Runtime-only; never persisted.
@@ -966,6 +999,10 @@ pub struct AppRuntime {
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
+    /// Issue #3604: last full PR-title enumeration per project. Kept separate
+    /// from `last_work_events_ingest` because the local part of that ingest is
+    /// cheap while this one costs a repository-wide `gh pr list`.
+    pub(crate) last_work_pr_titles_scan: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
     /// SPEC-2359 W16-3 (FR-390): normalized branch names that currently have
     /// a LOCAL worktree, per project — refreshed by the worktree reconcile.
     /// The view marks `remote_only` by cache lookup alone (no git spawn on
@@ -1743,6 +1780,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     scan_budget: std::time::Duration,
     commit_budget: std::time::Duration,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
+    // Issue #3609: this runs on the worker thread `enqueue_issue_monitor_scan_worker`
+    // spawned, so the prefs path is resolved from the process-global `HOME` here, not
+    // from the caller's thread. A test that isolates its gwt home with the
+    // `ScopedGwtHome` thread-local pin cannot reach this thread; such tests must hold
+    // `env_test_lock()` and repoint `HOME` instead. The rule is enforced by
+    // `crates/gwt/tests/bin_gwt_home_isolation_contract_test.rs`.
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
 
     // Cheap authority probe before any remote I/O. The lease is intentionally
@@ -1802,6 +1845,8 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                             &mut monitor,
                             project_root,
+                            &owner,
+                            &repo,
                         )
                         .err()
                         .map(|error| {
@@ -2035,6 +2080,7 @@ impl AppRuntime {
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
+            daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
@@ -2044,6 +2090,7 @@ impl AppRuntime {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
@@ -2058,6 +2105,7 @@ impl AppRuntime {
             ),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
@@ -2103,9 +2151,18 @@ impl AppRuntime {
         cleanup_ready_branches: HashMap<String, String>,
         dirty_branches: HashSet<String>,
         live_process_branches: HashSet<String>,
+        known_branch_refs: Option<HashSet<String>>,
     ) -> Vec<OutboundEvent> {
         self.work_merged_branches
             .insert(project_root.to_path_buf(), merged_branches);
+        // Issue #3611: the same ref snapshot the scan already needed answers
+        // Session resumability, keeping Git off the projection hot path. A
+        // failed snapshot (`None`) leaves the previous answer in place rather
+        // than declaring every branch gone.
+        if let Some(known_branch_refs) = known_branch_refs {
+            self.work_known_branch_refs
+                .insert(project_root.to_path_buf(), known_branch_refs);
+        }
         self.work_cleanup_ready_branches
             .insert(project_root.to_path_buf(), cleanup_ready_branches);
         self.work_dirty_branches
@@ -2145,6 +2202,12 @@ impl AppRuntime {
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
         if !self.note_work_events_ingest_attempt(&project_root, force) {
             return;
+        }
+        // Issue #3604: bootstrap and project-open are the moments a stale rail
+        // summary would actually be noticed, so they reopen the PR-title window
+        // that the frequent triggers (tab switch, every launch) must respect.
+        if force {
+            self.reopen_work_pr_titles_window(&project_root);
         }
         let proxy = self.proxy.clone();
         // Resolve the home-projection paths on the calling thread: HOME is
@@ -2216,6 +2279,21 @@ impl AppRuntime {
             };
             let mut targets = work_branch_scan_targets(&projection);
             append_workspace_projection_scan_target(&project_root, &mut targets);
+            // One ref snapshot replaces the former per-target `rev-parse`
+            // probes. Historical Work rows routinely outlive their branches;
+            // rejecting those rows in memory prevents hundreds of short-lived
+            // Git processes from competing with the GUI and agent PTYs.
+            // Issue #3611: it is resolved before the empty-target exit because
+            // the projection also consumes it, as the process-free answer to
+            // "can this Session's worktree be re-materialized?".
+            let tip_times = gwt_git::refs::branch_tip_committer_times(&project_root);
+            // A failed snapshot publishes `None`, not an empty set: an empty
+            // set would claim every branch is gone and silently strip working
+            // Resume controls.
+            let known_branch_refs: Option<HashSet<String>> = tip_times
+                .as_ref()
+                .ok()
+                .map(|tip_times| tip_times.keys().cloned().collect());
             if targets.is_empty() {
                 proxy.send(UserEvent::WorkMergeStatus {
                     project_root,
@@ -2223,15 +2301,12 @@ impl AppRuntime {
                     cleanup_ready_branches: HashMap::new(),
                     dirty_branches: HashSet::new(),
                     live_process_branches: HashSet::new(),
+                    known_branch_refs,
                 });
                 return;
             }
             let live_process_branches = work_branches_with_live_processes(&targets);
-            // One ref snapshot replaces the former per-target `rev-parse`
-            // probes. Historical Work rows routinely outlive their branches;
-            // rejecting those rows in memory prevents hundreds of short-lived
-            // Git processes from competing with the GUI and agent PTYs.
-            let tip_times = match gwt_git::refs::branch_tip_committer_times(&project_root) {
+            let tip_times = match tip_times {
                 Ok(tip_times) => tip_times,
                 Err(error) => {
                     tracing::warn!(
@@ -2249,6 +2324,7 @@ impl AppRuntime {
                             .map(|target| target.branch.clone())
                             .collect(),
                         live_process_branches,
+                        known_branch_refs,
                     });
                     return;
                 }
@@ -2305,6 +2381,7 @@ impl AppRuntime {
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
+                known_branch_refs,
             });
         });
     }
@@ -2361,7 +2438,37 @@ impl AppRuntime {
     /// "what work was running" signal. Network-dependent: an empty map (offline
     /// / `gh` absent / unauthenticated) leaves the commit-subject fallback in
     /// place. Runs once per project-open, after the events ingest.
+    ///
+    /// Issue #3604: this is the only *network* leg of the ingest continuation,
+    /// and `gh pr list --state all --limit 999` costs up to ten GraphQL
+    /// requests. Riding the 30s ingest throttle meant an ordinary GUI session
+    /// re-enumerated every PR in the repository twice a minute against a
+    /// 5000-point hourly budget, so it now has its own window
+    /// ([`WORK_PR_TITLES_SCAN_WINDOW`]).
+    /// Let the next PR-title enumeration for `project_root` run immediately,
+    /// regardless of when the last one happened.
+    pub(crate) fn reopen_work_pr_titles_window(&self, project_root: &Path) {
+        self.last_work_pr_titles_scan
+            .borrow_mut()
+            .remove(project_root);
+    }
+
+    pub(crate) fn note_work_pr_titles_scan_attempt(&self, project_root: &Path) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last_work_pr_titles_scan.borrow_mut();
+        if let Some(previous) = last.get(project_root) {
+            if now.duration_since(*previous) < WORK_PR_TITLES_SCAN_WINDOW {
+                return false;
+            }
+        }
+        last.insert(project_root.to_path_buf(), now);
+        true
+    }
+
     pub(crate) fn spawn_work_pr_titles_scan(&self, project_root: PathBuf) {
+        if !self.note_work_pr_titles_scan_attempt(&project_root) {
+            return;
+        }
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let pr_titles =
@@ -3687,6 +3794,80 @@ impl AppRuntime {
         if monitor_windows.is_empty() {
             return Vec::new();
         }
+        self.issue_monitor_release_closed_windows(project_root, monitor_windows)
+    }
+
+    /// Issue #3627: release launches whose agent window no longer exists.
+    ///
+    /// Slot release was driven exclusively by PTY exit events, so a window that
+    /// disappeared without one — an app restart, a crash, an error pane reaped
+    /// outside `close_window_events` — kept its `max_active` slot forever.
+    /// Nothing else reclaimed it either: `expire_stale_unbound_launches` only
+    /// covers claims that were never bound to a window, and
+    /// `recover_stuck_autonomous` returns early unless autonomous mode is on.
+    /// A human-gated deployment therefore sat with every slot held by an agent
+    /// that had been gone for over a day, and the queue behind it never moved.
+    ///
+    /// The tab's canvas is the store that issues these window ids, so its
+    /// contents are the authority on whether a window still exists. Consulting
+    /// it costs nothing, needs no new protocol, and — unlike a pid probe —
+    /// cannot be fooled by pid reuse. The release itself reuses the existing
+    /// `window_closed` control, which is the same accounting a manual close
+    /// performs: the Issue returns to `Queued` under the usual attempt budget
+    /// and backoff, never a fabricated completion.
+    pub(crate) fn issue_monitor_vanished_window_release_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        // Every tab open on this project is asked about its own windows. The
+        // scheduled tick visits a project once, through whichever tab it saw
+        // first, but a second tab on the same project shares these prefs and
+        // its launches would otherwise never be judged by anyone.
+        let live_windows_per_tab = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.project_root == project_root)
+            .map(|tab| {
+                (
+                    tab.id.clone(),
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .map(|window| window.id.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if live_windows_per_tab.is_empty() {
+            return Vec::new();
+        }
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        let vanished = live_windows_per_tab
+            .iter()
+            .flat_map(|(tab_id, live_window_ids)| {
+                monitor.vanished_launched_windows(tab_id, live_window_ids)
+            })
+            .collect::<Vec<_>>();
+        if vanished.is_empty() {
+            return Vec::new();
+        }
+        tracing::info!(
+            windows = ?vanished,
+            "releasing issue monitor launches whose agent window no longer exists"
+        );
+        self.issue_monitor_release_closed_windows(project_root, vanished)
+    }
+
+    fn issue_monitor_release_closed_windows(
+        &mut self,
+        project_root: &Path,
+        monitor_windows: Vec<String>,
+    ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         for window_id in monitor_windows {
             let publication = self.publish_issue_monitor_control(
@@ -4273,6 +4454,8 @@ impl AppRuntime {
                             gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                                 &mut monitor,
                                 &project_root,
+                                &owner,
+                                &repo,
                             )
                             .err()
                             .map(|error| {
@@ -4461,6 +4644,12 @@ impl AppRuntime {
             if !enabled_or_cleanup {
                 continue;
             }
+            // Issue #3627: reclaim slots held by windows that no longer exist
+            // before deciding what to launch. This runs on the periodic tick
+            // rather than the launch path because the launch path stops being
+            // reached at all once every slot is held — that is exactly the
+            // wedge, and a check gated behind free capacity could never open it.
+            events.extend(self.issue_monitor_vanished_window_release_events(&project_root));
             match self.enqueue_issue_monitor_scan_worker(
                 &project_root,
                 &prefs_path,
@@ -4478,6 +4667,62 @@ impl AppRuntime {
             }
         }
         events
+    }
+
+    /// Issue #3633 AC-1/AC-2: keep a runtime daemon alive for every project
+    /// whose Issue Monitor is enabled.
+    ///
+    /// The daemon is the single driver for the Issue Monitor control lane
+    /// (`scan_now`, `daemon.subscribe`), and nothing in the production
+    /// topology used to start one. Because the check is idempotent, "start it"
+    /// and "restart the one that died" are the same call; the caller only has
+    /// to keep calling.
+    pub(crate) fn ensure_runtime_daemons_for_enabled_projects(&mut self) {
+        let mut seen_prefs_paths = HashSet::new();
+        let project_roots: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .filter_map(|tab| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+                seen_prefs_paths
+                    .insert(prefs_path.clone())
+                    .then(|| (tab.project_root.clone(), prefs_path))
+            })
+            .filter(|(_, prefs_path)| {
+                gwt::load_issue_monitor_prefs(prefs_path)
+                    .map(|prefs| prefs.enabled)
+                    .unwrap_or(false)
+            })
+            .map(|(project_root, _)| project_root)
+            .collect();
+        for project_root in project_roots {
+            self.ensure_runtime_daemon_for(&project_root);
+        }
+    }
+
+    /// Make sure a runtime daemon serves `project_root`.
+    ///
+    /// A failure here is logged rather than surfaced as a toast: the GUI
+    /// fallback still scans, so a daemon that cannot start degrades the
+    /// control lane instead of stopping the monitor. AC-5's staleness
+    /// projection is what makes the degraded state visible to a reader.
+    pub(crate) fn ensure_runtime_daemon_for(&self, project_root: &Path) {
+        match self.daemon_supervisor.ensure_running(project_root) {
+            Ok(gwt::daemon_supervisor::DaemonEnsureOutcome::Spawned { pid }) => {
+                tracing::info!(
+                    pid,
+                    project_root = %project_root.display(),
+                    "started the runtime daemon for the Issue Monitor"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                project_root = %project_root.display(),
+                "could not start the runtime daemon; the Issue Monitor stays on the local fallback"
+            ),
+        }
     }
 
     fn enqueue_issue_monitor_scan_worker(
@@ -5771,6 +6016,13 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         match request {
             AgentFrontendRequest::Ready => self.agent_frontend_sync_events(&client_id, &principal),
+            AgentFrontendRequest::ListWindows => {
+                vec![self.agent_workspace_state_reply(
+                    &client_id,
+                    &principal,
+                    WorktreeFormProjection::Persisted,
+                )]
+            }
             AgentFrontendRequest::CloseWindow {
                 id,
                 request_id,
@@ -6002,18 +6254,8 @@ impl AppRuntime {
         client_id: &str,
         principal: &AgentSessionPrincipal,
     ) -> Vec<OutboundEvent> {
-        let mut workspace = self.app_state_view();
-        workspace
-            .tabs
-            .retain(|tab| principal.authorizes_project_root(Path::new(&tab.project_root)));
-        workspace.active_tab_id = workspace
-            .active_tab_id
-            .filter(|active| workspace.tabs.iter().any(|tab| &tab.id == active))
-            .or_else(|| workspace.tabs.first().map(|tab| tab.id.clone()));
-        // Recent-project history is process-global and is not required by
-        // pane.list/read. Never expose it on the agent capability route.
-        workspace.recent_projects.clear();
-
+        let workspace_state =
+            self.agent_workspace_state_reply(client_id, principal, WorktreeFormProjection::Resolve);
         let allowed_window_ids = self
             .window_lookup
             .iter()
@@ -6049,10 +6291,7 @@ impl AppRuntime {
             }
         }
 
-        let mut events = vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::WindowCanvasState { workspace },
-        )];
+        let mut events = vec![workspace_state];
         events.extend(terminal_snapshots.into_iter().map(|(id, snapshot)| {
             OutboundEvent::reply(
                 client_id,
@@ -6063,6 +6302,35 @@ impl AppRuntime {
             )
         }));
         events
+    }
+
+    fn agent_workspace_state_reply(
+        &self,
+        client_id: &str,
+        principal: &AgentSessionPrincipal,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> OutboundEvent {
+        let tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .map(|tab| self.project_tab_view(tab, worktree_form_projection))
+            .collect::<Vec<_>>();
+        let active_tab_id = self
+            .active_tab_id
+            .as_ref()
+            .filter(|active| tabs.iter().any(|tab| &tab.id == *active))
+            .cloned()
+            .or_else(|| tabs.first().map(|tab| tab.id.clone()));
+        let workspace = gwt::AppStateView {
+            app_version: crate::runtime_support::current_app_version().to_string(),
+            tabs,
+            active_tab_id,
+            // Recent-project history is process-global and is not required by
+            // pane.list/read. Never expose it on the agent capability route.
+            recent_projects: Vec::new(),
+        };
+        OutboundEvent::reply(client_id, BackendEvent::WindowCanvasState { workspace })
     }
 
     pub(crate) fn frontend_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
@@ -6138,20 +6406,7 @@ impl AppRuntime {
             tabs: self
                 .tabs
                 .iter()
-                .map(|tab| {
-                    let workspace = self.workspace_view_for_tab(tab);
-                    let running_agents =
-                        crate::runtime_support::collect_running_agents(&workspace.windows);
-                    gwt::ProjectTabView {
-                        id: tab.id.clone(),
-                        title: tab.title.clone(),
-                        project_root: tab.project_root.display().to_string(),
-                        kind: tab.kind,
-                        workspace,
-                        running_agent_count: running_agents.len() as u32,
-                        running_agents,
-                    }
-                })
+                .map(|tab| self.project_tab_view(tab, WorktreeFormProjection::Resolve))
                 .collect(),
             active_tab_id: self.active_tab_id.clone(),
             recent_projects: self
@@ -6166,7 +6421,33 @@ impl AppRuntime {
         }
     }
 
+    fn project_tab_view(
+        &self,
+        tab: &ProjectTabRuntime,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> gwt::ProjectTabView {
+        let workspace = self.workspace_view_for_tab_with(tab, worktree_form_projection);
+        let running_agents = crate::runtime_support::collect_running_agents(&workspace.windows);
+        gwt::ProjectTabView {
+            id: tab.id.clone(),
+            title: tab.title.clone(),
+            project_root: tab.project_root.display().to_string(),
+            kind: tab.kind,
+            workspace,
+            running_agent_count: running_agents.len() as u32,
+            running_agents,
+        }
+    }
+
     fn workspace_view_for_tab(&self, tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+        self.workspace_view_for_tab_with(tab, WorktreeFormProjection::Resolve)
+    }
+
+    fn workspace_view_for_tab_with(
+        &self,
+        tab: &ProjectTabRuntime,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> gwt::WorkspaceView {
         gwt::WorkspaceView {
             viewport: tab.workspace.persisted().viewport.clone(),
             windows: tab
@@ -6187,17 +6468,19 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
-                    window.worktree_form = self
-                        .active_agent_sessions
-                        .get(&window.id)
-                        .map(|session| {
-                            if self.session_uses_ephemeral_worktree(session) {
-                                gwt::WindowWorktreeForm::Ephemeral
-                            } else {
-                                gwt::WindowWorktreeForm::BranchBacked
-                            }
-                        })
-                        .unwrap_or(gwt::WindowWorktreeForm::Unknown);
+                    if worktree_form_projection == WorktreeFormProjection::Resolve {
+                        window.worktree_form = self
+                            .active_agent_sessions
+                            .get(&window.id)
+                            .map(|session| {
+                                if self.session_uses_ephemeral_worktree(session) {
+                                    gwt::WindowWorktreeForm::Ephemeral
+                                } else {
+                                    gwt::WindowWorktreeForm::BranchBacked
+                                }
+                            })
+                            .unwrap_or(gwt::WindowWorktreeForm::Unknown);
+                    }
                     if let gwt::WindowPlacement::AgentKanban {
                         board_id,
                         lane_id,
