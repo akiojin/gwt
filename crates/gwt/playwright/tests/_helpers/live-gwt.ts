@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page, TestInfo } from "@playwright/test";
@@ -28,7 +28,17 @@ async function removeStaleLiveBackendLock(path: string): Promise<boolean> {
       return false;
     }
   } catch {
-    return false;
+    // mkdir and owner.json cannot be created atomically. If the owner dies in
+    // that narrow window, fall back to the directory timestamp so later live
+    // tests can reclaim the orphan instead of waiting the full lock timeout.
+    try {
+      const metadata = await stat(path);
+      if (Date.now() - metadata.mtimeMs < LIVE_BACKEND_LOCK_STALE_MS) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
   }
   await rm(path, { recursive: true, force: true });
   return true;
@@ -43,14 +53,19 @@ export async function acquireLiveGwtBackendLock(
   while (Date.now() < deadline) {
     try {
       await mkdir(lockPath);
-      await writeFile(
-        join(lockPath, "owner.json"),
-        JSON.stringify({
-          createdAt: Date.now(),
-          titlePath: testInfo.titlePath,
-          workerIndex: testInfo.workerIndex,
-        }),
-      );
+      try {
+        await writeFile(
+          join(lockPath, "owner.json"),
+          JSON.stringify({
+            createdAt: Date.now(),
+            titlePath: testInfo.titlePath,
+            workerIndex: testInfo.workerIndex,
+          }),
+        );
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
       return async () => {
         await rm(lockPath, { recursive: true, force: true });
       };

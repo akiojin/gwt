@@ -159,10 +159,10 @@ fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
 /// etc.) remain the responsibility of the agent-specific builder methods.
 pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
     match agent {
-        // Keep Codex out of the alternate screen so the PTY emits normal
+        // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
         // CLI's documented inline mode for preserving terminal history.
-        AgentId::Codex => vec!["--no-alt-screen".to_string()],
+        AgentId::Codex | AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
         | AgentId::Gemini
@@ -1269,6 +1269,23 @@ impl AgentLaunchBuilder {
 
     /// Build the final `LaunchConfig`.
     pub fn build(mut self) -> LaunchConfig {
+        if self.agent_id == AgentId::GrokBuild {
+            let normalize = |value: Option<String>| {
+                value.and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                })
+            };
+            self.model = normalize(self.model.take());
+            self.reasoning_level = normalize(self.reasoning_level.take());
+            if self
+                .reasoning_level
+                .as_deref()
+                .is_some_and(|effort| effort.eq_ignore_ascii_case("auto"))
+            {
+                self.reasoning_level = None;
+            }
+        }
         self.working_dir = self
             .working_dir
             .as_ref()
@@ -1338,6 +1355,9 @@ impl AgentLaunchBuilder {
             }
             AgentId::Codex => {
                 self.build_codex_args(&mut args, &mut env_vars);
+            }
+            AgentId::GrokBuild => {
+                self.build_grok_build_args(&mut args);
             }
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
@@ -1718,6 +1738,39 @@ impl AgentLaunchBuilder {
         }
     }
 
+    fn build_grok_build_args(&self, args: &mut Vec<String>) {
+        args.extend(canonical_launch_args(&AgentId::GrokBuild));
+
+        match self.session_mode {
+            SessionMode::Continue => args.push("--continue".to_string()),
+            SessionMode::Resume => {
+                args.push("--resume".to_string());
+                if let Some(ref id) = self.resume_session_id {
+                    args.push(id.clone());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+
+        if let Some(model) = self.model.as_deref() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+
+        if let Some(effort) = self
+            .reasoning_level
+            .as_deref()
+            .filter(|effort| !effort.eq_ignore_ascii_case("auto"))
+        {
+            args.push("--effort".to_string());
+            args.push(effort.to_string());
+        }
+
+        if self.skip_permissions {
+            args.push("--always-approve".to_string());
+        }
+    }
+
     fn build_antigravity_args(&self, args: &mut Vec<String>) {
         match self.session_mode {
             SessionMode::Continue => args.push("--continue".to_string()),
@@ -1893,6 +1946,22 @@ mod tests {
             .into_owned()
     }
 
+    fn assert_single_option_pair(args: &[String], flag: &str, value: &str) {
+        let matches = args
+            .windows(2)
+            .filter(|pair| pair[0] == flag && pair[1] == value)
+            .count();
+        assert_eq!(
+            matches, 1,
+            "expected exactly one `{flag} {value}` pair in {args:?}"
+        );
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == flag).count(),
+            1,
+            "expected exactly one `{flag}` flag in {args:?}"
+        );
+    }
+
     #[test]
     fn canonical_launch_args_for_codex_contains_no_alt_screen() {
         let args = canonical_launch_args(&AgentId::Codex);
@@ -1903,7 +1972,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_launch_args_for_non_codex_agents_is_empty() {
+    fn canonical_launch_args_for_grok_build_contains_no_alt_screen() {
+        assert_eq!(
+            canonical_launch_args(&AgentId::GrokBuild),
+            vec!["--no-alt-screen".to_string()]
+        );
+    }
+
+    #[test]
+    fn canonical_launch_args_for_agents_without_defaults_is_empty() {
         // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
@@ -2545,6 +2622,7 @@ mod tests {
     fn build_non_codex_agents_do_not_enable_goal_feature() {
         for agent in [
             AgentId::ClaudeCode,
+            AgentId::GrokBuild,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -2801,6 +2879,123 @@ mod tests {
             spec_arg.map(String::as_str),
             Some("@google/gemini-cli@latest")
         );
+    }
+
+    #[test]
+    fn resolve_runner_latest_uses_official_grok_build_package() {
+        let runner = resolve_runner(&AgentId::GrokBuild, "latest");
+        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
+        assert_eq!(
+            spec_arg.map(String::as_str),
+            Some("@xai-official/grok@latest")
+        );
+    }
+
+    #[test]
+    fn build_grok_build_maps_launch_modes_and_permission_flag() {
+        let normal = AgentLaunchBuilder::new(AgentId::GrokBuild).build();
+        assert_eq!(normal.command, "grok");
+        assert_eq!(normal.display_name, "Grok Build");
+        assert_eq!(normal.args, ["--no-alt-screen"]);
+
+        let continue_latest = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Continue)
+            .build();
+        assert_eq!(continue_latest.args, ["--no-alt-screen", "--continue"]);
+
+        let resume = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("grok-session-42")
+            .skip_permissions(true)
+            .build();
+        assert_eq!(
+            resume.args,
+            [
+                "--no-alt-screen",
+                "--resume",
+                "grok-session-42",
+                "--always-approve",
+            ]
+        );
+
+        let resume_latest = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Resume)
+            .build();
+        assert_eq!(resume_latest.args, ["--no-alt-screen", "--resume"]);
+    }
+
+    #[test]
+    fn build_grok_build_maps_model_and_effort_for_every_launch_mode() {
+        // SPEC-1921 T483: Grok Build uses the same exact option/value argv
+        // pairs for new, continue, and resume launches.
+        let cases = [
+            (SessionMode::Normal, None, "none"),
+            (SessionMode::Continue, None, "high"),
+            (SessionMode::Resume, Some("grok-session-42"), "max"),
+        ];
+
+        for (mode, resume_id, effort) in cases {
+            let mut builder = AgentLaunchBuilder::new(AgentId::GrokBuild)
+                .model("grok-4.20-beta")
+                .reasoning_level(effort)
+                .session_mode(mode);
+            if let Some(resume_id) = resume_id {
+                builder = builder.resume_session_id(resume_id);
+            }
+
+            let config = builder.build();
+
+            assert_eq!(config.model.as_deref(), Some("grok-4.20-beta"));
+            assert_eq!(config.reasoning_level.as_deref(), Some(effort));
+            assert_single_option_pair(&config.args, "--model", "grok-4.20-beta");
+            assert_single_option_pair(&config.args, "--effort", effort);
+        }
+    }
+
+    #[test]
+    fn build_grok_build_accepts_every_common_effort_value() {
+        // Auto is tested separately as the CLI-default sentinel. Every other
+        // common value must be forwarded verbatim to Grok Build.
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let config = AgentLaunchBuilder::new(AgentId::GrokBuild)
+                .reasoning_level(effort)
+                .build();
+
+            assert_eq!(config.reasoning_level.as_deref(), Some(effort));
+            assert_single_option_pair(&config.args, "--effort", effort);
+        }
+    }
+
+    #[test]
+    fn build_grok_build_distinguishes_explicit_values_from_cli_defaults() {
+        let explicit = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model("grok-4.20-beta")
+            .reasoning_level("high")
+            .build();
+        assert_single_option_pair(&explicit.args, "--model", "grok-4.20-beta");
+        assert_single_option_pair(&explicit.args, "--effort", "high");
+
+        let cli_defaults = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model("")
+            .reasoning_level("auto")
+            .build();
+
+        assert_eq!(cli_defaults.reasoning_level, None);
+        assert!(!cli_defaults.args.iter().any(|arg| arg == "--model"));
+        assert!(!cli_defaults.args.iter().any(|arg| arg == "--effort"));
+
+        let whitespace_defaults = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model(" \t ")
+            .reasoning_level(" \t ")
+            .build();
+        assert!(!whitespace_defaults.args.iter().any(|arg| arg == "--model"));
+        assert!(!whitespace_defaults.args.iter().any(|arg| arg == "--effort"));
+
+        let provider_defined = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model("DefaultXL")
+            .build();
+        assert_eq!(provider_defined.model.as_deref(), Some("DefaultXL"));
+        assert_single_option_pair(&provider_defined.args, "--model", "DefaultXL");
     }
 
     #[test]
