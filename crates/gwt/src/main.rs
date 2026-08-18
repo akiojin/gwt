@@ -3202,6 +3202,7 @@ mod tests {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            linked_issue_number: None,
         }
     }
 
