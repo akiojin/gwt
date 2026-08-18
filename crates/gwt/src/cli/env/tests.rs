@@ -1082,6 +1082,60 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
 // `dispatch()`, so a hardcoded prefix makes `gwtd` errors read as `gwt ...`,
 // which misleads users into thinking the wrong binary was used.
 
+/// Issue #3655 AC-2: the escalation must be raised by the JSON envelope
+/// surface itself, not by a helper nobody calls.
+///
+/// `execution.adopt` with no ambient session is a genuine governance refusal
+/// that needs no fixture, so this exercises the real dispatch path end to end
+/// rather than the classifier in isolation.
+#[test]
+fn dispatch_escalates_a_governance_refusal_to_the_board() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = r#"{"schema_version":1,"operation":"execution.adopt","params":{"reason":"crash recovery"}}"#
+        .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_ne!(code, 0, "the operation itself must still report failure");
+
+    let open = gwt_core::coordination::load_open_escalations(temp.path())
+        .expect("read the escalation index");
+    assert_eq!(
+        open.len(),
+        1,
+        "a refused governance operation must reach the Board on its own"
+    );
+    assert!(
+        open[0].body.contains("execution.adopt"),
+        "the escalation must name the refused operation: {:?}",
+        open[0]
+    );
+}
+
+/// A failure the agent can fix by calling differently must stay quiet, or the
+/// PM learns to ignore escalations.
+#[test]
+fn dispatch_does_not_escalate_an_ordinary_operation_failure() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin =
+        r#"{"schema_version":1,"operation":"issue.view","params":{"number":999999}}"#.to_string();
+
+    dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert!(gwt_core::coordination::load_open_escalations(temp.path())
+        .expect("read the escalation index")
+        .is_empty());
+}
+
 fn dispatch_stderr(program: &str) -> String {
     let mut env = TestEnv::new(PathBuf::from("cache-root"));
     let args = vec![program.to_string(), "board".to_string(), "list".to_string()];
