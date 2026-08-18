@@ -1661,7 +1661,11 @@ pub enum BackendEvent {
     },
     /// Origin-connection-only terminal result for one privileged PM message.
     /// `queued` is reserved for a future durable payload queue; this slice
-    /// emits only `delivered` after exact acknowledgement or `failed`.
+    /// emits `delivered` after exact acknowledgement, `unverified` when the
+    /// prompt reached the pane but no acknowledgement arrived inside the
+    /// operation's budget, and `failed` when the input never committed.
+    /// `unverified` is deliberately not folded into `failed` (Issue #3608):
+    /// the two demand opposite responses from the caller.
     PmMessageSendResult {
         operation_id: String,
         status: String,
