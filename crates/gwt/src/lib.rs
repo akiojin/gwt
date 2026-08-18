@@ -133,9 +133,8 @@ pub use issue_monitor::{
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy,
     IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue, IssueMonitorPrefs,
     IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness, IssueMonitorReleasedFailure,
-    IssueMonitorRequeueOutcome,
-    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
+    IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary,
+    IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
     IssueMonitorStopTarget, MonitorInboxState, PendingIssueMonitorEffect,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
