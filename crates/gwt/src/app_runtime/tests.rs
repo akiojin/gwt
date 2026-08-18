@@ -3410,6 +3410,10 @@ fn sample_runtime_with_events(
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         issue_monitor_scheduled_scans_in_flight: HashSet::new(),
+        // Issue #3633: tests must never leave real daemons behind on the
+        // developer's machine, but the ensure pass still has to be observable
+        // so the wiring cannot silently disappear again.
+        daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
         pending_continue_work: HashMap::new(),
         pending_fresh_execution_launches: HashMap::new(),
         pending_tool_runtime_migrations: HashMap::new(),
@@ -50342,6 +50346,68 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
             .any(|event| matches!(&event.event, BackendEvent::IssueMonitorStatus { .. })),
         "the tick must produce a monitor status snapshot for the enabled project"
     );
+}
+
+/// Issue #3633 AC-7: the recurrence guard for the missing spawn subject.
+///
+/// #3505 was closed while nothing in the production topology started a
+/// daemon; #3633 re-registered the identical state weeks later. A supervisor
+/// that exists but is never called reproduces that exactly, so this asserts
+/// the wiring — every supervision tick that finds an enabled project must ask
+/// the supervisor to keep a daemon alive — rather than a spawn detail.
+#[test]
+fn the_daemon_supervision_tick_keeps_a_runtime_daemon_alive_for_enabled_projects() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    disable_pm_auto_start(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed disabled prefs");
+    runtime.ensure_runtime_daemons_for_enabled_projects();
+    assert_eq!(
+        runtime.daemon_supervisor.ensure_attempts(),
+        0,
+        "a disabled monitor needs no daemon"
+    );
+
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    runtime.ensure_runtime_daemons_for_enabled_projects();
+    assert_eq!(
+        runtime.daemon_supervisor.ensure_attempts(),
+        1,
+        "the tick must own the daemon for an enabled project"
+    );
+
+    // AC-2 in the topology: supervision is "the tick keeps asking", so a
+    // second tick has to ask again rather than trust the first answer.
+    runtime.ensure_runtime_daemons_for_enabled_projects();
+    assert_eq!(runtime.daemon_supervisor.ensure_attempts(), 2);
 }
 
 #[test]

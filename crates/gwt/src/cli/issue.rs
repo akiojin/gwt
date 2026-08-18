@@ -202,6 +202,11 @@ pub(super) fn run<E: CliEnv>(
             },
             out,
         )?,
+        IssueCommand::MonitorRequeue {
+            project_root,
+            number,
+            reason,
+        } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, out)?,
         IssueCommand::MonitorQuestions { project_root } => {
             run_monitor_questions(env, project_root.as_deref(), out)?
         }
@@ -275,18 +280,28 @@ fn run_monitor_status<E: CliEnv>(
     }
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
+    // Reaching this branch at all means no live daemon holds the projection.
+    let persisted_last_scan_at = prefs.last_scan_at.clone();
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
         .map_err(|error| io_as_api_error(io::Error::other(error)))?;
-    crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "gwtd-status");
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    crate::scan_issue_monitor_candidates(&mut monitor, &candidates, &now);
+    // Rebuilding the queue from the local Issue cache is a projection, not a
+    // scan: nothing was fetched and nothing was claimed. Stamping it as a scan
+    // (this used to report the literal string `gwtd-status`) told every reader
+    // the monitor had just run, which is exactly how a permanently stopped
+    // monitor kept looking healthy.
+    monitor.restore_persisted_last_scan_at(persisted_last_scan_at);
     // Serialize through the same projection as the daemon branch above. The
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
     // would silently disagree about what a caller can rely on.
     out.push_str(
-        &serde_json::to_string(&monitor.agent_status())
+        &serde_json::to_string(&monitor.agent_status_at(&now))
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
     );
     out.push('\n');
@@ -633,6 +648,100 @@ fn run_monitor_failover<E: CliEnv>(
     // The failover mutation itself is complete even when the follow-up scan
     // authority is unavailable. Keep the established command success
     // contract while reporting scan delivery truthfully in the JSON fields.
+    Ok(0)
+}
+
+/// Issue #3645 AC-1 / #3628 AC-1〜AC-3: release the failure hold on one issue.
+///
+/// Deliberately not a relaxation of [`run_monitor_failover`]'s gate. That gate
+/// resolves an exact live launch, which is the correct contract for handing
+/// running work to another provider and an impossible one for a row whose
+/// launch is already gone — the state this operation exists for. Keeping them
+/// separate means the failover can never be talked into killing a running agent
+/// by an operator who meant "recover the dead row".
+///
+/// An immediate scan is requested afterwards so the recovered issue re-enters
+/// the claim path now rather than at the next interval tick.
+fn run_monitor_requeue<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    reason: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.requeue_failed_issue(number, reason, &now);
+        if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let stale_window_id = match outcome {
+        crate::IssueMonitorRequeueOutcome::Requeued { stale_window_id } => stale_window_id,
+        // Fail closed and name the reason, so the caller can tell "I aimed at a
+        // running agent" apart from "there was nothing to recover" instead of
+        // retrying blindly.
+        crate::IssueMonitorRequeueOutcome::LaunchLive => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "refusal": "launch_live",
+                    "detail": "a launch still owns this issue — use issue.monitor.stop or issue.monitor.failover, which verify the exact live launch identity",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+        crate::IssueMonitorRequeueOutcome::NotHeld => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "refusal": "not_held",
+                    "detail": "no failure is holding this issue out of the queue",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "requeued",
+            "reason": reason,
+            "stale_window_id": stale_window_id,
+            "released_at": now,
+            "failure_release_version": prefs.failure_release_version,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
+            "pane_teardown": if stale_window_id.is_some() {
+                "close the returned window with pane.close — the release already unbound it from the issue, so the close cannot requeue it again"
+            } else {
+                "none"
+            },
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    // The release itself is committed even when the follow-up scan authority is
+    // unavailable; scan delivery is reported truthfully in the JSON fields.
     Ok(0)
 }
 
@@ -1890,8 +1999,54 @@ mod tests {
                         "recoverable_merged": false,
                     },
                 ],
-                "last_scan_at": "gwtd-status",
+                // Issue #3633 AC-5: this branch rebuilds the queue from the
+                // local Issue cache, which is a projection and not a scan. It
+                // used to stamp the literal string `gwtd-status` into
+                // `last_scan_at`, so a monitor no driver had ever scanned
+                // reported a cadence — the healthy-looking snapshot that made
+                // the stall unobservable. There is no scan to report, and the
+                // stall says why.
+                "scan_stall": "Issue Monitor has never completed a scan for this project; no driver is running",
             })
+        );
+    }
+
+    /// Issue #3633 AC-5: the offline branch must report the durable cadence,
+    /// not the age of its own cache rebuild.
+    #[test]
+    fn issue_monitor_status_reports_the_persisted_scan_time_without_a_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                last_scan_at: Some("2020-01-01T00:00:00Z".to_string()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(status["last_scan_at"], "2020-01-01T00:00:00Z");
+        assert!(
+            status["scan_stall"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
+            "a scan that last ran in 2020 must read as stalled: {status}"
         );
     }
 
@@ -2468,6 +2623,112 @@ mod tests {
             prefs.failed_issues.is_empty(),
             "a failover is not a failure and must not leave a hold behind"
         );
+    }
+
+    /// Issue #3645 AC-1 / #3628 AC-2: the recovery an operator reaches for when
+    /// the row has no launch left. Reproduces the 2026-08-17 shape exactly — a
+    /// persisted `agent_failed` hold with no `launched_issues` entry — because
+    /// that is the state every identity-checked operation refuses.
+    #[test]
+    fn monitor_requeue_releases_a_dead_hold_and_refuses_a_live_launch() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![43, 42],
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "an execution generation already exists for issue #42".to_string(),
+                    window_id: Some("tab-1::agent-dead".to_string()),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        // A live launch is refused with zero mutation: this operation exists for
+        // rows nothing owns, and stop/failover own the rest.
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 43,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+        assert_eq!(code, 1);
+        assert!(out.contains("\"status\":\"refused\""), "{out}");
+        assert!(out.contains("launch_live"), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused recovery must be zero-mutation"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"requeued\""), "{out}");
+        assert!(out.contains("tab-1::agent-dead"), "{out}");
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "the persisted hold must be gone"
+        );
+        assert_eq!(
+            prefs
+                .released_failures
+                .iter()
+                .map(|release| release.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "the release must be published so other processes converge on it"
+        );
+        assert_eq!(
+            prefs.launched_issues.len(),
+            1,
+            "the unrelated live launch must survive"
+        );
+
+        // Recovering an issue nothing is holding reports that, rather than
+        // claiming a state change that did not happen.
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+        assert_eq!(code, 1);
+        assert!(out.contains("not_held"), "{out}");
     }
 
     // -------------------------------------------------------------------

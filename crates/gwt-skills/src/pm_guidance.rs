@@ -204,6 +204,41 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+## Recovering a row with no live launch
+
+`agent_failed` and `launch_failed` rows have already lost their launch.
+That is why `issue.monitor.stop` and `issue.monitor.failover` refuse
+them: both resolve an exact live launch first, and there is none left to
+name. `issue.monitor.launch_now` only reorders priority, and the scan
+re-derives the failure from the persisted hold, so the row does not move.
+
+- `issue.monitor.requeue` is the operation for that state. Pass
+  `params.number` and a `params.reason`; it takes no launch identity,
+  because there is no launch. It drops the persisted hold, returns the
+  issue to the queue in its existing priority position, spends no retry
+  attempt, and requires the next launch to start a fresh session rather
+  than resume the conversation that stranded it.
+- It fails closed in both directions. `refusal: "launch_live"` means a
+  launch still owns the issue — use the stop or the failover, which
+  verify the exact identity. `refusal: "not_held"` means nothing was
+  holding it, so nothing changed.
+- The reply returns `stale_window_id` when the failure retained an error
+  window. Close it with `pane.close`; the release already unbound it, so
+  the close cannot requeue the issue again.
+- Recovering a row does not fix why it failed. If the launch is refused
+  for a durable reason (a stranded execution generation, a repository
+  lock), the requeued issue fails the same way on its next scan. Read the
+  `error_message` first and resolve the cause, then requeue.
+
+Never repair Issue Monitor state by editing `issue-monitor.json`. A hand
+edit is invisible to every process that already holds the same state in
+memory: they re-stamp what you removed on their next commit, so the
+repair silently un-happens and the row comes back. `issue.monitor.requeue`
+publishes the release so every process converges on it, which is the part
+a file edit cannot do. If a hand edit already happened, run the requeue
+for each affected issue afterwards to bring the state back into
+agreement.
+
 ## A repository has exactly one PM
 
 - `pm.status` reports `repository_registrations`: every PM registration
@@ -434,6 +469,17 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3645 / #3628: the recovery for a row with no live launch.
+            // Without it in the contract the PM's only remaining move is the
+            // hand edit that produced #3645 in the first place, so the
+            // prohibition below has to name the operation that replaces it.
+            "`issue.monitor.requeue`",
+            "there is no launch",
+            "launch_live",
+            "not_held",
+            "Never repair Issue Monitor state by editing `issue-monitor.json`",
+            "they re-stamp what you removed on their next commit",
+            "Recovering a row does not fix why it failed",
             // Issue #3607: the PM singleton is per repository, and an orphan
             // PM has a CLI route out. Without these the contract leaves the
             // PM believing GUI clicks are the only way to stop one.

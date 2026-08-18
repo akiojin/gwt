@@ -17,6 +17,7 @@ pub mod daemon_publisher;
 pub mod daemon_runtime;
 #[cfg(unix)]
 pub mod daemon_subscriber;
+pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod file_content;
 pub mod file_tree;
@@ -131,8 +132,9 @@ pub use issue_monitor::{
     IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy,
     IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue, IssueMonitorPrefs,
-    IssueMonitorReadiness, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary,
-    IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
+    IssueMonitorReadiness, IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
+    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
+    IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
     IssueMonitorStopTarget, MonitorInboxState, PendingIssueMonitorEffect,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };

@@ -3388,6 +3388,8 @@ fn scan_issue_monitor_once_blocking(
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
                 &mut monitor,
                 &scope.project_root,
+                &owner,
+                &repo,
             )
         },
     )?;
@@ -3506,8 +3508,12 @@ fn publish_issue_monitor_read_only_payloads(
 }
 
 fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::IssueMonitorState) {
+    // Issue #3633 AC-5: publish through the scan-cadence projection so a
+    // daemon whose worker has stopped scanning cannot keep serving a snapshot
+    // that reads healthy.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     hub.set_issue_monitor_status(
-        serde_json::to_value(monitor.agent_status())
+        serde_json::to_value(monitor.agent_status_at(&now))
             .expect("Issue Monitor agent status serializes"),
     );
 }
@@ -4815,9 +4821,21 @@ exit 0
                 .expect("retry ACK retains the live agent projection"),
         )
         .expect("deserialize retry projection");
+        // Issue #3633 AC-5: the published projection also carries the
+        // scan-cadence check, which `agent_status` deliberately leaves out
+        // because it needs a clock. This worker has never completed a scan.
+        assert!(
+            projected
+                .scan_stall
+                .as_deref()
+                .is_some_and(|reason| reason.contains("never")),
+            "the ACKed projection must report the scan cadence: {:?}",
+            projected.scan_stall
+        );
+        let mut reconciled = monitor.agent_status();
+        reconciled.scan_stall = projected.scan_stall.clone();
         assert_eq!(
-            projected,
-            monitor.agent_status(),
+            projected, reconciled,
             "retry ACK follows the reconciled agent projection"
         );
 

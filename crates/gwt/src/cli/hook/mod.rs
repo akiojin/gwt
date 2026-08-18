@@ -226,7 +226,9 @@ pub(crate) fn write_internal_command_output<E: CliEnv>(
 /// `gwtd daemon start`, and making `gwtd daemon status` report a daemon that
 /// does not exist. Claiming, reusing and stale-cleaning that slot belongs to
 /// the callers that actually speak the transport (`crates/gwt/src/cli/daemon`
-/// and `crates/gwt/src/daemon_publisher.rs`).
+/// and `crates/gwt/src/daemon_publisher.rs`), and filling it belongs to
+/// [`crate::daemon_supervisor::DaemonSupervisor`], which is what actually
+/// starts a daemon for this project (Issue #3633).
 pub fn prepare_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
     if !project_root.exists() {
         return Ok(());
