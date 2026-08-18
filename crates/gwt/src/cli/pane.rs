@@ -12,7 +12,7 @@ use tokio_tungstenite::{
     tungstenite::{
         client::IntoClientRequest,
         http::{header::AUTHORIZATION, HeaderValue},
-        protocol::frame::coding::CloseCode,
+        protocol::{frame::coding::CloseCode, CloseFrame},
         Error as WebSocketError, Message,
     },
 };
@@ -617,7 +617,45 @@ async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
     connect_async(request)
         .await
         .map(|(socket, _)| socket)
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))
+        .map_err(|err| pane_connect_error(ws_url, &err))
+}
+
+/// Issue #3667 AC-5: name the two very different conditions behind a failed
+/// pane WebSocket handshake. HTTP 409 means the instance is reachable but
+/// still refuses a settled session's observation at connect (a backend from
+/// before the #3667 fix); everything else reads as the backend being
+/// unreachable or rejecting the capability.
+fn pane_connect_error(ws_url: &str, error: &WebSocketError) -> String {
+    match error {
+        WebSocketError::Http(response) if response.status().as_u16() == 409 => format!(
+            "pane websocket connect was refused ({ws_url}): HTTP 409 Conflict — the gwt \
+             instance is reachable but refuses this settled session's pane observation at \
+             connect (behavior fixed by #3667). Restart that gwt instance on an updated \
+             build, or relaunch this Session."
+        ),
+        _ => format!("pane websocket connect failed ({ws_url}): {error}"),
+    }
+}
+
+/// Issue #3667 AC-3: a close frame during a pane operation is a refusal with
+/// a server-provided reason, not an unsupported message. The stale-binding
+/// reason additionally spells out that only mutation is refused for a settled
+/// session.
+fn pane_socket_closed_error(frame: Option<&CloseFrame>) -> String {
+    match frame {
+        Some(frame) if frame.reason == "execution binding is no longer current" => format!(
+            "pane operation was refused by the gwt instance: {} — this session's execution \
+             is settled, so pane mutation (close/send) is refused while pane observation \
+             (list/read) remains available",
+            frame.reason
+        ),
+        Some(frame) => format!(
+            "pane websocket was closed by the gwt instance: {} (close code {})",
+            frame.reason,
+            u16::from(frame.code)
+        ),
+        None => "pane websocket was closed by the gwt instance without a reason".to_string(),
+    }
 }
 
 fn pane_websocket_request(
@@ -682,6 +720,7 @@ async fn next_backend_json_unbounded(socket: &mut PaneWebSocket) -> Result<Value
             .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
         Message::Binary(bytes) => serde_json::from_slice(&bytes)
             .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
+        Message::Close(frame) => Err(pane_socket_closed_error(frame.as_ref())),
         other => Err(format!(
             "pane backend returned unsupported websocket message: {other:?}"
         )),
@@ -1466,6 +1505,56 @@ mod tests {
             issue_monitor_scan_connect_error(&WebSocketError::ConnectionClosed),
             "gui_command_unavailable"
         );
+    }
+
+    /// Issue #3667 AC-5: a caller must be able to tell "the instance refuses
+    /// this settled session's observation" apart from "the backend is
+    /// unreachable" — before the fix both surfaced as the same connect error.
+    #[test]
+    fn pane_connect_error_distinguishes_settled_refusal_from_unreachable_backend() {
+        let http_409 = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(409)
+                .body(None)
+                .expect("HTTP response"),
+        ));
+        let settled = pane_connect_error("ws://127.0.0.1:52202/internal/pane-ws", &http_409);
+        assert!(settled.contains("409"), "{settled}");
+        assert!(settled.contains("settled"), "{settled}");
+        assert!(settled.contains("reachable"), "{settled}");
+
+        let unreachable = pane_connect_error(
+            "ws://127.0.0.1:52202/internal/pane-ws",
+            &WebSocketError::ConnectionClosed,
+        );
+        assert!(unreachable.contains("connect failed"), "{unreachable}");
+        assert!(!unreachable.contains("settled"), "{unreachable}");
+    }
+
+    /// Issue #3667 AC-3: the mutation refusal for a settled session must reach
+    /// the caller as an identifiable reason, not as an "unsupported websocket
+    /// message" transport error.
+    #[test]
+    fn pane_socket_close_reports_identifiable_mutation_refusal() {
+        let refusal = pane_socket_closed_error(Some(&CloseFrame {
+            code: CloseCode::Policy,
+            reason: "execution binding is no longer current".into(),
+        }));
+        assert!(
+            refusal.contains("execution binding is no longer current"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("refused"), "{refusal}");
+        assert!(refusal.contains("observation"), "{refusal}");
+
+        let other = pane_socket_closed_error(Some(&CloseFrame {
+            code: CloseCode::Away,
+            reason: "shutting down".into(),
+        }));
+        assert!(other.contains("shutting down"), "{other}");
+        assert!(other.contains("close code"), "{other}");
+
+        assert!(pane_socket_closed_error(None).contains("without a reason"));
     }
 
     #[test]

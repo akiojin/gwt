@@ -3947,6 +3947,90 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+/// Issue #3667 AC-1/AC-3 at the runtime dispatch layer: a settled grant (an
+/// in-memory Active binding whose durable record is stale) still observes its
+/// scoped state while producing mutation stays refused.
+#[test]
+fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-settled".to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    // No durable session file exists under the scoped home, so the durable
+    // authority for this binding resolves Stale — the settled shape.
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: "session-settled".to_string(),
+        repo_hash: "repo-3667".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number: 3667,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3667".to_string(),
+            binding_id: "binding-3667".to_string(),
+            ledger_head_hash: "head-3667".to_string(),
+        },
+        capability_generation: 1,
+    };
+    let target = issuer
+        .issue_bound(&project, "session-settled", binding)
+        .expect("settled capability");
+    let grant = issuer
+        .grant_for_test(&target.token)
+        .expect("authenticated settled grant");
+
+    let observed = match runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant.clone(),
+        AgentFrontendRequest::Ready,
+    ) {
+        super::AgentFrontendDispatchOutcome::Dispatched(events) => events,
+        super::AgentFrontendDispatchOutcome::StaleCapability => {
+            panic!("settled observation must dispatch instead of reading as stale")
+        }
+        super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => {
+            panic!("settled observation must not require durable authority")
+        }
+    };
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+        "the settled grant must still receive its scoped snapshot"
+    );
+
+    let refused = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-dispatch".to_string(),
+        },
+    );
+    assert!(
+        matches!(
+            refused,
+            super::AgentFrontendDispatchOutcome::StaleCapability
+        ),
+        "settled producing mutation must stay refused at runtime dispatch"
+    );
+}
+
 #[test]
 fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
     let temp = tempdir().expect("tempdir");
