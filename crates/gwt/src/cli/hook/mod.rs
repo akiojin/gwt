@@ -241,7 +241,7 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
         let endpoint = gwt_core::daemon::DaemonEndpoint::new(
             scope,
             std::process::id(),
-            "internal://gwt-front-door".to_string(),
+            gwt_core::daemon::FRONT_DOOR_BIND.to_string(),
             uuid::Uuid::new_v4().to_string(),
             env!("CARGO_PKG_VERSION").to_string(),
         );

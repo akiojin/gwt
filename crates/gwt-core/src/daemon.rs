@@ -30,6 +30,16 @@ use crate::{
 ///   to exchange frames they cannot parse.
 pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
 
+/// `bind` value written by the GUI front door
+/// (`prepare_daemon_front_door_for_path`).
+///
+/// A front-door registration claims the scope for in-process hook dispatch;
+/// it exposes no IPC transport, so nothing can ever connect to it. Consumers
+/// must classify it structurally instead of inferring staleness from its pid
+/// or protocol version — those describe a GUI process, not a daemon that died
+/// or fell behind (Issue #3492).
+pub const FRONT_DOOR_BIND: &str = "internal://gwt-front-door";
+
 /// Runtime backend target for daemon-managed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +143,16 @@ impl DaemonEndpoint {
             auth_token,
             updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
         }
+    }
+
+    /// True when this registration is the GUI front door rather than a daemon
+    /// listening on an IPC transport.
+    ///
+    /// See [`FRONT_DOOR_BIND`]: the marker is a permanent property of the
+    /// registration, independent of whether the process that wrote it is still
+    /// alive or speaks the current protocol version.
+    pub fn is_front_door(&self) -> bool {
+        self.bind.trim() == FRONT_DOOR_BIND
     }
 
     pub fn is_usable<F>(

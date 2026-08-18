@@ -4,7 +4,7 @@ use gwt_core::daemon::{
     persist_endpoint, resolve_bootstrap_action, validate_handshake, ClientFrame,
     DaemonBootstrapAction, DaemonEndpoint, DaemonFrame, DaemonStatus, HookEnvelope,
     IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
-    DAEMON_PROTOCOL_VERSION,
+    DAEMON_PROTOCOL_VERSION, FRONT_DOOR_BIND,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -253,6 +253,46 @@ fn daemon_endpoint_is_usable_returns_false_for_mismatched_protocol() {
         "0.1.0".into(),
     );
     assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION + 1, |_| true));
+}
+
+/// Issue #3492: the GUI front door is identified by its `bind` value alone.
+/// Its pid and protocol version belong to a GUI process, so a marker written
+/// by an old release is still a front door and never a stale daemon.
+#[test]
+fn daemon_endpoint_recognises_the_front_door_marker_by_bind_alone() {
+    // Pins the on-disk value: endpoint files written by earlier releases are
+    // still read by the current binary.
+    assert_eq!(FRONT_DOOR_BIND, "internal://gwt-front-door");
+
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let mut front_door = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        FRONT_DOOR_BIND.into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    assert!(front_door.is_front_door());
+
+    front_door.protocol_version = DAEMON_PROTOCOL_VERSION - 1;
+    front_door.pid = 0;
+    assert!(front_door.is_front_door());
+
+    let daemon = DaemonEndpoint::new(
+        scope,
+        4242,
+        "/run/gwt/daemon.sock".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    assert!(!daemon.is_front_door());
 }
 
 #[test]

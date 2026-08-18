@@ -1,8 +1,9 @@
 //! Read-only endpoint selection for Unix daemon subscriptions.
 //!
 //! Exact caller scope always wins. A same-repository sibling is eligible only
-//! when exact evidence is absent or definitely dead, and only one compatible
-//! live sibling exists.
+//! when exact evidence is absent, definitely dead, or a GUI front-door marker
+//! that never listened on an IPC transport, and only one compatible live
+//! sibling exists.
 
 use std::{
     collections::BTreeMap,
@@ -220,7 +221,15 @@ where
                     "malformed",
                 )
             })?;
-            if !is_live_pid(endpoint.pid, &is_process_alive) {
+            if endpoint.scope == *requested_scope && endpoint.is_front_door() {
+                // A front-door marker announces that a GUI owns this scope's
+                // hook dispatch in-process and listens on nothing. That is an
+                // absence of IPC, not corrupt evidence, so same-repository
+                // sibling routing stays available (Issue #3492). The scope
+                // guard leaves a marker filed under someone else's worktree
+                // hash on the corruption path below, where it belongs.
+                "front_door".to_string()
+            } else if !is_live_pid(endpoint.pid, &is_process_alive) {
                 format!("dead(pid={})", endpoint.pid)
             } else {
                 return validate_exact(
@@ -455,6 +464,12 @@ where
         Some("target_mismatch")
     } else if !endpoint.scope.project_root.is_absolute() {
         Some("invalid_project_root")
+    } else if endpoint.is_front_door() {
+        // Checked ahead of the protocol version and the pid: a front door
+        // never listened, so reporting it as `protocol_mismatch` or `dead`
+        // describes a daemon that was never there and sends the reader toward
+        // pruning endpoint files instead of starting one (Issue #3492).
+        Some("front_door")
     } else if endpoint.protocol_version != expected_protocol_version {
         Some("protocol_mismatch")
     } else if !is_live_pid(endpoint.pid, is_process_alive) {
@@ -584,7 +599,7 @@ async fn read_bounded_handshake_response(stream: &mut UnixStream) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use gwt_core::daemon::{
-        persist_endpoint, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+        persist_endpoint, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION, FRONT_DOOR_BIND,
     };
     use std::os::unix::net::UnixListener;
     use tempfile::TempDir;
@@ -965,11 +980,14 @@ mod tests {
     }
 
     #[test]
-    fn internal_front_door_is_not_a_candidate() {
+    fn front_door_and_other_non_socket_transports_are_not_candidates() {
         let fixture = Fixture::new();
         let mut front_door = fixture.endpoint("front-door", 61);
-        front_door.bind = "internal://gwt-front-door".to_string();
+        front_door.bind = FRONT_DOOR_BIND.to_string();
         fixture.persist(&front_door);
+        let mut foreign_transport = fixture.endpoint("tcp-transport", 62);
+        foreign_transport.bind = "tcp://127.0.0.1:9000".to_string();
+        fixture.persist(&foreign_transport);
 
         let failure = resolve_assuming_reachable(
             &fixture.gwt_home,
@@ -980,7 +998,104 @@ mod tests {
         .expect_err("no daemon socket");
         assert_eq!(failure.kind, FailureKind::Missing);
         assert_eq!(failure.candidate_count, 0);
-        assert!(failure.to_string().contains("unsupported_transport=1"));
+        let diagnostic = failure.to_string();
+        assert!(diagnostic.contains("front_door=1"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("unsupported_transport=1"),
+            "{diagnostic}"
+        );
+    }
+
+    /// Issue #3492: the GUI claims the scope it was launched in with an
+    /// `internal://gwt-front-door` registration. That marker announces
+    /// in-process hook dispatch and no IPC transport, so it means "no daemon
+    /// listens here" — not "the evidence at this scope is corrupt". Reading it
+    /// as corruption fails the subscribe closed and permanently hides the live
+    /// same-repository daemon this Issue exists to reach.
+    #[test]
+    fn live_front_door_at_exact_scope_still_reaches_a_live_sibling() {
+        let fixture = Fixture::new();
+        let front_door = DaemonEndpoint::new(
+            fixture.caller.clone(),
+            81,
+            FRONT_DOOR_BIND.to_string(),
+            "front-door-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        let sibling = fixture.endpoint("sibling", 82);
+        fixture.persist(&front_door);
+        fixture.persist(&sibling);
+
+        assert_eq!(
+            resolve_assuming_reachable(
+                &fixture.gwt_home,
+                &fixture.caller,
+                DAEMON_PROTOCOL_VERSION,
+                |_| true
+            )
+            .expect("a front-door marker must not block same-repo routing"),
+            sibling
+        );
+    }
+
+    /// Issue #3492: a front-door marker at the caller's own scope must be
+    /// named for what it is. Reporting it as `dead` or `invalid_evidence`
+    /// describes a daemon that never existed at that scope.
+    #[test]
+    fn front_door_at_exact_scope_is_reported_as_front_door() {
+        let fixture = Fixture::new();
+        let front_door = DaemonEndpoint::new(
+            fixture.caller.clone(),
+            83,
+            FRONT_DOOR_BIND.to_string(),
+            "front-door-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        fixture.persist(&front_door);
+
+        let failure = resolve_assuming_reachable(
+            &fixture.gwt_home,
+            &fixture.caller,
+            DAEMON_PROTOCOL_VERSION,
+            |_| true,
+        )
+        .expect_err("a front door is not a subscribe target");
+        assert_eq!(failure.kind, FailureKind::Missing);
+        assert_eq!(failure.exact_outcome, "front_door");
+        assert!(failure.to_string().contains("gwtd daemon start"));
+    }
+
+    /// Issue #3492 post-release evidence: with only front-door markers
+    /// registered, the diagnostic reported `dead` and `protocol_mismatch`,
+    /// which reads as "stale daemons" and points the reader at pruning
+    /// endpoint files instead of starting a daemon. Transport eligibility is
+    /// a structural property of the registration, so it is classified before
+    /// the pid and protocol version of a daemon that was never there.
+    #[test]
+    fn front_door_siblings_are_reported_as_front_door_not_stale_daemons() {
+        let fixture = Fixture::new();
+        let mut dead_marker = fixture.endpoint("dead-front-door", 91);
+        dead_marker.bind = FRONT_DOOR_BIND.to_string();
+        let mut old_protocol_marker = fixture.endpoint("old-front-door", 92);
+        old_protocol_marker.bind = FRONT_DOOR_BIND.to_string();
+        old_protocol_marker.protocol_version += 1;
+        fixture.persist(&dead_marker);
+        fixture.persist(&old_protocol_marker);
+
+        let failure = resolve_assuming_reachable(
+            &fixture.gwt_home,
+            &fixture.caller,
+            DAEMON_PROTOCOL_VERSION,
+            |pid| pid != 91,
+        )
+        .expect_err("front-door markers are never subscribe candidates");
+        assert_eq!(failure.kind, FailureKind::Missing);
+        assert_eq!(failure.candidate_count, 0);
+        assert_eq!(failure.exact_outcome, "missing");
+        let diagnostic = failure.to_string();
+        assert!(diagnostic.contains("front_door=2"), "{diagnostic}");
+        assert!(!diagnostic.contains("dead="), "{diagnostic}");
+        assert!(!diagnostic.contains("protocol_mismatch="), "{diagnostic}");
     }
 
     #[test]
