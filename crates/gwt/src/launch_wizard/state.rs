@@ -45,6 +45,7 @@ impl LaunchWizardState {
         let mut state = Self {
             context: context.clone(),
             wizard_mode: LaunchWizardMode::Branch,
+            holder_decision: None,
             step,
             selected: 0,
             launch_path,
@@ -456,7 +457,10 @@ impl LaunchWizardState {
 
     pub fn apply(&mut self, action: LaunchWizardAction) {
         self.error = None;
-        if self.runtime_resolution_pending || self.launch_materialization_pending {
+        if self.launch_materialization_pending {
+            return;
+        }
+        if self.runtime_resolution_pending {
             match action {
                 LaunchWizardAction::Cancel => {
                     self.completion = Some(LaunchWizardCompletion::Cancelled);
@@ -471,7 +475,12 @@ impl LaunchWizardState {
                 self.completion = Some(LaunchWizardCompletion::Cancelled);
             }
             LaunchWizardAction::Submit => {
-                self.submit_panel();
+                if self.holder_decision.is_some() {
+                    self.error =
+                        Some("Resolve the current holder before launching a successor".to_string());
+                } else {
+                    self.submit_panel();
+                }
             }
             LaunchWizardAction::GotoStep { phase } => {
                 self.goto_phase(phase);
@@ -493,6 +502,10 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::FocusExistingSession { index } => {
                 self.focus_existing_session(index);
+            }
+            LaunchWizardAction::StopAndStartSuccessor { .. }
+            | LaunchWizardAction::MoveExistingPane { .. } => {
+                self.error = Some("Holder decision requires runtime handling".to_string());
             }
             LaunchWizardAction::SetBranchMode { create_new } => {
                 self.set_branch_mode(create_new);
@@ -2156,6 +2169,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2182,6 +2196,72 @@ mod tests {
         );
         state.set_agent_id("codex");
         state
+    }
+
+    #[test]
+    fn holder_decision_actions_fail_closed_in_state_without_runtime_handling() {
+        let actions = [
+            LaunchWizardAction::StopAndStartSuccessor {
+                fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                window_id: "tab-1:successor".to_string(),
+            },
+            LaunchWizardAction::MoveExistingPane {
+                fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                window_id: "tab-1:destination".to_string(),
+            },
+        ];
+
+        for action in actions {
+            let mut state = codex_manual_state();
+            let original_step = state.step;
+
+            state.apply(action);
+
+            assert!(state.completion.is_none());
+            assert_eq!(state.step, original_step);
+            assert_eq!(
+                state.error.as_deref(),
+                Some("Holder decision requires runtime handling")
+            );
+        }
+    }
+
+    #[test]
+    fn holder_decision_blocks_legacy_submit_without_runtime_mutation() {
+        let mut state = codex_manual_state();
+        state.holder_decision = Some(LaunchWizardHolderDecisionView {
+            fingerprint: "exact-holder".to_string(),
+            holder_session_id: "session-holder".to_string(),
+            holder_window_id: Some("tab-1::agent-holder".to_string()),
+            holder_summary: "Codex · work/issue-3547".to_string(),
+            stop_available: true,
+            stop_unavailable_reason: None,
+            move_available: true,
+            move_unavailable_reason: None,
+        });
+
+        state.apply(LaunchWizardAction::Submit);
+
+        assert!(state.completion.is_none());
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Resolve the current holder before launching a successor")
+        );
+    }
+
+    #[test]
+    fn launch_materialization_pending_rejects_cancel() {
+        let mut state = codex_manual_state();
+        state.mark_launch_materialization_pending("Starting successor...");
+
+        state.apply(LaunchWizardAction::Cancel);
+
+        assert!(state.completion.is_none());
+        assert!(state.launch_materialization_pending);
+        assert_eq!(
+            state.launch_materialization_message.as_deref(),
+            Some("Starting successor...")
+        );
     }
 
     // SPEC-1921 US-20 / FR-123: before any explicit choice the reasoning stop
@@ -2259,6 +2339,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.4".to_string()),
@@ -2310,6 +2391,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.4".to_string()),
@@ -3363,6 +3445,44 @@ mod tests {
     }
 
     #[test]
+    fn quick_start_lineage_survives_model_and_reasoning_selection() {
+        let mut entry = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetModel {
+            model: "gpt-5.4".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetReasoning {
+            reasoning: "high".to_string(),
+        });
+
+        let selected = state
+            .selected_quick_start_index
+            .and_then(|index| state.quick_start_entries.get(index))
+            .expect("selected durable Quick Start entry");
+        assert_eq!(selected.session_id, "durable-session-3457");
+        assert_eq!(selected.linked_issue_number, Some(3457));
+        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.reasoning, "high");
+    }
+
+    #[test]
     fn continue_last_session_is_unavailable_when_agent_cannot_continue_latest() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/current"), "feature/current"),
@@ -3732,6 +3852,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),

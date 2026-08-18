@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Launch Wizard Intake pending state", () => {
+test.describe("Launch Wizard states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
   test("Intake opens the local pending wizard before backend state arrives", async ({
@@ -34,6 +34,86 @@ test.describe("Launch Wizard Intake pending state", () => {
       .poll(() => page.evaluate(() => (window as any).__sentKinds))
       .toContain("open_intake_session");
     expect(pageErrors).toEqual([]);
+  });
+
+  test("exact holder decision renders safe actions without browser errors", async ({
+    page,
+  }, testInfo) => {
+    const browserErrors: string[] = [];
+    page.on("pageerror", (error) => {
+      browserErrors.push(error.message);
+    });
+    page.on("console", (message) => {
+      if (message.type() === "error") browserErrors.push(message.text());
+    });
+
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page);
+    await page.goto(APP_URL);
+    await keepLaunchWizardModalVisible(page);
+
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new CustomEvent("__gwt_test_inject", {
+          detail: {
+            kind: "launch_wizard_state",
+            wizard: {
+              title: "Launch Agent",
+              branch_name: "work/holder-decision",
+              selected_branch_name: "work/holder-decision",
+              branch_mode: "use_selected",
+              show_back_button: true,
+              show_branch_controls: true,
+              show_manual_setup: false,
+              show_runtime_confirmation: false,
+              show_confirm: false,
+              show_start_methods: false,
+              runtime_context_resolved: true,
+              primary_action_enabled: false,
+              launch_summary: [],
+              progress_steps: [],
+              holder_decision: {
+                fingerprint: "fp-live-holder",
+                holder_session_id: "session-live-holder",
+                holder_window_id: "window-live-holder",
+                holder_summary: "Codex · local active holder",
+                stop_available: true,
+                stop_unavailable_reason: null,
+                move_available: true,
+                move_unavailable_reason: null,
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    const modal = page.locator("#wizard-modal");
+    const dialog = modal.getByRole("dialog");
+    await expect(modal).toHaveClass(/open/);
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(dialog).toHaveAttribute("aria-labelledby", "wizard-title");
+    await expect(modal.locator(".modal-header")).toBeVisible();
+    await expect(modal.locator("#wizard-body")).toContainText(
+      "Codex · local active holder",
+    );
+
+    const actions = modal.locator(".wizard-actions > button:visible");
+    await expect(actions).toHaveText([
+      "Move existing pane",
+      "Cancel",
+      "Stop and start successor",
+    ]);
+    await expect(actions.nth(0)).toBeEnabled();
+    await expect(actions.nth(2)).toBeEnabled();
+    await expect(actions.nth(2)).toHaveClass(/destructive/);
+    await expect(actions.nth(0)).not.toHaveClass(/destructive/);
+
+    await testInfo.attach("holder-theme", {
+      body: Buffer.from(testInfo.project.name),
+      contentType: "text/plain",
+    });
+    expect(browserErrors).toEqual([]);
   });
 });
 

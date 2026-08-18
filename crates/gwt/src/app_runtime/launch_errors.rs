@@ -16,11 +16,47 @@
 //!   [`AppRuntime::status_events`])
 
 use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 
 use super::{
     AppRuntime, BackendEvent, LaunchFeedbackContext, LaunchWizardSession, OutboundEvent,
     WindowProcessStatus,
 };
+
+#[cfg(test)]
+thread_local! {
+    static LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn launch_wizard_error_log_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+struct LaunchWizardErrorCaptureScope;
+
+#[cfg(test)]
+impl Drop for LaunchWizardErrorCaptureScope {
+    fn drop(&mut self) {
+        LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK.with(|owns_lock| owns_lock.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn with_launch_wizard_error_log_capture<T>(operation: impl FnOnce() -> T) -> T {
+    let _lock = launch_wizard_error_log_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK.with(|owns_lock| {
+        assert!(!owns_lock.replace(true), "launch error capture cannot nest");
+    });
+    let _scope = LaunchWizardErrorCaptureScope;
+    operation()
+}
 
 /// Agents whose missing-binary launch failure should be rewritten into an
 /// actionable install hint instead of leaking the raw PTY/PATH error. Each
@@ -64,7 +100,9 @@ impl AppRuntime {
             | gwt::LaunchWizardAction::SelectQuickStart { .. }
             | gwt::LaunchWizardAction::SelectLiveSession { .. }
             | gwt::LaunchWizardAction::UseStartMethod { .. } => "launch_path_select",
-            gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::FocusExistingSession { .. }
+            | gwt::LaunchWizardAction::MoveExistingPane { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::StopAndStartSuccessor { .. } => "stop_and_start_successor",
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
             gwt::LaunchWizardAction::Select { .. } => "wizard_select",
@@ -84,6 +122,8 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
             gwt::LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::StopAndStartSuccessor { .. } => "stop_and_start_successor",
+            gwt::LaunchWizardAction::MoveExistingPane { .. } => "move_existing_pane",
             gwt::LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
             gwt::LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
             gwt::LaunchWizardAction::SetBranchName { .. } => "set_branch_name",
@@ -119,6 +159,16 @@ impl AppRuntime {
         requested_agent_id: Option<&str>,
         error: &str,
     ) {
+        #[cfg(test)]
+        let _test_log_lock = if LAUNCH_WIZARD_ERROR_CAPTURE_OWNS_LOCK.with(std::cell::Cell::get) {
+            None
+        } else {
+            Some(
+                launch_wizard_error_log_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        };
         let view = session.wizard.view();
         let sanitized_error = Self::sanitize_launch_log_error(error);
         let linked_issue_number = view
@@ -127,6 +177,30 @@ impl AppRuntime {
             .unwrap_or_else(|| "none".to_string());
         let requested_agent_id = requested_agent_id.unwrap_or("none");
         let selected_docker_service = view.selected_docker_service.as_deref().unwrap_or("none");
+        let holder_session_id = session
+            .manual_holder_intent
+            .as_ref()
+            .map(|intent| intent.predecessor.session_id.as_str())
+            .unwrap_or("none");
+        let holder_window_id = session
+            .manual_holder_intent
+            .as_ref()
+            .and_then(|intent| intent.local_window_id.as_deref())
+            .unwrap_or("none");
+        let holder_runtime_incarnation = session
+            .manual_holder_intent
+            .as_ref()
+            .and_then(|intent| intent.local_runtime_incarnation)
+            .map(|incarnation| incarnation.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let holder_fingerprint_digest = session
+            .manual_holder_intent
+            .as_ref()
+            .map(|intent| {
+                let digest = Sha256::digest(intent.fingerprint.as_bytes());
+                hex::encode(digest)[..16].to_string()
+            })
+            .unwrap_or_else(|| "none".to_string());
         tracing::error!(
             target: "gwt::agent_launch",
             stage = %stage,
@@ -140,6 +214,10 @@ impl AppRuntime {
             selected_tool_version = %view.selected_version,
             selected_docker_service = %selected_docker_service,
             linked_issue_number = %linked_issue_number,
+            holder_session_id = %holder_session_id,
+            holder_window_id = %holder_window_id,
+            holder_runtime_incarnation = %holder_runtime_incarnation,
+            holder_fingerprint_digest = %holder_fingerprint_digest,
             error = %sanitized_error,
             "launch wizard action failed"
         );

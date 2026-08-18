@@ -2,7 +2,7 @@
 // Owns the wizard state (launchWizard / launchWizardOpenError /
 // launchWizardOpening / branch draft / pending action), the
 // wizardInteractionGuard that defers destructive re-renders while a native
-// <select> dropdown or the reasoning slider is mid-interaction, the field
+// <select>, segmented choice, or reasoning slider is mid-interaction, the field
 // builders, the state transitions, renderLaunchWizard, the wizard chrome
 // listeners (installWizardChrome), and the wizard branch of the global Esc
 // handler. Pure movement from app.js: behavior, DOM output, and WS protocol
@@ -75,6 +75,8 @@ export function createLaunchWizardSurface({
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
       let launchWizardPendingAction = null;
+      let launchWizardPendingActionDisconnected = false;
+      let launchWizardPendingActionQueued = false;
       // SPEC-2359 US-80 — Start Work duplicate-work advisory. The intake prompt
       // is always skippable; these locals drive the debounced query and the
       // non-blocking results panel. `wizardAdvisoryLatestRequestId` guards
@@ -103,7 +105,7 @@ export function createLaunchWizardSurface({
             return;
           }
           if (deferred.kind === "launch_wizard_state") {
-            if (!deferred.wizard?.launch_materialization_pending) {
+            if (shouldClearLaunchWizardPendingAction(deferred.wizard)) {
               clearLaunchWizardPendingAction();
             }
             clearLaunchWizardOpening();
@@ -671,11 +673,55 @@ export function createLaunchWizardSurface({
 
       function setLaunchWizardPendingAction(action) {
         launchWizardPendingAction = action || null;
+        launchWizardPendingActionDisconnected = false;
+        launchWizardPendingActionQueued = false;
         renderLaunchWizard();
       }
 
       function clearLaunchWizardPendingAction() {
         launchWizardPendingAction = null;
+        launchWizardPendingActionDisconnected = false;
+        launchWizardPendingActionQueued = false;
+      }
+
+      function isHolderDecisionPendingAction() {
+        return Boolean(
+          launchWizardPendingAction
+            && (
+              launchWizardPendingAction.kind === "stop_and_start_successor"
+              || launchWizardPendingAction.kind === "move_existing_pane"
+            ),
+        );
+      }
+
+      function handleLaunchWizardTransportChange(connected) {
+        if (!connected && isHolderDecisionPendingAction()) {
+          launchWizardPendingActionDisconnected = true;
+        }
+      }
+
+      function isLaunchWizardCancellationBlocked() {
+        return Boolean(
+          launchWizardPendingAction || launchWizard?.launch_materialization_pending,
+        );
+      }
+
+      function shouldClearLaunchWizardPendingAction(nextWizard) {
+        if (!launchWizardPendingAction) return false;
+        const kind = launchWizardPendingAction.kind;
+        if (kind !== "stop_and_start_successor" && kind !== "move_existing_pane") {
+          return !nextWizard?.launch_materialization_pending;
+        }
+        if (!nextWizard) return true;
+        if (nextWizard.launch_materialization_pending) return false;
+        if (nextWizard.error || nextWizard.hydration_error) return true;
+        if (launchWizardPendingActionDisconnected && !launchWizardPendingActionQueued) {
+          return true;
+        }
+        const nextDecision = nextWizard.holder_decision;
+        return !nextDecision
+          || nextDecision.fingerprint !== launchWizardPendingAction.fingerprint
+          || nextDecision.holder_window_id !== launchWizardPendingAction.window_id;
       }
 
       function openLaunchPendingWizard({ title, meta, message }) {
@@ -732,6 +778,7 @@ export function createLaunchWizardSurface({
         if (!releaseWizardInteractionGuardForChromeAction()) {
           return;
         }
+        if (isLaunchWizardCancellationBlocked()) return;
         clearLaunchWizardPendingAction();
         if (launchWizardOpenError) {
           closeLaunchWizardLocal();
@@ -744,7 +791,73 @@ export function createLaunchWizardSurface({
         return !event || event.button === 0 || event.button === undefined;
       }
 
+      function currentHolderDecision() {
+        const decision = launchWizard?.holder_decision;
+        return decision && typeof decision === "object" ? decision : null;
+      }
+
+      function hasHolderDecisionTarget(decision) {
+        return Boolean(
+          decision
+            && typeof decision.fingerprint === "string"
+            && decision.fingerprint.length > 0
+            && typeof decision.holder_window_id === "string"
+            && decision.holder_window_id.length > 0,
+        );
+      }
+
+      function holderDecisionActionAvailable(decision, actionKind) {
+        if (!hasHolderDecisionTarget(decision)) {
+          return false;
+        }
+        return actionKind === "stop_and_start_successor"
+          ? decision.stop_available === true
+          : decision.move_available === true;
+      }
+
+      function handleHolderDecisionAction(
+        actionKind,
+        button,
+        interactionGuardReleased = false,
+      ) {
+        if (
+          (!interactionGuardReleased
+            && !releaseWizardInteractionGuardForChromeAction())
+          || launchWizardOpenError
+          || launchWizardPendingAction
+          || button.disabled
+        ) {
+          return;
+        }
+        const decision = currentHolderDecision();
+        if (!holderDecisionActionAvailable(decision, actionKind)) {
+          return;
+        }
+        const action = {
+          kind: actionKind,
+          fingerprint: decision.fingerprint,
+          window_id: decision.holder_window_id,
+        };
+        setLaunchWizardPendingAction(action);
+        // A destructive holder action must not enter the generic reconnect
+        // queue: once shifted from that queue, a second disconnect could lose
+        // the only delivery while leaving the UI locked forever. An unsent or
+        // disconnected attempt becomes manually retryable after the next
+        // authoritative same-decision snapshot.
+        const disposition = sendWizardAction(action, {
+          queueIfDisconnected: false,
+        });
+        launchWizardPendingActionQueued = false;
+        if (disposition !== "sent") {
+          launchWizardPendingActionDisconnected = true;
+        }
+      }
+
       function handleLaunchWizardSubmitFromChrome() {
+        if (currentHolderDecision()) {
+          handleHolderDecisionAction("stop_and_start_successor", wizardSubmitButton);
+          return;
+        }
         if (
           !releaseWizardInteractionGuardForChromeAction()
           || launchWizardOpenError
@@ -758,6 +871,7 @@ export function createLaunchWizardSurface({
       }
 
       function renderLaunchWizard() {
+        wizardSubmitButton.classList.remove("destructive");
         if (!launchWizard && !launchWizardOpenError && !launchWizardOpening) {
           clearLaunchWizardPendingAction();
           syncLaunchWizardPendingChrome(false);
@@ -885,14 +999,30 @@ export function createLaunchWizardSurface({
           return;
         }
 
+        const holderDecision = currentHolderDecision();
+        const hasHolderTarget = hasHolderDecisionTarget(holderDecision);
         wizardSubmitButton.hidden = false;
+        wizardBackButton.textContent = holderDecision
+          ? launchWizardPendingAction?.kind === "move_existing_pane"
+            ? "Moving..."
+            : "Move existing pane"
+          : "Back";
         wizardBackButton.hidden = !launchWizard.show_back_button;
-        wizardBackButton.disabled = Boolean(
-          isLaunchActionPending
-            || launchWizard.is_hydrating
-            || launchWizard.runtime_resolution_pending
-            || !launchWizard.show_back_button,
-        );
+        if (holderDecision) {
+          wizardBackButton.hidden = false;
+        }
+        wizardBackButton.disabled = holderDecision
+          ? Boolean(
+              isLaunchActionPending
+                || !hasHolderTarget
+                || holderDecision.move_available !== true,
+            )
+          : Boolean(
+              isLaunchActionPending
+                || launchWizard.is_hydrating
+                || launchWizard.runtime_resolution_pending
+                || !launchWizard.show_back_button,
+            );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         const isIntakeWizard = launchWizard.mode === "intake";
@@ -922,7 +1052,19 @@ export function createLaunchWizardSurface({
             || launchWizard.runtime_resolution_pending
             || launchWizard.primary_action_enabled === false,
         );
-        wizardCancelButton.disabled = false;
+        if (holderDecision) {
+          wizardSubmitButton.textContent =
+            launchWizardPendingAction?.kind === "stop_and_start_successor"
+              ? "Stopping..."
+              : "Stop and start successor";
+          wizardSubmitButton.classList.add("destructive");
+          wizardSubmitButton.disabled = Boolean(
+            isLaunchActionPending
+              || !hasHolderTarget
+              || holderDecision.stop_available !== true,
+          );
+        }
+        wizardCancelButton.disabled = isLaunchActionPending;
 
         if (launchWizard.error || launchWizard.hydration_error) {
           wizardError.hidden = false;
@@ -997,6 +1139,43 @@ export function createLaunchWizardSurface({
               launchWizard.launch_materialization_message || "Preparing worktree...",
             ),
           );
+        }
+        if (holderDecision) {
+          const section = createLaunchSection(
+            "Existing session",
+            "Choose how to continue with the session already holding this work.",
+          );
+          section.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              holderDecision.holder_summary
+                || (holderDecision.holder_session_id
+                  ? `Session ${holderDecision.holder_session_id} is holding this work.`
+                  : "An existing session is holding this work."),
+            ),
+          );
+          if (!hasHolderTarget || holderDecision.stop_available !== true) {
+            section.appendChild(
+              createNode(
+                "div",
+                "launch-field-help",
+                holderDecision.stop_unavailable_reason
+                  || "Stop and start successor is unavailable for this session.",
+              ),
+            );
+          }
+          if (!hasHolderTarget || holderDecision.move_available !== true) {
+            section.appendChild(
+              createNode(
+                "div",
+                "launch-field-help",
+                holderDecision.move_unavailable_reason
+                  || "Move existing pane is unavailable for this session.",
+              ),
+            );
+          }
+          panel.appendChild(section);
         }
 
         // SPEC-3165 — the prompt is still skippable and still drives the
@@ -1761,7 +1940,8 @@ export function createLaunchWizardSurface({
         ) {
           return;
         }
-        if (!event.wizard?.launch_materialization_pending) {
+        const previousHolderFingerprint = currentHolderDecision()?.fingerprint || null;
+        if (shouldClearLaunchWizardPendingAction(event.wizard)) {
           clearLaunchWizardPendingAction();
         }
         clearLaunchWizardOpening();
@@ -1770,6 +1950,16 @@ export function createLaunchWizardSurface({
         }
         launchWizard = event.wizard;
         renderLaunchWizard();
+        const nextHolderFingerprint = currentHolderDecision()?.fingerprint || null;
+        if (
+          nextHolderFingerprint
+          && nextHolderFingerprint !== previousHolderFingerprint
+          && !wizardCancelButton.disabled
+          && typeof wizardCancelButton.focus === "function"
+        ) {
+          try { wizardCancelButton.focus({ preventScroll: true }); }
+          catch { wizardCancelButton.focus(); }
+        }
       }
 
       function applyLaunchWizardOpenErrorEvent(event) {
@@ -1805,6 +1995,10 @@ export function createLaunchWizardSurface({
             event.preventDefault();
             return true;
           }
+          if (isLaunchWizardCancellationBlocked()) {
+            event.preventDefault();
+            return true;
+          }
           if (launchWizardOpenError) {
             closeLaunchWizardLocal();
           } else {
@@ -1821,13 +2015,10 @@ export function createLaunchWizardSurface({
       function installWizardChrome() {
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardBackButton.addEventListener("click", () => {
-        if (
-          !releaseWizardInteractionGuardForChromeAction()
-          || launchWizardOpenError
-          || wizardBackButton.disabled
-        ) {
-          return;
-        }
+        if (!releaseWizardInteractionGuardForChromeAction()) return;
+        if (launchWizardOpenError || wizardBackButton.disabled) return;
+        if (currentHolderDecision())
+          return handleHolderDecisionAction("move_existing_pane", wizardBackButton, true);
         flushWizardBranchDraft();
         sendWizardAction({ kind: "back" });
       });
@@ -1855,14 +2046,30 @@ export function createLaunchWizardSurface({
       // are coalesced for the whole interaction, not committed on every step.
       const isGuardedRange = (el) =>
         Boolean(el && el.classList && el.classList.contains("launch-range__input"));
+      const isGuardedSegmentedOption = (el) =>
+        Boolean(
+          el
+            && el.classList
+            && el.classList.contains("launch-segmented__option"),
+        );
       wizardBody.addEventListener("pointerdown", (event) => {
         const target = event.target;
-        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+        if (
+          target
+          && (
+            target.tagName === "SELECT"
+            || isGuardedRange(target)
+            || isGuardedSegmentedOption(target)
+          )
+        ) {
           wizardInteractionGuard.activate();
         }
       });
       wizardBody.addEventListener("focusin", (event) => {
-        if (isGuardedRange(event.target)) {
+        if (
+          isGuardedRange(event.target)
+          || isGuardedSegmentedOption(event.target)
+        ) {
           wizardInteractionGuard.activate();
         }
       });
@@ -1876,7 +2083,14 @@ export function createLaunchWizardSurface({
       });
       wizardBody.addEventListener("focusout", (event) => {
         const target = event.target;
-        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+        if (
+          target
+          && (
+            target.tagName === "SELECT"
+            || isGuardedRange(target)
+            || isGuardedSegmentedOption(target)
+          )
+        ) {
           wizardInteractionGuard.release();
         }
       });
@@ -1897,6 +2111,7 @@ export function createLaunchWizardSurface({
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
       };

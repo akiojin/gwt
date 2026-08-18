@@ -869,9 +869,10 @@
       function send(message) {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify(message));
-          return;
+          return "sent";
         }
         pendingMessages.push(message);
+        return "queued";
       }
 
       function sendKnowledgeSemanticSearchNow(message) {
@@ -1116,6 +1117,7 @@
 
       function setConnectionState(connected) {
         connectionOverlay.setConnected(connected);
+        handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -4498,12 +4500,25 @@
         });
       }
 
-      function sendWizardAction(action) {
-        send({
+      function sendWizardAction(action, { queueIfDisconnected = true } = {}) {
+        const message = {
           kind: "launch_wizard_action",
           action,
           bounds: visibleBounds(),
-        });
+        };
+        if (queueIfDisconnected) {
+          return send(message);
+        }
+        const activeSocket = socket;
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+          return "unavailable";
+        }
+        try {
+          activeSocket.send(JSON.stringify(message));
+          return "sent";
+        } catch {
+          return "unavailable";
+        }
       }
 
       // SPEC-2359 US-80: debounced Start Work duplicate-work advisory query.
@@ -4694,6 +4709,7 @@
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
       } = createLaunchWizardSurface({

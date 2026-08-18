@@ -345,6 +345,11 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
 - Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
   PM だけです。他のエージェントセッションは GUI 操作が必要です。マージ判断は
   影響を受けません — 上記の強い自動ゲートが引き続きすべてのマージを決めます。
+- PM は project store 単位ではなく**リポジトリ単位**で 1 つです。state が
+  2 つの store に分かれたリポジトリでも PM は 1 本だけになります。JSON operation
+  `pm.status` はリポジトリ内の全登録を一覧し、`pm.stop` は CLI から PM を
+  停止します。登録済み PM は孤児化した PM を停止でき、自分自身も GUI 操作なしで
+  停止できます。
 
 設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
 
@@ -750,6 +755,43 @@ cargo bundle -p gwt --format osx
 ```bash
 cargo test -p gwt-core -p gwt --all-features
 ```
+
+### 重量級検証の直列化
+
+重量級検証（`cargo test --all-features` / `cargo llvm-cov` / headed
+Playwright / `verify.run`）はホストの CPU を奪い合います。同じマシンで 2 つ
+同時に走らせると wall-clock に依存する fixture が理由なく失敗し、カバレッジ
+計測も汚れるため、gwt はホスト単位の lease で直列化します。保持者はマシン
+あたり 1 つで、リポジトリや worktree をまたいで共有されます。
+
+重量級コマンドの前に lease を取得し、終わったら解放します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
+JSON
+```
+
+応答は即時です。`verification lease: granted` の場合は解放に使う `lease_id`
+が返り、`verification lease: unavailable` の場合は現在の保持者と残り TTL が
+返るため、他プロセスを監視する必要はありません。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.status","params":{}}
+JSON
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
+JSON
+```
+
+TTL より実行が長引く場合は、同じ `lease_id` で `verify.lease.extend` を
+使います。既定 TTL は 45 分で、満了した lease は自動的に解放され、保持者が
+kill された場合も即座に解放されます。lease の遷移は
+`~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
 
 ### リリース手順
 
