@@ -2315,6 +2315,7 @@ mod tests {
             agents,
             vec![QuickStartEntry {
                 session_id: "gwt-session-grok".to_string(),
+                linked_issue_number: None,
                 agent_id: "grok".to_string(),
                 tool_label: "Grok Build".to_string(),
                 model: Some("grok-4.20-beta".to_string()),
@@ -2378,6 +2379,7 @@ mod tests {
             agents,
             vec![QuickStartEntry {
                 session_id: "gwt-session-grok-default".to_string(),
+                linked_issue_number: None,
                 agent_id: "grok".to_string(),
                 tool_label: "Grok Build".to_string(),
                 model: None,
