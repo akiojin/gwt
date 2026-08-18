@@ -1952,16 +1952,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
 }
 
 fn issue_monitor_prefs_need_local_claim_cleanup(prefs: &gwt::IssueMonitorPrefs) -> bool {
-    prefs.pending_effects.iter().any(|effect| {
-        matches!(
-            effect.payload,
-            gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
-        ) || (effect.state == gwt::IssueMonitorEffectState::Attempting
-            && matches!(
-                effect.payload,
-                gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-            ))
-    })
+    gwt::issue_monitor::prefs_need_local_claim_cleanup(prefs)
 }
 
 fn quick_issue_body(title: &str) -> String {

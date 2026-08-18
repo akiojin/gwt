@@ -3337,6 +3337,19 @@ fn scan_issue_monitor_once_blocking(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
     )?;
+    // Issue #3604 AC-11: everything past this point queries GitHub. The tick
+    // that got us here is unconditional, so a monitor with nothing to do would
+    // otherwise keep burning the shared GraphQL budget forever. The disk rebase
+    // above re-read `enabled`, so flipping the switch back on resumes scanning
+    // on the next tick; `IssueMonitorControl::Enabled` also requests an
+    // immediate scan, so re-enabling never waits out a poll interval.
+    //
+    // The local `origin` resolution above stays outside the gate: it costs
+    // nothing and its typed failure is the useful diagnostic for a repository
+    // that never configured a remote.
+    if !monitor.scan_needs_github_budget() {
+        return Ok(monitor);
+    }
     let loaded = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::CandidateLoad,
         || {
@@ -4078,6 +4091,46 @@ exit 0
 "###,
         )
         .expect("write fake gh");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+        fake_gh
+    }
+
+    /// Issue #3604: pin the gwt home so the daemon **worker thread** resolves it
+    /// too.
+    ///
+    /// [`ScopedGwtHome`] is thread-local, but a worker-driven test runs its scan
+    /// on another thread where that override is invisible. gwt home there falls
+    /// back to the pid-scoped cargo test home, which every test in this binary
+    /// shares — so a test that seeds prefs on its own thread silently reads back
+    /// another test's file. Pinning `HOME` under a temp dir also satisfies
+    /// `is_explicit_isolated_home`, which suppresses that shared fallback.
+    ///
+    /// Hold [`crate::env_test_lock`] for the returned guards' whole lifetime.
+    fn scoped_worker_visible_home(home: &Path) -> (ScopedGwtHome, ScopedEnvVar, ScopedEnvVar) {
+        (
+            ScopedGwtHome::set(home),
+            ScopedEnvVar::set("HOME", home),
+            ScopedEnvVar::set("USERPROFILE", home),
+        )
+    }
+
+    /// Issue #3604: a `gh` stand-in that records every invocation, so a test can
+    /// assert that a scan spent no GitHub API budget at all.
+    fn write_recording_fake_gh(temp_root: &Path, call_log: &Path) -> std::path::PathBuf {
+        let fake_gh = temp_root.join("gh");
+        fs::write(
+            &fake_gh,
+            format!(
+                r###"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+printf '%s\n' '[]'
+exit 0
+"###,
+                log = call_log.display()
+            ),
+        )
+        .expect("write recording fake gh");
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
         fake_gh
@@ -6442,6 +6495,87 @@ exit 0
         );
     }
 
+    /// Issue #3604 AC-11: the daemon tick fires every `poll_interval_secs`
+    /// regardless of the monitor switch. A monitor that is OFF, holds no
+    /// launched work to reconcile, and has no claim effect to settle has
+    /// nothing to learn from GitHub, so its scan must not spend a single point
+    /// of either budget.
+    fn disabled_idle_scan_scope(temp: &TempDir) -> (RuntimeScope, std::path::PathBuf) {
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        (scope, home)
+    }
+
+    #[test]
+    fn daemon_scan_spends_no_github_budget_while_disabled_with_nothing_in_flight() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let (scope, home) = disabled_idle_scan_scope(&temp);
+        let _home = ScopedGwtHome::set(&home);
+        let call_log = temp.path().join("gh-calls.log");
+        let fake_gh = write_recording_fake_gh(temp.path(), &call_log);
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        assert!(!monitor.config.enabled, "default monitor is OFF");
+
+        super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("a disabled idle scan is a local no-op, not a scan failure");
+
+        assert!(
+            !call_log.exists(),
+            "a disabled idle monitor must not call gh, but it ran: {}",
+            fs::read_to_string(&call_log).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn daemon_scan_still_reconciles_merges_for_work_launched_before_the_monitor_was_disabled() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let (scope, home) = disabled_idle_scan_scope(&temp);
+        let _home = ScopedGwtHome::set(&home);
+        let call_log = temp.path().join("gh-calls.log");
+        let fake_gh = write_recording_fake_gh(temp.path(), &call_log);
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "window-43".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let _ = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        assert!(
+            call_log.exists(),
+            "launched work must keep being reconciled even with the monitor OFF"
+        );
+    }
+
     #[test]
     fn issue_monitor_scan_reports_missing_origin_instead_of_generic_unavailable() {
         let temp = TempDir::new().expect("tempdir");
@@ -6749,7 +6883,13 @@ exit 0
         )
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        let legacy = legacy_failed_prefs(&scope.project_root);
+        // Issue #3604 AC-11: a disabled monitor no longer reaches GitHub, and
+        // this test's contract is the legacy failure migration during a *live*
+        // scan — not the enablement gate. Turn the monitor on so the scan runs.
+        let legacy = crate::IssueMonitorPrefs {
+            enabled: true,
+            ..legacy_failed_prefs(&scope.project_root)
+        };
         crate::save_issue_monitor_prefs(&prefs_path, &legacy).expect("seed legacy prefs");
         let monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
@@ -6933,7 +7073,7 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
-        let _home = ScopedGwtHome::set(&home);
+        let _home = scoped_worker_visible_home(&home);
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let scan_started_path = temp.path().join("scan-started");
         // Deliberately never created: every fake gh invocation hangs until its
@@ -7030,7 +7170,7 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
-        let _home = ScopedGwtHome::set(&home);
+        let _home = scoped_worker_visible_home(&home);
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let scan_started_path = temp.path().join("scan-started");
         let release_scan_path = temp.path().join("release-scan");
@@ -7173,9 +7313,14 @@ exit 0
         // Always release the fake process before asserting RED so a failed test
         // cannot strand a blocking child or the Tokio blocking pool.
         fs::write(&release_scan_path, b"release").expect("release fake gh scan");
+        // Issue #3604 AC-11: once the OFF control lands, later ticks stop
+        // querying GitHub, so no fresh `last_scan_at` will ever arrive. The
+        // contract under test is that releasing the stale scan does not rewind
+        // the control's mutation, so wait for the next status published after
+        // the release and assert the mutation survived it.
         let settled_status =
             recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(3), |status| {
-                status.max_active_agents == 7 && status.last_scan_at.is_some()
+                status.max_active_agents == 7 && !status.enabled
             })
             .await;
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
@@ -7232,7 +7377,11 @@ exit 0
             "should-scan controls and ticks must not overlap fake gh scans; a watchdog may finish \
              one attempt and start its recovery attempt under a heavily loaded full suite"
         );
-        assert!(settled_status.is_some(), "released scan must settle");
+        assert!(
+            settled_status.is_some(),
+            "releasing the stale scan must publish a status that still carries the control's \
+             mutation"
+        );
         assert!(
             !mutation_marker_path.exists(),
             "a stale scan must cause zero external claim/arm mutations after OFF"
@@ -12197,7 +12346,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create home");
-        let _home = ScopedGwtHome::set(&home);
+        let _home = scoped_worker_visible_home(&home);
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let scan_started_path = temp.path().join("scan-started");
         let release_scan_path = temp.path().join("release-scan");

@@ -926,6 +926,25 @@ fn issue_monitor_runtime_label(target: gwt_agent::LaunchRuntimeTarget) -> &'stat
     }
 }
 
+/// Whether these prefs still owe GitHub a claim settlement that only this
+/// machine can perform: a queued release, or an acquire that was left mid-flight
+/// and must be reconciled against the remote before the slot can be trusted.
+///
+/// Both outlive the monitor switch, so they keep a scan authorized to spend
+/// GitHub budget even while the monitor is OFF (Issue #3604 AC-11).
+pub fn prefs_need_local_claim_cleanup(prefs: &IssueMonitorPrefs) -> bool {
+    prefs.pending_effects.iter().any(|effect| {
+        matches!(
+            effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim { .. }
+        ) || (effect.state == IssueMonitorEffectState::Attempting
+            && matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim { .. }
+            ))
+    })
+}
+
 impl Default for IssueMonitorConfig {
     fn default() -> Self {
         Self {
@@ -5682,6 +5701,25 @@ impl IssueMonitorState {
 
     /// issue → work branch for every currently active (launched) Issue. Uses
     /// the stored launch branch, falling back to the inbox launch plan.
+    /// Issue #3604 AC-11: whether a periodic scan still has a reason to spend
+    /// GitHub API budget.
+    ///
+    /// The scan tick is unconditional, but a monitor that is switched off, holds
+    /// no launched work to reconcile, and has no claim effect to settle has
+    /// nothing left to learn from GitHub. Querying anyway burned the shared
+    /// GraphQL quota around the clock: a running instance was observed advancing
+    /// `last_scan_at` (02:00:36Z -> 02:05:36Z) while reporting `enabled:false`
+    /// with zero active launches.
+    ///
+    /// Held slots — not resolved branches — are the signal here: the branch of
+    /// an active launch is only resolved by the candidate scan that this gate
+    /// decides whether to run.
+    pub fn scan_needs_github_budget(&self) -> bool {
+        self.config.enabled
+            || self.active_count() > 0
+            || prefs_need_local_claim_cleanup(&self.prefs())
+    }
+
     pub fn active_launched_branches(&self) -> Vec<(u64, String)> {
         self.active_launches
             .iter()
