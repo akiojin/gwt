@@ -6657,7 +6657,8 @@ fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight(
                                         gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
                                     ..
                                 } if expected_predecessor.as_deref() == Some(&holder)
-                                    && runtime == &proof
+                                    && runtime
+                                        == &gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof)
                             )
                     )
             )
@@ -6686,8 +6687,15 @@ fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight(
     ));
 }
 
+/// Issue #3457 retargeted this fixture. Deleting the sidecar outright no
+/// longer means "no proof" — absence is now decisive evidence that no Host is
+/// running the holder, and refusing there is the permanent-lockout bug this
+/// Issue fixes. The safety property under test is unchanged and still worth
+/// pinning: when the runtime evidence is genuinely *ambiguous*, the refusal
+/// must land before any pane or authority mutation. So the holder now
+/// publishes a sidecar the classifier cannot trust instead of none at all.
 #[test]
-fn manual_launch_unknown_terminal_proof_refuses_before_pane_and_authority_mutation() {
+fn manual_launch_ambiguous_terminal_proof_refuses_before_pane_and_authority_mutation() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -6709,11 +6717,15 @@ fn manual_launch_unknown_terminal_proof_refuses_before_pane_and_authority_mutati
         gwt_agent::AgentStatus::Stopped,
         None,
     );
-    fs::remove_file(gwt_agent::runtime_state_path(
-        &runtime.sessions_dir,
-        &holder.session_id,
-    ))
-    .expect("remove exact terminal proof");
+    // Republish the sidecar without an execution identity: the evidence
+    // exists but cannot be tied to this holder, which is the ambiguous
+    // `Unknown` case rather than the decisive `Absent` one.
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped)
+        .save(&gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            &holder.session_id,
+        ))
+        .expect("publish untrustworthy terminal proof");
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 42,
@@ -17756,10 +17768,12 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
         gwt::cli::execution_state::ExactManualLaunchPredecessor {
             sessions_dir: &sessions_dir,
             session: Some(&predecessor_identity),
-            runtime: Some(gwt_agent::ManualLaunchRuntimeProof {
-                host_pid: std::process::id(),
-                runtime_incarnation: 1,
-            }),
+            runtime: Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                gwt_agent::ManualLaunchRuntimeProof {
+                    host_pid: std::process::id(),
+                    runtime_incarnation: 1,
+                },
+            )),
             binding: &predecessor_identity.execution_binding.identity,
             status: gwt::cli::execution_state::SuccessorPredecessorStatus::Active,
             terminal_reason: "exact producing runtime terminated before manual Launch Agent",

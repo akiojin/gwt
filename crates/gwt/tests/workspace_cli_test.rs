@@ -16,7 +16,7 @@ use std::{
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{mpsc, Mutex, MutexGuard, OnceLock},
     thread::JoinHandle,
     time::Duration,
 };
@@ -57,13 +57,19 @@ const BRANCH: &str = "work/ws-cli";
 const WORK_ID: &str = "existing-similar-work";
 const FOREIGN_CURRENT_WORK_ID: &str = "foreign-current-work";
 const FORWARD_TOKEN: &str = "workspace-proxy-secret-sentinel";
-// Instrumented Windows `gwtd` startup can exceed three seconds under the
-// full single-threaded coverage matrix. The client still owns the operation
-// timeout; this deadline only keeps the loopback observer alive long enough
-// to see its first request.
-const FIRST_PROXY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const HOST_WORK_ID: &str = "host-work-id";
 const HOST_JOURNAL_ENTRY_ID: &str = "host-journal-entry-id";
+const DOCKER_RUNTIME_WORKTREE: &str = "/workspace/project";
+
+/// Serialize only the tests that execute a real Host authority mutation.
+/// Waiting at test entry keeps contention outside the bridge client's fixed
+/// production timeout; locking inside the handler would consume that budget.
+fn real_host_mutation_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedWorkEventStoreSnapshot {
@@ -436,7 +442,6 @@ impl DisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + FIRST_PROXY_REQUEST_TIMEOUT;
             let mut accepted = 0;
             loop {
                 match listener.accept() {
@@ -449,15 +454,9 @@ impl DisconnectServer {
                         accepted += 1;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        let now = std::time::Instant::now();
                         if shutdown_rx.try_recv().is_ok() {
                             tx.send(accepted)
                                 .expect("record disconnected bridge request count");
-                            return;
-                        }
-                        if accepted == 0 && now >= first_request_deadline {
-                            tx.send(accepted)
-                                .expect("record missing disconnected bridge request");
                             return;
                         }
                         std::thread::sleep(Duration::from_millis(10));
@@ -475,12 +474,10 @@ impl DisconnectServer {
     }
 
     fn receive(&mut self) {
-        self.shutdown_tx
-            .send(())
-            .expect("stop disconnect listener after the client exits");
+        let _ = self.shutdown_tx.send(());
         let accepted = self
             .rx
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(30))
             .expect("expected disconnected bridge request count");
         self.handle
             .take()
@@ -526,7 +523,6 @@ impl ApplyThenDisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + FIRST_PROXY_REQUEST_TIMEOUT;
             let mut accepted = 0;
             let mut applied_receipt = None;
             loop {
@@ -559,7 +555,6 @@ impl ApplyThenDisconnectServer {
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        let now = std::time::Instant::now();
                         if shutdown_rx.try_recv().is_ok() {
                             let (work_id, journal_entry_id) = applied_receipt
                                 .expect("the accepted Host request must be applied exactly once");
@@ -570,9 +565,6 @@ impl ApplyThenDisconnectServer {
                             })
                             .expect("record apply-then-disconnect observation");
                             return;
-                        }
-                        if accepted == 0 && now >= first_request_deadline {
-                            panic!("timed out before the apply-then-disconnect Host request");
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -589,12 +581,10 @@ impl ApplyThenDisconnectServer {
     }
 
     fn receive(&mut self) -> AppliedDisconnectObservation {
-        self.shutdown_tx
-            .send(())
-            .expect("stop apply-then-disconnect listener after the client exits");
+        let _ = self.shutdown_tx.send(());
         let observation = self
             .rx
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(30))
             .expect("expected apply-then-disconnect observation");
         self.handle
             .take()
@@ -803,7 +793,7 @@ async fn capture_workspace_update(
                     Session::load(&session_path).expect("load Host Session before Docker switch");
                 session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
                 session
-                    .bind_docker_runtime("/workspace/gwt-test", &project_root)
+                    .bind_docker_runtime(DOCKER_RUNTIME_WORKTREE, &project_root)
                     .expect("bind Docker runtime before static Host response");
                 session
                     .save(&gwt_core::paths::gwt_sessions_dir())
@@ -1341,7 +1331,7 @@ fn mark_bound_session_as_docker(fixture: &Fixture) {
     let mut session = Session::load(&session_path).expect("load bound Docker Session fixture");
     session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
     session
-        .bind_docker_runtime("/workspace/gwt-test", fixture.project.path())
+        .bind_docker_runtime(DOCKER_RUNTIME_WORKTREE, fixture.project.path())
         .expect("bind Docker runtime fixture");
     session
         .save(&fixture.home.path().join(".gwt/sessions"))
@@ -1563,6 +1553,7 @@ fn workspace_update_complete_forward_pair_uses_host_proxy_without_reading_contai
 
 #[test]
 fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_container_home() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     for (case, poisoned_container) in [("empty", false), ("poisoned", true)] {
         let fixture = fixture();
         if poisoned_container {
@@ -1726,6 +1717,7 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
 
 #[test]
 fn workspace_update_exact_same_home_host_accepts_fresh_canonical_journal_receipt() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1780,6 +1772,7 @@ fn workspace_update_exact_same_home_host_accepts_fresh_canonical_journal_receipt
 
 #[test]
 fn workspace_update_exact_same_home_foreign_work_accepts_fresh_work_event_receipt() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1864,6 +1857,7 @@ fn workspace_update_exact_same_home_foreign_work_accepts_fresh_work_event_receip
 
 #[test]
 fn workspace_update_current_snapshot_accepts_fresh_event_after_host_switches_current_work() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1997,6 +1991,7 @@ fn workspace_update_foreign_work_rejects_static_receipt_without_fresh_event() {
 
 #[test]
 fn workspace_update_foreign_work_rejects_preexisting_matching_event_as_stale() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -2281,6 +2276,7 @@ fn workspace_update_proxy_response_loss_never_replays_locally_or_to_the_host() {
 
 #[test]
 fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let mut server = ApplyThenDisconnectServer::start(
@@ -2565,6 +2561,7 @@ fn workspace_update_host_rejects_success_receipt_with_unknown_journal_entry() {
 
 #[test]
 fn workspace_update_host_rejects_preexisting_matching_journal_receipt_as_stale() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
