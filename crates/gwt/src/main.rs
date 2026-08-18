@@ -409,6 +409,15 @@ impl Drop for EventLoopDispatchTimer {
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 
+/// Issue #3633: how often the GUI re-checks that a runtime daemon is serving
+/// each enabled project, and therefore the worst-case gap after one dies.
+///
+/// Deliberately independent of `IssueMonitorConfig::poll_interval_secs` (300s
+/// by default, and user-tunable). Inheriting the scan cadence would mean a
+/// crashed daemon leaves `scan_now` and `daemon.subscribe` unavailable for
+/// minutes, which is the state Issue #3633 was filed about.
+const RUNTIME_DAEMON_ENSURE_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GuiShutdownReason {
     /// SPEC #2920: retained for the unit tests that still exercise
@@ -518,6 +527,34 @@ fn spawn_gui_exit_backstop(reason: GuiShutdownReason, grace: Duration) {
             std::process::exit(0);
         })
         .expect("spawn gui exit backstop thread");
+}
+
+/// Report a fatal front-door startup failure on every surface that can still
+/// be read afterwards, then terminate.
+///
+/// Issue #1764: on Windows the tray front door runs under
+/// `windows_subsystem = "windows"` and never attaches a console, so `eprintln!`
+/// alone leaves a user whose gwt "just disappeared" with nothing to inspect.
+/// The message therefore also goes to the canonical project log.
+///
+/// The log writer is non-blocking and only flushes when its `WorkerGuard`
+/// drops, while `std::process::exit` skips destructors — so the handles are
+/// dropped here explicitly. Without that the freshly emitted event would be
+/// discarded along with the buffer, which is precisely the silence this
+/// function exists to end.
+fn fatal_startup_exit(
+    log_handles: &mut Option<gwt_core::logging::LoggingHandles>,
+    message: &str,
+    code: i32,
+) -> ! {
+    tracing::error!(
+        target: "gwt::startup",
+        exit_code = code,
+        "{message}"
+    );
+    eprintln!("{message}");
+    drop(log_handles.take());
+    std::process::exit(code);
 }
 
 enum BoardProjectionWatcherMessage {
@@ -1267,6 +1304,13 @@ enum UserEvent {
     /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
     /// tick — drives local scans and the PM periodic wake.
     IssueMonitorScheduledTick,
+    /// Issue #3633: keep a runtime daemon alive for every enabled project.
+    ///
+    /// Separate from the scan tick because the two cadences answer different
+    /// questions. The scan cadence is a user-tunable poll interval (300s by
+    /// default); daemon supervision is a liveness check that must not inherit
+    /// it, or a crashed daemon would leave the control lane dead for minutes.
+    RuntimeDaemonEnsureTick,
     IssueMonitorScheduledScanComplete {
         project_root: PathBuf,
         prefs_path: PathBuf,
@@ -1436,6 +1480,56 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    /// Issue #3633 AC-1/AC-2/AC-7: the GUI must drive daemon supervision on a
+    /// timer of its own.
+    ///
+    /// The supervisor is idempotent by design, which means the whole
+    /// supervision contract is "somebody keeps calling it". #3505 shipped a
+    /// working scan path that nothing drove; this asserts the timer, the
+    /// immediate first tick (so the control lane is up at launch rather than
+    /// an interval later), and that the cadence is not the user-tunable scan
+    /// poll interval.
+    #[test]
+    fn the_gui_drives_daemon_supervision_on_its_own_timer() {
+        let source = include_str!("main.rs");
+        let supervision = source
+            .split_once("runtime-daemon-ensure-tick")
+            .expect("the GUI must own a daemon supervision thread")
+            .1
+            .split_once("}\n    }")
+            .expect("supervision thread body must be delimited")
+            .0;
+
+        assert!(
+            supervision.contains("UserEvent::RuntimeDaemonEnsureTick"),
+            "the supervision thread must emit the ensure tick"
+        );
+        assert!(
+            supervision.contains("RUNTIME_DAEMON_ENSURE_INTERVAL"),
+            "supervision must not inherit the scan poll interval"
+        );
+        let send_at = supervision
+            .find("send_event")
+            .expect("the supervision thread must send its tick");
+        let sleep_at = supervision
+            .find("thread::sleep")
+            .expect("the supervision thread must have a cadence");
+        assert!(
+            send_at < sleep_at,
+            "the first ensure must run at launch, not one interval later"
+        );
+
+        assert!(
+            source.contains("app.ensure_runtime_daemons_for_enabled_projects()"),
+            "the ensure tick must reach the supervisor"
+        );
+        assert!(
+            crate::RUNTIME_DAEMON_ENSURE_INTERVAL
+                < Duration::from_secs(gwt::IssueMonitorConfig::default().poll_interval_secs),
+            "a crashed daemon must not stay dead for a whole scan interval"
+        );
+    }
+
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use base64::Engine;
     use chrono::Utc;
@@ -1452,6 +1546,7 @@ mod tests {
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_config::{Profile, Settings};
     use gwt_core::logging::{LogEvent, LogLevel};
+    use gwt_core::test_support::ScopedGwtHome;
     use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
@@ -2153,6 +2248,7 @@ mod tests {
     #[test]
     fn pane_send_input_replies_explicit_result_for_session_binding() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let mut window = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
         window.id = "claude-1".to_string();
         window.agent_id = Some("claude".to_string());
@@ -2281,6 +2377,7 @@ mod tests {
     #[test]
     fn logging_dir_for_startup_path_uses_project_scoped_fallback() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let log_dir = logging_dir_for_startup_path(temp.path());
         let project_hash = gwt_core::repo_hash::compute_path_hash(temp.path());
 
@@ -2404,6 +2501,7 @@ mod tests {
     #[test]
     fn project_index_status_check_delegates_project_root_to_bootstrap_path() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (proxy, events) = AppEventProxy::stub();
         let captured_root = Arc::new(Mutex::new(None));
         let captured_root_for_closure = captured_root.clone();
@@ -2470,6 +2568,7 @@ mod tests {
     #[test]
     fn write_browser_url_handoff_file_persists_url_to_target_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(tmp.path());
         let target = tmp.path().join("gwt-browser-url");
         let url = "http://127.0.0.1:44557/";
 
@@ -2492,6 +2591,7 @@ mod tests {
         // it should be reported as Failed so callers can log without
         // aborting startup.
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(tmp.path());
         let missing = tmp.path().join("does/not/exist/gwt-browser-url");
 
         let outcome =
@@ -2912,6 +3012,7 @@ mod tests {
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
+            daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
@@ -3101,6 +3202,7 @@ mod tests {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            linked_issue_number: None,
         }
     }
 
@@ -3180,6 +3282,7 @@ mod tests {
     #[test]
     fn frontend_sync_events_replay_status_wizard_and_pending_update() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -3287,6 +3390,7 @@ mod tests {
     #[test]
     fn update_available_event_records_pending_update_before_broadcast() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let tab = sample_project_tab(
             "tab-1",
             "Repo",
@@ -3367,6 +3471,7 @@ mod tests {
     #[test]
     fn open_project_path_reuses_existing_tab_and_adds_new_tab() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let other = temp.path().join("other");
         let scratch = temp.path().join("scratch");
@@ -3418,6 +3523,7 @@ mod tests {
     #[test]
     fn select_and_close_project_tabs_emit_workspace_and_wizard_updates() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let other = temp.path().join("other");
         fs::create_dir_all(&repo).expect("create repo");
@@ -3475,6 +3581,7 @@ mod tests {
     #[test]
     fn window_management_events_cover_canvas_operations() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
@@ -3571,6 +3678,7 @@ mod tests {
     #[test]
     fn non_agent_window_presets_open_and_focus_at_normal_floating_size() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -3718,6 +3826,7 @@ mod tests {
     #[test]
     fn loaders_and_wizard_entrypoints_cover_success_and_error_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         fs::create_dir_all(repo.join("src")).expect("create src");
@@ -4059,6 +4168,7 @@ mod tests {
     #[test]
     fn file_tree_load_uses_selected_linked_worktree_root() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
 
@@ -4326,6 +4436,7 @@ mod tests {
     #[test]
     fn runtime_status_missing_window_cleans_active_agent_session() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -4360,6 +4471,7 @@ mod tests {
     #[test]
     fn app_runtime_window_helpers_cover_lookup_status_and_seeded_details() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, _recorded_events) = sample_runtime_with_events(
@@ -4411,6 +4523,7 @@ mod tests {
     #[test]
     fn async_main_helpers_emit_proxy_events_without_gui_runtime() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         let default_branch = current_git_branch(&repo).expect("current branch");
@@ -4509,6 +4622,7 @@ mod tests {
     #[test]
     fn frontend_event_dispatch_routes_canvas_knowledge_and_async_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let scratch = temp.path().join("scratch");
         init_git_repo(&repo);
@@ -4828,6 +4942,7 @@ mod tests {
     #[test]
     fn test_backend_connection_replies_through_async_dispatch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
 
         let immediate_events = runtime.handle_frontend_event(
@@ -4867,6 +4982,7 @@ mod tests {
     #[test]
     fn test_agent_backend_connection_replies_through_async_dispatch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
 
         let immediate_events = runtime.handle_frontend_event(
@@ -4928,6 +5044,7 @@ mod tests {
     #[test]
     fn agent_backend_connection_probe_drops_older_reverse_completion_per_client_and_agent() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
         let codex = gwt_agent::BuiltinAgentId::Codex;
         let claude = gwt_agent::BuiltinAgentId::ClaudeCode;
@@ -5004,6 +5121,7 @@ mod tests {
     #[test]
     fn wizard_handler_helpers_cover_preparation_focus_and_error_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, recorded_events) = sample_runtime_with_events(
@@ -5212,6 +5330,7 @@ mod tests {
     #[test]
     fn launch_wizard_action_flow_launches_agent_when_selected_index_is_stale() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, recorded_events) = sample_runtime_with_events(
@@ -5333,6 +5452,7 @@ mod tests {
     #[test]
     fn launch_completion_and_project_target_error_paths_are_reported() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let mut runtime = sample_runtime(
@@ -5612,6 +5732,7 @@ mod tests {
     #[test]
     fn resolve_project_target_uses_selected_directory_name_for_git_subdir_title() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("demo-repo");
         fs::create_dir_all(repo.join("apps/frontend")).expect("create repo dirs");
         let status = gwt_core::process::hidden_command("git")
@@ -5636,6 +5757,7 @@ mod tests {
     #[test]
     fn local_branch_exists_surfaces_git_errors_for_invalid_repo() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let err = super::local_branch_exists(temp.path(), "feature/missing")
             .expect_err("non-repo path should surface git failure");
 
@@ -5816,6 +5938,7 @@ mod tests {
     #[test]
     fn build_shell_process_launch_for_host_uses_worktree_env() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -5852,6 +5975,7 @@ mod tests {
     #[test]
     fn build_shell_process_launch_for_host_uses_selected_windows_shell() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -5888,6 +6012,7 @@ mod tests {
         // replaces the detected interactive shell while keeping the worktree
         // env and GWT_PROJECT_ROOT.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -6199,6 +6324,7 @@ mod tests {
     #[test]
     fn recent_project_and_path_helpers_dedupe_and_fallback() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("repo");
         fs::create_dir_all(&project).expect("project dir");
         let project_dot = project.join(".");
@@ -6344,6 +6470,7 @@ mod tests {
     #[test]
     fn docker_defaults_and_mount_helpers_prefer_devcontainer_settings() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
         let devcontainer_dir = project_root.join(".devcontainer");
         fs::create_dir_all(&devcontainer_dir).expect("devcontainer dir");
@@ -6412,6 +6539,7 @@ mod tests {
     #[test]
     fn docker_launch_plan_merges_devcontainer_compose_files_and_rebases_relative_mounts() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("project");
         let devcontainer_dir = project.join(".devcontainer");
         fs::create_dir_all(&devcontainer_dir).expect("create devcontainer dir");
@@ -6450,6 +6578,7 @@ mod tests {
     #[test]
     fn worktree_git_and_misc_helpers_cover_repo_paths_and_defaults() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         let init = gwt_core::process::hidden_command("git")
@@ -6551,6 +6680,7 @@ mod tests {
         // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
         // are reaped — clean ones removed, dirty ones kept, capped per run.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -6617,6 +6747,7 @@ mod tests {
     #[test]
     fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -6647,6 +6778,7 @@ mod tests {
         // `.intake-*` worktree (no branch) and sets working_dir; the existing
         // branch-based launch path is untouched.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -6707,6 +6839,7 @@ mod tests {
         // develop after the clone; the resolved intake worktree must contain
         // the new commit.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
 
@@ -6757,6 +6890,7 @@ mod tests {
         // #3374: a repo with no origin remote cannot fetch; an `origin/*` base
         // must fall back to HEAD instead of failing the intake launch.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         for args in [
@@ -6793,6 +6927,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_helpers_cover_short_circuits_existing_and_remote_creation() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -7078,6 +7213,7 @@ mod tests {
         // mint a new work/* branch. This locks the routing contract that both
         // entry points (Branches row + Launch Wizard picker) reuse.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -7179,6 +7315,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let branch = "feature/existing";
@@ -7229,6 +7366,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_recreates_remote_develop_when_start_work_ref_is_stale() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
 
@@ -7306,6 +7444,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_prunes_missing_existing_worktree_before_recreating() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let branch = "feature/stale-worktree";
@@ -7675,6 +7814,7 @@ mod tests {
         assert_eq!(super::knowledge_kind_for_preset(WindowPreset::Shell), None);
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
         fs::create_dir_all(&project_root).expect("create project root");
         assert!(super::mount_source_matches_project_root(".", &project_root));
@@ -7760,6 +7900,7 @@ mod tests {
         );
 
         let profile_temp = tempdir().expect("profile tempdir");
+        let _gwt_home = ScopedGwtHome::set(profile_temp.path());
         let config_path = profile_temp.path().join("profile-config.toml");
         let mut settings = Settings::default();
         settings
@@ -7940,6 +8081,33 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let log_dir = logging_dir_for_startup_path(&startup_dir);
+
+    // Install the tracing subscriber so that `tracing::debug!/info!` lands in
+    // the startup project's canonical `gwt.log.YYYY-MM-DD`. The returned guard
+    // must outlive the event loop; we bind it to `log_handles` and keep it
+    // until `main` returns.
+    //
+    // Issue #1764: this MUST stay ahead of every startup step that can
+    // terminate the front door. Windows builds use
+    // `windows_subsystem = "windows"` and the tray route deliberately never
+    // attaches a console, so the `eprintln!` diagnostics below reach nobody
+    // there — the project log is the only post-mortem surface left once the
+    // process is gone. Initialising after the single-instance lock (as this
+    // used to) meant a stale Windows lock killed gwt with no trace anywhere,
+    // and even the `GWT_FORCE_NEW_INSTANCE` recovery hint was discarded for
+    // want of a subscriber.
+    //
+    // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
+    // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
+    // `RUST_LOG=gwt_input_trace=debug`.
+    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(log_dir))
+        .map_err(|error| {
+            eprintln!("gwt logging init failed: {error}");
+        })
+        .ok();
+
     // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
     // (tray-resident) route so VPN-reachable hosts can run
     // `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
@@ -7948,10 +8116,7 @@ fn main() -> std::io::Result<()> {
     // Phase 4. Parse errors render the canonical usage hint and exit 2.
     let tray_args = match gwt::cli::tray::parse_tray_argv(&argv) {
         Ok(parsed) => parsed,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(2);
-        }
+        Err(err) => fatal_startup_exit(&mut log_handles, &err.to_string(), 2),
     };
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
@@ -7964,7 +8129,6 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // SPEC #2920: `gwt serve` is removed, so `main()` only ever reaches
     // this point on the GUI route. Phase 3 will rework the kind taxonomy
     // entirely to `(gwt_home, "tray", user_id)`; until then keep the
@@ -7978,32 +8142,21 @@ fn main() -> std::io::Result<()> {
     ) {
         Ok(outcome) => outcome,
         Err(error @ gwt::gui_single_instance::GuiInstanceLockError::AlreadyRunning { .. }) => {
-            eprintln!("gwt {lock_role_label} startup failed: {error}");
-            std::process::exit(2);
+            fatal_startup_exit(
+                &mut log_handles,
+                &format!("gwt {lock_role_label} startup failed: {error}"),
+                2,
+            )
         }
-        Err(error) => {
-            eprintln!("gwt {lock_role_label} startup failed: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fatal_startup_exit(
+            &mut log_handles,
+            &format!("gwt {lock_role_label} startup failed: {error}"),
+            1,
+        ),
     };
-    let log_dir = logging_dir_for_startup_path(&startup_dir);
 
-    // Install the tracing subscriber so that `tracing::debug!/info!` lands in
-    // the startup project's canonical `gwt.log.YYYY-MM-DD`. The returned guard
-    // must outlive the event loop; we bind it to `log_handles` and keep it
-    // until `main` returns.
-    //
-    // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
-    // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
-    // `RUST_LOG=gwt_input_trace=debug`.
-    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(log_dir))
-        .map_err(|error| {
-            eprintln!("gwt logging init failed: {error}");
-        })
-        .ok();
-
-    if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
-        eprintln!("gwt daemon bootstrap: {error}");
+    if let Err(error) = gwt::cli::hook::prepare_front_door_for_path(&startup_dir) {
+        eprintln!("gwt front door preparation: {error}");
     }
 
     // SPEC #2920 Phase 4 / FR-011: acquire the per-user tray
@@ -8013,22 +8166,27 @@ fn main() -> std::io::Result<()> {
     let mut tray_lock_handle = match gwt::cli::tray::lock::acquire(&gwt_core::paths::gwt_home()) {
         Ok(handle) => handle,
         Err(gwt::cli::tray::lock::TrayLockError::AlreadyRunning { url, .. }) => {
+            // Issue #1764: not a failure, but from a console-less Windows
+            // launch it looks identical to one — the user double-clicks gwt
+            // and nothing appears. Record why so the log distinguishes
+            // "declined to start a duplicate" from "crashed on startup".
             if url.trim().is_empty() {
-                eprintln!(
-                        "gwt: another tray-resident gwt instance is already running for this user (server still starting)"
-                    );
+                let message = "gwt: another tray-resident gwt instance is already running for this user (server still starting)";
+                tracing::info!(target: "gwt::startup", "{message}");
+                eprintln!("{message}");
             } else {
+                let message = "gwt: another tray-resident gwt instance is already running for this user (set GWT_FORCE_NEW_INSTANCE=1 to start a second, coexisting instance)";
+                tracing::info!(target: "gwt::startup", running_url = %url, "{message}");
                 eprintln!("gwt browser URL: {url}");
-                eprintln!(
-                    "gwt: another tray-resident gwt instance is already running for this user (set GWT_FORCE_NEW_INSTANCE=1 to start a second, coexisting instance)"
-                );
+                eprintln!("{message}");
             }
             return Ok(());
         }
-        Err(error) => {
-            eprintln!("gwt tray lock acquire failed: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fatal_startup_exit(
+            &mut log_handles,
+            &format!("gwt tray lock acquire failed: {error}"),
+            1,
+        ),
     };
 
     let runtime = Runtime::new().expect("tokio runtime");
@@ -8047,10 +8205,11 @@ fn main() -> std::io::Result<()> {
         ),
     ) {
         Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("gwt embedded server startup failed: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => fatal_startup_exit(
+            &mut log_handles,
+            &format!("gwt embedded server startup failed: {error}"),
+            1,
+        ),
     };
     let prepared_port = prepared_listener.port();
     let stable_port_outcome = prepared_listener.outcome();
@@ -8122,6 +8281,31 @@ fn main() -> std::io::Result<()> {
             })
         {
             tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+        }
+    }
+    // Issue #3633: the GUI is the subject that keeps a runtime daemon alive.
+    // Nothing in production used to start one, so the daemon-only control
+    // lane (`scan_now`, `daemon.subscribe`) was permanently unavailable.
+    //
+    // This fires immediately and then on its own short cadence, deliberately
+    // not the scan poll interval: the first tick is what makes the control
+    // lane available at launch instead of minutes later, and the cadence is
+    // the worst-case gap after a daemon crash.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        if let Err(error) = std::thread::Builder::new()
+            .name("runtime-daemon-ensure-tick".to_string())
+            .spawn(move || loop {
+                if tick_proxy
+                    .send_event(UserEvent::RuntimeDaemonEnsureTick)
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(RUNTIME_DAEMON_ENSURE_INTERVAL);
+            })
+        {
+            tracing::error!(%error, "failed to start the runtime daemon supervision thread");
         }
     }
     #[cfg(unix)]
@@ -8380,6 +8564,11 @@ fn main() -> std::io::Result<()> {
                         workspace_projection_watchers.shutdown();
                         #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
+                        // Issue #3633: stop the daemons this GUI started. The
+                        // endpoint contract does not compare `daemon_version`,
+                        // so a survivor would be reused by the next launch even
+                        // after an update.
+                        app.daemon_supervisor.shutdown();
                         server.shutdown();
                     },
                 );
@@ -8587,6 +8776,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
                 let events = app.issue_monitor_scheduled_tick_events();
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
+                app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,
@@ -9077,6 +9269,7 @@ fn main() -> std::io::Result<()> {
                         workspace_projection_watchers.shutdown();
                         #[cfg(unix)]
                         board_daemon_subscribers.shutdown();
+                        app.daemon_supervisor.shutdown();
                         server.shutdown();
                     },
                 );
