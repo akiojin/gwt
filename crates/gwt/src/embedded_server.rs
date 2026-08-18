@@ -3300,10 +3300,14 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            // Issue #3629 AC-9: closing a scoped peer pane is a window
+            // lifecycle operation, not a producing Work mutation — the PM
+            // holds only an observation grant and pane.close is its everyday
+            // recovery tool. Project scoping (`allowed_window_ids`) still
+            // applies, and an uncorrelated self-close is refused by the
+            // runtime dispatch.
             FrontendEvent::CloseWindow { id, request_id }
-                if self.allowed_window_ids.contains(&id)
-                    && (self.grant.principal().authorizes_producing_mutation()
-                        || request_id.is_some()) =>
+                if self.allowed_window_ids.contains(&id) =>
             {
                 Some(AgentFrontendRequest::CloseWindow {
                     id,
@@ -3358,6 +3362,10 @@ impl AgentPaneSessionScope {
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            // Issue #3629 AC-12: the close reply is already client-scoped by
+            // its dispatch target; passing it through lets the requester hear
+            // the outcome even after the window left the projection.
+            "pane_close_result" => Some(payload),
             _ => None,
         }
     }
@@ -5061,6 +5069,89 @@ mod tests {
         assert!(!debug.contains(&project.path().display().to_string()));
     }
 
+    /// Issue #3629 AC-9/AC-12: an authenticated observation grant (the PM has
+    /// no Active execution binding) must be able to request close of a peer
+    /// pane inside its own project scope, and the close reply kind must pass
+    /// the outbound filter so the caller hears the outcome.
+    #[test]
+    fn agent_pane_scope_allows_observation_grant_close_and_passes_close_result() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let foreign = tempfile::tempdir().expect("foreign tempdir");
+        let principal =
+            AgentSessionPrincipal::new(project.path(), "session-pm").expect("agent principal");
+        assert!(
+            !principal.authorizes_producing_mutation(),
+            "test precondition: the PM-shaped principal is observation-only"
+        );
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        let workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "app_version": "test",
+                "active_tab_id": "tab-owned",
+                "recent_projects": [],
+                "tabs": [
+                    {
+                        "id": "tab-owned",
+                        "project_root": project.path(),
+                        "workspace": { "windows": [{
+                            "id": "tab-owned::agent-1",
+                            "preset": "codex",
+                            "status": "running",
+                            "session_id": "target-session"
+                        }] }
+                    },
+                    {
+                        "id": "tab-foreign",
+                        "project_root": foreign.path(),
+                        "workspace": { "windows": [{ "id": "tab-foreign::agent-2" }] }
+                    }
+                ]
+            }
+        });
+        scope
+            .filter_outbound(workspace.to_string())
+            .expect("workspace projection populates allowed ids");
+
+        assert!(
+            matches!(
+                scope.filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-owned::agent-1".to_string(),
+                    request_id: None,
+                }),
+                Some(super::AgentFrontendRequest::CloseWindow { .. })
+            ),
+            "an observation grant must be able to request a scoped peer close (Issue #3629 AC-9)"
+        );
+        assert!(
+            scope
+                .filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-foreign::agent-2".to_string(),
+                    request_id: None,
+                })
+                .is_none(),
+            "a foreign-project window stays out of reach"
+        );
+        assert!(
+            scope
+                .filter_outbound(
+                    serde_json::json!({
+                        "kind": "pane_close_result",
+                        "ok": true,
+                        "window_id": "tab-owned::agent-1",
+                        "reason": null
+                    })
+                    .to_string()
+                )
+                .is_some(),
+            "the close reply must reach the requesting client (Issue #3629 AC-12)"
+        );
+    }
+
     #[test]
     fn agent_pane_scope_filters_project_output_and_frontend_authority() {
         let project = tempfile::tempdir().expect("project tempdir");
@@ -5144,8 +5235,9 @@ mod tests {
                     id: "tab-owned::agent-1".to_string(),
                     request_id: None,
                 })
-                .is_none(),
-            "Inspection principal must not mutate peer pane lifecycle"
+                .is_some(),
+            "Issue #3629 AC-9: an inspection principal may request a scoped peer close; \
+             self-close correlation is enforced by the runtime dispatch"
         );
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
@@ -5279,8 +5371,9 @@ mod tests {
                     id: "tab-owned::agent-1".to_string(),
                     request_id: None,
                 })
-                .is_none(),
-            "Prepared principal must not mutate peer pane lifecycle"
+                .is_some(),
+            "Issue #3629 AC-9: a scoped peer close is a window lifecycle \
+             operation available to every authenticated grant"
         );
         assert!(prepared_scope
             .filter_outbound(

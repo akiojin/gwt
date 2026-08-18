@@ -132,6 +132,66 @@ fn pm_wake_signals(inbox: &[gwt::IssueMonitorInboxItem]) -> std::collections::BT
     signals
 }
 
+/// How much of one escalation body reaches the wake prompt.
+///
+/// Enough to tell a fresh-launch request from a spec ruling from a tool bug,
+/// short enough that five of them still fit on the single physical line a pane
+/// injection has to be.
+const ESCALATION_PROMPT_BODY_CHARS: usize = 220;
+
+/// Cap on escalations quoted in one prompt. Beyond this the PM should read
+/// `issue.monitor.status` rather than a wall of text.
+const ESCALATION_PROMPT_MAX_ROWS: usize = 5;
+
+/// Issue #3655 AC-5 / AC-9: every open unblock request, with its body, as a
+/// suffix for a PM wake prompt.
+///
+/// The failure this closes: the Board's own timeline said nothing but
+/// "ready for the next instruction", so a PM reading Board history could not
+/// tell a finished agent from a stuck one, and had to read panes one by one to
+/// find out. The blocker text now travels with the wake itself. It is read
+/// from the escalation index — a file — so it still arrives when `pane.read`
+/// is failing (#3629).
+///
+/// Rendered on one physical line: the prompt is typed into a pane, and an
+/// embedded newline would submit it half-written.
+pub(crate) fn open_escalation_prompt_section(project_root: &Path) -> String {
+    let store = match gwt_core::coordination::load_escalation_store(project_root) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(%error, "PM wake could not read the Board escalation index");
+            return String::new();
+        }
+    };
+    let open = store.open_escalations();
+    if open.is_empty() {
+        return String::new();
+    }
+    let shown = open.len().min(ESCALATION_PROMPT_MAX_ROWS);
+    let lines = gwt_core::board_escalation::render_open_escalation_lines(
+        &open[..shown],
+        ESCALATION_PROMPT_BODY_CHARS,
+    );
+    let overflow = if open.len() > shown {
+        format!(" (+{} more in issue.monitor.status)", open.len() - shown)
+    } else {
+        String::new()
+    };
+    format!(
+        " UNRESOLVED BLOCKED ESCALATIONS ({count}){overflow} — decide fresh launch / spec ruling / \
+         tool fix for each, then post the resolution with params.resolves: {lines}",
+        count = open.len(),
+        lines = lines.join(" || "),
+    )
+}
+
+/// Whether any agent currently has a standing unblock request.
+pub(crate) fn has_open_board_escalations(project_root: &Path) -> bool {
+    gwt_core::coordination::load_escalation_store(project_root)
+        .map(|store| store.open().next().is_some())
+        .unwrap_or(false)
+}
+
 /// An actively-looping PM picks new events up in its own next cycle, and a PM
 /// a human just prompted is busy with that conversation — the wake is only
 /// for a loop quiet on both clocks (parked on the budget cap, or dead after a
@@ -584,8 +644,9 @@ impl AppRuntime {
             prompt: format!(
                 "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
                  Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
-                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}\r",
-                reasons.join(", ")
+                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                reasons.join(", "),
+                escalations = open_escalation_prompt_section(project_root),
             ),
         })
     }
@@ -623,9 +684,14 @@ impl AppRuntime {
             return None;
         }
         let status = monitor.agent_status();
+        // Issue #3655 AC-5: a standing unblock request is supervision work in
+        // its own right. Without this the worst case parks itself — the queue
+        // empties precisely because every agent stopped, so the tick that
+        // should raise the alarm decides there is nothing to supervise.
         if status.active_launches.is_empty()
             && status.queue.is_empty()
             && status.needs_human.is_empty()
+            && !has_open_board_escalations(project_root)
         {
             return None;
         }
@@ -653,7 +719,8 @@ impl AppRuntime {
             prompt: format!(
                 "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
                  fresh `issue.monitor.status` snapshot, check the running agents' \
-                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}\r"
+                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                escalations = open_escalation_prompt_section(project_root),
             ),
         })
     }

@@ -5738,6 +5738,37 @@ mod tests {
         assert!(!window_details.contains_key(&window_id));
     }
 
+    /// Issue #3629 AC-9: a window restored from an older app generation can
+    /// survive in a tab's workspace without a `window_lookup` entry (a
+    /// "husk"). Close must still remove the workspace record instead of
+    /// silently reporting failure forever.
+    #[test]
+    fn close_window_from_workspace_falls_back_to_tab_scan_without_lookup_entry() {
+        let tab_id = "tab-1";
+        let raw_window_id = "claude-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let mut tabs = vec![sample_project_tab_with_window(
+            tab_id,
+            raw_window_id,
+            WindowPreset::Claude,
+            WindowProcessStatus::Exited,
+        )];
+        let mut window_lookup = HashMap::new();
+        let mut window_details = HashMap::from([(window_id.clone(), "husk".to_string())]);
+
+        assert!(
+            close_window_from_workspace(
+                &mut tabs,
+                &mut window_lookup,
+                &mut window_details,
+                &window_id,
+            ),
+            "close must land via the tab scan fallback when the lookup entry is gone"
+        );
+        assert!(tabs[0].workspace.window(raw_window_id).is_none());
+        assert!(!window_details.contains_key(&window_id));
+    }
+
     #[test]
     fn app_state_view_includes_current_app_version() {
         let tabs = vec![sample_project_tab_with_window(

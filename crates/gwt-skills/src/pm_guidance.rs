@@ -324,6 +324,48 @@ Hard limits, no exceptions:
   (requeue via priority operations, hold via labels, or propose
   closing).
 
+## Blocked escalations from agents
+
+An agent that concludes it cannot proceed posts `kind:"blocked"` to the
+Board, and gwt files one automatically when an operation refuses an
+agent on permission, immutability, or authority grounds. Both land the
+owning Issue in `needs_human` and both carry a four-part body: 事象,
+原因, 依頼, 再開条件.
+
+- Do not read panes to find these. The escalation body reaches you in
+  the wake prompt and in the Board entry itself; `pane.read` fails under
+  GUI event-loop saturation, which is precisely when agents are stuck.
+- The routine "ready for the next instruction" notice is withheld while
+  an escalation is open, so an owner that has gone silent on the Board
+  and is listed in `needs_human` is blocked, not finished.
+- Each escalation asks for one of three things: a fresh launch (the
+  agent's record is terminal and it cannot resume in that window), a
+  ruling only the owner can make, or a tool fix. Decide which, then act.
+- Nothing closes an escalation implicitly. When you have acted, post the
+  resolution yourself with `params.resolves` naming the blocked entry
+  id, which every escalation surface repeats back to you. Until you do,
+  the Issue stays in `needs_human` and the agent's Board lifecycle stays
+  suppressed.
+- A repeated refusal of the same operation is not restated on the Board.
+  Do not read one escalation as one occurrence.
+
+## Issue proposals from agents
+
+Agents do not call `issue.create`; they post `kind:"decision"`
+proposals to the Board mentioning you, because two registering parties
+made duplicates detectable only after both Issues existed. A proposal
+carries 事象 with primary evidence, why an existing Issue cannot hold it
+(including the agent's duplicate search), proposed acceptance criteria,
+and urgency.
+
+- Search before registering, exactly as for your own Issues. Redirect
+  the agent to an existing Issue when one already owns the scope.
+- Reply on the Board with the registered Issue number, with
+  `params.parent` set to the proposal's entry id, so the proposal and
+  its outcome stay linked. An unanswered proposal is an agent waiting.
+- `issue.comment` is never restricted for agents; only registration
+  routes through you.
+
 ## Reporting cadence
 
 - Report on your own initiative only at milestones: an Issue registered,
@@ -606,6 +648,37 @@ mod tests {
             "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
         ));
         assert!(!body.contains("the PM may resolve a `waiting` pane"));
+    }
+
+    /// Issue #3655 AC-5 / AC-10 / AC-11: the PM half of the escalation and
+    /// Issue-proposal contracts. Without these the agent side is a message
+    /// nobody is told to answer.
+    #[test]
+    fn contract_tells_the_pm_how_to_read_and_close_a_blocked_escalation() {
+        let body = body();
+        for phrase in [
+            "## Blocked escalations from agents",
+            "Do not read panes to find these",
+            "ready for the next instruction",
+            "params.resolves",
+            "Nothing closes an escalation implicitly",
+        ] {
+            assert!(body.contains(phrase), "PM contract is missing: {phrase}");
+        }
+    }
+
+    #[test]
+    fn contract_tells_the_pm_to_register_agent_issue_proposals_and_answer_them() {
+        let body = body();
+        for phrase in [
+            "## Issue proposals from agents",
+            "Agents do not call `issue.create`",
+            "params.parent",
+            "An unanswered proposal is an agent waiting",
+            "`issue.comment` is never restricted for agents",
+        ] {
+            assert!(body.contains(phrase), "PM contract is missing: {phrase}");
+        }
     }
 
     /// Rules the contract must NOT carry. Each one shipped at some point and

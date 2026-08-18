@@ -3654,7 +3654,12 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         },
     );
 
-    assert!(denied.is_empty());
+    // Issue #3629 AC-12: the refusal answers explicitly instead of silence;
+    // the foreign window itself must survive untouched.
+    assert!(denied.iter().all(|outbound| matches!(
+        outbound.event,
+        BackendEvent::PaneCloseResult { ok: false, .. }
+    )));
     assert!(runtime
         .window_lookup
         .contains_key("tab-foreign::agent-foreign"));
@@ -3674,6 +3679,198 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
     assert!(runtime
         .window_lookup
         .contains_key("tab-foreign::agent-foreign"));
+}
+
+/// Issue #3629 AC-10/AC-12: every agent-route close outcome must answer the
+/// requesting client with an explicit `pane_close_result` instead of the
+/// silent empty event list that made `pane.close` undiagnosable.
+#[test]
+fn agent_pane_close_replies_with_pane_close_result() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+
+    let denied = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-foreign::agent-foreign".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(
+            denied.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id,
+                    reason: Some(_),
+                },
+                ..
+            }] if client_id == "pane-client" && window_id == "tab-foreign::agent-foreign"
+        ),
+        "a cross-project close refusal must answer explicitly, got: {denied:?}"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-foreign::agent-foreign"));
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-authenticated::agent-authenticated".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(
+            accepted.first(),
+            Some(OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: true,
+                    window_id,
+                    reason: None,
+                },
+                ..
+            }) if client_id == "pane-client" && window_id == "tab-authenticated::agent-authenticated"
+        ),
+        "a successful close must answer the requesting client first, got: {accepted:?}"
+    );
+    assert!(!runtime
+        .window_lookup
+        .contains_key("tab-authenticated::agent-authenticated"));
+}
+
+/// Issue #3629 AC-12: an uncorrelated self-close stays refused, but the
+/// refusal must be explicit so the CLI stops guessing at session correlation.
+#[test]
+fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let principal =
+        AgentSessionPrincipal::for_test(&project, "session-project").expect("self-owned principal");
+
+    let refused = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-project".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        matches!(
+            refused.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id,
+                    reason: Some(reason),
+                },
+                ..
+            }] if client_id == "pane-client"
+                && window_id == "tab-project::agent-project"
+                && reason.contains("correlated")
+        ),
+        "an uncorrelated self-close must name the correlation requirement, got: {refused:?}"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-project::agent-project"));
+}
+
+/// Issue #3629 AC-9: a husk window (workspace record without a lookup entry,
+/// left behind by an app restart) must still close through the agent route.
+#[test]
+fn agent_pane_close_removes_husk_window_missing_from_lookup() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-husk",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    runtime.window_lookup.remove("tab-project::agent-husk");
+    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-husk".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        matches!(
+            events.first(),
+            Some(OutboundEvent {
+                event: BackendEvent::PaneCloseResult { ok: true, .. },
+                ..
+            })
+        ),
+        "husk close must succeed via the workspace fallback, got: {events:?}"
+    );
+    assert!(runtime
+        .tab("tab-project")
+        .expect("project tab")
+        .workspace
+        .window("agent-husk")
+        .is_none());
 }
 
 #[test]
@@ -51226,6 +51423,117 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
     assert!(
         prompt.contains("issue.monitor.status"),
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
+    );
+}
+
+/// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
+///
+/// The production failure: the Board showed the routine "ready for the next
+/// instruction" line and nothing else, so the PM had no way to tell a finished
+/// agent from one that had concluded it could not proceed, and resorted to
+/// reading panes one at a time — the channel that fails under GUI event-loop
+/// saturation. This reads the escalation index instead, so no pane is involved.
+fn seed_open_escalation(repo: &std::path::Path, owner: &str, body: &str) -> String {
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::Agent,
+        "Claude Code",
+        gwt_core::coordination::BoardEntryKind::Blocked,
+        body,
+        None,
+        None,
+        vec![],
+        vec![owner.to_string()],
+    );
+    let id = entry.id.clone();
+    gwt_core::coordination::post_entry(repo, entry).expect("post escalation");
+    id
+}
+
+#[test]
+fn both_wake_prompts_carry_the_open_escalation_bodies() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let entry_id = seed_open_escalation(
+        &repo,
+        "2338",
+        "事象: execution.reopen が immutable で拒否\n\
+         原因: Completed ECR\n\
+         依頼: fresh launch を手配してほしい\n\
+         再開条件: #2338 に紐づく新しい pane",
+    );
+
+    // The delta wake: baseline first, then one genuinely new signal.
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-18T01:00:00Z")
+        .is_none());
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    let delta = runtime
+        .pm_wake_decision_at(&repo, &escalated, "2026-08-18T01:01:00Z")
+        .expect("a fresh signal must wake the quiet PM");
+
+    // The periodic wake, standing on the escalation alone: no queue, no active
+    // launch, no autonomous needs_human row.
+    let periodic = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+        .expect("an open escalation is standing supervision work on its own");
+
+    for (prompt, label) in [(&delta.prompt, "delta"), (&periodic.prompt, "periodic")] {
+        assert!(
+            prompt.contains("UNRESOLVED BLOCKED ESCALATIONS (1)"),
+            "{label} wake must name the standing blockers; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("fresh launch を手配してほしい"),
+            "{label} wake must carry the body, not just a count; got: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("params.resolves:[\"{entry_id}\"]")),
+            "{label} wake must hand back the handle that closes it; got: {prompt}"
+        );
+        assert!(
+            !prompt.trim_end_matches('\r').contains('\n'),
+            "{label} wake is typed into a pane and must stay one line; got: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn a_resolved_escalation_leaves_the_wake_prompts_unchanged() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let entry_id = seed_open_escalation(
+        &repo,
+        "2338",
+        "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+    );
+    let mut resolution = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::User,
+        "You",
+        gwt_core::coordination::BoardEntryKind::Decision,
+        "fresh launch を手配しました",
+        None,
+        None,
+        vec![],
+        vec!["2338".to_string()],
+    );
+    resolution.resolves_entry_ids = vec![entry_id];
+    gwt_core::coordination::post_entry(&repo, resolution).expect("post resolution");
+
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+            .is_none(),
+        "a resolved escalation must stop counting as supervision work"
     );
 }
 

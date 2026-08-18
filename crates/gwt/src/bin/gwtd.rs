@@ -258,12 +258,18 @@ fn format_board_help() -> String {
         "",
         "Key params:",
         "  kind, body, title, topics, owners, targets, mentions, parent, broadcast",
+        "  resolves                                 Blocked entry id(s) this post closes",
         "  workspace, all                           board.show filters",
         "",
         "Note: board.post does not accept purpose/title_summary; update Agent title",
         "      through workspace.update params.purpose.",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
+        "",
+        "A `blocked` post is an unblock request to the PM and must state 事象 / 原因 /",
+        "依頼 / 再開条件 (or Symptom / Cause / Request / Resume), one per line. It is",
+        "mirrored onto the owning Issue and lands that Issue in issue.monitor.status",
+        "needs_human until a later post names its entry id in params.resolves.",
         "",
     ]
     .join("\n")
@@ -446,7 +452,7 @@ fn format_verify_help() -> String {
         "",
         "Usage:",
         "  gwtd <<'JSON'",
-        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt -- --check\",\"cargo test -p gwt --lib\"]}}",
+        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
         "  JSON",
         "",
         "Operations:",
@@ -915,6 +921,26 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "board help must document {expected} JSON param. help:\n{help}",
+            );
+        }
+    }
+
+    /// Issue #3655: the escalation contract has to be discoverable from the
+    /// tool itself, not only from a skill body an agent may never load.
+    #[test]
+    fn format_board_help_documents_the_blocked_escalation_contract() {
+        let help = format_board_help();
+        for expected in [
+            "resolves",
+            "事象",
+            "原因",
+            "依頼",
+            "再開条件",
+            "needs_human",
+        ] {
+            assert!(
+                help.contains(expected),
+                "board help must document {expected}. help:\n{help}",
             );
         }
     }
