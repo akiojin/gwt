@@ -170,7 +170,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
         "  issue.monitor.launch_now | issue.monitor.stop",
-        "  issue.monitor.failover",
+        "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
         "",
         "Key params:",
@@ -181,6 +181,8 @@ fn format_issue_help() -> String {
         "  project_root                          Optional Issue Monitor project scope",
         "  number, position                      Move one priority (head or numeric index)",
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
+        "  number, reason                        issue.monitor.requeue releases a dead",
+        "                                        agent_failed / launch_failed hold",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -919,6 +921,10 @@ mod tests {
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",
+            // Issue #3645 / #3628: the only recovery for a row with no live
+            // launch. If it is not discoverable here, the operator falls back
+            // to hand-editing the state file, which is the bug.
+            "issue.monitor.requeue",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",
