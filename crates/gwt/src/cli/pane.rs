@@ -648,21 +648,62 @@ async fn next_workspace_windows(
         .await
 }
 
+/// Issue #3606 AC-3: `response_timeout` is one absolute budget for reaching the
+/// project's `workspace_state`, not a per-message one.
+///
+/// A backend that streams unrelated frames must not be able to hold the caller
+/// past the budget it was given (32 messages × 15s was over seven minutes), and
+/// a saturated backend has to produce a diagnosis in bounded time.
 async fn next_workspace_windows_with_timeout(
     socket: &mut PaneWebSocket,
     project_root: &str,
     context: &str,
     response_timeout: Duration,
 ) -> Result<Vec<PersistedWindowState>, String> {
-    for _ in 0..32 {
-        let value = next_backend_json_with_timeout(socket, response_timeout)
-            .await
-            .map_err(|error| format!("{context}: {error}"))?;
+    let deadline = tokio::time::Instant::now() + response_timeout;
+    let mut received = 0usize;
+    loop {
+        let Some(remaining) = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+        else {
+            return Err(pane_backend_silence(context, received, response_timeout));
+        };
+        let value = match tokio::time::timeout(remaining, next_backend_json_unbounded(socket)).await
+        {
+            Ok(value) => value?,
+            Err(_) => return Err(pane_backend_silence(context, received, response_timeout)),
+        };
+        received += 1;
         if let Some(windows) = parse_workspace_windows(&value, project_root) {
             return Ok(windows);
         }
     }
-    Err(format!("{context}: backend did not return workspace_state"))
+}
+
+/// Issue #3606 AC-3: name the condition instead of reporting that the caller
+/// gave up.
+///
+/// "timed out waiting for backend response" tells an operator nothing they can
+/// act on — the instance may be dead, saturated, or simply serving a different
+/// project. These two conditions have different next moves, so they get
+/// different stable codes.
+fn pane_backend_silence(context: &str, received: usize, budget: Duration) -> String {
+    let budget = format!("{}ms", budget.as_millis());
+    if received == 0 {
+        format!(
+            "{context}: pane_backend_unresponsive — the gwt instance behind this pane WebSocket \
+             accepted the connection and then sent nothing within {budget}. It is running but not \
+             answering, which is what a saturated instance looks like from here. Nothing was \
+             changed; retry, or restart that instance."
+        )
+    } else {
+        format!(
+            "{context}: pane_backend_state_missing — the gwt instance sent {received} message(s) \
+             in {budget} but no workspace_state for this project. The connection is healthy, so \
+             this instance is serving a different project; check which instance owns this worktree."
+        )
+    }
 }
 
 /// Read the project projection from the same authenticated connection used
@@ -1748,9 +1789,13 @@ mod tests {
             release_tx.send(()).expect("release pane list mock");
             server.await.expect("pane list mock task");
 
-            assert_eq!(
-                error,
-                "pane list: pane websocket timed out waiting for backend response"
+            // Issue #3606 AC-3: a silent backend is named, not reported as a
+            // bare give-up. #3510 raised the budget so a stalled instance still
+            // answers; when it does not, the operator needs to know which of
+            // the two conditions they are looking at.
+            assert!(
+                error.starts_with("pane list: pane_backend_unresponsive"),
+                "{error}"
             );
         });
     }
@@ -2183,6 +2228,119 @@ mod tests {
             server.await.expect("pane mock task");
 
             assert_eq!(result, Ok("close requested agent-self\n".to_string()));
+        });
+    }
+
+    /// Issue #3606 AC-3: a gwt instance can accept the pane WebSocket and then
+    /// answer nothing — that is what a saturated backend looks like from here.
+    /// "timed out waiting for backend response" says only that the caller gave
+    /// up; the operator still has to guess whether the instance is dead, busy,
+    /// serving another project, or the wrong instance entirely. The error has
+    /// to name the condition.
+    #[test]
+    fn a_silent_backend_is_named_rather_than_reported_as_a_bare_timeout() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind silent mock");
+            let address = listener.local_addr().expect("silent mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept silent connection");
+                let socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept silent websocket");
+                // Hold the connection open and never answer.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(socket);
+            });
+            let (mut socket, _) = connect_async(format!("ws://{address}/internal/pane-ws"))
+                .await
+                .expect("connect silent websocket");
+
+            let error = next_workspace_windows_with_timeout(
+                &mut socket,
+                "/tmp/project",
+                "pane list",
+                Duration::from_millis(300),
+            )
+            .await
+            .expect_err("a silent backend must be reported");
+
+            assert!(
+                error.contains("pane_backend_unresponsive"),
+                "the refusal must carry a stable, greppable condition: {error}"
+            );
+            assert!(
+                error.contains("pane list"),
+                "the refusal must say which operation gave up: {error}"
+            );
+            server.abort();
+            let _ = server.await;
+        });
+    }
+
+    /// Issue #3606 AC-3: a backend that is talking but never sends the project's
+    /// `workspace_state` is a different condition from a silent one, and the
+    /// operator's next move differs — this instance is serving something else.
+    #[test]
+    fn a_talkative_backend_without_workspace_state_is_a_distinct_condition() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind chatty mock");
+            let address = listener.local_addr().expect("chatty mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept chatty connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept chatty websocket");
+                loop {
+                    if socket
+                        .send(Message::Text(
+                            json!({ "kind": "runtime_hook_event" }).to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            let (mut socket, _) = connect_async(format!("ws://{address}/internal/pane-ws"))
+                .await
+                .expect("connect chatty websocket");
+
+            let error = next_workspace_windows_with_timeout(
+                &mut socket,
+                "/tmp/project",
+                "pane list",
+                Duration::from_millis(300),
+            )
+            .await
+            .expect_err("a backend that never sends workspace_state must be reported");
+
+            assert!(
+                error.contains("pane_backend_state_missing"),
+                "a talking backend is not an unresponsive one: {error}"
+            );
+            assert!(
+                !error.contains("pane_backend_unresponsive"),
+                "the two conditions must not be conflated: {error}"
+            );
+            drop(socket);
+            server.abort();
+            let _ = server.await;
         });
     }
 
