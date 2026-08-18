@@ -2506,6 +2506,7 @@ pub(super) fn post_improvement_board_status<E: CliEnv>(
             owners: vec!["SPEC-3164".to_string()],
             targets: Vec::new(),
             mentions: Vec::new(),
+            resolves: Vec::new(),
             broadcast: true,
         })),
         &mut board_out,

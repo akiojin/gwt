@@ -49955,6 +49955,137 @@ fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_projec
     assert_eq!(configured.model.as_deref(), Some("gpt-5.1-codex-max"));
     assert_eq!(configured.reasoning_level.as_deref(), Some("high"));
     assert!(configured.suppress_execution_control);
+
+    let grok = AppRuntime::pm_launch_config(
+        worktree,
+        &gwt::pm_registry::PmLaunchProfile {
+            agent_id: "grok".to_string(),
+            model: Some("DefaultXL".to_string()),
+            reasoning: Some("xhigh".to_string()),
+            version: None,
+        },
+    );
+    assert_eq!(grok.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(grok.model.as_deref(), Some("DefaultXL"));
+    assert_eq!(grok.reasoning_level.as_deref(), Some("xhigh"));
+    assert_eq!(
+        grok.args
+            .windows(2)
+            .filter(|pair| pair[0] == "--model" && pair[1] == "DefaultXL")
+            .count(),
+        1
+    );
+    assert_eq!(
+        grok.args
+            .windows(2)
+            .filter(|pair| pair[0] == "--effort" && pair[1] == "xhigh")
+            .count(),
+        1
+    );
+    assert!(grok.args.iter().any(|arg| arg == "$gwt-pm"));
+}
+
+/// SPEC-3431 FR-119/FR-120 / T-484: selecting Grok is a durable PM profile,
+/// including the free-text model and reasoning effort that the next launch
+/// must receive. Existing unsupported providers remain rejected by the
+/// neighboring regression test.
+#[test]
+fn set_pm_launch_profile_accepts_grok_and_persists_model_and_reasoning() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetPmLaunchProfile {
+            agent_id: "grok".to_string(),
+            model: Some("  grok-4.20-beta  ".to_string()),
+            reasoning: Some("  xhigh  ".to_string()),
+        },
+    );
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let profile = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("load PM prefs")
+        .settings
+        .launch_profile
+        .expect("Grok PM profile must be persisted");
+    assert_eq!(profile.agent_id, "grok");
+    assert_eq!(profile.model.as_deref(), Some("grok-4.20-beta"));
+    assert_eq!(profile.reasoning.as_deref(), Some("xhigh"));
+}
+
+/// SPEC-3431 FR-121 / T-484: configured and running launch identities are
+/// deliberately independent. A changed profile is pending restart until the
+/// live pane's agent, model, and reasoning all match the configured values.
+#[test]
+fn pm_status_projects_configured_and_running_agent_model_and_reasoning() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = "pm-session-live".to_string();
+    active.agent_id = "claude".to_string();
+    active.display_name = "Claude Code".to_string();
+    runtime.active_agent_sessions.insert(window_id, active);
+
+    let mut running = gwt_agent::Session::new(&repo, "pm", gwt_agent::AgentId::ClaudeCode);
+    running.id = "pm-session-live".to_string();
+    running.model = Some("claude-opus-4-1".to_string());
+    running.reasoning_level = Some("high".to_string());
+    running
+        .save(&runtime.sessions_dir)
+        .expect("save live PM session launch identity");
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.6".to_string()),
+            reasoning: Some("xhigh".to_string()),
+            version: None,
+        });
+    })
+    .expect("configure the next PM launch");
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("register the live PM");
+
+    let status = serde_json::to_value(runtime.pm_status_event().expect("PM status event"))
+        .expect("serialize PM status");
+    assert_eq!(status["configured_agent_id"], "codex");
+    assert_eq!(status["configured_model"], "gpt-5.6");
+    assert_eq!(status["configured_reasoning"], "xhigh");
+    assert_eq!(status["running_agent_id"], "claude");
+    assert_eq!(status["running_model"], "claude-opus-4-1");
+    assert_eq!(status["running_reasoning"], "high");
+    assert_eq!(status["is_running"], true);
 }
 
 /// SPEC-3431 FR-012 / FR-026 (2026-08-06 ユーザー裁定): the PM runs unattended
@@ -51292,6 +51423,117 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
     assert!(
         prompt.contains("issue.monitor.status"),
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
+    );
+}
+
+/// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
+///
+/// The production failure: the Board showed the routine "ready for the next
+/// instruction" line and nothing else, so the PM had no way to tell a finished
+/// agent from one that had concluded it could not proceed, and resorted to
+/// reading panes one at a time — the channel that fails under GUI event-loop
+/// saturation. This reads the escalation index instead, so no pane is involved.
+fn seed_open_escalation(repo: &std::path::Path, owner: &str, body: &str) -> String {
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::Agent,
+        "Claude Code",
+        gwt_core::coordination::BoardEntryKind::Blocked,
+        body,
+        None,
+        None,
+        vec![],
+        vec![owner.to_string()],
+    );
+    let id = entry.id.clone();
+    gwt_core::coordination::post_entry(repo, entry).expect("post escalation");
+    id
+}
+
+#[test]
+fn both_wake_prompts_carry_the_open_escalation_bodies() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let entry_id = seed_open_escalation(
+        &repo,
+        "2338",
+        "事象: execution.reopen が immutable で拒否\n\
+         原因: Completed ECR\n\
+         依頼: fresh launch を手配してほしい\n\
+         再開条件: #2338 に紐づく新しい pane",
+    );
+
+    // The delta wake: baseline first, then one genuinely new signal.
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-18T01:00:00Z")
+        .is_none());
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    let delta = runtime
+        .pm_wake_decision_at(&repo, &escalated, "2026-08-18T01:01:00Z")
+        .expect("a fresh signal must wake the quiet PM");
+
+    // The periodic wake, standing on the escalation alone: no queue, no active
+    // launch, no autonomous needs_human row.
+    let periodic = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+        .expect("an open escalation is standing supervision work on its own");
+
+    for (prompt, label) in [(&delta.prompt, "delta"), (&periodic.prompt, "periodic")] {
+        assert!(
+            prompt.contains("UNRESOLVED BLOCKED ESCALATIONS (1)"),
+            "{label} wake must name the standing blockers; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("fresh launch を手配してほしい"),
+            "{label} wake must carry the body, not just a count; got: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("params.resolves:[\"{entry_id}\"]")),
+            "{label} wake must hand back the handle that closes it; got: {prompt}"
+        );
+        assert!(
+            !prompt.trim_end_matches('\r').contains('\n'),
+            "{label} wake is typed into a pane and must stay one line; got: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn a_resolved_escalation_leaves_the_wake_prompts_unchanged() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let entry_id = seed_open_escalation(
+        &repo,
+        "2338",
+        "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+    );
+    let mut resolution = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::User,
+        "You",
+        gwt_core::coordination::BoardEntryKind::Decision,
+        "fresh launch を手配しました",
+        None,
+        None,
+        vec![],
+        vec!["2338".to_string()],
+    );
+    resolution.resolves_entry_ids = vec![entry_id];
+    gwt_core::coordination::post_entry(&repo, resolution).expect("post resolution");
+
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+            .is_none(),
+        "a resolved escalation must stop counting as supervision work"
     );
 }
 
