@@ -17,6 +17,7 @@ pub mod daemon_publisher;
 pub mod daemon_runtime;
 #[cfg(unix)]
 pub mod daemon_subscriber;
+pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod file_content;
 pub mod file_tree;

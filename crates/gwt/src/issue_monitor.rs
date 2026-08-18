@@ -588,6 +588,16 @@ pub struct IssueMonitorPrefs {
     /// their compact shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub autonomous_handoffs: Vec<AutonomousQuestionHandoff>,
+    /// Issue #3633 (AC-5): when a driver last completed a scan for this
+    /// project.
+    ///
+    /// Persisted because the question "is anything scanning this project?"
+    /// is asked precisely when no driver is running, and an in-memory
+    /// timestamp cannot answer it. A reader with only the prefs file used to
+    /// have nothing to compare against, which is how a monitor that had never
+    /// scanned kept reporting a completely healthy snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_at: Option<String>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -614,6 +624,7 @@ impl Default for IssueMonitorPrefs {
             pending_effects: Vec::new(),
             last_control_receipt: None,
             autonomous_handoffs: Vec::new(),
+            last_scan_at: None,
         }
     }
 }
@@ -1225,6 +1236,15 @@ pub struct IssueMonitorAgentStatus {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<String>,
+    /// Issue #3633 (AC-5): why the scan cadence looks stopped, when it does.
+    ///
+    /// Deliberately its own field rather than a projection onto `last_error`.
+    /// In the production incident `last_error` was already occupied by an
+    /// unrelated per-issue launch failure, so a stall written there would have
+    /// stayed invisible — which is the exact failure mode this Issue is about:
+    /// a monitor that has stopped while every field still reads healthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_stall: Option<String>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -2447,6 +2467,7 @@ impl IssueMonitorState {
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
         state.priority_order = prefs.priority_order;
+        state.last_scan_at = prefs.last_scan_at;
         state.launch_profile = prefs.launch_profile;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         for launched in prefs.launched_issues {
@@ -2567,6 +2588,7 @@ impl IssueMonitorState {
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
             autonomous_handoffs: self.autonomous_handoffs.clone(),
+            last_scan_at: self.last_scan_at.clone(),
         }
     }
 
@@ -3351,6 +3373,15 @@ impl IssueMonitorState {
 
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
         self.config.max_active = max_active_agents.max(1);
+    }
+
+    /// Put back the durable scan timestamp after a projection-only rebuild.
+    ///
+    /// Issue #3633 (AC-5): a reader that reconstructs the queue from the local
+    /// Issue cache has not scanned anything. Leaving the rebuild's timestamp in
+    /// place would report a cadence that never happened.
+    pub fn restore_persisted_last_scan_at(&mut self, last_scan_at: Option<String>) {
+        self.last_scan_at = last_scan_at;
     }
 
     pub fn record_scan_error(&mut self, now: impl Into<String>, error: impl Into<String>) {
@@ -4171,7 +4202,49 @@ impl IssueMonitorState {
                 .collect(),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
+            scan_stall: None,
         }
+    }
+
+    /// The agent-facing snapshot with Issue #3633's scan-cadence check applied.
+    ///
+    /// [`Self::agent_status`] answers "what is in the queue"; this answers the
+    /// question a reader actually has when the queue stops moving: "is anything
+    /// still scanning?". Both the daemon projection and the offline CLI
+    /// fallback publish through here so the two branches cannot disagree about
+    /// whether a project is being driven.
+    pub fn agent_status_at(&self, now: &str) -> IssueMonitorAgentStatus {
+        let mut status = self.agent_status();
+        status.scan_stall = self.scan_stall_at(now);
+        status
+    }
+
+    /// Describe a stopped scan cadence, or `None` while it is healthy.
+    ///
+    /// A disabled monitor is stopped on purpose and never reports a stall —
+    /// flagging it would train readers to ignore the field. An unparsable or
+    /// future timestamp fails open for the same reason.
+    fn scan_stall_at(&self, now: &str) -> Option<String> {
+        if !self.config.enabled {
+            return None;
+        }
+        let Some(last_scan_at) = self.last_scan_at.as_deref() else {
+            // The #3633 state itself: enabled, queued work, and no driver has
+            // ever completed a scan for this project.
+            return Some(
+                "Issue Monitor has never completed a scan for this project; no driver is running"
+                    .to_string(),
+            );
+        };
+        let elapsed_secs = u64::try_from(rfc3339_elapsed_secs(last_scan_at, now)?).ok()?;
+        let stall_after = self.config.poll_interval_secs.saturating_mul(3);
+        (elapsed_secs >= stall_after).then(|| {
+            format!(
+                "Issue Monitor scan stalled for {elapsed_secs}s (poll interval {interval}s); \
+                 last scan at {last_scan_at}",
+                interval = self.config.poll_interval_secs
+            )
+        })
     }
 
     /// Project scan staleness onto the existing status error surface using a
@@ -6628,6 +6701,9 @@ mod tests {
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
+                // `agent_status` reports the queue; the scan-cadence check is
+                // applied by `agent_status_at`, which needs a clock.
+                scan_stall: None,
             }
         );
     }
