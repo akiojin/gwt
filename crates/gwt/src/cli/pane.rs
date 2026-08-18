@@ -381,10 +381,44 @@ async fn close_pane(
     if resolve_window_id(&windows, &resolved_id).is_none() {
         Ok(format!("closed {requested_id}\n"))
     } else {
-        Err(format!(
-            "pane close: backend did not close {requested_id}; the target may be this authenticated Session and requires a correlated acceptance"
+        Err(refused_close_message(
+            requested_id,
+            ambient_session_id.is_some(),
         ))
     }
+}
+
+/// Issue #3503 / #3552 AC-3: report the observation and the causes that are
+/// actually still reachable, never a single asserted one. The old wording
+/// claimed "the target may be this authenticated Session and requires a
+/// correlated acceptance", which was never why the PM's cleanup closes were
+/// refused — it sent the #3503 diagnosis after a self-close guard that was not
+/// involved, while the closes were being dropped at the transport filter.
+///
+/// With that filter now identity-shaped (SPEC-3431 FR-066), an uncorrelated
+/// close that survives the round trip leaves only capability-shaped causes:
+/// a superseded continuation generation, or a rotated or revoked grant. Both
+/// are answered from the current Session, so the refusal says so. When the
+/// caller has no ambient Session id, it could not recognise its own pane
+/// either, and that second cause is named alongside the first.
+fn refused_close_message(requested_id: &str, session_id_is_ambient: bool) -> String {
+    let mut causes = vec![
+        "this Session's pane capability cannot act on it — its continuation generation was \
+         superseded, or its capability grant was rotated or revoked"
+            .to_string(),
+    ];
+    if !session_id_is_ambient {
+        causes.push(format!(
+            "{GWT_SESSION_ID_ENV} is not set, so a pane bound to this very Session could not be \
+             recognised and its close could not be correlated"
+        ));
+    }
+    format!(
+        "pane close: backend did not close {requested_id}; it is still present in the \
+         authenticated project scope. Cause: {}. Next: retry from the Session gwt launched \
+         (relaunch it if this window was restored), then confirm with pane.list.",
+        causes.join("; or ")
+    )
 }
 
 async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
@@ -1453,6 +1487,42 @@ mod tests {
         });
     }
 
+    /// Issue #3552 AC-3: a refused `pane.close` has to be actionable. The old
+    /// wording asserted a single cause — "the target may be this authenticated
+    /// Session and requires a correlated acceptance" — which was never why the
+    /// PM's cleanup closes were refused, and it walked the #3503 diagnosis into
+    /// a self-close guard that was not involved. Now that the transport gate is
+    /// identity-shaped (SPEC-3431 FR-066), the causes that remain reachable are
+    /// enumerable, so the refusal names them and says what to do next.
+    #[test]
+    fn refused_pane_close_names_reachable_causes_and_a_next_action() {
+        for session_id_is_ambient in [true, false] {
+            let message = refused_close_message("agent-7", session_id_is_ambient);
+
+            assert!(
+                !message.contains("correlated acceptance"),
+                "the refusal must not resurrect the cause it never had: {message}"
+            );
+            assert!(
+                message.contains("Cause:") && message.contains("superseded"),
+                "the refusal names the authority cause that is still reachable: {message}"
+            );
+            assert!(
+                message.contains("Next:") && message.contains("pane.list"),
+                "the refusal tells the caller what to do next: {message}"
+            );
+        }
+
+        assert!(
+            !refused_close_message("agent-7", true).contains(GWT_SESSION_ID_ENV),
+            "a Session that knows its own id must not be told to go set it"
+        );
+        assert!(
+            refused_close_message("agent-7", false).contains(GWT_SESSION_ID_ENV),
+            "without an ambient Session id, a self-close cannot be correlated — say so"
+        );
+    }
+
     #[test]
     fn own_pane_close_never_reports_success_without_matching_ambient_session() {
         let _env_lock = crate::env_test_lock()
@@ -1489,9 +1559,10 @@ mod tests {
                     .expect_err("rejected uncorrelated self-close must not report success");
                 let received_kinds = server.await.expect("pane mock task");
 
-                assert!(
-                    error.contains("requires a correlated acceptance"),
-                    "{error}"
+                assert_eq!(
+                    error,
+                    refused_close_message("agent-self", ambient_session.is_some()),
+                    "the production call site emits the actionable refusal, not a second wording"
                 );
                 assert_eq!(
                     received_kinds,

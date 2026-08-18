@@ -2801,13 +2801,34 @@ impl AgentPaneSessionScope {
         }
     }
 
+    /// SPEC-3431 FR-066 (user arbitration 2026-08-07) / Issue #3503: raw
+    /// `pane.close` is unblocked for the PM and for humans, bounded by
+    /// `IssueMonitorState::requeue_window_at`'s attempt ladder rather than by
+    /// an authority gate. The PM is a conversational role with no linked
+    /// owner, so its principal never carries an active execution binding;
+    /// requiring one here dropped every PM cleanup close at the transport
+    /// layer, whatever state the target pane was in.
+    ///
+    /// The one authority this layer still fences is a superseded continuation
+    /// generation (`Prepared`), which must stay observation-only so a replaced
+    /// generation cannot tear down its replacement. Self-session protection is
+    /// enforced authoritatively in
+    /// [`crate::AppRuntime::handle_agent_frontend_event`] against the window's
+    /// real session binding — an uncorrelated self-close is refused there, and
+    /// a correlated one goes through `accept_agent_self_close`.
+    fn authorizes_uncorrelated_pane_close(&self) -> bool {
+        !matches!(
+            self.grant.principal().execution_authority_kind(),
+            AgentExecutionAuthorityKind::Prepared
+        )
+    }
+
     fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::CloseWindow { id, request_id }
                 if self.allowed_window_ids.contains(&id)
-                    && (self.grant.principal().authorizes_producing_mutation()
-                        || request_id.is_some()) =>
+                    && (request_id.is_some() || self.authorizes_uncorrelated_pane_close()) =>
             {
                 Some(AgentFrontendRequest::CloseWindow {
                     id,
@@ -4220,8 +4241,8 @@ mod tests {
                     id: "tab-owned::agent-1".to_string(),
                     request_id: None,
                 })
-                .is_none(),
-            "Inspection principal must not mutate peer pane lifecycle"
+                .is_some(),
+            "SPEC-3431 FR-066: an owner-less principal still reaches the runtime's peer pane close gate"
         );
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
@@ -4286,6 +4307,19 @@ mod tests {
             }),
             Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
         ));
+        // Issue #3552 AC-4: unblocking peer *close* must not leak into peer
+        // *injection*. An ordinary agent — even a fully bound, producing one —
+        // keeps the SPEC-3050 FR-002 self-only contract here; the only way into
+        // another pane's keyboard stays the registered-PM route of FR-111.
+        assert!(
+            bound_scope
+                .filter_inbound(FrontendEvent::PaneSendInput {
+                    session_id: "session-peer".to_string(),
+                    text: "hello".to_string(),
+                })
+                .is_none(),
+            "a producing ordinary agent still cannot inject into a peer Session's pane"
+        );
 
         let prepared_principal = AgentSessionPrincipal::new_prepared(
             project.path(),
@@ -4366,6 +4400,136 @@ mod tests {
                 "tab-foreign::agent-2".to_string(),
             ]),
             vec!["tab-owned::agent-3".to_string()]
+        );
+    }
+
+    /// SPEC-3431 FR-066 / Issue #3503: raw `pane.close` is unblocked for the
+    /// PM and for humans, bounded mechanically by `requeue_window`'s attempt
+    /// ladder rather than by an authority gate. The PM runs without a linked
+    /// owner, so its principal carries no active execution binding; gating
+    /// peer close on that binding silently dropped every PM cleanup close
+    /// here, whichever state the target pane was in — which is why the CLI
+    /// then blamed a "correlated acceptance" that was never the cause.
+    ///
+    /// Two fences stay: panes outside the authenticated project, and a
+    /// superseded (`Prepared`) continuation generation, which must remain
+    /// observation-only so a replaced generation cannot kill its replacement.
+    /// Self-session protection is not this layer's job — the runtime enforces
+    /// it against the window's real session binding.
+    #[test]
+    fn owner_less_principal_closes_peer_panes_while_superseded_generation_stays_fenced() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let foreign = tempfile::tempdir().expect("foreign tempdir");
+        let workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "app_version": "test",
+                "active_tab_id": "tab-owned",
+                "recent_projects": [],
+                "tabs": [
+                    {
+                        "id": "tab-owned",
+                        "project_root": project.path(),
+                        "workspace": { "windows": [
+                            {
+                                "id": "tab-owned::agent-launch-failed",
+                                "preset": "codex",
+                                "status": "error"
+                            },
+                            {
+                                "id": "tab-owned::agent-delivered",
+                                "preset": "codex",
+                                "status": "idle",
+                                "session_id": "delivered-session"
+                            }
+                        ] }
+                    },
+                    {
+                        "id": "tab-foreign",
+                        "project_root": foreign.path(),
+                        "workspace": { "windows": [{ "id": "tab-foreign::agent-2" }] }
+                    }
+                ]
+            }
+        });
+
+        let pm_principal =
+            AgentSessionPrincipal::new(project.path(), "pm-session").expect("PM principal");
+        let mut pm_scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "pm-capability".to_string(),
+            pm_principal,
+        ));
+        pm_scope
+            .filter_outbound(workspace.to_string())
+            .expect("owned workspace projection");
+
+        // The launch failed before the PTY started, so the pane carries no
+        // session binding at all — exactly the pane #3503 could not clean up.
+        assert!(
+            matches!(
+                pm_scope.filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-owned::agent-launch-failed".to_string(),
+                    request_id: None,
+                }),
+                Some(AgentFrontendRequest::CloseWindow { id, request_id: None, .. })
+                    if id == "tab-owned::agent-launch-failed"
+            ),
+            "a launch-failed peer pane must reach the runtime close gate"
+        );
+        assert!(
+            matches!(
+                pm_scope.filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-owned::agent-delivered".to_string(),
+                    request_id: None,
+                }),
+                Some(AgentFrontendRequest::CloseWindow { id, .. })
+                    if id == "tab-owned::agent-delivered"
+            ),
+            "pane state is not the gate: a delivered idle peer pane closes too"
+        );
+        assert!(
+            pm_scope
+                .filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-foreign::agent-2".to_string(),
+                    request_id: None,
+                })
+                .is_none(),
+            "the project scope fence is unchanged"
+        );
+
+        let superseded_principal = AgentSessionPrincipal::new_prepared(
+            project.path(),
+            "superseded-session",
+            gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: "superseded-session".to_string(),
+                repo_hash: "repo-current".to_string(),
+                owner_kind: "issue".to_string(),
+                owner_number: 3503,
+                identity: gwt_agent::ExecutionBindingIdentity {
+                    generation_id: "generation-superseded".to_string(),
+                    binding_id: "binding-superseded".to_string(),
+                    ledger_head_hash: "head-superseded".to_string(),
+                },
+                capability_generation: 1,
+            },
+        )
+        .expect("superseded continuation principal");
+        let mut superseded_scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "superseded-capability".to_string(),
+            superseded_principal,
+        ));
+        superseded_scope
+            .filter_outbound(workspace.to_string())
+            .expect("owned workspace projection");
+        assert!(
+            superseded_scope
+                .filter_inbound(FrontendEvent::CloseWindow {
+                    id: "tab-owned::agent-launch-failed".to_string(),
+                    request_id: None,
+                })
+                .is_none(),
+            "a superseded continuation generation must stay observation-only"
         );
     }
 
@@ -4683,6 +4847,145 @@ mod tests {
             .expect("accepted response attempt must schedule finalization")
         });
         assert!(issuer.finish_self_close(&ticket));
+        server.shutdown();
+    }
+
+    /// Issue #3503 at the boundary the PM actually hits: an owner-less
+    /// capability, a real `/internal/pane-ws` socket, and the bare
+    /// `close_window` frame the CLI sends for a peer pane (`pane.close` and
+    /// `pane.stop` resolve to the same command). The regression was a silent
+    /// drop here — nothing reached the runtime, the pane survived, and the CLI
+    /// reported a self-close cause that was never involved. Assert the request
+    /// is dispatched with no correlation and no responder, so the runtime's
+    /// own project and self-session gates are what decide it.
+    #[test]
+    fn uncorrelated_peer_pane_close_from_an_owner_less_capability_reaches_the_runtime() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        // No linked owner, so no execution binding — exactly the PM's shape.
+        let target = issuer
+            .issue(project.path(), "pm-session")
+            .expect("owner-less capability");
+        assert!(!issuer
+            .grant_for_test(&target.token)
+            .expect("authenticated owner-less grant")
+            .principal()
+            .authorizes_producing_mutation());
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let window_id = "tab-owned::agent-launch-failed";
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+
+            let pane_queue = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let queue = clients
+                        .clients
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .find(|registration| !registration.receives_broadcasts)
+                        .map(|registration| registration.queue.clone());
+                    if let Some(queue) = queue {
+                        break queue;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("pane client registration");
+            // The pane failed before its PTY started, so it carries no
+            // `session_id` — the state #3503 could not clean up.
+            assert!(!pane_queue.enqueue(&PreparedOutbound {
+                payload: serde_json::json!({
+                    "kind": "workspace_state",
+                    "workspace": {
+                        "active_tab_id": "tab-owned",
+                        "recent_projects": [],
+                        "tabs": [{
+                            "id": "tab-owned",
+                            "project_root": project.path(),
+                            "workspace": { "windows": [{
+                                "id": window_id,
+                                "status": "error"
+                            }] }
+                        }]
+                    }
+                })
+                .to_string(),
+                kind: "workspace_state",
+                coalesce_key: None,
+                repair_pane_id: None,
+                class: QueueClass::IdempotentLatest,
+            }));
+            let workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("scoped workspace response")
+                .expect("workspace frame")
+                .expect("valid workspace frame");
+            assert!(matches!(workspace, WebSocketMessage::Text(_)));
+
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({ "kind": "close_window", "id": window_id })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send uncorrelated peer close");
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let dispatched = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::AgentFrontend { .. }));
+                        position.map(|position| recorded.remove(position))
+                    };
+                    if let Some(UserEvent::AgentFrontend { request, .. }) = dispatched {
+                        assert!(
+                            matches!(
+                                request,
+                                AgentFrontendRequest::CloseWindow {
+                                    ref id,
+                                    request_id: None,
+                                    responder: None,
+                                } if id == window_id
+                            ),
+                            "the peer close must reach the runtime uncorrelated"
+                        );
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("an owner-less peer close must not be dropped at the transport filter");
+        });
         server.shutdown();
     }
 
