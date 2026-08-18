@@ -825,12 +825,17 @@ mod tests {
     ///
     /// The title demand ("set title-summary as your first action, this is not
     /// optional", re-issued every turn) outranks the PM's own contract in the
-    /// context it reads. It is also unsatisfiable: the PM runs in a detached
-    /// worktree where `workspace.update` fails with
-    /// `branch identity is unavailable` — the PM filed that as #3477 itself.
-    /// The progress-summary demand asks for an implementation/verification
-    /// digest the PM has no basis to write, and writing it would overwrite the
-    /// shared projection that belongs to the implementation agents.
+    /// context it reads. The progress-summary demand asks for an
+    /// implementation/verification digest the PM has no basis to write, and
+    /// writing it would overwrite the shared projection that belongs to the
+    /// implementation agents.
+    ///
+    /// This exemption originally had a second justification — the demand was
+    /// unsatisfiable, because `workspace.update` from the PM's detached
+    /// worktree always failed with `branch identity is unavailable`. Issue
+    /// #3477 removed that failure, so the exemption now rests on the two
+    /// reasons above alone. It is deliberately *not* keyed on branchlessness:
+    /// the PM can record Work state now and simply must not be nagged to.
     #[test]
     fn the_resident_pm_gets_no_work_state_reminders() {
         let home = tempfile::tempdir().expect("tempdir");
