@@ -31,24 +31,31 @@
 //! lock; the thread-local pin is not visible from the worker thread. See
 //! [`SCAN_WORKER_TRIGGERS`].
 //!
-//! Scope: this test covers the `--bin gwt` test tree, the one test binary all
-//! three historical flakes occurred in. Other test binaries are separate
-//! processes and do not share this `HOME`; several of them pin the home from
-//! a fixture struct rather than the test body, which this simple body-level
-//! detector cannot see.
+//! Scope differs per rule. The gwt-home rules cover the `--bin gwt` test tree,
+//! the one test binary all three historical flakes occurred in: other test
+//! binaries are separate processes that do not share this `HOME`, and several
+//! of them pin the home from a fixture struct rather than the test body, which
+//! this simple body-level detector cannot see.
+//! [`every_test_that_mutates_the_environment_holds_the_env_lock`] instead
+//! covers the whole crate, because an unserialized environment mutation races
+//! whichever binary it lands in — that rule was added after
+//! `exact_target_user_prompt_submit_verifies_the_delivery_receipt` was caught
+//! failing about 1 run in 6 in `gwt --lib`.
 //!
-//! Known gap, stated so nobody reads a pass here as full coverage: the rules
-//! below follow calls a test makes *directly*, plus fixtures declared in
-//! [`SHARED_FIXTURE_SOURCE`]. They do not follow a test into production code.
-//! A test that drives, say, `handle_frontend_event(OpenIntakeSession)` reaches
-//! `reserve_start_work_branch_name_for_project`, which resolves
-//! `gwt_project_dir_for_repo_path` two hops away — and this detector stays
-//! silent. Name-based propagation through production code was measured and
+//! None of the rules follow a test into production code, and they deliberately
+//! do not try. Name-based propagation through production was measured and
 //! rejected: it reaches generic entry points such as `handle_frontend_event`
 //! and `new`, and would flag roughly 260 tests without distinguishing the ones
-//! that actually resolve a home. Closing that class needs either per-test home
-//! pinning across the binary or a runtime guard inside `gwt_home()`, not a
-//! wider static rule.
+//! that actually resolve a home. The hops are real, though —
+//! `handle_frontend_event(OpenIntakeSession)` reaches
+//! `reserve_start_work_branch_name_for_project`, and `abort_prepared_execution`
+//! reaches the durable ledger — so instead of chasing them,
+//! [`every_test_with_a_tempdir_owns_its_gwt_home`] applies the rule at the
+//! door: a test doing filesystem work owns its home before it starts.
+//!
+//! What still escapes: a test that resolves the home without ever creating a
+//! `TempDir`. Nothing in this binary does that today, and such a test would be
+//! writing into the real user home, which is its own bug.
 
 use std::{
     collections::BTreeSet,
@@ -103,6 +110,19 @@ const SCAN_WORKER_TRIGGERS: &[&str] = &[
     "wait_for_scheduled_scan_completion",
 ];
 
+/// Issue #3609 AC-6: a test that creates a `TempDir` is doing filesystem work,
+/// and anything it drives from there can resolve the gwt home several hops
+/// into production code — `handle_frontend_event(OpenIntakeSession)` reaches
+/// `reserve_start_work_branch_name_for_project`, which calls
+/// `gwt_project_dir_for_repo_path`; `abort_prepared_execution` reaches the
+/// durable ledger the same way. Following those hops by name is not workable
+/// (it lands on generic entry points such as `handle_frontend_event` and
+/// `new`, flagging ~260 tests without distinguishing the ones that resolve a
+/// home), so the rule is applied at the door instead: own your home before you
+/// touch the filesystem. Pinning costs one line and is harmless for a test
+/// that never resolves the home.
+const TEMP_DIR_CONSTRUCTORS: &[&str] = &["tempdir"];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -120,6 +140,7 @@ struct ParsedFn {
     calls: BTreeSet<String>,
     holds_env_lock: bool,
     pins_thread_local_home: bool,
+    mutates_env: bool,
 }
 
 impl ParsedFn {
@@ -155,6 +176,8 @@ fn parse_functions(source: &str) -> Vec<ParsedFn> {
             calls: called_names(&body),
             holds_env_lock: acquires_env_lock(&body),
             pins_thread_local_home: body.contains("ScopedGwtHome::set"),
+            mutates_env: body.contains("ScopedEnvVar::set(")
+                || body.contains("ScopedEnvVar::unset("),
         });
     }
     parsed
@@ -234,6 +257,19 @@ fn lock_call_follows(body: &str, accessor: &str) -> bool {
         rest = &rest[offset + accessor.len()..];
     }
     false
+}
+
+/// Every source file in the `gwt` crate.
+///
+/// The `ScopedEnvVar` rule below is not specific to one test binary: a
+/// process-global environment mutation races every other test in whatever
+/// binary it lands in. `--bin gwt` and `gwt --lib` are both affected, so this
+/// rule walks the whole crate rather than one binary's module tree.
+fn gwt_crate_sources(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    collect_rust_sources(&root.join("crates/gwt/src"), &mut sources);
+    sources.sort();
+    sources
 }
 
 /// Source files compiled into the `--bin gwt` test binary, derived from the
@@ -403,7 +439,11 @@ fn env_lock_acquisitions(source: &str) -> Vec<(usize, String)> {
 fn every_env_lock_acquisition_recovers_from_poisoning() {
     let root = repo_root();
     let mut violations = Vec::new();
-    for path in bin_gwt_test_sources(&root) {
+    // Crate-wide, like the environment-mutation rule: a poisoned mutex fails
+    // every later holder in whatever binary the first panic happened in. One
+    // real failure in `gwt --lib` cascaded into six `PoisonError` aborts in
+    // `cli/env/tests.rs` and hid its own cause.
+    for path in gwt_crate_sources(&root) {
         let source = read_source(&path);
         for (line, consumer) in env_lock_acquisitions(&source) {
             // `unwrap_or_else(PoisonError::into_inner)` and the equivalent
@@ -489,6 +529,27 @@ fn every_scan_worker_test_holds_the_process_env_lock() {
         "Issue #3609: {} test(s) enqueue the Issue Monitor scan worker without holding \
          `env_test_lock()`. The worker re-resolves the prefs path from the process-global \
          `HOME` on its own thread, where a `ScopedGwtHome` thread-local pin is invisible:\n{}",
+        violations.len(),
+        report(&violations)
+    );
+}
+
+#[test]
+fn every_test_with_a_tempdir_owns_its_gwt_home() {
+    let root = repo_root();
+    let watched: BTreeSet<String> = TEMP_DIR_CONSTRUCTORS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let violations = violations_for(&root, &watched, ParsedFn::guarded);
+    assert!(
+        violations.is_empty(),
+        "Issue #3609 AC-6: {} test(s) create a `TempDir` without owning a gwt home. \
+         Production code driven from such a test resolves the process-global `HOME` \
+         several hops in, so whichever tempdir a parallel test installed decides where \
+         this one writes — and it disappears when that test ends. Add \
+         `let _gwt_home = ScopedGwtHome::set(<this test's temp root>);` right after the \
+         `tempdir()` binding, or take `env_test_lock()` and repoint `HOME`:\n{}",
         violations.len(),
         report(&violations)
     );
@@ -608,5 +669,136 @@ fn a_test_is_never_a_fixture() {
     assert_eq!(
         derived,
         BTreeSet::from(["leaf_fixture".to_string(), "wrapper_fixture".to_string()])
+    );
+}
+
+/// `ScopedEnvVar` mutates a process-global environment variable, and its own
+/// documentation says the caller must hold [`env_lock`] for the guard's whole
+/// lifetime — the guard does not lock by itself.
+///
+/// Issue #3609: the rule was documented but unenforced, and
+/// `exact_target_user_prompt_submit_verifies_the_delivery_receipt` reproduced
+/// at roughly 1 run in 6 because it set `GWT_SESSION_ID` without the lock
+/// while other tests in the same binary set it to different values. The
+/// production path reads that variable to decide whose delivery receipt to
+/// verify, so the receipt silently stayed unverified. `ScopedGwtHome` cannot
+/// help there: the variable is not `HOME`.
+///
+/// Helpers are followed one hop within their own file, so a test that reaches
+/// the mutation through a fixture is still covered.
+fn env_mutating_names(source: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::from(["set".to_string(), "unset".to_string()]);
+    let helpers: Vec<ParsedFn> = parse_functions(source)
+        .into_iter()
+        .filter(|function| !function.is_test && function.mutates_env && !function.holds_env_lock)
+        .collect();
+    for helper in helpers {
+        names.insert(helper.name);
+    }
+    names
+}
+
+/// Fixtures in `source` that acquire the env lock on their caller's behalf.
+///
+/// `env_guard` returns a struct that owns the `MutexGuard`, and
+/// `with_strict_target_fixture` holds it across the closure it runs — either
+/// way the calling test is serialized without taking the lock itself. Taking
+/// it again would deadlock: `std::sync::Mutex` is not reentrant.
+///
+/// The check is an approximation: it cannot tell a fixture that hands the
+/// guard back from one that drops it before returning. Requiring the fixture
+/// to acquire the lock at all is the useful half of the contract, and the
+/// alternative — flagging every caller — produces exactly the double-lock
+/// deadlock this comment warns about.
+fn lock_providing_names(source: &str) -> BTreeSet<String> {
+    parse_functions(source)
+        .into_iter()
+        .filter(|function| !function.is_test && function.holds_env_lock)
+        .map(|function| function.name)
+        .collect()
+}
+
+#[test]
+fn every_test_that_mutates_the_environment_holds_the_env_lock() {
+    let root = repo_root();
+    let mut violations = Vec::new();
+    for path in gwt_crate_sources(&root) {
+        let source = read_source(&path);
+        let watched = env_mutating_names(&source);
+        let lock_providers = lock_providing_names(&source);
+        for function in parse_functions(&source) {
+            if !function.is_test
+                || function.holds_env_lock
+                || function
+                    .calls
+                    .iter()
+                    .any(|call| lock_providers.contains(call))
+            {
+                continue;
+            }
+            let reached: Vec<String> = if function.mutates_env {
+                vec!["ScopedEnvVar".to_string()]
+            } else {
+                function
+                    .calls
+                    .iter()
+                    .filter(|call| watched.contains(*call) && *call != "set" && *call != "unset")
+                    .cloned()
+                    .collect()
+            };
+            if reached.is_empty() {
+                continue;
+            }
+            violations.push(Violation {
+                file: relative(&root, &path),
+                line: function.line,
+                function: function.name.clone(),
+                reached,
+            });
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Issue #3609: {} test(s) mutate a process-global environment variable without holding \
+         `env_test_lock()`. `ScopedEnvVar` restores the old value on drop but never serializes, \
+         so a parallel test reads whatever the last writer left. Take the lock for the guard's \
+         whole lifetime:\n{}",
+        violations.len(),
+        report(&violations)
+    );
+}
+
+#[test]
+fn env_mutation_rule_exempts_fixtures_that_take_the_lock_themselves() {
+    let source = "\
+fn locking_fixture() -> Guard {
+    let lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Guard { _env: ScopedEnvVar::set(\"GWT_SESSION_ID\", \"x\"), _lock: lock }
+}
+
+fn leaking_fixture() {
+    let _env = ScopedEnvVar::set(\"GWT_SESSION_ID\", \"x\");
+}
+
+#[test]
+fn uses_the_locking_fixture() {
+    let _guard = locking_fixture();
+}
+
+#[test]
+fn uses_the_leaking_fixture() {
+    leaking_fixture();
+}
+";
+    let watched = env_mutating_names(source);
+    assert!(
+        !watched.contains("locking_fixture"),
+        "a fixture that holds the lock must not pass the obligation on"
+    );
+    assert!(
+        watched.contains("leaking_fixture"),
+        "a fixture that mutates without the lock must reach its callers"
     );
 }
