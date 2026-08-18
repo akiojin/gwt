@@ -814,6 +814,7 @@ mod poll_state_tests {
         // cleanup helper wipes it. This exercises the same cleanup contract
         // the bootstrap path uses for "pending version <= current".
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tempdir.path());
         let payload = tempdir.path().join("v9.20.0").join("gwt");
         std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
         std::fs::write(&payload, b"#!/bin/sh\nexit 0\n").unwrap();

@@ -283,6 +283,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn normalized_key_and_generation_reject_a_late_completion() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         std::fs::create_dir_all(&root).expect("create repo");
         let equivalent_root = root.join(".");
@@ -314,6 +315,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn snapshot_cache_is_capacity_eight_lru_and_kind_isolated() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let mut cache = KnowledgeRelatedSnapshotCache::default();
         let mut roots = Vec::new();
         for index in 0..8_u64 {
@@ -349,6 +351,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn pr_reservation_and_snapshot_miss_do_not_mutate_issue_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         let other = directory.path().join("other");
         std::fs::create_dir_all(&root).expect("create repo");
@@ -371,6 +374,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn pr_full_augmentation_preserves_baseline_view_without_publishing_a_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         let sessions_dir = directory.path().join("sessions");
         let issue_link_cache_dir = directory.path().join("cache");
@@ -428,6 +432,7 @@ mod related_snapshot_cache_tests {
     #[test]
     fn partial_search_consumes_but_never_replaces_the_full_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
         std::fs::create_dir_all(&root).expect("create repo");
         let snapshots = KnowledgeRelatedSnapshot::default();
@@ -512,6 +517,7 @@ mod monitor_snapshot_cache_tests {
     #[test]
     fn projection_preserves_global_queue_positions_for_filtered_rows_and_clears_stale_values() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let project_root = directory.path().join("repo");
         let mut cache = KnowledgeMonitorSnapshotCache::default();
         cache.replace(
@@ -579,6 +585,7 @@ mod monitor_snapshot_cache_tests {
     #[test]
     fn projection_keeps_all_current_wire_states_isolated_by_project_root() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let first_root = directory.path().join("first");
         let second_root = directory.path().join("second");
         let states = [
@@ -633,9 +640,10 @@ mod monitor_snapshot_cache_tests {
 }
 
 use super::{
-    knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
-    workspace_resume_owner_issue_number, workspace_work_item_view_from_item, AppRuntime,
-    BackendEvent, IssueBranchLinkStore, OutboundEvent, UserEvent, WindowPreset,
+    knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name,
+    resume_branch_refs_snapshot, work_session_index, workspace_resume_owner_issue_number,
+    workspace_work_item_view_from_item, AppRuntime, BackendEvent, IssueBranchLinkStore,
+    OutboundEvent, ResumeBranchIndex, UserEvent, WindowPreset,
 };
 
 pub struct KnowledgeSearchRequest<'a> {
@@ -903,6 +911,11 @@ fn augment_knowledge_bridge_related_works(
     }
 
     let session_index = work_session_index(sessions);
+    // Issue #3611: the Knowledge augmentation runs on a blocking task, so one
+    // bulk ref snapshot is affordable — a per-Session Git probe inside the
+    // Work loop is not, at any repository size.
+    let known_branch_refs = resume_branch_refs_snapshot(project_root);
+    let resume_branches = ResumeBranchIndex::scanned(Some(&known_branch_refs));
     let mut related_by_number: HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> = HashMap::new();
     let mut represented_sessions_by_number: HashMap<u64, HashSet<String>> = HashMap::new();
 
@@ -914,7 +927,7 @@ fn augment_knowledge_bridge_related_works(
         if !relevant_numbers.contains(&issue_number) {
             continue;
         }
-        let work_view = workspace_work_item_view_from_item(item, &session_index, project_root);
+        let work_view = workspace_work_item_view_from_item(item, &session_index, resume_branches);
         represented_sessions_by_number
             .entry(issue_number)
             .or_default()

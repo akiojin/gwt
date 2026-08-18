@@ -288,16 +288,123 @@ fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
 /// cores).
 const GUI_EVENT_LOOP_SLOW_DISPATCH_MS: u64 = 30;
 
-/// Cheap variant-name label for a `FrontendEvent`, derived from `Debug` and
-/// truncated to the leading identifier so dispatch-timing logs name the
-/// handler without ever emitting payload fields (which may contain env vars or
-/// tokens). Used only by the Phase 0 dispatch instrumentation.
-fn frontend_event_kind_label(event: &FrontendEvent) -> String {
-    format!("{event:?}")
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .find(|token| !token.is_empty())
-        .unwrap_or("Unknown")
-        .to_string()
+/// Upper bound for a dispatch label. The longest `UserEvent` /
+/// `FrontendEvent` variant name is comfortably inside this; anything longer is
+/// truncated rather than allocated.
+const DISPATCH_LABEL_CAPACITY: usize = 64;
+
+/// Fixed-capacity variant-name buffer for the dispatch-timing instrumentation.
+///
+/// Issue #3611: the timer wraps *every* event-loop iteration — including the
+/// high-frequency PTY output events — so labelling must not allocate. It must
+/// also never carry payload fields, which may contain env vars or tokens.
+#[derive(Clone, Copy)]
+struct DispatchLabel {
+    bytes: [u8; DISPATCH_LABEL_CAPACITY],
+    len: usize,
+}
+
+impl DispatchLabel {
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len])
+            .ok()
+            .filter(|label| !label.is_empty())
+            .unwrap_or("Unknown")
+    }
+}
+
+impl std::fmt::Display for DispatchLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Write for DispatchLabel {
+    /// Accumulates the leading identifier only. `#[derive(Debug)]` writes the
+    /// variant name before any field, so returning `Err` at the first
+    /// non-identifier byte aborts formatting right after the name — the whole
+    /// payload is never rendered.
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        for byte in text.bytes() {
+            if !(byte.is_ascii_alphanumeric() || byte == b'_') || self.len == self.bytes.len() {
+                return Err(std::fmt::Error);
+            }
+            self.bytes[self.len] = byte;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Cheap variant-name label derived from `Debug`, used by the dispatch-timing
+/// instrumentation so a slow handler is identifiable from `~/.gwt/logs/`
+/// without emitting payload fields.
+fn debug_variant_label<T: std::fmt::Debug + ?Sized>(value: &T) -> DispatchLabel {
+    use std::fmt::Write as _;
+    let mut label = DispatchLabel {
+        bytes: [0; DISPATCH_LABEL_CAPACITY],
+        len: 0,
+    };
+    // The `Err` return above is the intended stop signal, not a failure.
+    let _ = write!(&mut label, "{value:?}");
+    label
+}
+
+fn frontend_event_kind_label(event: &FrontendEvent) -> DispatchLabel {
+    debug_variant_label(event)
+}
+
+/// Issue #3611 AC-4: name the event-loop dispatch that is about to be timed.
+/// `UserEvent` carries the interesting handlers (Work/branch scan results,
+/// projection refreshes), so it is labelled by its own variant rather than the
+/// outer `Event::UserEvent` wrapper.
+fn event_loop_dispatch_label(event: &Event<'_, UserEvent>) -> DispatchLabel {
+    match event {
+        Event::UserEvent(user_event) => debug_variant_label(user_event),
+        other => debug_variant_label(other),
+    }
+}
+
+/// Issue #3611 AC-4: the warning text for an event-loop dispatch that held the
+/// GUI thread past [`GUI_EVENT_LOOP_SLOW_DISPATCH_MS`], or `None` when the
+/// dispatch was within budget. Split out from the timer so the threshold is
+/// directly testable.
+fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> {
+    (elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS)
+        .then(|| format!("{label} blocked the GUI event loop for {elapsed_ms}ms"))
+}
+
+/// Times one event-loop dispatch and warns when it stalls the GUI thread.
+///
+/// Issue #3611: a `Drop` guard rather than a trailing measurement because
+/// several dispatch arms `return` early; a stall in one of those is exactly the
+/// case worth recording.
+struct EventLoopDispatchTimer {
+    label: DispatchLabel,
+    started: std::time::Instant,
+}
+
+impl EventLoopDispatchTimer {
+    fn start(event: &Event<'_, UserEvent>) -> Self {
+        Self {
+            label: event_loop_dispatch_label(event),
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for EventLoopDispatchTimer {
+    fn drop(&mut self) {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        if let Some(message) = gui_event_loop_stall_warning(self.label.as_str(), elapsed_ms) {
+            tracing::warn!(
+                target: "gwt.frontend.timing",
+                event = %self.label,
+                elapsed_ms,
+                "{message}"
+            );
+        }
+    }
 }
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
@@ -1126,6 +1233,12 @@ enum UserEvent {
         cleanup_ready_branches: std::collections::HashMap<String, String>,
         dirty_branches: std::collections::HashSet<String>,
         live_process_branches: std::collections::HashSet<String>,
+        /// Issue #3611: every short branch name the scan's single
+        /// `for-each-ref` found. The Workspace projection answers Session
+        /// resumability from this set instead of spawning Git per Session on
+        /// the event loop. `None` when the snapshot failed — the previous
+        /// answer then stands instead of "every branch is gone".
+        known_branch_refs: Option<std::collections::HashSet<String>>,
     },
     /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
     /// caches the `branch -> subject` map and rebroadcasts the Workspace
@@ -1367,6 +1480,7 @@ mod tests {
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_config::{Profile, Settings};
     use gwt_core::logging::{LogEvent, LogLevel};
+    use gwt_core::test_support::ScopedGwtHome;
     use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
@@ -1375,9 +1489,9 @@ mod tests {
         apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
         close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content,
-        gui_front_door_launch_surface, hook_forward_authorized,
-        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        docker_bundle_mounts_for_home, docker_bundle_override_content, event_loop_dispatch_label,
+        frontend_event_kind_label, gui_event_loop_stall_warning, gui_front_door_launch_surface,
+        hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
         AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
@@ -1403,6 +1517,55 @@ mod tests {
         gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
             .apply_to_parts(&mut env, &mut remove_env);
         remove_env
+    }
+
+    /// Issue #3611 AC-4: a Work/branch scan result that stalls the GUI thread
+    /// must be identifiable after the fact. The dispatch label names the
+    /// `UserEvent` variant — not the `Event::UserEvent` wrapper — and never
+    /// leaks payload fields such as filesystem paths.
+    #[test]
+    fn event_loop_dispatch_label_names_the_user_event_variant_without_payload() {
+        let event = UserEvent::WorkMergeStatus {
+            project_root: PathBuf::from("/tmp/secret-project-root"),
+            merged_branches: HashMap::new(),
+            cleanup_ready_branches: HashMap::new(),
+            dirty_branches: std::collections::HashSet::new(),
+            live_process_branches: std::collections::HashSet::new(),
+            known_branch_refs: None,
+        };
+
+        let label = event_loop_dispatch_label(&tao::event::Event::UserEvent(event));
+
+        assert_eq!(label.as_str(), "WorkMergeStatus");
+        assert!(
+            !label.as_str().contains("secret-project-root"),
+            "dispatch labels must never carry payload fields"
+        );
+    }
+
+    #[test]
+    fn frontend_event_dispatch_label_keeps_naming_its_own_variant() {
+        assert_eq!(
+            frontend_event_kind_label(&gwt::FrontendEvent::FrontendReady).as_str(),
+            "FrontendReady"
+        );
+    }
+
+    /// Issue #3611 AC-4: the warn fires once the dispatch crosses the budget,
+    /// so a multi-second projection stall leaves a durable log record.
+    #[test]
+    fn gui_event_loop_stall_warning_fires_only_past_the_budget() {
+        assert_eq!(
+            gui_event_loop_stall_warning(
+                "WorkMergeStatus",
+                super::GUI_EVENT_LOOP_SLOW_DISPATCH_MS - 1
+            ),
+            None
+        );
+        let warning = gui_event_loop_stall_warning("WorkMergeStatus", 4_000)
+            .expect("a 4s dispatch must be reported");
+        assert!(warning.contains("WorkMergeStatus"), "{warning}");
+        assert!(warning.contains("4000ms"), "{warning}");
     }
 
     #[test]
@@ -2019,6 +2182,7 @@ mod tests {
     #[test]
     fn pane_send_input_replies_explicit_result_for_session_binding() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let mut window = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
         window.id = "claude-1".to_string();
         window.agent_id = Some("claude".to_string());
@@ -2147,6 +2311,7 @@ mod tests {
     #[test]
     fn logging_dir_for_startup_path_uses_project_scoped_fallback() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let log_dir = logging_dir_for_startup_path(temp.path());
         let project_hash = gwt_core::repo_hash::compute_path_hash(temp.path());
 
@@ -2270,6 +2435,7 @@ mod tests {
     #[test]
     fn project_index_status_check_delegates_project_root_to_bootstrap_path() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (proxy, events) = AppEventProxy::stub();
         let captured_root = Arc::new(Mutex::new(None));
         let captured_root_for_closure = captured_root.clone();
@@ -2336,6 +2502,7 @@ mod tests {
     #[test]
     fn write_browser_url_handoff_file_persists_url_to_target_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(tmp.path());
         let target = tmp.path().join("gwt-browser-url");
         let url = "http://127.0.0.1:44557/";
 
@@ -2358,6 +2525,7 @@ mod tests {
         // it should be reported as Failed so callers can log without
         // aborting startup.
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(tmp.path());
         let missing = tmp.path().join("does/not/exist/gwt-browser-url");
 
         let outcome =
@@ -2793,6 +2961,7 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
@@ -2807,6 +2976,7 @@ mod tests {
             ),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
@@ -3044,6 +3214,7 @@ mod tests {
     #[test]
     fn frontend_sync_events_replay_status_wizard_and_pending_update() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -3151,6 +3322,7 @@ mod tests {
     #[test]
     fn update_available_event_records_pending_update_before_broadcast() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let tab = sample_project_tab(
             "tab-1",
             "Repo",
@@ -3231,6 +3403,7 @@ mod tests {
     #[test]
     fn open_project_path_reuses_existing_tab_and_adds_new_tab() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let other = temp.path().join("other");
         let scratch = temp.path().join("scratch");
@@ -3282,6 +3455,7 @@ mod tests {
     #[test]
     fn select_and_close_project_tabs_emit_workspace_and_wizard_updates() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let other = temp.path().join("other");
         fs::create_dir_all(&repo).expect("create repo");
@@ -3339,6 +3513,7 @@ mod tests {
     #[test]
     fn window_management_events_cover_canvas_operations() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
@@ -3435,6 +3610,7 @@ mod tests {
     #[test]
     fn non_agent_window_presets_open_and_focus_at_normal_floating_size() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -3582,6 +3758,7 @@ mod tests {
     #[test]
     fn loaders_and_wizard_entrypoints_cover_success_and_error_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         fs::create_dir_all(repo.join("src")).expect("create src");
@@ -3923,6 +4100,7 @@ mod tests {
     #[test]
     fn file_tree_load_uses_selected_linked_worktree_root() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
 
@@ -4190,6 +4368,7 @@ mod tests {
     #[test]
     fn runtime_status_missing_window_cleans_active_agent_session() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab(
@@ -4224,6 +4403,7 @@ mod tests {
     #[test]
     fn app_runtime_window_helpers_cover_lookup_status_and_seeded_details() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, _recorded_events) = sample_runtime_with_events(
@@ -4275,6 +4455,7 @@ mod tests {
     #[test]
     fn async_main_helpers_emit_proxy_events_without_gui_runtime() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         let default_branch = current_git_branch(&repo).expect("current branch");
@@ -4373,6 +4554,7 @@ mod tests {
     #[test]
     fn frontend_event_dispatch_routes_canvas_knowledge_and_async_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let scratch = temp.path().join("scratch");
         init_git_repo(&repo);
@@ -4692,6 +4874,7 @@ mod tests {
     #[test]
     fn test_backend_connection_replies_through_async_dispatch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
 
         let immediate_events = runtime.handle_frontend_event(
@@ -4731,6 +4914,7 @@ mod tests {
     #[test]
     fn test_agent_backend_connection_replies_through_async_dispatch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
 
         let immediate_events = runtime.handle_frontend_event(
@@ -4792,6 +4976,7 @@ mod tests {
     #[test]
     fn agent_backend_connection_probe_drops_older_reverse_completion_per_client_and_agent() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
         let codex = gwt_agent::BuiltinAgentId::Codex;
         let claude = gwt_agent::BuiltinAgentId::ClaudeCode;
@@ -4868,6 +5053,7 @@ mod tests {
     #[test]
     fn wizard_handler_helpers_cover_preparation_focus_and_error_paths() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, recorded_events) = sample_runtime_with_events(
@@ -5076,6 +5262,7 @@ mod tests {
     #[test]
     fn launch_wizard_action_flow_launches_agent_when_selected_index_is_stale() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let (mut runtime, recorded_events) = sample_runtime_with_events(
@@ -5197,6 +5384,7 @@ mod tests {
     #[test]
     fn launch_completion_and_project_target_error_paths_are_reported() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let mut runtime = sample_runtime(
@@ -5476,6 +5664,7 @@ mod tests {
     #[test]
     fn resolve_project_target_uses_selected_directory_name_for_git_subdir_title() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("demo-repo");
         fs::create_dir_all(repo.join("apps/frontend")).expect("create repo dirs");
         let status = gwt_core::process::hidden_command("git")
@@ -5500,6 +5689,7 @@ mod tests {
     #[test]
     fn local_branch_exists_surfaces_git_errors_for_invalid_repo() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let err = super::local_branch_exists(temp.path(), "feature/missing")
             .expect_err("non-repo path should surface git failure");
 
@@ -5680,6 +5870,7 @@ mod tests {
     #[test]
     fn build_shell_process_launch_for_host_uses_worktree_env() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -5716,6 +5907,7 @@ mod tests {
     #[test]
     fn build_shell_process_launch_for_host_uses_selected_windows_shell() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -5752,6 +5944,7 @@ mod tests {
         // replaces the detected interactive shell while keeping the worktree
         // env and GWT_PROJECT_ROOT.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let worktree = temp.path().join("repo-feature");
         fs::create_dir_all(&worktree).expect("create worktree");
         let mut config = ShellLaunchConfig {
@@ -6063,6 +6256,7 @@ mod tests {
     #[test]
     fn recent_project_and_path_helpers_dedupe_and_fallback() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("repo");
         fs::create_dir_all(&project).expect("project dir");
         let project_dot = project.join(".");
@@ -6208,6 +6402,7 @@ mod tests {
     #[test]
     fn docker_defaults_and_mount_helpers_prefer_devcontainer_settings() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
         let devcontainer_dir = project_root.join(".devcontainer");
         fs::create_dir_all(&devcontainer_dir).expect("devcontainer dir");
@@ -6276,6 +6471,7 @@ mod tests {
     #[test]
     fn docker_launch_plan_merges_devcontainer_compose_files_and_rebases_relative_mounts() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("project");
         let devcontainer_dir = project.join(".devcontainer");
         fs::create_dir_all(&devcontainer_dir).expect("create devcontainer dir");
@@ -6314,6 +6510,7 @@ mod tests {
     #[test]
     fn worktree_git_and_misc_helpers_cover_repo_paths_and_defaults() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         let init = gwt_core::process::hidden_command("git")
@@ -6415,6 +6612,7 @@ mod tests {
         // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
         // are reaped — clean ones removed, dirty ones kept, capped per run.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -6481,6 +6679,7 @@ mod tests {
     #[test]
     fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -6511,6 +6710,7 @@ mod tests {
         // `.intake-*` worktree (no branch) and sets working_dir; the existing
         // branch-based launch path is untouched.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -6571,6 +6771,7 @@ mod tests {
         // develop after the clone; the resolved intake worktree must contain
         // the new commit.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
 
@@ -6621,6 +6822,7 @@ mod tests {
         // #3374: a repo with no origin remote cannot fetch; an `origin/*` base
         // must fall back to HEAD instead of failing the intake launch.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         for args in [
@@ -6657,6 +6859,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_helpers_cover_short_circuits_existing_and_remote_creation() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -6942,6 +7145,7 @@ mod tests {
         // mint a new work/* branch. This locks the routing contract that both
         // entry points (Branches row + Launch Wizard picker) reuse.
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
 
@@ -7043,6 +7247,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let branch = "feature/existing";
@@ -7093,6 +7298,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_recreates_remote_develop_when_start_work_ref_is_stale() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
 
@@ -7170,6 +7376,7 @@ mod tests {
     #[test]
     fn resolve_launch_worktree_prunes_missing_existing_worktree_before_recreating() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let branch = "feature/stale-worktree";
@@ -7539,6 +7746,7 @@ mod tests {
         assert_eq!(super::knowledge_kind_for_preset(WindowPreset::Shell), None);
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let project_root = temp.path().join("repo");
         fs::create_dir_all(&project_root).expect("create project root");
         assert!(super::mount_source_matches_project_root(".", &project_root));
@@ -7624,6 +7832,7 @@ mod tests {
         );
 
         let profile_temp = tempdir().expect("profile tempdir");
+        let _gwt_home = ScopedGwtHome::set(profile_temp.path());
         let config_path = profile_temp.path().join("profile-config.toml");
         let mut settings = Settings::default();
         settings
@@ -7878,8 +8087,8 @@ fn main() -> std::io::Result<()> {
         ),
     };
 
-    if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
-        eprintln!("gwt daemon bootstrap: {error}");
+    if let Err(error) = gwt::cli::hook::prepare_front_door_for_path(&startup_dir) {
+        eprintln!("gwt front door preparation: {error}");
     }
 
     // SPEC #2920 Phase 4 / FR-011: acquire the per-user tray
@@ -8214,6 +8423,10 @@ fn main() -> std::io::Result<()> {
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        // Issue #3611 AC-4: every dispatch on this thread is timed, not just
+        // the frontend ones. The Work/branch scan results land as `UserEvent`s,
+        // so a projection stall was previously invisible in the logs.
+        let _dispatch_timer = EventLoopDispatchTimer::start(&event);
         // Keep the tray icon handle alive for the lifetime of the
         // event loop closure; dropping it would unregister the tray
         // icon from the OS. `tray_lock_handle` lives in the outer
@@ -8401,6 +8614,7 @@ fn main() -> std::io::Result<()> {
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
+                known_branch_refs,
             }) => {
                 let events = app.apply_work_merge_status(
                     &project_root,
@@ -8408,6 +8622,7 @@ fn main() -> std::io::Result<()> {
                     cleanup_ready_branches,
                     dirty_branches,
                     live_process_branches,
+                    known_branch_refs,
                 );
                 clients.dispatch(events);
             }

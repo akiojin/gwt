@@ -370,9 +370,8 @@ fn start_daemon<E: CliEnv>(_env: &mut E, out: &mut String) -> Result<i32, SpecOp
 
 // Liveness probe lives in `crate::process::is_process_alive` so the
 // three daemon-related callers (this file, daemon_publisher, main)
-// share one definition. The narrow `|pid| pid == self.pid` predicate
-// used by `prepare_daemon_front_door_for_path` is intentionally NOT
-// the same function; see Issue #2338.
+// share one definition. Issue #2338 removed the last divergent copy
+// along with the GUI front door's endpoint-slot handling.
 use crate::process::is_process_alive as is_process_alive_pid;
 
 #[cfg(test)]
