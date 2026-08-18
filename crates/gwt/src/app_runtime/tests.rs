@@ -3654,7 +3654,12 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         },
     );
 
-    assert!(denied.is_empty());
+    // Issue #3629 AC-12: the refusal answers explicitly instead of silence;
+    // the foreign window itself must survive untouched.
+    assert!(denied.iter().all(|outbound| matches!(
+        outbound.event,
+        BackendEvent::PaneCloseResult { ok: false, .. }
+    )));
     assert!(runtime
         .window_lookup
         .contains_key("tab-foreign::agent-foreign"));
@@ -3674,6 +3679,198 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
     assert!(runtime
         .window_lookup
         .contains_key("tab-foreign::agent-foreign"));
+}
+
+/// Issue #3629 AC-10/AC-12: every agent-route close outcome must answer the
+/// requesting client with an explicit `pane_close_result` instead of the
+/// silent empty event list that made `pane.close` undiagnosable.
+#[test]
+fn agent_pane_close_replies_with_pane_close_result() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+
+    let denied = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-foreign::agent-foreign".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(
+            denied.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id,
+                    reason: Some(_),
+                },
+                ..
+            }] if client_id == "pane-client" && window_id == "tab-foreign::agent-foreign"
+        ),
+        "a cross-project close refusal must answer explicitly, got: {denied:?}"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-foreign::agent-foreign"));
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-authenticated::agent-authenticated".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(
+            accepted.first(),
+            Some(OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: true,
+                    window_id,
+                    reason: None,
+                },
+                ..
+            }) if client_id == "pane-client" && window_id == "tab-authenticated::agent-authenticated"
+        ),
+        "a successful close must answer the requesting client first, got: {accepted:?}"
+    );
+    assert!(!runtime
+        .window_lookup
+        .contains_key("tab-authenticated::agent-authenticated"));
+}
+
+/// Issue #3629 AC-12: an uncorrelated self-close stays refused, but the
+/// refusal must be explicit so the CLI stops guessing at session correlation.
+#[test]
+fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let principal =
+        AgentSessionPrincipal::for_test(&project, "session-project").expect("self-owned principal");
+
+    let refused = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-project".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        matches!(
+            refused.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id,
+                    reason: Some(reason),
+                },
+                ..
+            }] if client_id == "pane-client"
+                && window_id == "tab-project::agent-project"
+                && reason.contains("correlated")
+        ),
+        "an uncorrelated self-close must name the correlation requirement, got: {refused:?}"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-project::agent-project"));
+}
+
+/// Issue #3629 AC-9: a husk window (workspace record without a lookup entry,
+/// left behind by an app restart) must still close through the agent route.
+#[test]
+fn agent_pane_close_removes_husk_window_missing_from_lookup() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-husk",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    runtime.window_lookup.remove("tab-project::agent-husk");
+    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-husk".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        matches!(
+            events.first(),
+            Some(OutboundEvent {
+                event: BackendEvent::PaneCloseResult { ok: true, .. },
+                ..
+            })
+        ),
+        "husk close must succeed via the workspace fallback, got: {events:?}"
+    );
+    assert!(runtime
+        .tab("tab-project")
+        .expect("project tab")
+        .workspace
+        .window("agent-husk")
+        .is_none());
 }
 
 #[test]

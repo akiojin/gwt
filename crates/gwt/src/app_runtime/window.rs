@@ -30,6 +30,14 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
     matches!(preset, WindowPreset::Work | WindowPreset::Branches)
 }
 
+/// Result of a close request (Issue #3629 AC-10): `closed` reports whether the
+/// workspace record was actually removed, so callers can answer the requester
+/// instead of treating an empty event list as success.
+pub(crate) struct CloseWindowOutcome {
+    pub(crate) closed: bool,
+    pub(crate) events: Vec<OutboundEvent>,
+}
+
 impl AppRuntime {
     pub(crate) fn create_window_events(
         &mut self,
@@ -420,7 +428,15 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        self.close_window_events_with_monitor_notification(id, true)
+        self.close_window_outcome(id).events
+    }
+
+    /// Close a window and report whether the workspace record was actually
+    /// removed (Issue #3629 AC-10): the agent pane route must be able to
+    /// distinguish a landed close from the silent no-op that an unknown or
+    /// already-closed window produces.
+    pub(crate) fn close_window_outcome(&mut self, id: &str) -> CloseWindowOutcome {
+        self.close_window_outcome_with_monitor_notification(id, true)
     }
 
     /// Close a window whose Issue Monitor lifecycle transition was already
@@ -431,14 +447,15 @@ impl AppRuntime {
         &mut self,
         id: &str,
     ) -> Vec<OutboundEvent> {
-        self.close_window_events_with_monitor_notification(id, false)
+        self.close_window_outcome_with_monitor_notification(id, false)
+            .events
     }
 
-    fn close_window_events_with_monitor_notification(
+    fn close_window_outcome_with_monitor_notification(
         &mut self,
         id: &str,
         notify_issue_monitor: bool,
-    ) -> Vec<OutboundEvent> {
+    ) -> CloseWindowOutcome {
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
@@ -457,7 +474,10 @@ impl AppRuntime {
             &mut self.window_details,
             id,
         ) {
-            return Vec::new();
+            return CloseWindowOutcome {
+                closed: false,
+                events: Vec::new(),
+            };
         }
         let pm_deregistered = match (
             closing_session_id.as_deref(),
@@ -486,7 +506,10 @@ impl AppRuntime {
                 );
             }
         }
-        events
+        CloseWindowOutcome {
+            closed: true,
+            events,
+        }
     }
 
     /// SPEC-2356 安心 Addendum (FR-041): stop a single window's agent runtime
