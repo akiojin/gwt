@@ -888,6 +888,11 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_materializer_id: String,
+    /// Issue #3676 AC-2: credential preflight consulted before any Issue
+    /// Monitor launch spawns a terminal. Injected at construction so tests
+    /// control ambient credential facts without mutating process state; only
+    /// a definitive `Unauthenticated` verdict refuses a launch.
+    pub(crate) issue_monitor_provider_auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
     /// Issue #3505: prefs-path scoped scheduled scans currently running in a
     /// blocking worker. Duplicate ticks are coalesced by dropping them while
     /// the same canonical project scope is in flight.
@@ -2110,6 +2115,7 @@ impl AppRuntime {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
+            issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
             pending_continue_work: HashMap::new(),
