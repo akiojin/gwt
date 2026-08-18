@@ -5766,6 +5766,28 @@ impl AppRuntime {
                 issue_number,
                 linked_issue_kind.unwrap_or(gwt::LinkedIssueKind::Issue),
             ),
+            // Issue #3628 (AC-3): the recovery Launch Now never was. The wizard
+            // path only ever offered "start an agent", so an operator who
+            // wanted the row back in the queue had to edit the state file.
+            FrontendEvent::IssueMonitorRequeue { issue_number } => {
+                let reason = "operator requeue from the Issue Monitor surface";
+                let publication = self.publish_active_issue_monitor_control(serde_json::json!({
+                    "requeue": { "issue_number": issue_number, "reason": reason }
+                }));
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "requeue",
+                    |monitor| {
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        // The driver owns the safety decision: a row a launch
+                        // still owns is refused here exactly as it is in the
+                        // daemon and the CLI.
+                        monitor.requeue_failed_issue(issue_number, reason, &now);
+                    },
+                )
+            }
             FrontendEvent::IssueMonitorConfigureIssue {
                 issue_number,
                 linked_issue_kind,

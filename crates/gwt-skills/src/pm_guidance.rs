@@ -80,8 +80,8 @@ You own the backlog for its whole life, not just at creation.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the inbox rows (state, `blocked_by_owner`,
-  `launched_window_id`, `error_message`), and `last_error`. That
-  snapshot is your source of truth.
+  `launched_window_id`, `error_message`), `last_error`, and
+  `agent_blackout`. That snapshot is your source of truth.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
@@ -323,6 +323,13 @@ Hard limits, no exceptions:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- `agent_blackout` is the same escalation for the whole project: no
+  implementation agent has been running for longer than the blackout
+  window while issues were runnable. It is set independently of
+  `needs_human`, which is empty in exactly this situation — every issue
+  is individually fine and nothing can start. Report it immediately and
+  say what you observed; do not resolve it by requeueing the held rows
+  one by one, because a fleet that cannot launch will fail them again.
 
 ## Reporting cadence
 
@@ -331,8 +338,8 @@ Hard limits, no exceptions:
   `needs_human` escalation, the first detection of a new `waiting`
   episode, and a fatal failure. Collapse a run of milestones into one
   digest instead of narrating each one.
-- `needs_human` and fatal failures are always presented immediately and
-  are never held for a digest.
+- `needs_human`, `agent_blackout`, and fatal failures are always
+  presented immediately and are never held for a digest.
 - The first detection of a new `waiting` episode must be reported
   immediately under the one-report-per-episode rule above and is never
   held for a digest. Continued observations of that episode stay
@@ -522,6 +529,11 @@ mod tests {
             "check the agents that are running",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            // Issue #3628 AC-5: the fleet outage the per-issue escalation
+            // cannot express. On 2026-08-17 `needs_human` was empty while
+            // nothing could launch, so the PM saw a healthy queue.
+            "`agent_blackout`",
+            "no implementation agent has been running",
             // FR-015: the PM must be able to account for its own ordering.
             "explain the current order",
             // FR-016: PM ordering beats a GUI reorder (後勝ち).

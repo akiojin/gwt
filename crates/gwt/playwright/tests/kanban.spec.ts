@@ -266,6 +266,57 @@ test.describe("Issue Bridge load recovery", () => {
     expect(pageErrors).toEqual([]);
   });
 
+  // Issue #3628 (AC-3/AC-5): the 2026-08-17 outage. A row whose launch died had
+  // no GUI recovery — only Launch Now, which opens the wizard — and the fleet
+  // running nothing at all showed up nowhere, because `last_error` was already
+  // occupied by one of the per-issue failures.
+  test("offers a requeue on a failed row and shows a fleet outage", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { blackedOutFleet: true });
+
+    await page.goto(APP_URL);
+
+    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    await expect(
+      issueSurface.locator('[data-issue-number="3098"] .knowledge-monitor-chip'),
+    ).toHaveText("Agent failed");
+
+    const blackout = issueSurface.locator(".knowledge-monitor-blackout");
+    await expect(blackout).toBeVisible();
+    await expect(blackout).toContainText("the fleet has been down since");
+    // The per-issue failure keeps its own line; the outage must not be masked.
+    await expect(issueSurface.locator(".knowledge-monitor-error")).toContainText(
+      "#3098",
+    );
+
+    // A queued row has no failure hold to release, so it must not offer the
+    // recovery — a button that cannot change anything is worse than none.
+    await expect(
+      issueSurface.locator('[data-issue-number="3273"] [data-action="requeue"]'),
+    ).toHaveCount(0);
+
+    await issueSurface
+      .locator('[data-issue-number="3098"] [data-action="requeue"]')
+      .click();
+
+    const messages = await page.evaluate(() => window.__knowledgeLoadMessages);
+    expect(messages).toContainEqual({
+      kind: "issue_monitor_requeue",
+      issue_number: 3098,
+    });
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
   test("redirects a persisted issue_monitor preset to the Issue surface", async ({
     page,
   }) => {
@@ -1279,6 +1330,10 @@ async function installIssueBridgeBackend(
     legacyPreset = false,
     staleDetailBeforeWorkspace = false,
     triggerAutoRefreshOnce = false,
+    // Issue #3628: the 2026-08-17 shape — a row whose launch died beside a
+    // fleet that has been running nothing. Opt-in so the existing row-count
+    // assertions keep describing the fixture they were written for.
+    blackedOutFleet = false,
   } = {},
 ) {
   await page.addInitScript(
@@ -1288,6 +1343,7 @@ async function installIssueBridgeBackend(
       legacyPreset: shouldUseLegacyPreset,
       staleDetailBeforeWorkspace: shouldSeedStaleDetail,
       triggerAutoRefreshOnce: shouldTriggerAutoRefreshOnce,
+      blackedOutFleet: shouldBlackOutFleet,
     }) => {
       window.__knowledgeLoadMessages = [];
       if (shouldTriggerAutoRefreshOnce) {
@@ -1383,6 +1439,23 @@ async function installIssueBridgeBackend(
           exclusion_reason: "Excluded by label: hold",
         },
       ];
+      if (shouldBlackOutFleet) {
+        entries.push({
+          number: 3098,
+          title: "Agent failed with no launch left to name",
+          state: "open",
+          meta: "Blackout fixture",
+          labels: ["bug"],
+          linked_branch_count: 0,
+          match_score: 91,
+          phase: null,
+          has_unknown_phase: false,
+          is_spec: false,
+          monitor_state: "agent_failed",
+          queue_position: null,
+          exclusion_reason: null,
+        });
+      }
 
       const workspaceState = {
         kind: "workspace_state",
@@ -1470,17 +1543,33 @@ async function installIssueBridgeBackend(
           if (message.kind === "list_issue_monitor") {
             this.emit({
               kind: "issue_monitor_status",
-              status: {
-                enabled: false,
-                state: "disabled",
-                queue_len: 3,
-                active_count: 1,
-                max_active_agents: 2,
-                total_candidates: 5,
-                autonomous_mode: false,
-                launch_profile_source: "saved",
-                launch_profile_summary: "codex / host",
-              },
+              status: shouldBlackOutFleet
+                ? {
+                    enabled: true,
+                    state: "error",
+                    queue_len: 3,
+                    active_count: 0,
+                    max_active_agents: 2,
+                    total_candidates: 6,
+                    autonomous_mode: false,
+                    launch_profile_source: "saved",
+                    launch_profile_summary: "codex / host",
+                    last_error:
+                      "issue #3098: an execution generation already exists",
+                    agent_blackout:
+                      "No implementation agent has been running for 1800s while 4 issue(s) were runnable; the fleet has been down since 2026-08-17T00:00:00Z",
+                  }
+                : {
+                    enabled: false,
+                    state: "disabled",
+                    queue_len: 3,
+                    active_count: 1,
+                    max_active_agents: 2,
+                    total_candidates: 5,
+                    autonomous_mode: false,
+                    launch_profile_source: "saved",
+                    launch_profile_summary: "codex / host",
+                  },
             });
             return;
           }
@@ -1566,6 +1655,7 @@ async function installIssueBridgeBackend(
       legacyPreset,
       staleDetailBeforeWorkspace,
       triggerAutoRefreshOnce,
+      blackedOutFleet,
     },
   );
 }

@@ -2107,3 +2107,218 @@ fn a_recorded_error_does_not_hide_the_scan_stall() {
         "the stall must have a field an existing error cannot occupy"
     );
 }
+
+/// Build the 2026-08-17 blackout shape: an enabled monitor holding failed work
+/// and running nothing at all.
+fn blacked_out_monitor() -> IssueMonitorState {
+    let mut monitor = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        },
+        IssueMonitorPrefs {
+            enabled: true,
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "an execution generation already exists for issue #42".to_string(),
+                window_id: None,
+            }],
+            ..IssueMonitorPrefs::default()
+        },
+    );
+    // Every launch path is gated on an attached GUI, so the outage is only
+    // meaningful when one is there to launch through.
+    monitor.set_gui_connected(true);
+    monitor
+}
+
+/// A detached GUI cannot launch anything by design — the ordinary state
+/// whenever the app is closed. An outage raised for it would fire nightly.
+#[test]
+fn a_detached_gui_is_not_a_blackout() {
+    let mut monitor = blacked_out_monitor();
+    monitor.set_gui_connected(false);
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+    );
+}
+
+/// Issue #3628 AC-5: the blackout itself. Nine issues fell to `agent_failed`,
+/// zero agents ran, and every escalation surface stayed empty — `needs_human`
+/// had nothing in it, so the operator had no signal that the fleet was down.
+#[test]
+fn agent_status_at_escalates_a_fleet_with_no_agent_running() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T00:00:29Z")
+            .agent_blackout,
+        None,
+        "a fleet inside the blackout window is not yet escalated"
+    );
+
+    let escalated = monitor.agent_status_at("2026-08-17T00:00:30Z");
+    assert!(
+        escalated
+            .agent_blackout
+            .as_deref()
+            .is_some_and(|reason| reason.contains("2026-08-17T00:00:00Z")),
+        "the blackout must name when the fleet went to zero: {:?}",
+        escalated.agent_blackout
+    );
+    assert!(
+        escalated.needs_human.is_empty(),
+        "the blackout is a fleet fact and must not be faked onto an issue"
+    );
+}
+
+/// The clock is "how long has the fleet been at zero", not "how long since the
+/// last scan". A recovered agent must clear it, or the escalation outlives the
+/// outage it reports.
+#[test]
+fn a_running_agent_clears_the_blackout_clock() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+    assert!(monitor
+        .agent_status_at("2026-08-17T00:01:00Z")
+        .agent_blackout
+        .is_some());
+
+    monitor.complete_active_launch(42, "tab-1::agent-1");
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:01:10Z");
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T00:02:00Z")
+            .agent_blackout,
+        None,
+        "a running agent means the fleet is not down"
+    );
+}
+
+/// An idle monitor with nothing to run is not a blackout. Flagging it would
+/// train readers to ignore the field.
+#[test]
+fn an_empty_backlog_is_not_a_blackout() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+    );
+}
+
+/// A disabled monitor runs nothing on purpose.
+#[test]
+fn a_disabled_monitor_never_reports_a_blackout() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+    monitor.set_enabled(false);
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+    );
+}
+
+/// Issue #3616: work deliberately parked until a provider quota resets is
+/// waiting, not stranded. A blackout raised for it would fire on every rate
+/// limit and be tuned out before the real outage arrived.
+#[test]
+fn work_parked_until_a_quota_reset_is_not_a_blackout() {
+    let mut monitor = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        },
+        IssueMonitorPrefs {
+            enabled: true,
+            autonomous_records: vec![AutonomousIssueRecord {
+                issue_number: 42,
+                retry_not_before: Some("2026-08-18T00:00:00Z".to_string()),
+                retry_hold_reason: Some("provider usage limit".to_string()),
+                ..AutonomousIssueRecord::new(42)
+            }],
+            ..IssueMonitorPrefs::default()
+        },
+    );
+    monitor.set_gui_connected(true);
+    monitor.record_candidate(issue(42, &["auto-improve"]));
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+        "a queue held behind a future retry floor is parked, not blacked out"
+    );
+}
+
+/// The onset has to survive the process that observed it. The question "has
+/// the fleet been down for a while?" is asked precisely when the driver that
+/// watched it go down is gone.
+#[test]
+fn the_blackout_onset_survives_a_prefs_roundtrip() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    let prefs = monitor.prefs();
+    assert_eq!(
+        prefs.agent_blackout_since.as_deref(),
+        Some("2026-08-17T00:00:00Z")
+    );
+
+    let restored = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        },
+        prefs,
+    );
+    assert!(
+        restored
+            .agent_status_at("2026-08-17T00:01:00Z")
+            .agent_blackout
+            .is_some(),
+        "a reader holding only the prefs file must still see the outage"
+    );
+}
+
+/// The blackout must not be maskable by an unrelated per-issue error. In the
+/// incident `last_error` already carried a launch failure, which is exactly how
+/// a projection onto that field would have stayed invisible.
+#[test]
+fn a_recorded_error_does_not_hide_the_agent_blackout() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+    monitor.record_scan_error("2026-08-17T00:01:00Z", "issue #2338: generation exists");
+
+    let status = monitor.agent_status_at("2026-08-17T00:02:00Z");
+
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("issue #2338: generation exists"),
+        "the recorded error keeps its own surface"
+    );
+    assert!(
+        status.agent_blackout.is_some(),
+        "the blackout must have a field an existing error cannot occupy"
+    );
+}

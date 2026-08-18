@@ -1468,6 +1468,14 @@ enum IssueMonitorControl {
     WindowClosed {
         window_id: String,
     },
+    /// Issue #3628 (AC-3): release the failure holding one issue out of the
+    /// queue. Deliberately identity-free — the rows this exists for have no
+    /// launch left to name — and refused by the driver for any row a launch
+    /// still owns.
+    Requeue {
+        issue_number: u64,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2043,6 +2051,18 @@ fn apply_routine_issue_monitor_control(
             monitor.requeue_window(&window_id);
             true
         }
+        IssueMonitorControl::Requeue {
+            issue_number,
+            reason,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            // A refusal asks for no scan: nothing changed, and claiming
+            // otherwise is how a caller learns to trust a no-op.
+            matches!(
+                monitor.requeue_failed_issue(issue_number, &reason, &now),
+                crate::IssueMonitorRequeueOutcome::Requeued { .. }
+            )
+        }
     }
 }
 
@@ -2451,6 +2471,18 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
             if let Some(window_closed) = payload.get("window_closed") {
                 let window_id = window_closed.get("window_id")?.as_str()?.to_string();
                 return Some(IssueMonitorControl::WindowClosed { window_id });
+            }
+            if let Some(requeue) = payload.get("requeue") {
+                let issue_number = requeue.get("issue_number")?.as_u64()?;
+                let reason = requeue
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("operator requeue")
+                    .to_string();
+                return Some(IssueMonitorControl::Requeue {
+                    issue_number,
+                    reason,
+                });
             }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
@@ -4973,6 +5005,10 @@ exit 0
         );
         let mut reconciled = monitor.agent_status();
         reconciled.scan_stall = projected.scan_stall.clone();
+        // Issue #3628 AC-5: the fleet-outage check is clock-bound for the same
+        // reason, and is reconciled here rather than compared, so this test
+        // keeps asserting what it was written to assert.
+        reconciled.agent_blackout = projected.agent_blackout.clone();
         assert_eq!(
             projected, reconciled,
             "retry ACK follows the reconciled agent projection"
@@ -5454,6 +5490,86 @@ exit 0
                 .and_then(|r| r.last_heartbeat.clone())
                 .as_deref(),
             Some("2026-06-29T00:05:00Z"),
+        );
+    }
+
+    /// Issue #3628 AC-3/AC-6: the GUI recovery reaches the canonical driver,
+    /// and the exact-identity safety the CLI operation enforces survives the
+    /// trip through the control plane.
+    ///
+    /// Seeded in the 2026-08-17 shape: a persisted `agent_failed` hold with no
+    /// launch left to name, next to an unrelated live launch that must not be
+    /// touched.
+    #[test]
+    fn issue_monitor_requeue_control_releases_a_dead_hold_and_spares_a_live_launch() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "an execution generation already exists for issue #42".to_string(),
+                    window_id: Some("tab-1::agent-dead".to_string()),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let live =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "requeue": { "issue_number": 43, "reason": "operator recovery" }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("requeue decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, live),
+            "a row a launch still owns must not be recovered by this control"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("tab-1::agent-live"),
+            Some(43),
+            "the live launch must be untouched"
+        );
+
+        let dead =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "requeue": { "issue_number": 42, "reason": "operator recovery" }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("requeue decodes");
+        assert!(
+            apply_issue_monitor_control(&mut monitor, dead),
+            "releasing a dead hold must request a scan so the row runs now"
+        );
+        let prefs = monitor.prefs();
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "the persisted hold must be gone: {:?}",
+            prefs.failed_issues
+        );
+        assert_eq!(
+            prefs
+                .released_failures
+                .iter()
+                .map(|release| release.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "the release must be published so other processes converge on it"
+        );
+        assert_eq!(
+            prefs.launched_issues.len(),
+            1,
+            "the unrelated live launch must survive the recovery"
         );
     }
 

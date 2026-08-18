@@ -52,6 +52,17 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         }
     ));
 
+    // Issue #3628 AC-3: the GUI recovery for a row whose launch is already
+    // gone. It deliberately names no launch identity — an `agent_failed` row
+    // has none left, which is the whole defect this Issue reports.
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"issue_monitor_requeue","issue_number":3628}"#)
+            .expect("requeue event");
+    assert!(matches!(
+        event,
+        FrontendEvent::IssueMonitorRequeue { issue_number: 3628 }
+    ));
+
     let event: FrontendEvent = serde_json::from_str(
         r#"{"kind":"issue_monitor_configure_issue","issue_number":3165,"linked_issue_kind":"spec"}"#,
     )
@@ -161,6 +172,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            agent_blackout: None,
         },
     };
 

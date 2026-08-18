@@ -158,6 +158,14 @@ export function createKnowledgeKanbanSurface({
           autonomous.dataset.enabled = enabled ? "true" : "false";
           autonomous.classList.toggle("primary", enabled);
         }
+        // Issue #3628 (AC-5): a total outage always leaves some per-issue
+        // failure in `last_error`, so it needs a line that failure cannot
+        // occupy — otherwise the fleet reads healthy exactly when it is down.
+        const blackout = panel.querySelector(".knowledge-monitor-blackout");
+        if (blackout) {
+          blackout.textContent = issueMonitorStatus.agent_blackout || "";
+          blackout.hidden = !issueMonitorStatus.agent_blackout;
+        }
         const error = panel.querySelector(".knowledge-monitor-error");
         if (error) {
           error.textContent = issueMonitorStatus.last_error || "";
@@ -2268,6 +2276,26 @@ export function createKnowledgeKanbanSurface({
           });
           actions.appendChild(launchNow);
         }
+        // Issue #3628 (AC-3): a failed row holds a failure that keeps it out of
+        // the queue. Launch Now only opens the wizard, so returning the row to
+        // the queue *without* starting an agent had no control at all and meant
+        // hand-editing issue-monitor.json. Offered only where such a hold
+        // exists, so the button never promises a change that cannot happen.
+        if (["launch_failed", "agent_failed"].includes(monitorView?.state)) {
+          const requeue = issueMonitorActionButton(
+            "Return to queue",
+            "↺",
+            "requeue",
+            entry.number,
+          );
+          requeue.addEventListener("click", () => {
+            send({
+              kind: "issue_monitor_requeue",
+              issue_number: entry.number,
+            });
+          });
+          actions.appendChild(requeue);
+        }
         if (actions.childElementCount > 0) {
           row.appendChild(actions);
         }
@@ -2516,6 +2544,7 @@ export function createKnowledgeKanbanSurface({
                     <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />
                     <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
                   </div>
+                  <div class="knowledge-monitor-blackout" role="alert" hidden></div>
                   <div class="knowledge-monitor-error" role="alert" hidden></div>
                 </section>
                 <div class="knowledge-status"></div>

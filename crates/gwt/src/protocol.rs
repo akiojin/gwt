@@ -718,6 +718,17 @@ pub enum FrontendEvent {
         #[serde(default)]
         linked_issue_kind: Option<crate::LinkedIssueKind>,
     },
+    /// Issue #3628 (AC-3): return an issue whose launch is gone to the queue,
+    /// without launching anything.
+    ///
+    /// Carries no launch identity on purpose. `stop` and `failover` resolve an
+    /// exact live launch, which is right for them and impossible here — a row
+    /// that reached `agent_failed` has already lost the launch those operations
+    /// would name, and hand-editing `issue-monitor.json` was the only remaining
+    /// recovery. The driver still refuses any row a launch does own.
+    IssueMonitorRequeue {
+        issue_number: u64,
+    },
     IssueMonitorConfigureIssue {
         issue_number: u64,
         #[serde(default)]

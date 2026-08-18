@@ -612,6 +612,15 @@ pub struct IssueMonitorPrefs {
     /// scanned kept reporting a completely healthy snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<String>,
+    /// Issue #3628 (AC-5): when this project's fleet last went to zero running
+    /// agents while it still had work it could run. `None` while at least one
+    /// agent is running, while nothing is runnable, or while the monitor is off.
+    ///
+    /// Persisted for the same reason as `last_scan_at`: the question "has
+    /// anything been running lately?" is asked precisely when the driver that
+    /// watched the fleet go down is no longer around to be asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_blackout_since: Option<String>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -641,6 +650,7 @@ impl Default for IssueMonitorPrefs {
             last_control_receipt: None,
             autonomous_handoffs: Vec::new(),
             last_scan_at: None,
+            agent_blackout_since: None,
         }
     }
 }
@@ -1256,6 +1266,14 @@ pub struct IssueMonitorStatusView {
     /// decision boundary (phase, attempts, needs-human) is observable.
     #[serde(default)]
     pub autonomous_issues: Vec<AutonomousIssueSummary>,
+    /// Issue #3628 (AC-5): the fleet has run nothing for longer than the
+    /// blackout window while work was runnable.
+    ///
+    /// Its own field rather than a projection onto `last_error`, which a total
+    /// outage always occupies with whichever launch happened to fail first —
+    /// the mask that kept the 2026-08-17 outage invisible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_blackout: Option<String>,
 }
 
 /// Atomic agent-facing projection of the live Issue Monitor driver state.
@@ -1292,6 +1310,17 @@ pub struct IssueMonitorAgentStatus {
     /// a monitor that has stopped while every field still reads healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_stall: Option<String>,
+    /// Issue #3628 (AC-5): the fleet has been at zero running agents for longer
+    /// than the blackout window while it still had work it could run.
+    ///
+    /// Reported next to `needs_human` rather than inside it. On 2026-08-17 nine
+    /// issues fell to `agent_failed` and `needs_human` was empty, so the
+    /// escalation surface showed nothing at all — but a total outage is a fact
+    /// about the project, not about any one issue. Writing it onto issues would
+    /// mark nine rows terminal for a cause none of them owns; this field says
+    /// the true thing once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_blackout: Option<String>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -1430,6 +1459,10 @@ pub struct IssueMonitorState {
     #[serde(default, skip)]
     legacy_git_launch_failure_migration_tombstones: BTreeMap<u64, String>,
     last_scan_at: Option<String>,
+    /// Issue #3628 (AC-5): when the fleet went to zero running agents while it
+    /// still had runnable work. `None` while the fleet is healthy.
+    #[serde(default)]
+    agent_blackout_since: Option<String>,
     last_error: Option<String>,
     launch_auth_required: bool,
     active_launches: Vec<u64>,
@@ -2486,6 +2519,7 @@ impl IssueMonitorState {
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
             last_scan_at: None,
+            agent_blackout_since: None,
             last_error: None,
             launch_auth_required: false,
             active_launches: Vec::new(),
@@ -2525,6 +2559,7 @@ impl IssueMonitorState {
             prefs.legacy_git_launch_failure_migration_version;
         state.priority_order = prefs.priority_order;
         state.last_scan_at = prefs.last_scan_at;
+        state.agent_blackout_since = prefs.agent_blackout_since;
         state.launch_profile = prefs.launch_profile;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         // Issue #3627: restore used to re-inject every persisted launch into
@@ -2716,6 +2751,7 @@ impl IssueMonitorState {
             autonomous_records: self.autonomous_records.values().cloned().collect(),
             autonomous_handoffs: self.autonomous_handoffs.clone(),
             last_scan_at: self.last_scan_at.clone(),
+            agent_blackout_since: self.agent_blackout_since.clone(),
         }
     }
 
@@ -4265,6 +4301,8 @@ impl IssueMonitorState {
                     }
                 })
                 .collect(),
+            // Needs a clock to judge; `status_view_at` fills it in.
+            agent_blackout: None,
         }
     }
 
@@ -4355,6 +4393,7 @@ impl IssueMonitorState {
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             scan_stall: None,
+            agent_blackout: None,
         }
     }
 
@@ -4368,7 +4407,92 @@ impl IssueMonitorState {
     pub fn agent_status_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let mut status = self.agent_status();
         status.scan_stall = self.scan_stall_at(now);
+        status.agent_blackout = self.agent_blackout_at(now);
         status
+    }
+
+    /// Issue #3628 (AC-5): describe a fleet that has run nothing for longer than
+    /// the blackout window, or `None` while it is healthy.
+    ///
+    /// The clock is the onset stamped by [`Self::observe_agent_blackout`], not
+    /// the age of the last scan: a driver scanning briskly while every launch
+    /// dies is exactly the 2026-08-17 outage, and a scan-based clock would call
+    /// it healthy. A disabled monitor and an unreadable or future onset all fail
+    /// open, because a field that cries wolf is a field readers stop reading.
+    fn agent_blackout_at(&self, now: &str) -> Option<String> {
+        if !self.config.enabled {
+            return None;
+        }
+        let since = self.agent_blackout_since.as_deref()?;
+        let elapsed_secs = u64::try_from(rfc3339_elapsed_secs(since, now)?).ok()?;
+        (elapsed_secs >= self.agent_blackout_after_secs()).then(|| {
+            format!(
+                "No implementation agent has been running for {elapsed_secs}s while {backlog} \
+                 issue(s) were runnable; the fleet has been down since {since}",
+                backlog = self.runnable_backlog_len(now)
+            )
+        })
+    }
+
+    /// How long a fleet may sit at zero agents before it counts as an outage.
+    ///
+    /// Three poll intervals, matching the scan-stall window (#3633): a launch
+    /// that lands on any of three consecutive scans is a fleet that still
+    /// works, and three misses in a row is not a coincidence.
+    fn agent_blackout_after_secs(&self) -> u64 {
+        self.config.poll_interval_secs.saturating_mul(3)
+    }
+
+    /// Update the blackout onset from what this scan observed.
+    ///
+    /// Called by the scan rather than by the reader because the onset is a
+    /// durable fact about the fleet, and the reader that needs it is typically
+    /// a different process from the one that watched the fleet go quiet.
+    fn observe_agent_blackout(&mut self, now: &str) {
+        let fleet_idle = self.active_launches.is_empty()
+            && self.launched_windows.is_empty()
+            && self.pending_launch_deliveries.is_empty()
+            && self.pending_launches.is_empty();
+        // Every launch path here is gated on `gui_connected`, so a detached
+        // GUI means nothing can start by design — the ordinary overnight
+        // state. Reporting that as an outage would fire nightly and teach
+        // readers to skip the field, which is precisely how the real one on
+        // 2026-08-17 would go unnoticed again.
+        if !self.config.enabled
+            || !self.gui_connected
+            || !fleet_idle
+            || self.runnable_backlog_len(now) == 0
+        {
+            self.agent_blackout_since = None;
+            return;
+        }
+        if self.agent_blackout_since.is_none() {
+            self.agent_blackout_since = Some(now.to_string());
+        }
+    }
+
+    /// Issues this project could be running right now.
+    ///
+    /// Queued work whose retry floor has not passed is deliberately parked
+    /// (Issue #3616 quota holds live here), and an issue already escalated to
+    /// `NeedsHuman` is on a human's desk rather than the fleet's. Counting
+    /// either would raise a blackout for a fleet that is behaving correctly.
+    fn runnable_backlog_len(&self, now: &str) -> usize {
+        let queued = self
+            .queue
+            .iter()
+            .filter(|issue_number| self.retry_ready(**issue_number, now))
+            .count();
+        let held = self
+            .failed_issues
+            .keys()
+            .filter(|issue_number| {
+                self.autonomous_records
+                    .get(issue_number)
+                    .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman)
+            })
+            .count();
+        queued + held
     }
 
     /// Describe a stopped scan cadence, or `None` while it is healthy.
@@ -4403,6 +4527,11 @@ impl IssueMonitorState {
     /// caller-supplied clock so daemon publication and tests stay deterministic.
     pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
         let mut status = self.status_view();
+        // Issue #3628 (AC-5): set before the `last_error` early return below. A
+        // total outage always leaves a failure in `last_error`, so anything
+        // reported after that guard is unreachable in exactly the situation it
+        // exists for.
+        status.agent_blackout = self.agent_blackout_at(now);
         if !status.enabled || status.last_error.is_some() {
             return status;
         }
@@ -6898,6 +7027,11 @@ pub fn scan_issue_monitor_candidates(
         }
     }
 
+    // Issue #3628 (AC-5): the scan is the only place that sees the whole fleet
+    // at one instant, which is what "nothing is running" has to be judged
+    // against.
+    monitor.observe_agent_blackout(now);
+
     summary
 }
 
@@ -7077,9 +7211,11 @@ mod tests {
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
-                // `agent_status` reports the queue; the scan-cadence check is
-                // applied by `agent_status_at`, which needs a clock.
+                // `agent_status` reports the queue; the scan-cadence and
+                // fleet-outage checks are applied by `agent_status_at`, which
+                // needs a clock.
                 scan_stall: None,
+                agent_blackout: None,
             }
         );
     }

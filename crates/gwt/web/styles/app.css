@@ -3113,6 +3113,7 @@ body {
 .knowledge-monitor-summary,
 .knowledge-monitor-settings-copy,
 .knowledge-monitor-max-active,
+.knowledge-monitor-blackout,
 .knowledge-monitor-error {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
@@ -3177,6 +3178,15 @@ body {
 }
 
 .knowledge-monitor-error {
+  color: var(--color-state-blocked);
+}
+
+/* Issue #3628 (AC-5): a project-wide outage, ranked above the per-issue error
+   line it would otherwise hide behind. */
+.knowledge-monitor-blackout {
+  padding: 6px 8px;
+  border: 1px solid var(--color-state-blocked);
+  border-radius: var(--radius-sm);
   color: var(--color-state-blocked);
 }
 

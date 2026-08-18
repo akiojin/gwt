@@ -41761,6 +41761,104 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
     );
 }
 
+/// Issue #3628 AC-3/AC-6: the GUI recovery for a row whose launch is gone.
+///
+/// Launch Now only opens the wizard, so an operator who wanted the row back in
+/// the queue *without* starting an agent had no control at all and fell back to
+/// editing `issue-monitor.json` by hand. Seeded in the 2026-08-17 shape: a
+/// persisted failure hold with no launch left, beside a live launch that the
+/// recovery must not disturb.
+#[test]
+fn app_runtime_issue_monitor_requeue_releases_a_dead_hold_without_launching() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 3629,
+                window_id: "tab-1::agent-live".to_string(),
+            }],
+            failed_issues: vec![gwt::IssueMonitorFailedIssue {
+                issue_number: 3628,
+                message: "an execution generation already exists for issue #3628".to_string(),
+                window_id: Some("tab-1::agent-dead".to_string()),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("save issue monitor prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorRequeue { issue_number: 3628 },
+    );
+
+    assert!(
+        !events.is_empty(),
+        "missing daemon forces the atomic GUI fallback writer"
+    );
+    assert!(
+        runtime.launch_wizard.is_none(),
+        "the recovery returns the row to the queue and must not start an agent"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        persisted.failed_issues.is_empty(),
+        "the persisted hold must be gone: {:?}",
+        persisted.failed_issues
+    );
+    assert_eq!(
+        persisted
+            .released_failures
+            .iter()
+            .map(|release| release.issue_number)
+            .collect::<Vec<_>>(),
+        vec![3628],
+        "the release must be published so other processes converge on it"
+    );
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "the unrelated live launch must survive the recovery"
+    );
+
+    // Aiming the recovery at the live row is refused, and the refusal changes
+    // nothing — killing a running agent is the one mistake no later
+    // compensation can undo.
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorRequeue { issue_number: 3629 },
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "a refused recovery must leave the live launch bound"
+    );
+    assert!(
+        persisted
+            .released_failures
+            .iter()
+            .all(|release| release.issue_number != 3629),
+        "a refused recovery must not publish a release"
+    );
+}
+
 #[test]
 fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
     let _env_lock = env_test_lock()
