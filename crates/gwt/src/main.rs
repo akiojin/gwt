@@ -1189,6 +1189,16 @@ enum UserEvent {
     LogEntry {
         entry: gwt_core::logging::LogEvent,
     },
+    /// Issue #3616: one account-level usage snapshot from the provider-usage
+    /// poller, delivered into the event loop rather than only to clients.
+    ///
+    /// It carries two things the quota classifier needs: corroboration that an
+    /// account really is exhausted, and a periodic tick. The tick matters
+    /// because a quota-blocked pane emits no further output, so the output path
+    /// alone would never reach a pending candidate's settle deadline.
+    ProviderUsageSnapshot {
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+    },
     /// SPEC-2809 Phase F1 — one redacted line from an external process
     /// (gh / git / docker / agent / runner) emitted by
     /// `ProcessConsoleHub`. Broadcast to all WebSocket clients so the
@@ -3051,6 +3061,9 @@ mod tests {
             window_approval_waiting: std::collections::HashMap::new(),
             approval_settle_epoch: 0,
             recoverable_agent_error_windows: std::collections::HashSet::new(),
+            provider_quota_holds: std::collections::HashMap::new(),
+            provider_quota_candidates: std::collections::HashMap::new(),
+            provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
@@ -8389,7 +8402,18 @@ fn main() -> std::io::Result<()> {
     // Claude opt-in toggle request an immediate refresh.
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
     app.set_usage_refresh(usage_refresh.clone());
-    usage_poller::spawn_usage_poller(&runtime, clients.clone(), usage_refresh);
+    // Issue #3616: the poller's account rows also reach AppRuntime, which owns
+    // the provider-quota classifier. A dropped send just means this tick did
+    // not corroborate; the screen notice remains the trigger.
+    let usage_proxy = proxy.clone();
+    usage_poller::spawn_usage_poller(
+        &runtime,
+        clients.clone(),
+        usage_refresh,
+        std::sync::Arc::new(move |accounts| {
+            let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
+        }),
+    );
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
@@ -8650,6 +8674,12 @@ fn main() -> std::io::Result<()> {
                 // Issue #3366 — gated on an open Console window; see
                 // `AppRuntime::process_line_events`.
                 clients.dispatch(app.process_line_events(line));
+            }
+            Event::UserEvent(UserEvent::ProviderUsageSnapshot { accounts }) => {
+                // Issue #3616: corroborate and re-check pending quota
+                // candidates. See `AppRuntime::handle_provider_usage_snapshot`.
+                let events = app.handle_provider_usage_snapshot(accounts, chrono::Utc::now());
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeOutput {
                 id,

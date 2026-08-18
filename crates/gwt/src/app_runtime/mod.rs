@@ -849,6 +849,15 @@ pub(crate) struct ApprovalPromptLatch {
     pub(crate) pending_settle_token: Option<u64>,
 }
 
+/// Issue #3616: a quota notice seen on a live pane, awaiting confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderQuotaCandidate {
+    /// When this uninterrupted run of the notice began. Reset whenever the
+    /// notice leaves the screen or the agent shows activity, so the settle
+    /// window always measures continuous silence.
+    pub(crate) first_seen: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
@@ -1025,6 +1034,28 @@ pub struct AppRuntime {
     pub(crate) window_approval_waiting: HashMap<String, ApprovalPromptLatch>,
     pub(crate) approval_settle_epoch: u64,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
+    /// Issue #3616: agent windows whose provider ran out of quota, with the
+    /// typed failure that was classified from the provider's own notice.
+    ///
+    /// Runtime-only. Holding the classified value rather than re-deriving it
+    /// from the window detail keeps the decision made once, at the one moment
+    /// the provider's wording is on screen.
+    pub(crate) provider_quota_holds: HashMap<String, gwt::IssueMonitorFailure>,
+    /// Issue #3616: quota notices seen on a *live* pane's screen, not yet
+    /// confirmed as a block.
+    ///
+    /// Claude does not exit when its quota runs out — the pane stays alive
+    /// showing the notice and stops responding — so the exit path cannot see
+    /// that shape at all. A candidate is only promoted once it has survived
+    /// [`PROVIDER_QUOTA_SETTLE_SECS`] with no agent activity, or once the usage
+    /// poller independently reports the same account exhausted. That gate is
+    /// what keeps an agent whose own output *contains* the sentence from being
+    /// released out from under itself.
+    pub(crate) provider_quota_candidates: HashMap<String, ProviderQuotaCandidate>,
+    /// Issue #3616: the newest account-level usage snapshot, used only to
+    /// corroborate a screen notice. Never a trigger on its own: the poller is
+    /// silent while no client is connected and Claude's account read is opt-in.
+    pub(crate) provider_usage_accounts: Vec<gwt_core::usage::ProviderUsage>,
     /// SPEC-3431 FR-068: when each agent window last showed activity, so the
     /// heartbeat published to the Issue Monitor can be throttled instead of
     /// firing a daemon control on every hook. Keyed by combined window id.
@@ -2113,6 +2144,9 @@ impl AppRuntime {
             window_approval_waiting: HashMap::new(),
             approval_settle_epoch: 0,
             recoverable_agent_error_windows: HashSet::new(),
+            provider_quota_holds: HashMap::new(),
+            provider_quota_candidates: HashMap::new(),
+            provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
@@ -3082,6 +3116,10 @@ impl AppRuntime {
                     // at the control completion boundary, so no unrelated
                     // FreshRequired state can be mistaken for this result.
                     Some(gwt::IssueMonitorFailure::ResumeWriterConflict { .. }) => true,
+                    // Issue #3616: the launch path never produces one (the
+                    // agent must be running to be refused), and the daemon
+                    // rejects it, so nothing committed.
+                    Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
                             self.issue_monitor_launch_failure_committed(
@@ -3115,6 +3153,11 @@ impl AppRuntime {
                                 ),
                                 issue_number,
                             )
+                        }
+                        // Issue #3616: unreachable from the launch path — the
+                        // agent must be running to receive a provider refusal.
+                        Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
+                            IssueMonitorFailureCommit::Rejected
                         }
                         None => {
                             if monitor.record_launch_failed_delivery(
@@ -3426,6 +3469,13 @@ impl AppRuntime {
         message: &str,
         session_mode: gwt_agent::SessionMode,
     ) -> Option<gwt::IssueMonitorFailure> {
+        // Issue #3616: the quota classification was made while the provider's
+        // notice was still on screen. The window detail derived from it is
+        // written for a human and is not itself a provider notice, so
+        // re-classifying the message would lose the reset instant.
+        if let Some(failure) = self.provider_quota_holds.get(window_id) {
+            return Some(failure.clone());
+        }
         let failure = runtime_events::classify_issue_monitor_failure(message, session_mode)?;
         let gwt::IssueMonitorFailure::ResumeWriterConflict {
             holder_window_id: None,
@@ -3591,6 +3641,33 @@ impl AppRuntime {
                                     ),
                                     issue_number,
                                 )
+                            }
+                            // Issue #3616: same hold the daemon applies, so a
+                            // quota block is not silently downgraded to a
+                            // terminal agent failure when the daemon is down.
+                            Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
+                                resets_at,
+                                ..
+                            }) => {
+                                let issue_number = issue_number_hint
+                                    .or_else(|| monitor.launched_window_issue(window_id));
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                match monitor.try_hold_provider_usage_limit(
+                                    issue_number,
+                                    window_id,
+                                    message.to_string(),
+                                    resets_at.as_deref(),
+                                    &now,
+                                ) {
+                                    gwt::IssueMonitorProviderUsageLimitOutcome::Held => {
+                                        IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                    }
+                                    gwt::IssueMonitorProviderUsageLimitOutcome::Rejected => {
+                                        IssueMonitorFailureCommit::Rejected
+                                    }
+                                }
                             }
                             None => {
                                 let issue_number = if let Some(issue_number) = issue_number_hint {
@@ -6781,11 +6858,17 @@ impl AppRuntime {
                 })?
         };
         let hook_state = self.window_hook_states.get(window_id).copied();
-        Some(gwt::window_state::compose_window_state_with_active_session(
+        let composed = gwt::window_state::compose_window_state_with_active_session(
             pty_state,
             preset,
             hook_state,
             self.active_agent_sessions.contains_key(window_id),
+        );
+        // Issue #3616: applied on the shared base so every reader of a window's
+        // status agrees with the state `recompute_window_state` persisted.
+        Some(gwt::window_state::apply_provider_quota_block(
+            composed,
+            self.provider_quota_holds.contains_key(window_id),
         ))
     }
 
@@ -6909,6 +6992,7 @@ impl AppRuntime {
         self.window_hook_states.clear();
         self.window_approval_waiting.clear();
         self.recoverable_agent_error_windows.clear();
+        self.provider_quota_holds.clear();
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
@@ -6954,6 +7038,10 @@ impl AppRuntime {
             self.active_agent_sessions.contains_key(window_id),
             self.window_approval_waiting.contains_key(window_id),
         );
+        let composed = gwt::window_state::apply_provider_quota_block(
+            composed,
+            self.provider_quota_holds.contains_key(window_id),
+        );
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -6967,7 +7055,33 @@ impl AppRuntime {
         self.window_hook_states.remove(window_id);
         self.clear_runtime_approval_latch_without_status(window_id, true);
         self.recoverable_agent_error_windows.remove(window_id);
+        self.provider_quota_holds.remove(window_id);
+        self.provider_quota_candidates.remove(window_id);
         self.board_all_view_windows.remove(window_id);
+    }
+
+    /// Issue #3616: record the newest account-level usage snapshot and act on
+    /// any candidate it now corroborates.
+    ///
+    /// The snapshot is corroboration only. `limit_reached` is read from local
+    /// rollout files (Codex) or an opt-in account endpoint (Claude), so it can
+    /// be absent exactly when a block is real; the screen notice remains the
+    /// trigger.
+    pub(crate) fn handle_provider_usage_snapshot(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        self.provider_usage_accounts = accounts;
+        self.sweep_provider_quota_candidates(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_provider_usage_accounts(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+    ) {
+        self.provider_usage_accounts = accounts;
     }
 
     fn tracked_window_exists(&self, window_id: &str) -> bool {

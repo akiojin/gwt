@@ -1,6 +1,48 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.83.0] - 2026-08-18
+
+### Bug Fixes
+
+- **test:** Daemon scan marker の待機を固定 2 秒から子プロセスの状態観測へ置き換える
+- **launch:** Provider の quota 枯渇を終端扱いせず hold として扱う
+- **launch:** Quota 枯渇を live pane でも検出し provider 跨ぎで閉じる
+- **launch:** Rustdoc の HTML タグ誤認と timezone 依存テストを修正
+- **agent:** エージェント PTY の終了を exit code / signal / 終了時刻付きで記録する
+- Initialize Grok quick-start issue lineage
+
+### Features
+
+- Grok Build エージェント対応を追加
+- Configure Grok models and PM launch profiles
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3641 の Work event を記録する
+- **work:** #3659 の Work event shard を記帳する
+- **work:** #3659 の Work event shard を追記する
+- **work:** Issue #3616 の Work receipt を settle する
+- **work:** Issue #3341 の Work event を記録する
+- **work:** Issue #3341 の verification event を記録する
+- **work:** Issue #3341 の完了 Work event を記録する
+- **work:** Issue #3608 の完了 event を記録する
+
+### Security
+
+- **test:** Playwright ブラウザ実体化を phase 分離と timeout/retry/cache で耐障害化する
+
+### Styling
+
+- **launch:** コンフリクト解決後の pub use を rustfmt 正準形に戻す
+
+### Testing
+
+- Grok Build の live E2E を安定化
+- Grok Build 選択の backend 反映を待機
+- **launch:** 実 PTY で quota notice から Waiting までを検証する
+
 ## [9.82.0] - 2026-08-18
 
 ### Bug Fixes
