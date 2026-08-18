@@ -4029,11 +4029,12 @@ pub(crate) mod tests {
         capability_generation: u64,
     ) -> gwt_agent::SessionExecutionBinding {
         let owner = generation_scoped_owner();
-        let mut session = gwt_agent::Session::new(
-            worktree,
-            "work/verification-authority",
-            gwt_agent::AgentId::Codex,
-        );
+        let branch = gwt_git::Repository::open(worktree)
+            .expect("open generation fixture repository")
+            .current_branch()
+            .expect("read generation fixture branch")
+            .expect("generation fixture has a branch");
+        let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.project_state_root = Some(worktree.to_path_buf());
         session.linked_issue_number = Some(owner.number);
