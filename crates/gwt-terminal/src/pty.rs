@@ -172,6 +172,10 @@ struct SpawnDiagnostic {
 struct PtyInputState {
     protected: bool,
     queued: VecDeque<Vec<u8>>,
+    /// Ordinary (unprotected) keystrokes that have not been submitted or
+    /// cleared. Used so PM wake injection can wait instead of splicing a
+    /// `[gwt]` prompt into a live TUI composer.
+    unsent_user_input: bool,
 }
 
 pub struct PtyHandle {
@@ -449,6 +453,7 @@ impl PtyHandle {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
+        state.note_user_input(data);
         if state.protected {
             state.queued.push_back(data.to_vec());
             return Ok(());
@@ -467,6 +472,16 @@ impl PtyHandle {
         drop(state);
 
         Self::write_with_locked_writer(&mut writer, data, lock_wait_us)
+    }
+
+    /// Whether the last ordinary keystrokes left unsent prompt content in the
+    /// TUI composer. Escape-only navigation and protected injects do not
+    /// count; submit (`\r`/`\n`) and composer-clear (Ctrl+C / Ctrl+U) reset it.
+    pub fn has_unsent_user_input(&self) -> bool {
+        self.input_state
+            .lock()
+            .map(|state| state.unsent_user_input)
+            .unwrap_or(false)
     }
 
     /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
@@ -798,6 +813,77 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
                 reason: format!("execute released PTY target: {error}"),
             })?;
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+impl PtyInputState {
+    fn note_user_input(&mut self, data: &[u8]) {
+        self.unsent_user_input = next_unsent_user_input(self.unsent_user_input, data);
+    }
+}
+
+/// Issue #3702: classify one ordinary PTY write as leaving, submitting, or
+/// clearing unsent composer content. Protected injects never call this.
+fn next_unsent_user_input(unsent: bool, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return unsent;
+    }
+    if data.iter().any(|&byte| matches!(byte, 0x03 | 0x15)) {
+        return false;
+    }
+    if let Some(offset) = data
+        .iter()
+        .rposition(|&byte| byte == b'\r' || byte == b'\n')
+    {
+        return chunk_has_prompt_content(&data[offset + 1..]);
+    }
+    unsent || chunk_has_prompt_content(data)
+}
+
+fn chunk_has_prompt_content(data: &[u8]) -> bool {
+    let mut index = 0;
+    while index < data.len() {
+        match data[index] {
+            0x1b => index = skip_escape_sequence(data, index),
+            0x08 | 0x09 | 0x7f => return true,
+            0x20..=0x7e => return true,
+            byte if byte >= 0x80 => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn skip_escape_sequence(data: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    if index >= data.len() {
+        return index;
+    }
+    match data[index] {
+        b'[' => {
+            index += 1;
+            while index < data.len() && (0x20..0x40).contains(&data[index]) {
+                index += 1;
+            }
+            if index < data.len() {
+                index += 1;
+            }
+            index
+        }
+        b']' => {
+            index += 1;
+            while index < data.len() && data[index] != 0x07 && data[index] != 0x1b {
+                index += 1;
+            }
+            if index < data.len() && data[index] == 0x07 {
+                index + 1
+            } else if index + 1 < data.len() && data[index] == 0x1b {
+                index + 2
+            } else {
+                index
+            }
+        }
+        _ => index + 1,
     }
 }
 
@@ -1662,6 +1748,55 @@ mod tests {
         invalidator.join().expect("invalidation thread");
 
         assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn next_unsent_user_input_tracks_compose_submit_and_clear() {
+        assert!(
+            next_unsent_user_input(false, "ちゃんとbunx/npxで実行されてい".as_bytes()),
+            "printable / UTF-8 composer text is unsent"
+        );
+        assert!(
+            next_unsent_user_input(true, b"\x1b[A"),
+            "navigation must not clear an already-unsent composer"
+        );
+        assert!(
+            !next_unsent_user_input(false, b"\x1b[A"),
+            "escape-only input is not composer content"
+        );
+        assert!(
+            !next_unsent_user_input(true, "ますか？\r".as_bytes()),
+            "a trailing submit consumes the composer"
+        );
+        assert!(
+            next_unsent_user_input(false, b"hello\rworld"),
+            "bytes after the last submit start a new unsent composer"
+        );
+        assert!(
+            !next_unsent_user_input(true, b"\x03"),
+            "Ctrl+C clears the composer"
+        );
+        assert!(
+            !next_unsent_user_input(true, b"\x15"),
+            "Ctrl+U clears the composer"
+        );
+        assert!(
+            !next_unsent_user_input(false, b"\x1b[1;1R"),
+            "cursor-position replies are not composer content"
+        );
+    }
+
+    #[test]
+    fn write_input_marks_unsent_user_input_until_submit() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper");
+        assert!(!handle.has_unsent_user_input());
+        handle
+            .write_input("実行されてい".as_bytes())
+            .expect("compose");
+        assert!(handle.has_unsent_user_input());
+        handle.write_input(b"\r").expect("submit");
+        assert!(!handle.has_unsent_user_input());
     }
 
     #[test]

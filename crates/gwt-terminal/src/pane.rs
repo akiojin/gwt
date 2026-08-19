@@ -414,6 +414,11 @@ impl Pane {
         self.pty.write_input(data)
     }
 
+    /// Issue #3702: the TUI composer still holds unsent keystrokes.
+    pub fn has_unsent_user_input(&self) -> bool {
+        self.pty.has_unsent_user_input()
+    }
+
     /// Resize the pane (PTY + vt100 parser).
     ///
     /// Emits an `info` event at `target = gwt::resize::pane` capturing the
