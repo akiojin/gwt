@@ -196,6 +196,34 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn detect_by_command_maps_grok_build_and_version() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable = temp.path().join("grok");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '1.0.3\\n'\n")
+            .expect("write Grok Build fixture");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("read Grok Build fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("make Grok Build fixture executable");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", temp.path());
+
+        let detected =
+            AgentDetector::detect_by_command("grok").expect("Grok Build fixture must be detected");
+
+        assert_eq!(detected.agent_id, AgentId::GrokBuild);
+        assert_eq!(detected.version.as_deref(), Some("1.0.3"));
+        assert_eq!(detected.path, executable);
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn detect_by_command_preserves_the_absolute_which_path_off_windows() {
@@ -225,10 +253,11 @@ mod tests {
     #[test]
     fn builtin_probes_cover_all_variants() {
         let probes = builtin_probes();
-        assert_eq!(probes.len(), 8);
+        assert_eq!(probes.len(), 9);
         let ids: Vec<_> = probes.iter().map(|p| &p.id).collect();
         assert!(ids.contains(&&AgentId::ClaudeCode));
         assert!(ids.contains(&&AgentId::Codex));
+        assert!(ids.contains(&&AgentId::GrokBuild));
         assert!(ids.contains(&&AgentId::Antigravity));
         assert!(ids.contains(&&AgentId::Gemini));
         assert!(ids.contains(&&AgentId::OpenCode));

@@ -2305,8 +2305,22 @@ impl AppRuntime {
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
-        if previous_profiles.preferred_profile().is_none() {
+        let Some(profile_agent_id) = previous_profiles
+            .preferred_profile()
+            .map(|profile| profile.agent_id.clone())
+        else {
             return Ok(None);
+        };
+        // Issue #3676 AC-2: refuse before any terminal is spawned when the
+        // profile provider's CLI is definitively unauthenticated. The error
+        // funnels through the normal launch-failed path, so the active slot
+        // is released instead of burning on a provider login screen.
+        if (self.issue_monitor_provider_auth_probe)(&profile_agent_id)
+            == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+        {
+            return Err(gwt::issue_monitor::provider_unauthenticated_message(
+                &profile_agent_id,
+            ));
         }
         // SPEC #3200 FR-015: for the independent review, force a different model
         // than the implementer's (when configured) so the verdict is not a
@@ -2336,6 +2350,7 @@ impl AppRuntime {
                 &target_branch,
                 issue_number,
                 delivery_id.clone(),
+                &profile_agent_id,
             )?;
             if let Some(events) = events {
                 return Ok(Some(events));
@@ -2475,11 +2490,23 @@ impl AppRuntime {
         target_branch: &str,
         issue_number: u64,
         delivery_id: Option<String>,
+        profile_agent_id: &str,
     ) -> Result<(Option<Vec<OutboundEvent>>, Option<String>), String> {
         let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
         else {
             return Ok((None, None));
         };
+        // Issue #3676 AC-1: a stored session only qualifies for resume when
+        // its provider matches the Monitor's current launch profile. A
+        // mismatched provider must fall through to a fresh launch on the
+        // profile provider instead of re-binding the slot to the old CLI.
+        if !session
+            .agent_id
+            .command()
+            .eq_ignore_ascii_case(profile_agent_id.trim())
+        {
+            return Ok((None, None));
+        }
         if !session_exact_resume_materializable(project_root, &session) {
             return Ok((None, None));
         }
@@ -2991,15 +3018,21 @@ impl AppRuntime {
         let runtime_proof = match runtime_disposition {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof)
             | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(proof) => {
-                Some(proof)
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live => {
                 local_runtime_incarnation.map(|runtime_incarnation| {
-                    gwt_agent::ManualLaunchRuntimeProof {
-                        host_pid: std::process::id(),
-                        runtime_incarnation,
-                    }
+                    gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                        gwt_agent::ManualLaunchRuntimeProof {
+                            host_pid: std::process::id(),
+                            runtime_incarnation,
+                        },
+                    )
                 })
+            }
+            // Issue #3457: absence is exact evidence, not a missing proof.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
@@ -3033,6 +3066,14 @@ impl AppRuntime {
                 ))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(_) => Ok(
+                super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
+            ),
+            // Issue #3457: the holder published no sidecar in any namespace,
+            // so no Host is running it and no proof can ever appear. Unlike a
+            // Terminal holder there is no exit record to cross-check against
+            // the durable status, so a `.toml` a crashed Host left behind as
+            // Running must still be recoverable here.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
                 super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
             ),
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {
@@ -4404,6 +4445,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_checked_out_develop_in_container_workspace() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -4416,6 +4458,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_checked_out_main_without_develop() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &[], Some("main"));
 
@@ -4428,6 +4471,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_existing_normal_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");
 
@@ -4440,6 +4484,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_existing_bare_head_without_default_worktree() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
 
@@ -4452,6 +4497,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_empty_bare_repository() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_empty_bare_workspace(&workspace);
 
@@ -4464,6 +4510,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_unborn_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repository");
         run_git(&repo, &["init", "-q", "-b", "future"]);
@@ -4477,6 +4524,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_develop_worktree_from_detached_head() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         run_git(&repo, &["branch", "develop"]);
@@ -4494,6 +4542,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_falls_back_from_unusable_root_git_metadata() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -4507,6 +4556,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_develop_when_project_root_is_bare() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -4519,6 +4569,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_local_ref_that_is_not_a_commit() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &["main"], Some("main"));
         let blob = git_stdout(&workspace.join("seed"), &["rev-parse", "master:README.md"]);
@@ -4537,6 +4588,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_git_error_when_fallback_is_unavailable() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -4552,6 +4604,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_malformed_local_ref_error() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         fs::write(repo.join(".git/refs/heads/main"), "not-an-object-id\n")

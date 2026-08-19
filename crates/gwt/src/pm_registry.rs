@@ -20,6 +20,27 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+/// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
+/// injects into the resident PM must end.
+///
+/// Three separate injection points drive a PM cycle — the delta wake, the
+/// periodic wake, and the Stop-gate forced continuation — and each used to
+/// phrase the reporting expectation itself. Injected text outranks the gwt-pm
+/// skill body for the reading agent, so those three sentences, not the
+/// milestone-only cadence in `gwt_skills::pm_guidance`, decided what the PM
+/// actually did: both wakes closed with a flat "report the milestone digest"
+/// and produced a digest on every tick, change or no change.
+///
+/// One canonical clause, used verbatim by all three, keeps the wordings from
+/// drifting apart again. It constrains the *report* and never the cycle: the
+/// reconcile still runs in full, and the wake that drove it is recorded in
+/// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
+/// distinguishable from a dead one without a keepalive line in the
+/// conversation (FR-4).
+pub const PM_CYCLE_REPORTING_CLAUSE: &str =
+    "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
+     changed, end the cycle with no user-facing output.";
+
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmRegistration {
@@ -71,10 +92,12 @@ pub const PM_DEFAULT_AGENT: &str = "claude";
 /// Agents that can resolve the `$gwt-pm` bootstrap prompt.
 ///
 /// Managed assets only reach agents with a skills mirror, and `pm_guidance`
-/// writes the `.claude` and `.codex` mirrors. Launching the PM as any other
-/// agent would hand it a prompt that resolves to nothing — the exact failure
-/// the T-052 materialization fix removed, reintroduced through configuration.
-pub const PM_SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
+/// writes the `.claude` and `.codex` mirrors. Grok consumes the existing
+/// Claude-compatible target rather than inventing a third mirror. Launching
+/// the PM as any other agent would hand it a prompt that resolves to nothing —
+/// the exact failure the T-052 materialization fix removed, reintroduced
+/// through configuration.
+pub const PM_SUPPORTED_AGENTS: &[&str] = &["claude", "codex", "grok"];
 
 pub fn pm_agent_is_supported(agent_id: &str) -> bool {
     PM_SUPPORTED_AGENTS.contains(&agent_id)
@@ -115,7 +138,9 @@ impl PmSettings {
     /// true even for prefs written by a newer or misconfigured build.
     pub fn launch_profile_or_default(&self) -> PmLaunchProfile {
         match self.launch_profile.as_ref() {
-            Some(profile) if pm_agent_is_supported(&profile.agent_id) => profile.clone(),
+            Some(profile) if pm_agent_is_supported(&profile.agent_id) => {
+                profile.clone().normalized()
+            }
             Some(profile) => {
                 tracing::warn!(
                     agent_id = %profile.agent_id,
@@ -129,6 +154,30 @@ impl PmSettings {
 }
 
 impl PmLaunchProfile {
+    /// Canonicalize user-entered optional tuning without changing the agent
+    /// identity or the legacy optional schema. Blank values mean provider
+    /// defaults; non-blank values are persisted and launched without their UI
+    /// padding.
+    pub fn normalized(mut self) -> Self {
+        let normalize = |value: Option<String>| {
+            value.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        };
+        self.model = normalize(self.model);
+        self.reasoning = normalize(self.reasoning);
+        if self.agent_id == "grok"
+            && self
+                .reasoning
+                .as_deref()
+                .is_some_and(|effort| effort.eq_ignore_ascii_case("auto"))
+        {
+            self.reasoning = None;
+        }
+        self
+    }
+
     pub fn default_profile() -> Self {
         Self {
             agent_id: PM_DEFAULT_AGENT.to_string(),
@@ -569,6 +618,37 @@ pub fn is_pm_worktree(path: &Path) -> bool {
     pm_worktree_store_dir(path).is_some()
 }
 
+/// [`is_pm_worktree`] for callers holding an already-canonicalized path.
+///
+/// The Work mutation paths canonicalize every path they touch, while
+/// [`gwt_projects_dir`](gwt_core::paths::gwt_projects_dir) is built from `HOME`
+/// verbatim. When `HOME` traverses a symlink — macOS `/var` -> `/private/var`
+/// is the everyday case under a temporary home — the two spellings disagree
+/// and the plain shape test rejects a genuine PM worktree. Comparing both
+/// spellings keeps the answer about the path, not about how it was spelled.
+pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    if is_pm_worktree(path) {
+        return true;
+    }
+    let Some(canonical_projects_dir) =
+        dunce::canonicalize(gwt_core::paths::gwt_projects_dir()).ok()
+    else {
+        return false;
+    };
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
+    pm_dir
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|projects_dir| projects_dir == canonical_projects_dir)
+}
+
 /// The project store that owns `path`, when `path` is that store's PM
 /// worktree: `<gwt projects dir>/<repo hash>` for
 /// `<gwt projects dir>/<repo hash>/pm/worktree`.
@@ -896,6 +976,48 @@ pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
         prefs
             .registration
             .is_some_and(|registration| registration.session_id == session_id)
+    })
+}
+
+/// SPEC-3431 FR-032 (Issue #3477): is `session_id` this project's registered
+/// PM, running in this project's canonical PM worktree?
+///
+/// The Work mutation paths use this to grant a branchless identity to the one
+/// Session that has no branch by design. It is stricter than
+/// [`session_is_registered_pm`] on purpose: PM privilege over conversational
+/// operations only needs the subject, but rewriting Work state also needs the
+/// *container* to be the exact worktree this project's PM was given. Three
+/// facts must agree, and any disagreement is not privileged (fail-closed):
+///
+/// 1. the durable registration names `session_id`,
+/// 2. the registration's worktree is `worktree`, and
+/// 3. `worktree` is the canonical PM worktree derived from
+///    `project_state_root` itself.
+///
+/// (3) is what keeps a stale registration pointing at some other directory —
+/// or a foreign project's PM path — from authorizing anything here. Paths are
+/// compared canonically because callers hand us an already-canonicalized
+/// worktree while the derived and stored paths may still contain symlinks.
+pub fn registered_pm_worktree_authority(
+    project_state_root: &Path,
+    session_id: &str,
+    worktree: &Path,
+) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let canonical = |path: &Path| dunce::canonicalize(path).ok();
+    let Some(worktree) = canonical(worktree) else {
+        return false;
+    };
+    if canonical(&pm_worktree_path_for_repo_path(project_state_root)).as_ref() != Some(&worktree) {
+        return false;
+    }
+    load_pm_prefs(&pm_prefs_path_for_repo_path(project_state_root)).is_ok_and(|prefs| {
+        prefs.registration.is_some_and(|registration| {
+            registration.session_id == session_id
+                && canonical(Path::new(&registration.worktree_path)).as_ref() == Some(&worktree)
+        })
     })
 }
 
@@ -1467,6 +1589,96 @@ mod tests {
         let reloaded = load_pm_prefs(&path).expect("reload");
         assert_eq!(reloaded.settings.launch_profile, Some(configured.clone()));
         assert_eq!(reloaded.settings.launch_profile_or_default(), configured);
+    }
+
+    /// SPEC-3431 FR-119/FR-120 / T-484: Grok uses the existing
+    /// Claude-compatible managed target, but its PM identity and launch
+    /// tuning remain Grok-specific in durable project settings. Older prefs
+    /// may omit every optional tuning value and must still deserialize.
+    #[test]
+    fn grok_launch_profile_is_supported_and_preserves_optional_launch_tuning() {
+        let (_dir, path) = temp_prefs_path();
+        let configured = PmLaunchProfile {
+            agent_id: "grok".to_string(),
+            model: Some("grok-4.20-beta".to_string()),
+            reasoning: Some("xhigh".to_string()),
+            version: None,
+        };
+        let prefs = PmPrefs {
+            settings: PmSettings {
+                launch_profile: Some(configured.clone()),
+                ..PmSettings::default()
+            },
+            ..PmPrefs::default()
+        };
+
+        assert!(
+            pm_agent_is_supported("grok"),
+            "Grok is a valid PM agent through the Claude-compatible managed target"
+        );
+        assert_eq!(prefs.settings.launch_profile_or_default(), configured);
+
+        save_pm_prefs(&path, &prefs).expect("save Grok PM profile");
+        let reloaded = load_pm_prefs(&path).expect("reload Grok PM profile");
+        assert_eq!(
+            reloaded.settings.launch_profile,
+            prefs.settings.launch_profile
+        );
+
+        let legacy: PmPrefs = serde_json::from_str(
+            r#"{"settings":{"auto_start":true,"launch_profile":{"agent_id":"grok"}}}"#,
+        )
+        .expect("legacy profile with omitted optional tuning remains readable");
+        assert_eq!(
+            legacy.settings.launch_profile_or_default(),
+            PmLaunchProfile {
+                agent_id: "grok".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+            }
+        );
+    }
+
+    #[test]
+    fn launch_profile_normalizes_model_and_reasoning_whitespace() {
+        let settings = PmSettings {
+            launch_profile: Some(PmLaunchProfile {
+                agent_id: "codex".to_string(),
+                model: Some("  gpt-5.6  ".to_string()),
+                reasoning: Some("  xhigh  ".to_string()),
+                version: None,
+            }),
+            ..PmSettings::default()
+        };
+        let normalized = settings.launch_profile_or_default();
+        assert_eq!(normalized.model.as_deref(), Some("gpt-5.6"));
+        assert_eq!(normalized.reasoning.as_deref(), Some("xhigh"));
+
+        let blank = PmSettings {
+            launch_profile: Some(PmLaunchProfile {
+                agent_id: "codex".to_string(),
+                model: Some(" \t ".to_string()),
+                reasoning: Some("  ".to_string()),
+                version: None,
+            }),
+            ..PmSettings::default()
+        }
+        .launch_profile_or_default();
+        assert_eq!(blank.model, None);
+        assert_eq!(blank.reasoning, None);
+
+        let grok_auto = PmSettings {
+            launch_profile: Some(PmLaunchProfile {
+                agent_id: "grok".to_string(),
+                model: None,
+                reasoning: Some(" AUTO ".to_string()),
+                version: None,
+            }),
+            ..PmSettings::default()
+        }
+        .launch_profile_or_default();
+        assert_eq!(grok_auto.reasoning, None);
     }
 
     /// A profile naming an agent with no skills mirror would hand the PM a

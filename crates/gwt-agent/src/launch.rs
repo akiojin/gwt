@@ -14,6 +14,17 @@ use crate::{
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
+/// `RUST_LOG` filter that turns on Codex's own file logging (Issue #3341).
+///
+/// Codex writes `$CODEX_HOME/log/codex-tui.log` (default
+/// `~/.codex/log/codex-tui.log`) through a `RUST_LOG`-driven filter. gwt used
+/// to launch Codex without setting it, so the directory stayed empty and an
+/// agent that vanished mid-turn left no provider-side evidence to correlate
+/// against gwt's own PTY exit record. `info` on the Codex crates is the level
+/// Codex documents for diagnostics; it names Codex crates only so the value
+/// cannot be confused with gwt's own logging filter.
+pub const CODEX_FILE_LOG_FILTER: &str = "codex_core=info,codex_tui=info";
+
 /// Build the Claude Code `--settings` inline JSON for session-level toggles.
 ///
 /// Both `fastMode` and `ultracode` ride the single `--settings` channel
@@ -148,10 +159,10 @@ fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
 /// etc.) remain the responsibility of the agent-specific builder methods.
 pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
     match agent {
-        // Keep Codex out of the alternate screen so the PTY emits normal
+        // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
         // CLI's documented inline mode for preserving terminal history.
-        AgentId::Codex => vec!["--no-alt-screen".to_string()],
+        AgentId::Codex | AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
         | AgentId::Gemini
@@ -537,7 +548,7 @@ pub enum ExecutionLaunchIntent {
         operation_id: String,
         expected_binding: crate::ExecutionBindingIdentity,
         expected_predecessor: Option<Box<crate::SessionExecutionIdentity>>,
-        expected_runtime: Option<ManualLaunchRuntimeProof>,
+        expected_runtime: Option<ManualLaunchRuntimeEvidence>,
         predecessor_kind: ManualLaunchSuccessorPredecessor,
     },
     /// Manual successor already prepared by the typed pre-pane coordinator.
@@ -550,6 +561,27 @@ pub enum ExecutionLaunchIntent {
 pub struct ManualLaunchRuntimeProof {
     pub host_pid: u32,
     pub runtime_incarnation: u64,
+}
+
+/// What the runtime layer can say about an exact terminal predecessor.
+///
+/// Issue #3457: a Host that dies without settling leaves an orphan `.toml`
+/// behind while its runtime namespace is cleared on the next start. Requiring
+/// a sidecar proof then makes the predecessor unrecoverable, because the only
+/// process that could have published one is gone. Absence is itself exact
+/// evidence — a launched Session always publishes a sidecar into its own
+/// Host's namespace — so it is modeled alongside the proof rather than folded
+/// into "no evidence".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualLaunchRuntimeEvidence {
+    Proof(ManualLaunchRuntimeProof),
+    Absent,
+}
+
+impl From<ManualLaunchRuntimeProof> for ManualLaunchRuntimeEvidence {
+    fn from(proof: ManualLaunchRuntimeProof) -> Self {
+        Self::Proof(proof)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1237,6 +1269,23 @@ impl AgentLaunchBuilder {
 
     /// Build the final `LaunchConfig`.
     pub fn build(mut self) -> LaunchConfig {
+        if self.agent_id == AgentId::GrokBuild {
+            let normalize = |value: Option<String>| {
+                value.and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                })
+            };
+            self.model = normalize(self.model.take());
+            self.reasoning_level = normalize(self.reasoning_level.take());
+            if self
+                .reasoning_level
+                .as_deref()
+                .is_some_and(|effort| effort.eq_ignore_ascii_case("auto"))
+            {
+                self.reasoning_level = None;
+            }
+        }
         self.working_dir = self
             .working_dir
             .as_ref()
@@ -1306,6 +1355,9 @@ impl AgentLaunchBuilder {
             }
             AgentId::Codex => {
                 self.build_codex_args(&mut args, &mut env_vars);
+            }
+            AgentId::GrokBuild => {
+                self.build_grok_build_args(&mut args);
             }
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
@@ -1540,6 +1592,14 @@ impl AgentLaunchBuilder {
             "1".to_string(),
         );
 
+        // Issue #3341: Codex writes `$CODEX_HOME/log/codex-tui.log` only for
+        // the crates its `RUST_LOG` filter selects, so an unset (or
+        // gwt-inherited) value leaves the directory empty and the provider
+        // side of a mid-turn death unrecorded. Set the filter explicitly here;
+        // `env_overrides` is merged after agent-specific env, so an explicit
+        // caller override still wins.
+        env_vars.insert("RUST_LOG".to_string(), CODEX_FILE_LOG_FILTER.to_string());
+
         // SPEC-1921 FR-103 (2026-05-18 amendment): when a Codex Backend
         // Override profile is attached, materialize a worktree-local
         // CODEX_HOME containing a generated
@@ -1675,6 +1735,39 @@ impl AgentLaunchBuilder {
 
         if self.skip_permissions {
             args.push("--yolo".to_string());
+        }
+    }
+
+    fn build_grok_build_args(&self, args: &mut Vec<String>) {
+        args.extend(canonical_launch_args(&AgentId::GrokBuild));
+
+        match self.session_mode {
+            SessionMode::Continue => args.push("--continue".to_string()),
+            SessionMode::Resume => {
+                args.push("--resume".to_string());
+                if let Some(ref id) = self.resume_session_id {
+                    args.push(id.clone());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+
+        if let Some(model) = self.model.as_deref() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+
+        if let Some(effort) = self
+            .reasoning_level
+            .as_deref()
+            .filter(|effort| !effort.eq_ignore_ascii_case("auto"))
+        {
+            args.push("--effort".to_string());
+            args.push(effort.to_string());
+        }
+
+        if self.skip_permissions {
+            args.push("--always-approve".to_string());
         }
     }
 
@@ -1853,6 +1946,22 @@ mod tests {
             .into_owned()
     }
 
+    fn assert_single_option_pair(args: &[String], flag: &str, value: &str) {
+        let matches = args
+            .windows(2)
+            .filter(|pair| pair[0] == flag && pair[1] == value)
+            .count();
+        assert_eq!(
+            matches, 1,
+            "expected exactly one `{flag} {value}` pair in {args:?}"
+        );
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == flag).count(),
+            1,
+            "expected exactly one `{flag}` flag in {args:?}"
+        );
+    }
+
     #[test]
     fn canonical_launch_args_for_codex_contains_no_alt_screen() {
         let args = canonical_launch_args(&AgentId::Codex);
@@ -1863,7 +1972,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_launch_args_for_non_codex_agents_is_empty() {
+    fn canonical_launch_args_for_grok_build_contains_no_alt_screen() {
+        assert_eq!(
+            canonical_launch_args(&AgentId::GrokBuild),
+            vec!["--no-alt-screen".to_string()]
+        );
+    }
+
+    #[test]
+    fn canonical_launch_args_for_agents_without_defaults_is_empty() {
         // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
@@ -2505,6 +2622,7 @@ mod tests {
     fn build_non_codex_agents_do_not_enable_goal_feature() {
         for agent in [
             AgentId::ClaudeCode,
+            AgentId::GrokBuild,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -2761,6 +2879,123 @@ mod tests {
             spec_arg.map(String::as_str),
             Some("@google/gemini-cli@latest")
         );
+    }
+
+    #[test]
+    fn resolve_runner_latest_uses_official_grok_build_package() {
+        let runner = resolve_runner(&AgentId::GrokBuild, "latest");
+        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
+        assert_eq!(
+            spec_arg.map(String::as_str),
+            Some("@xai-official/grok@latest")
+        );
+    }
+
+    #[test]
+    fn build_grok_build_maps_launch_modes_and_permission_flag() {
+        let normal = AgentLaunchBuilder::new(AgentId::GrokBuild).build();
+        assert_eq!(normal.command, "grok");
+        assert_eq!(normal.display_name, "Grok Build");
+        assert_eq!(normal.args, ["--no-alt-screen"]);
+
+        let continue_latest = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Continue)
+            .build();
+        assert_eq!(continue_latest.args, ["--no-alt-screen", "--continue"]);
+
+        let resume = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("grok-session-42")
+            .skip_permissions(true)
+            .build();
+        assert_eq!(
+            resume.args,
+            [
+                "--no-alt-screen",
+                "--resume",
+                "grok-session-42",
+                "--always-approve",
+            ]
+        );
+
+        let resume_latest = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Resume)
+            .build();
+        assert_eq!(resume_latest.args, ["--no-alt-screen", "--resume"]);
+    }
+
+    #[test]
+    fn build_grok_build_maps_model_and_effort_for_every_launch_mode() {
+        // SPEC-1921 T483: Grok Build uses the same exact option/value argv
+        // pairs for new, continue, and resume launches.
+        let cases = [
+            (SessionMode::Normal, None, "none"),
+            (SessionMode::Continue, None, "high"),
+            (SessionMode::Resume, Some("grok-session-42"), "max"),
+        ];
+
+        for (mode, resume_id, effort) in cases {
+            let mut builder = AgentLaunchBuilder::new(AgentId::GrokBuild)
+                .model("grok-4.20-beta")
+                .reasoning_level(effort)
+                .session_mode(mode);
+            if let Some(resume_id) = resume_id {
+                builder = builder.resume_session_id(resume_id);
+            }
+
+            let config = builder.build();
+
+            assert_eq!(config.model.as_deref(), Some("grok-4.20-beta"));
+            assert_eq!(config.reasoning_level.as_deref(), Some(effort));
+            assert_single_option_pair(&config.args, "--model", "grok-4.20-beta");
+            assert_single_option_pair(&config.args, "--effort", effort);
+        }
+    }
+
+    #[test]
+    fn build_grok_build_accepts_every_common_effort_value() {
+        // Auto is tested separately as the CLI-default sentinel. Every other
+        // common value must be forwarded verbatim to Grok Build.
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let config = AgentLaunchBuilder::new(AgentId::GrokBuild)
+                .reasoning_level(effort)
+                .build();
+
+            assert_eq!(config.reasoning_level.as_deref(), Some(effort));
+            assert_single_option_pair(&config.args, "--effort", effort);
+        }
+    }
+
+    #[test]
+    fn build_grok_build_distinguishes_explicit_values_from_cli_defaults() {
+        let explicit = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model("grok-4.20-beta")
+            .reasoning_level("high")
+            .build();
+        assert_single_option_pair(&explicit.args, "--model", "grok-4.20-beta");
+        assert_single_option_pair(&explicit.args, "--effort", "high");
+
+        let cli_defaults = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model("")
+            .reasoning_level("auto")
+            .build();
+
+        assert_eq!(cli_defaults.reasoning_level, None);
+        assert!(!cli_defaults.args.iter().any(|arg| arg == "--model"));
+        assert!(!cli_defaults.args.iter().any(|arg| arg == "--effort"));
+
+        let whitespace_defaults = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model(" \t ")
+            .reasoning_level(" \t ")
+            .build();
+        assert!(!whitespace_defaults.args.iter().any(|arg| arg == "--model"));
+        assert!(!whitespace_defaults.args.iter().any(|arg| arg == "--effort"));
+
+        let provider_defined = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .model("DefaultXL")
+            .build();
+        assert_eq!(provider_defined.model.as_deref(), Some("DefaultXL"));
+        assert_single_option_pair(&provider_defined.args, "--model", "DefaultXL");
     }
 
     #[test]
@@ -4103,5 +4338,41 @@ mod tests {
             .env_vars
             .keys()
             .any(|k| k.starts_with("GWT_CODEX_BACKEND_API_KEY_")));
+    }
+
+    /// Issue #3341: Codex only writes `$CODEX_HOME/log/codex-tui.log` when
+    /// `RUST_LOG` selects its crates. Launching without it leaves the provider
+    /// side of a mid-turn death completely unrecorded.
+    #[test]
+    fn codex_launch_enables_provider_file_logging() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert_eq!(
+            config.env_vars.get("RUST_LOG").map(String::as_str),
+            Some(CODEX_FILE_LOG_FILTER)
+        );
+    }
+
+    /// An explicit caller override still wins, so a deeper provider trace can
+    /// be requested for one launch without editing gwt.
+    #[test]
+    fn codex_launch_honors_an_explicit_rust_log_override() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .env("RUST_LOG", "codex_core=trace")
+            .build();
+
+        assert_eq!(
+            config.env_vars.get("RUST_LOG").map(String::as_str),
+            Some("codex_core=trace")
+        );
+    }
+
+    /// The filter names Codex crates only. gwt's own `RUST_LOG` value would
+    /// silence Codex entirely, which is how `~/.codex/log/` stayed empty.
+    #[test]
+    fn other_agents_do_not_inherit_the_codex_log_filter() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+
+        assert!(!config.env_vars.contains_key("RUST_LOG"));
     }
 }

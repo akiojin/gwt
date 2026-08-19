@@ -402,6 +402,13 @@ pub(crate) fn write_issue_labels_via_gh(
     if labels_to_add.is_empty() && labels_to_remove.is_empty() {
         return Ok(());
     }
+    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
+    // applies the unsandboxed-gh test guard itself.
+    if let Some(detail) =
+        gwt_core::process_console::unsandboxed_gh_denial(&format!("gh issue edit #{issue_number}"))
+    {
+        return Err(format!("gh issue edit #{issue_number}: {detail}"));
+    }
     let mut command = gwt_core::process::hidden_command(gh_executable());
     command.args(["issue", "edit", &issue_number.to_string()]);
     for label in labels_to_add {
@@ -440,6 +447,12 @@ fn run_gh_issue_command_with_gate(
     args: &[&str],
     label: &str,
 ) -> Result<String, String> {
+    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
+    // applies the unsandboxed-gh test guard itself — before the quota gate,
+    // so a refusal never depends on (or pollutes) quota state.
+    if let Some(detail) = gwt_core::process_console::unsandboxed_gh_denial(label) {
+        return Err(format!("{label}: {detail}"));
+    }
     let now = chrono::Utc::now();
     if let Some(detail) = gwt_core::github_quota::suppressed_spawn_detail(gate, args, now) {
         return Err(format!("{label}: {detail}"));
@@ -468,6 +481,11 @@ fn run_gh_issue_command_with_gate(
 /// Ask GitHub for the authoritative reset window. `gh` never prints it, and the
 /// `rate_limit` endpoint itself spends no budget.
 fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
+    // Issue #3675 AC-2: the probe is a gh spawn too; skip it when the test
+    // guard forbids unsandboxed gh (the caller then records a short backoff).
+    if gwt_core::process_console::unsandboxed_gh_denial("gh api rate_limit").is_some() {
+        return None;
+    }
     let output = gwt_core::process::hidden_command(gh_executable())
         .args(gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS)
         .current_dir(cwd)
@@ -662,6 +680,63 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    fn clear_gh_sandbox_markers() -> Vec<gwt_core::test_support::ScopedEnvVar> {
+        [
+            "GWT_TEST_GH_SANDBOX",
+            "GWT_TEST_GH",
+            "GWT_FAKE_GH_MODE",
+            "GWT_ALLOW_REAL_GH",
+        ]
+        .into_iter()
+        .map(gwt_core::test_support::ScopedEnvVar::unset)
+        .collect()
+    }
+
+    // Issue #3675 AC-2: this module spawns `gh` directly (not through
+    // `spawn_logged`), so it must apply the unsandboxed-gh test guard itself —
+    // otherwise a test that forgets its fake silently reaches the real GitHub
+    // API and, once rate-limited, poisons the process-global quota gate for
+    // every other test in the binary.
+    #[test]
+    fn unsandboxed_gh_issue_command_is_refused_in_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _markers = clear_gh_sandbox_markers();
+        let temp = tempdir().expect("tempdir");
+
+        let error = run_gh_issue_command(temp.path(), &["issue", "list"], "gh issue list")
+            .expect_err("an unsandboxed gh read must be refused in test builds");
+
+        assert!(
+            error.contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE),
+            "refusal must carry the machine-readable code: {error}"
+        );
+    }
+
+    #[test]
+    fn unsandboxed_issue_label_write_is_refused_in_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _markers = clear_gh_sandbox_markers();
+        let temp = tempdir().expect("tempdir");
+
+        let error = write_issue_labels_via_gh(temp.path(), 42, &["bug".to_string()], &[])
+            .expect_err("an unsandboxed gh label write must be refused in test builds");
+
+        assert!(
+            error.contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE),
+            "refusal must carry the machine-readable code: {error}"
+        );
+    }
 
     #[test]
     fn repo_slug_root_uses_repo_hash_subdirectory() {
@@ -1299,6 +1374,12 @@ exit 1\n",
 
     #[test]
     fn issue_cache_gh_reads_are_refused_while_the_graphql_budget_is_exhausted() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The quota-gate refusal under test sits behind the unsandboxed-gh
+        // guard (Issue #3675); mark a sandbox so the gate stays reachable.
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
         let temp = tempdir().expect("tempdir");
         let gate = exhausted_graphql_gate();
 

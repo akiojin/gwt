@@ -8,6 +8,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import {
+  acquireLiveGwtBackendLock,
   clearLiveLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
@@ -21,16 +22,30 @@ const BRANCH_NAME =
 
 test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
+  test.setTimeout(120_000);
+
+  let releaseBackendLock: (() => Promise<void>) | undefined;
 
   test.beforeEach(async ({ page }, testInfo) => {
     test.skip(
       testInfo.project.name !== "chromium-dark",
       "live Launch Wizard E2E runs once against the shared backend",
     );
+    releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    if (!releaseBackendLock) return;
+    try {
+      await clearLiveLaunchWizard(page);
+    } finally {
+      await releaseBackendLock();
+      releaseBackendLock = undefined;
+    }
   });
 
   test("Claude Code Fast mode stays on after runtime context resolution", async ({
@@ -161,6 +176,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   if (tag === "select") {
     await agentField.selectOption(agentId);
     await expect(agentField).toHaveValue(agentId);
+    await agentField.blur();
     return;
   }
   const option = wizard.locator(

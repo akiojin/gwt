@@ -1685,6 +1685,15 @@ pub enum BackendEvent {
         request_id: String,
         window_id: String,
     },
+    /// Client-scoped reply to a peer-pane `close_window` request on the agent
+    /// pane route (Issue #3629 AC-10/AC-12): every close outcome — success,
+    /// refusal, or a window record that could not be removed — answers
+    /// explicitly instead of silently producing no events.
+    PaneCloseResult {
+        ok: bool,
+        window_id: String,
+        reason: Option<String>,
+    },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
     ///
@@ -1696,7 +1705,10 @@ pub enum BackendEvent {
         auto_start: bool,
         configured_agent_id: String,
         configured_model: Option<String>,
+        configured_reasoning: Option<String>,
         running_agent_id: Option<String>,
+        running_model: Option<String>,
+        running_reasoning: Option<String>,
         is_running: bool,
         agent_options: Vec<PmAgentOption>,
     },
@@ -2449,6 +2461,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
+    BackendEventPolicy::new(
+        "pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
     // the newest one matters.
     BackendEventPolicy::new(
@@ -2892,6 +2909,7 @@ impl BackendEvent {
                 "issue_monitor_scan_request_result"
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
+            BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
