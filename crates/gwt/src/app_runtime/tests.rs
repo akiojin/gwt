@@ -3483,6 +3483,10 @@ fn sample_runtime_with_events(
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
+        // Issue #3676 AC-2: tests default to fail-open so ambient developer /
+        // CI credential state never decides a launch; auth-preflight tests
+        // install a real or explicit probe themselves.
+        issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
         issue_monitor_scheduled_scans_in_flight: HashSet::new(),
         // Issue #3633: tests must never leave real daemons behind on the
         // developer's machine, but the ensure pass still has to be observable
@@ -3654,7 +3658,12 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         },
     );
 
-    assert!(denied.is_empty());
+    // Issue #3629 AC-12: the refusal answers explicitly instead of silence;
+    // the foreign window itself must survive untouched.
+    assert!(denied.iter().all(|outbound| matches!(
+        outbound.event,
+        BackendEvent::PaneCloseResult { ok: false, .. }
+    )));
     assert!(runtime
         .window_lookup
         .contains_key("tab-foreign::agent-foreign"));
@@ -3676,77 +3685,196 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         .contains_key("tab-foreign::agent-foreign"));
 }
 
-/// Issue #3503: the pane that could not be cleaned up had failed *before* its
-/// PTY started, so it carries no session binding at all. The self-session
-/// protection compares the window's real binding, so `None` is not "may be
-/// yourself" — it is a peer pane and closes. Locking this keeps the guard
-/// identity-shaped instead of drifting back to a state- or authority-shaped
-/// one, and covers `pane.stop`, which resolves to the same close command.
+/// Issue #3629 AC-10/AC-12: every agent-route close outcome must answer the
+/// requesting client with an explicit `pane_close_result` instead of the
+/// silent empty event list that made `pane.close` undiagnosable.
 #[test]
-fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() {
+fn agent_pane_close_replies_with_pane_close_result() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+
+    let denied = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-foreign::agent-foreign".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(
+            denied.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id,
+                    reason: Some(_),
+                },
+                ..
+            }] if client_id == "pane-client" && window_id == "tab-foreign::agent-foreign"
+        ),
+        "a cross-project close refusal must answer explicitly, got: {denied:?}"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-foreign::agent-foreign"));
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-authenticated::agent-authenticated".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(
+            accepted.first(),
+            Some(OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: true,
+                    window_id,
+                    reason: None,
+                },
+                ..
+            }) if client_id == "pane-client" && window_id == "tab-authenticated::agent-authenticated"
+        ),
+        "a successful close must answer the requesting client first, got: {accepted:?}"
+    );
+    assert!(!runtime
+        .window_lookup
+        .contains_key("tab-authenticated::agent-authenticated"));
+}
+
+/// Issue #3629 AC-12: an uncorrelated self-close stays refused, but the
+/// refusal must be explicit so the CLI stops guessing at session correlation.
+#[test]
+fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     let mut tab = sample_project_tab_with_window_at(
         "tab-project",
-        "agent-caller",
+        "agent-project",
         project.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
     assert!(tab
         .workspace
-        .set_session_id("agent-caller", Some("caller-session".to_string())));
-    let launch_failed = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
-    let launch_failed_window_id = combined_window_id("tab-project", &launch_failed.id);
-    assert!(
-        tab.workspace
-            .window(&launch_failed.id)
-            .expect("launch-failed window")
-            .session_id
-            .is_none(),
-        "a pane that failed before PTY start carries no session binding"
-    );
+        .set_session_id("agent-project", Some("session-project".to_string())));
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    // The PM is a conversational role without a linked owner, so its principal
-    // never carries an active execution binding.
-    let owner_less_principal =
-        AgentSessionPrincipal::for_test(&project, "caller-session").expect("owner-less principal");
-    assert!(!owner_less_principal.authorizes_producing_mutation());
-
-    let closed = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        owner_less_principal.clone(),
-        AgentFrontendRequest::CloseWindow {
-            id: launch_failed_window_id.clone(),
-            request_id: None,
-            responder: None,
-        },
-    );
-
-    assert!(!closed.is_empty());
-    assert!(!runtime.window_lookup.contains_key(&launch_failed_window_id));
+    let principal =
+        AgentSessionPrincipal::for_test(&project, "session-project").expect("self-owned principal");
 
     let refused = runtime.handle_agent_frontend_event(
         "pane-client".to_string(),
-        owner_less_principal,
+        principal,
         AgentFrontendRequest::CloseWindow {
-            id: "tab-project::agent-caller".to_string(),
+            id: "tab-project::agent-project".to_string(),
             request_id: None,
             responder: None,
         },
     );
 
     assert!(
-        refused.is_empty(),
-        "self-session protection still refuses an uncorrelated close of the caller's own pane"
+        matches!(
+            refused.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id,
+                    reason: Some(reason),
+                },
+                ..
+            }] if client_id == "pane-client"
+                && window_id == "tab-project::agent-project"
+                && reason.contains("correlated")
+        ),
+        "an uncorrelated self-close must name the correlation requirement, got: {refused:?}"
     );
     assert!(runtime
         .window_lookup
-        .contains_key("tab-project::agent-caller"));
+        .contains_key("tab-project::agent-project"));
+}
+
+/// Issue #3629 AC-9: a husk window (workspace record without a lookup entry,
+/// left behind by an app restart) must still close through the agent route.
+#[test]
+fn agent_pane_close_removes_husk_window_missing_from_lookup() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-husk",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    runtime.window_lookup.remove("tab-project::agent-husk");
+    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-husk".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        matches!(
+            events.first(),
+            Some(OutboundEvent {
+                event: BackendEvent::PaneCloseResult { ok: true, .. },
+                ..
+            })
+        ),
+        "husk close must succeed via the workspace fallback, got: {events:?}"
+    );
+    assert!(runtime
+        .tab("tab-project")
+        .expect("project tab")
+        .workspace
+        .window("agent-husk")
+        .is_none());
 }
 
 #[test]
@@ -3816,6 +3944,90 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
             .iter()
             .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
         "the current observation grant must still receive its scoped snapshot"
+    );
+}
+
+/// Issue #3667 AC-1/AC-3 at the runtime dispatch layer: a settled grant (an
+/// in-memory Active binding whose durable record is stale) still observes its
+/// scoped state while producing mutation stays refused.
+#[test]
+fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-settled".to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    // No durable session file exists under the scoped home, so the durable
+    // authority for this binding resolves Stale — the settled shape.
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: "session-settled".to_string(),
+        repo_hash: "repo-3667".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number: 3667,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3667".to_string(),
+            binding_id: "binding-3667".to_string(),
+            ledger_head_hash: "head-3667".to_string(),
+        },
+        capability_generation: 1,
+    };
+    let target = issuer
+        .issue_bound(&project, "session-settled", binding)
+        .expect("settled capability");
+    let grant = issuer
+        .grant_for_test(&target.token)
+        .expect("authenticated settled grant");
+
+    let observed = match runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant.clone(),
+        AgentFrontendRequest::Ready,
+    ) {
+        super::AgentFrontendDispatchOutcome::Dispatched(events) => events,
+        super::AgentFrontendDispatchOutcome::StaleCapability => {
+            panic!("settled observation must dispatch instead of reading as stale")
+        }
+        super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => {
+            panic!("settled observation must not require durable authority")
+        }
+    };
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+        "the settled grant must still receive its scoped snapshot"
+    );
+
+    let refused = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-dispatch".to_string(),
+        },
+    );
+    assert!(
+        matches!(
+            refused,
+            super::AgentFrontendDispatchOutcome::StaleCapability
+        ),
+        "settled producing mutation must stay refused at runtime dispatch"
     );
 }
 
@@ -41176,6 +41388,146 @@ fn app_runtime_monitor_fresh_required_switches_to_current_provider_profile() {
     assert!(successor.skip_permissions);
     assert!(!successor.fast_mode);
     assert!(!successor.codex_fast_mode);
+}
+
+/// Issue #3676 AC-1: `ResumeIfSafe` must not re-bind the launch to a stored
+/// session whose provider differs from the Monitor's current launch profile.
+/// A provider-mismatched resumable session is skipped and the launch falls
+/// through to a fresh session on the profile provider.
+#[test]
+fn app_runtime_monitor_resume_if_safe_skips_provider_mismatched_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "resume-provider-mismatch",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Codex Monitor profile");
+    prefs.launch_profile = Some(claude_issue_monitor_launch_profile());
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs)
+        .expect("save current Claude Monitor profile");
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result =
+        take_monitor_launch_complete("ResumeIfSafe provider mismatch", &fixture.recorded_events);
+    let Ok((process, session_id, _, _, _, agent_id, _, _, _, session_mode, _, _)) = result else {
+        panic!("Issue Monitor provider-mismatch launch failed: {result:?}");
+    };
+    assert_eq!(
+        agent_id,
+        gwt_agent::AgentId::ClaudeCode,
+        "resume must not adopt the stored Codex session when the profile says claude",
+    );
+    assert_eq!(session_mode, gwt_agent::SessionMode::Normal);
+    assert!(
+        process
+            .args
+            .iter()
+            .all(|argument| !argument.contains(&fixture.native_conversation_id)),
+        "provider mismatch must not pass the old Codex conversation id: {:?}",
+        process.args,
+    );
+    let successor =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("load Claude fresh successor Session");
+    assert_eq!(successor.agent_id, gwt_agent::AgentId::ClaudeCode);
+    assert_eq!(successor.session_mode, gwt_agent::SessionMode::Normal);
+    assert!(successor.agent_session_id.is_none());
+    assert_eq!(successor.model.as_deref(), Some("sonnet"));
+}
+
+/// Issue #3676 AC-2: a Monitor launch whose profile provider is definitively
+/// unauthenticated must fail identifiably before a terminal is spawned, so
+/// the slot is released through the normal launch-failed path instead of
+/// burning on a login screen.
+#[test]
+fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _openai_key = ScopedEnvVar::unset("OPENAI_API_KEY");
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "unauthenticated-provider",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    // The fixture writes rollouts but no auth.json: this CODEX_HOME is a
+    // definitively unauthenticated Codex CLI for the real probe.
+    let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").expect("CODEX_HOME is isolated"));
+    assert!(!codex_home.join("auth.json").exists());
+    fixture.runtime.issue_monitor_provider_auth_probe =
+        gwt::issue_monitor::provider_auth_state_from_env;
+
+    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let message = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorLaunchFailed {
+                issue_number,
+                message,
+            } if *issue_number == 3165 => Some(message.clone()),
+            _ => None,
+        })
+        .expect("unauthenticated provider launch must fail identifiably before spawning");
+    assert!(
+        message.contains("provider_unauthenticated"),
+        "failure must carry the machine marker: {message}",
+    );
+    assert!(
+        message.contains("codex"),
+        "failure must name the provider: {message}"
+    );
+    // No terminal may have been dispatched for the refused launch.
+    std::thread::sleep(Duration::from_millis(1500));
+    let recorded = fixture
+        .recorded_events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        recorded
+            .iter()
+            .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })),
+        "refused launch must not spawn a PTY",
+    );
 }
 
 #[test]

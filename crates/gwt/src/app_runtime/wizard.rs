@@ -2305,8 +2305,22 @@ impl AppRuntime {
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
-        if previous_profiles.preferred_profile().is_none() {
+        let Some(profile_agent_id) = previous_profiles
+            .preferred_profile()
+            .map(|profile| profile.agent_id.clone())
+        else {
             return Ok(None);
+        };
+        // Issue #3676 AC-2: refuse before any terminal is spawned when the
+        // profile provider's CLI is definitively unauthenticated. The error
+        // funnels through the normal launch-failed path, so the active slot
+        // is released instead of burning on a provider login screen.
+        if (self.issue_monitor_provider_auth_probe)(&profile_agent_id)
+            == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+        {
+            return Err(gwt::issue_monitor::provider_unauthenticated_message(
+                &profile_agent_id,
+            ));
         }
         // SPEC #3200 FR-015: for the independent review, force a different model
         // than the implementer's (when configured) so the verdict is not a
@@ -2336,6 +2350,7 @@ impl AppRuntime {
                 &target_branch,
                 issue_number,
                 delivery_id.clone(),
+                &profile_agent_id,
             )?;
             if let Some(events) = events {
                 return Ok(Some(events));
@@ -2475,11 +2490,23 @@ impl AppRuntime {
         target_branch: &str,
         issue_number: u64,
         delivery_id: Option<String>,
+        profile_agent_id: &str,
     ) -> Result<(Option<Vec<OutboundEvent>>, Option<String>), String> {
         let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
         else {
             return Ok((None, None));
         };
+        // Issue #3676 AC-1: a stored session only qualifies for resume when
+        // its provider matches the Monitor's current launch profile. A
+        // mismatched provider must fall through to a fresh launch on the
+        // profile provider instead of re-binding the slot to the old CLI.
+        if !session
+            .agent_id
+            .command()
+            .eq_ignore_ascii_case(profile_agent_id.trim())
+        {
+            return Ok((None, None));
+        }
         if !session_exact_resume_materializable(project_root, &session) {
             return Ok((None, None));
         }

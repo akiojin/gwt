@@ -58,6 +58,15 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
 }
 
+// Issue #3675: unit tests must never reach the real GitHub API. Armed before
+// any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
+// SAFETY(pre-main): only stores a relaxed AtomicBool.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn forbid_real_gh_in_tests() {
+    gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
+}
+
 #[cfg(test)]
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
@@ -3021,6 +3030,9 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            // Issue #3676 AC-2: fail-open in tests so ambient credential
+            // state never decides a launch.
+            issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
             issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
             pending_workspace_resume_contexts: HashMap::new(),
@@ -5726,6 +5738,37 @@ mod tests {
         ));
         assert!(tabs[0].workspace.window(raw_window_id).is_none());
         assert!(!window_lookup.contains_key(&window_id));
+        assert!(!window_details.contains_key(&window_id));
+    }
+
+    /// Issue #3629 AC-9: a window restored from an older app generation can
+    /// survive in a tab's workspace without a `window_lookup` entry (a
+    /// "husk"). Close must still remove the workspace record instead of
+    /// silently reporting failure forever.
+    #[test]
+    fn close_window_from_workspace_falls_back_to_tab_scan_without_lookup_entry() {
+        let tab_id = "tab-1";
+        let raw_window_id = "claude-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let mut tabs = vec![sample_project_tab_with_window(
+            tab_id,
+            raw_window_id,
+            WindowPreset::Claude,
+            WindowProcessStatus::Exited,
+        )];
+        let mut window_lookup = HashMap::new();
+        let mut window_details = HashMap::from([(window_id.clone(), "husk".to_string())]);
+
+        assert!(
+            close_window_from_workspace(
+                &mut tabs,
+                &mut window_lookup,
+                &mut window_details,
+                &window_id,
+            ),
+            "close must land via the tab scan fallback when the lookup entry is gone"
+        );
+        assert!(tabs[0].workspace.window(raw_window_id).is_none());
         assert!(!window_details.contains_key(&window_id));
     }
 

@@ -205,6 +205,23 @@ async fn spawn_logged_inner(
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return Err(deadline_error());
     }
+    // Issue #3675 AC-2: in test builds (armed via
+    // `forbid_unsandboxed_gh_spawns_for_tests`), a `gh` spawn with no sandbox
+    // marker in the environment is refused before it can reach the real
+    // GitHub API — and before the quota gate, so a refusal never depends on
+    // (or pollutes) quota state.
+    if matches!(kind, ProcessKind::Gh) {
+        if let Some(detail) = super::gh_guard::unsandboxed_gh_denial(&options.label) {
+            tracing::warn!(
+                target: SUMMARY_TARGET,
+                kind = kind.as_str(),
+                label = %options.label,
+                detail = %detail,
+                "gh call refused: unsandboxed spawn in a guarded test build"
+            );
+            return Err(std::io::Error::other(detail));
+        }
+    }
     // Issue #3604 AC-3: an exhausted GitHub budget refuses the call here, so a
     // rate-limited window stops producing spawns, log noise, and generic
     // "network error" reports until its measured reset passes.
@@ -228,6 +245,11 @@ async fn spawn_logged_inner(
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
+    if matches!(kind, ProcessKind::Git) {
+        // Issue #3629 AC-7: feed the per-thread git spawn counter so "must
+        // not spawn git" regression assertions cover this route too.
+        crate::process::note_thread_git_spawn();
+    }
 
     trace_process_start(kind, spawn_id, &options, &program);
 

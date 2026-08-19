@@ -1,5 +1,14 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+// Issue #3675: unit tests must never reach the real GitHub API. Armed before
+// any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
+// SAFETY(pre-main): only stores a relaxed AtomicBool.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn forbid_real_gh_in_tests() {
+    gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     match argv.get(1).map(String::as_str) {

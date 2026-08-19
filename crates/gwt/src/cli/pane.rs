@@ -12,7 +12,7 @@ use tokio_tungstenite::{
     tungstenite::{
         client::IntoClientRequest,
         http::{header::AUTHORIZATION, HeaderValue},
-        protocol::frame::coding::CloseCode,
+        protocol::{frame::coding::CloseCode, CloseFrame},
         Error as WebSocketError, Message,
     },
 };
@@ -41,6 +41,10 @@ const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 /// ordinary stall into a hard failure (#3510). The budget covers the stall
 /// instead, and the idle case is unaffected because it never waits.
 const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Issue #3629 AC-12: bounded wait for the explicit `pane_close_result` reply
+/// before falling back to the legacy post-close readback for backends that
+/// predate the protocol. Mirrors the correlated self-close acceptance budget.
+const PANE_CLOSE_RESULT_DEADLINE: Duration = Duration::from_secs(2);
 const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
 const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
 const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
@@ -531,50 +535,81 @@ async fn close_pane(
         .await?;
         return Ok(format!("close requested {requested_id}\n"));
     }
+
+    // Issue #3629 AC-12: the backend answers a peer close with an explicit
+    // `pane_close_result`. Prefer it; a backend that predates the protocol
+    // sends nothing here, so fall back to the legacy post-close readback
+    // after the bounded wait.
+    if let Some(reply) =
+        wait_for_pane_close_result(&mut socket, &resolved_id, PANE_CLOSE_RESULT_DEADLINE).await?
+    {
+        return pane_close_verdict(requested_id, reply);
+    }
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
     if resolve_window_id(&windows, &resolved_id).is_none() {
         Ok(format!("closed {requested_id}\n"))
     } else {
-        Err(refused_close_message(
-            requested_id,
-            ambient_session_id.is_some(),
+        // Issue #3629 AC-6: report only the observed facts — the window is
+        // still listed and no close result arrived. Never guess at session
+        // correlation on behalf of the backend.
+        Err(format!(
+            "pane close: backend did not remove {requested_id} and sent no close result; \
+             the backend may predate the close-result protocol, be saturated, or have \
+             refused the request"
         ))
     }
 }
 
-/// Issue #3503 / #3552 AC-3: report the observation and the causes that are
-/// actually still reachable, never a single asserted one. The old wording
-/// claimed "the target may be this authenticated Session and requires a
-/// correlated acceptance", which was never why the PM's cleanup closes were
-/// refused — it sent the #3503 diagnosis after a self-close guard that was not
-/// involved, while the closes were being dropped at the transport filter.
-///
-/// With that filter now identity-shaped (SPEC-3431 FR-066), an uncorrelated
-/// close that survives the round trip leaves only capability-shaped causes:
-/// a superseded continuation generation, or a rotated or revoked grant. Both
-/// are answered from the current Session, so the refusal says so. When the
-/// caller has no ambient Session id, it could not recognise its own pane
-/// either, and that second cause is named alongside the first.
-fn refused_close_message(requested_id: &str, session_id_is_ambient: bool) -> String {
-    let mut causes = vec![
-        "this Session's pane capability cannot act on it — its continuation generation was \
-         superseded, or its capability grant was rotated or revoked"
-            .to_string(),
-    ];
-    if !session_id_is_ambient {
-        causes.push(format!(
-            "{GWT_SESSION_ID_ENV} is not set, so a pane bound to this very Session could not be \
-             recognised and its close could not be correlated"
-        ));
+struct PaneCloseReply {
+    ok: bool,
+    reason: Option<String>,
+}
+
+/// Wait up to `deadline_after` for the `pane_close_result` frame that matches
+/// `window_id`, skipping unrelated broadcasts. `Ok(None)` means the deadline
+/// elapsed without a result (a pre-protocol backend); socket failures stay
+/// hard errors.
+async fn wait_for_pane_close_result(
+    socket: &mut PaneWebSocket,
+    window_id: &str,
+    deadline_after: Duration,
+) -> Result<Option<PaneCloseReply>, String> {
+    let deadline = tokio::time::Instant::now() + deadline_after;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        let value = match tokio::time::timeout(remaining, next_backend_json_unbounded(socket)).await
+        {
+            Err(_) => return Ok(None),
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok(value)) => value,
+        };
+        if value.get("kind").and_then(Value::as_str) == Some("pane_close_result")
+            && value.get("window_id").and_then(Value::as_str) == Some(window_id)
+        {
+            return Ok(Some(PaneCloseReply {
+                ok: value.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                reason: value
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }));
+        }
     }
-    format!(
-        "pane close: backend did not close {requested_id}; it is still present in the \
-         authenticated project scope. Cause: {}. Next: retry from the Session gwt launched \
-         (relaunch it if this window was restored), then confirm with pane.list.",
-        causes.join("; or ")
-    )
+}
+
+fn pane_close_verdict(requested_id: &str, reply: PaneCloseReply) -> Result<String, String> {
+    if reply.ok {
+        return Ok(format!("closed {requested_id}\n"));
+    }
+    Err(match reply.reason {
+        Some(reason) => format!("pane close: backend refused to close {requested_id}: {reason}"),
+        None => format!("pane close: backend reported the close of {requested_id} failed"),
+    })
 }
 
 async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
@@ -582,7 +617,45 @@ async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
     connect_async(request)
         .await
         .map(|(socket, _)| socket)
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))
+        .map_err(|err| pane_connect_error(ws_url, &err))
+}
+
+/// Issue #3667 AC-5: name the two very different conditions behind a failed
+/// pane WebSocket handshake. HTTP 409 means the instance is reachable but
+/// still refuses a settled session's observation at connect (a backend from
+/// before the #3667 fix); everything else reads as the backend being
+/// unreachable or rejecting the capability.
+fn pane_connect_error(ws_url: &str, error: &WebSocketError) -> String {
+    match error {
+        WebSocketError::Http(response) if response.status().as_u16() == 409 => format!(
+            "pane websocket connect was refused ({ws_url}): HTTP 409 Conflict — the gwt \
+             instance is reachable but refuses this settled session's pane observation at \
+             connect (behavior fixed by #3667). Restart that gwt instance on an updated \
+             build, or relaunch this Session."
+        ),
+        _ => format!("pane websocket connect failed ({ws_url}): {error}"),
+    }
+}
+
+/// Issue #3667 AC-3: a close frame during a pane operation is a refusal with
+/// a server-provided reason, not an unsupported message. The stale-binding
+/// reason additionally spells out that only mutation is refused for a settled
+/// session.
+fn pane_socket_closed_error(frame: Option<&CloseFrame>) -> String {
+    match frame {
+        Some(frame) if frame.reason == "execution binding is no longer current" => format!(
+            "pane operation was refused by the gwt instance: {} — this session's execution \
+             is settled, so pane mutation (close/send) is refused while pane observation \
+             (list/read) remains available",
+            frame.reason
+        ),
+        Some(frame) => format!(
+            "pane websocket was closed by the gwt instance: {} (close code {})",
+            frame.reason,
+            u16::from(frame.code)
+        ),
+        None => "pane websocket was closed by the gwt instance without a reason".to_string(),
+    }
 }
 
 fn pane_websocket_request(
@@ -647,6 +720,7 @@ async fn next_backend_json_unbounded(socket: &mut PaneWebSocket) -> Result<Value
             .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
         Message::Binary(bytes) => serde_json::from_slice(&bytes)
             .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
+        Message::Close(frame) => Err(pane_socket_closed_error(frame.as_ref())),
         other => Err(format!(
             "pane backend returned unsupported websocket message: {other:?}"
         )),
@@ -1433,6 +1507,56 @@ mod tests {
         );
     }
 
+    /// Issue #3667 AC-5: a caller must be able to tell "the instance refuses
+    /// this settled session's observation" apart from "the backend is
+    /// unreachable" — before the fix both surfaced as the same connect error.
+    #[test]
+    fn pane_connect_error_distinguishes_settled_refusal_from_unreachable_backend() {
+        let http_409 = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(409)
+                .body(None)
+                .expect("HTTP response"),
+        ));
+        let settled = pane_connect_error("ws://127.0.0.1:52202/internal/pane-ws", &http_409);
+        assert!(settled.contains("409"), "{settled}");
+        assert!(settled.contains("settled"), "{settled}");
+        assert!(settled.contains("reachable"), "{settled}");
+
+        let unreachable = pane_connect_error(
+            "ws://127.0.0.1:52202/internal/pane-ws",
+            &WebSocketError::ConnectionClosed,
+        );
+        assert!(unreachable.contains("connect failed"), "{unreachable}");
+        assert!(!unreachable.contains("settled"), "{unreachable}");
+    }
+
+    /// Issue #3667 AC-3: the mutation refusal for a settled session must reach
+    /// the caller as an identifiable reason, not as an "unsupported websocket
+    /// message" transport error.
+    #[test]
+    fn pane_socket_close_reports_identifiable_mutation_refusal() {
+        let refusal = pane_socket_closed_error(Some(&CloseFrame {
+            code: CloseCode::Policy,
+            reason: "execution binding is no longer current".into(),
+        }));
+        assert!(
+            refusal.contains("execution binding is no longer current"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("refused"), "{refusal}");
+        assert!(refusal.contains("observation"), "{refusal}");
+
+        let other = pane_socket_closed_error(Some(&CloseFrame {
+            code: CloseCode::Away,
+            reason: "shutting down".into(),
+        }));
+        assert!(other.contains("shutting down"), "{other}");
+        assert!(other.contains("close code"), "{other}");
+
+        assert!(pane_socket_closed_error(None).contains("without a reason"));
+    }
+
     #[test]
     fn ensure_trailing_submit_appends_carriage_return_once() {
         assert_eq!(ensure_trailing_submit("/goal x"), "/goal x\r");
@@ -2133,9 +2257,12 @@ mod tests {
                             .to_string(),
                     );
                     if let Some(windows) = post_close_windows.as_ref() {
+                        // Issue #3629: the CLI now waits out the bounded
+                        // close-result deadline before the legacy readback,
+                        // so give the follow-up frontend_ready extra room.
                         received_kinds.push(
                             tokio::time::timeout(
-                                Duration::from_secs(1),
+                                Duration::from_secs(5),
                                 next_frontend_kind(&mut socket),
                             )
                             .await
@@ -2195,6 +2322,141 @@ mod tests {
         });
 
         (format!("ws://{address}/internal/pane-ws"), server)
+    }
+
+    /// Issue #3629 backend mock: after `close_window`, reply with the explicit
+    /// `pane_close_result` protocol instead of a workspace readback.
+    async fn spawn_close_pane_result_mock(
+        project_root: &'static str,
+        target: PersistedWindowState,
+        ok: bool,
+        reason: Option<&'static str>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let initial_state = workspace_state_for_test(project_root, vec![target]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind pane result mock");
+        let address = listener.local_addr().expect("pane result mock address");
+        let server = tokio::spawn(async move {
+            let mut received_kinds = Vec::new();
+            for connection_index in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept pane connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane websocket");
+
+                received_kinds.push(next_frontend_kind(&mut socket).await);
+                socket
+                    .send(Message::Text(initial_state.to_string().into()))
+                    .await
+                    .expect("send workspace state");
+
+                if connection_index == 1 {
+                    let close = next_frontend_json(&mut socket).await;
+                    received_kinds.push(
+                        close["kind"]
+                            .as_str()
+                            .expect("close frontend kind")
+                            .to_string(),
+                    );
+                    let result = json!({
+                        "kind": "pane_close_result",
+                        "ok": ok,
+                        "window_id": close["id"],
+                        "reason": reason,
+                    });
+                    socket
+                        .send(Message::Text(result.to_string().into()))
+                        .await
+                        .expect("send pane close result");
+                }
+            }
+            received_kinds
+        });
+
+        (format!("ws://{address}/internal/pane-ws"), server)
+    }
+
+    /// Issue #3629 AC-12: a backend that answers with `pane_close_result`
+    /// settles the close without any workspace readback round.
+    #[test]
+    fn non_self_pane_close_consumes_backend_close_result() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "peer-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/peer";
+            let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
+            peer.session_id = Some("session-peer".to_string());
+            let (ws_url, server) =
+                spawn_close_pane_result_mock(project_root, peer, true, None).await;
+
+            let result = close_pane(&ws_url, project_root, "agent-peer").await;
+            let received_kinds = server.await.expect("pane result mock task");
+
+            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
+            assert_eq!(
+                received_kinds,
+                vec!["list_windows", "frontend_ready", "close_window"],
+                "an explicit close result must settle without a readback round"
+            );
+        });
+    }
+
+    /// Issue #3629 AC-6/AC-12: a backend refusal is reported with the
+    /// backend's own reason; the retired session-correlation guess must not
+    /// reappear.
+    #[test]
+    fn non_self_pane_close_reports_backend_refusal_reason() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "peer-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/peer";
+            let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
+            peer.session_id = Some("session-peer".to_string());
+            let (ws_url, server) = spawn_close_pane_result_mock(
+                project_root,
+                peer,
+                false,
+                Some("window is outside the authenticated project scope"),
+            )
+            .await;
+
+            let error = close_pane(&ws_url, project_root, "agent-peer")
+                .await
+                .expect_err("backend refusal must surface as an error");
+            server.await.expect("pane result mock task");
+
+            assert!(
+                error.contains("window is outside the authenticated project scope"),
+                "the backend reason must be relayed verbatim, got: {error}"
+            );
+            assert!(
+                !error.contains("may be this authenticated Session"),
+                "the misleading session guess is retired (Issue #3629 AC-6), got: {error}"
+            );
+        });
     }
 
     #[test]
@@ -2432,42 +2694,6 @@ mod tests {
             server.abort();
             let _ = server.await;
         });
-    }
-
-    /// Issue #3552 AC-3: a refused `pane.close` has to be actionable. The old
-    /// wording asserted a single cause — "the target may be this authenticated
-    /// Session and requires a correlated acceptance" — which was never why the
-    /// PM's cleanup closes were refused, and it walked the #3503 diagnosis into
-    /// a self-close guard that was not involved. Now that the transport gate is
-    /// identity-shaped (SPEC-3431 FR-066), the causes that remain reachable are
-    /// enumerable, so the refusal names them and says what to do next.
-    #[test]
-    fn refused_pane_close_names_reachable_causes_and_a_next_action() {
-        for session_id_is_ambient in [true, false] {
-            let message = refused_close_message("agent-7", session_id_is_ambient);
-
-            assert!(
-                !message.contains("correlated acceptance"),
-                "the refusal must not resurrect the cause it never had: {message}"
-            );
-            assert!(
-                message.contains("Cause:") && message.contains("superseded"),
-                "the refusal names the authority cause that is still reachable: {message}"
-            );
-            assert!(
-                message.contains("Next:") && message.contains("pane.list"),
-                "the refusal tells the caller what to do next: {message}"
-            );
-        }
-
-        assert!(
-            !refused_close_message("agent-7", true).contains(GWT_SESSION_ID_ENV),
-            "a Session that knows its own id must not be told to go set it"
-        );
-        assert!(
-            refused_close_message("agent-7", false).contains(GWT_SESSION_ID_ENV),
-            "without an ambient Session id, a self-close cannot be correlated — say so"
-        );
     }
 
     #[test]
@@ -2717,10 +2943,13 @@ mod tests {
                     .expect_err("rejected uncorrelated self-close must not report success");
                 let received_kinds = server.await.expect("pane mock task");
 
-                assert_eq!(
-                    error,
-                    refused_close_message("agent-self", ambient_session.is_some()),
-                    "the production call site emits the actionable refusal, not a second wording"
+                // Issue #3629 AC-6: without an explicit close result, the CLI
+                // reports only the observed fact instead of guessing at
+                // session correlation. A current backend names the cause in
+                // its `pane_close_result` refusal instead.
+                assert!(
+                    error.contains("did not remove agent-self and sent no close result"),
+                    "{error}"
                 );
                 assert_eq!(
                     received_kinds,

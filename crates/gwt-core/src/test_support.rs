@@ -913,6 +913,78 @@ fn percent_decode_registry_path(path: &str) -> String {
     String::from_utf8_lossy(&decoded).to_ascii_lowercase()
 }
 
+/// Summarize raw PTY output for wait-timeout diagnostics (Issue #3656 AC-1).
+///
+/// Terminal output is dominated by ANSI escape sequences that make Debug
+/// output unreadable in CI logs. Strip CSI/OSC/escape sequences and
+/// non-printing control bytes, report the total received byte count, and
+/// bound the sanitized text to its newest tail so panic messages stay
+/// readable while still letting host saturation be distinguished from
+/// product bugs after the fact.
+pub fn summarize_pty_output_for_diagnostics(bytes: &[u8]) -> String {
+    const TAIL_CHARS: usize = 2_000;
+    if bytes.is_empty() {
+        return "no PTY output received".to_string();
+    }
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut sanitized = String::with_capacity(decoded.len());
+    let mut chars = decoded.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.next() {
+                // CSI: parameter and intermediate bytes end at a final byte.
+                Some('[') => {
+                    for follower in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&follower) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: terminated by BEL or ST (ESC \).
+                Some(']') => {
+                    while let Some(follower) = chars.next() {
+                        if follower == '\u{7}' {
+                            break;
+                        }
+                        if follower == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // nF escape (e.g. charset selection): intermediates then final.
+                Some(follower) if ('\u{20}'..='\u{2f}').contains(&follower) => {
+                    for next in chars.by_ref() {
+                        if !('\u{20}'..='\u{2f}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // Two-byte escape: the follower is consumed with the escape.
+                Some(_) | None => {}
+            }
+            continue;
+        }
+        if ch == '\n' || ch == '\t' || !ch.is_control() {
+            sanitized.push(ch);
+        }
+    }
+    let sanitized = sanitized.trim();
+    let total_chars = sanitized.chars().count();
+    if total_chars <= TAIL_CHARS {
+        format!(
+            "{} raw bytes received; sanitized output: {sanitized:?}",
+            bytes.len()
+        )
+    } else {
+        let tail: String = sanitized.chars().skip(total_chars - TAIL_CHARS).collect();
+        format!(
+            "{} raw bytes received; sanitized output (last {TAIL_CHARS} of {total_chars} chars): {tail:?}",
+            bytes.len()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +996,65 @@ mod tests {
         assert_eq!(
             percent_decode_registry_path("/%40Scope%2FPackage?cache=1"),
             "/@scope/package"
+        );
+    }
+
+    #[test]
+    fn summarize_pty_output_for_diagnostics_strips_escape_sequences() {
+        let raw =
+            b"\x1b[2J\x1b[31mnpm http fetch GET 200\x1b[0m\r\n\x1b]0;title\x07next line\x1b[6n";
+        let summary = summarize_pty_output_for_diagnostics(raw);
+        assert!(
+            summary.contains("npm http fetch GET 200"),
+            "sanitized text must survive: {summary}"
+        );
+        assert!(
+            summary.contains("next line"),
+            "text after an OSC sequence must survive: {summary}"
+        );
+        assert!(
+            !summary.contains('\u{1b}'),
+            "escape bytes must be stripped: {summary:?}"
+        );
+        assert!(
+            !summary.contains("[31m") && !summary.contains("[2J") && !summary.contains("[6n"),
+            "CSI parameter/final bytes must be stripped with their sequence: {summary}"
+        );
+        assert!(
+            !summary.contains("0;title"),
+            "OSC payloads must be stripped: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("{} raw bytes", raw.len())),
+            "the summary must report the total received byte count: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_pty_output_for_diagnostics_bounds_long_output_to_a_tail() {
+        let mut raw = vec![b'a'; 10_000];
+        raw.extend_from_slice(b"phase75-tail-end");
+        let summary = summarize_pty_output_for_diagnostics(&raw);
+        assert!(
+            summary.contains("phase75-tail-end"),
+            "the newest output must stay visible in the tail: {summary}"
+        );
+        assert!(
+            summary.len() < 4_000,
+            "the summary must stay bounded, got {} chars",
+            summary.len()
+        );
+        assert!(
+            summary.contains("10016 raw bytes"),
+            "the summary must report the total received byte count: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_pty_output_for_diagnostics_reports_empty_input_explicitly() {
+        assert_eq!(
+            summarize_pty_output_for_diagnostics(b""),
+            "no PTY output received"
         );
     }
 
