@@ -2704,6 +2704,9 @@ exit 0
             "PATH",
             std::env::join_paths(path_entries).expect("join PATH"),
         );
+        // Issue #3675: mark the fake as installed so the unsandboxed-gh spawn
+        // guard lets ProcessKind::Gh spawns through inside this scope.
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
 
         let issues = vec![IssueMonitorIssue {
             number: 42,

@@ -53,6 +53,9 @@ pub mod work_notes;
 pub mod worktree_form;
 pub mod worktree_inventory;
 
+#[cfg(any(test, feature = "test-gh-guard"))]
+mod test_guard;
+
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
