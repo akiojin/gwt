@@ -106,6 +106,16 @@ jobs:
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
+      # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
+      # pane's pseudoconsole, so the released agent renders in an external
+      # Windows Terminal window. Both guards are Windows-only and would be
+      # skipped by the Linux workspace run.
+      - name: Run Windows PTY start-gate console contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --test windows_binary_subsystem_test -- --test-threads=1
+          cargo test -p gwt --test pty_start_gate_console_test -- --test-threads=1
+        timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
         run: |
