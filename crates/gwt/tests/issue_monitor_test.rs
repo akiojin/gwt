@@ -10,6 +10,7 @@ use gwt::issue_monitor::{
 use gwt::issue_monitor_worker::{
     scan_loaded_issue_monitor_candidates, LoadedIssueMonitorCandidates,
 };
+use gwt::IssueMonitorRequeueOutcome;
 use gwt::LinkedIssueKind;
 use gwt_github::issue_auto_claim::{render_claim_comment, ClaimComment, ClaimStatus};
 use gwt_github::{
@@ -2081,6 +2082,264 @@ fn agent_status_at_stays_quiet_for_a_disabled_monitor() {
         monitor.agent_status_at("2026-07-27T10:00:00Z").scan_stall,
         None
     );
+}
+
+/// Issue #3683: an arbitrary claim comment for staleness scenarios. The
+/// incident fixture on #3287 carried claims in the pre-identity-migration
+/// owner format (`AkioJinsenji:9720`) whose deterministic claim ids embed
+/// that owner, so collisions with current-format claims are impossible.
+fn claim_comment_with(
+    comment_id: u64,
+    claim_id: &str,
+    owner: &str,
+    issue_number: u64,
+    heartbeat_at: &str,
+    expires_at: &str,
+) -> CommentSnapshot {
+    let claim = ClaimComment {
+        comment_id: Some(CommentId(comment_id)),
+        claim_id: claim_id.to_string(),
+        owner: owner.to_string(),
+        issue_number,
+        status: ClaimStatus::Active,
+        heartbeat_at: heartbeat_at.to_string(),
+        expires_at: expires_at.to_string(),
+        launched_work_id: Some(format!("work/issue-{issue_number}")),
+    };
+    CommentSnapshot {
+        id: CommentId(comment_id),
+        body: render_claim_comment(&claim),
+        updated_at: UpdatedAt::new("t1"),
+    }
+}
+
+/// Issue #3683 AC-1: a `BlockedByClaim` hold is only as durable as the claim
+/// behind it. Once the recorded claim expiry passes, the next claim cycle must
+/// return the issue to the queue and launch it instead of starving it forever.
+#[test]
+fn expired_claim_block_requeues_and_launches_on_next_claim_cycle() {
+    let client = FakeIssueClient::new();
+    // The foreign claim expires at 10:30 and is never released.
+    client.seed(github_issue_number(
+        42,
+        vec![claim_comment("host-b/session-b")],
+    ));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-06-23T10:01:00Z");
+
+    let launches =
+        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-06-23T10:01:00Z");
+    assert!(
+        launches.is_empty(),
+        "a live foreign claim blocks the launch"
+    );
+    assert_eq!(
+        monitor.inbox_item(42).expect("blocked item").state,
+        MonitorInboxState::BlockedByClaim
+    );
+
+    // A scan between the claim cycles must not resurrect or erase the hold.
+    scan_issue_monitor_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-06-23T10:31:00Z");
+
+    let launches =
+        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-06-23T10:31:00Z");
+    assert_eq!(
+        launches.len(),
+        1,
+        "an expired claim must stop blocking the launch"
+    );
+    assert_eq!(launches[0].issue_number, 42);
+    assert_eq!(
+        monitor.inbox_item(42).expect("recovered item").state,
+        MonitorInboxState::Launching
+    );
+}
+
+/// Issue #3683 AC-4: the exact shape observed on #3287 — two expired
+/// pre-identity-migration claims (old owner format, still marked active) plus
+/// one live current-format claim. While the live claim holds, the issue is
+/// blocked; once it lapses the issue must recover instead of starving.
+#[test]
+fn issue_3287_expired_old_format_claims_recover_after_current_claim_lapses() {
+    let client = FakeIssueClient::new();
+    client.seed(github_issue_number(
+        3287,
+        vec![
+            claim_comment_with(
+                11,
+                "gwt-auto-improve:AkioJinsenji:9720:3287:2026-07-27T09:58:27Z",
+                "AkioJinsenji:9720",
+                3287,
+                "2026-07-27T09:58:27Z",
+                "2026-07-27T10:28:27Z",
+            ),
+            claim_comment_with(
+                12,
+                "gwt-auto-improve:AkioJinsenji:9720:3287:2026-07-28T02:10:00Z",
+                "AkioJinsenji:9720",
+                3287,
+                "2026-07-28T02:10:00Z",
+                "2026-07-28T02:40:00Z",
+            ),
+            claim_comment_with(
+                13,
+                "gwt-auto-improve:7bd80289-4c1c-4c57-9d3e-000000000001",
+                "akiojin:41446",
+                3287,
+                "2026-08-19T04:16:23Z",
+                "2026-08-19T04:46:23Z",
+            ),
+        ],
+    ));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        &[issue(3287, &["auto-improve"])],
+        "2026-08-19T04:20:00Z",
+    );
+
+    let launches =
+        monitor.claim_next_launch_requests(&client, "akiojin:41446", "2026-08-19T04:20:00Z");
+    assert!(
+        launches.is_empty(),
+        "the live current-format claim still holds the issue"
+    );
+    let blocked = monitor.inbox_item(3287).expect("blocked item");
+    assert_eq!(blocked.state, MonitorInboxState::BlockedByClaim);
+    assert_eq!(
+        blocked.blocked_by_owner.as_deref(),
+        Some("akiojin:41446"),
+        "the block must name the live claim, not an expired pre-migration one"
+    );
+
+    let launches =
+        monitor.claim_next_launch_requests(&client, "akiojin:41446", "2026-08-19T04:47:00Z");
+    assert_eq!(
+        launches.len(),
+        1,
+        "expired claims (old and current format alike) must not starve the issue"
+    );
+    assert_eq!(launches[0].issue_number, 3287);
+    assert_eq!(
+        monitor.inbox_item(3287).expect("recovered item").state,
+        MonitorInboxState::Launching
+    );
+}
+
+/// Issue #3683 AC-2: pre-identity-migration claims are expired by protocol
+/// (their TTL lapsed long before the owner format changed), so they must not
+/// block a launch for the current owner at all.
+#[test]
+fn expired_pre_identity_migration_claims_do_not_block_launch() {
+    let client = FakeIssueClient::new();
+    client.seed(github_issue_number(
+        3287,
+        vec![claim_comment_with(
+            11,
+            "gwt-auto-improve:AkioJinsenji:9720:3287:2026-07-27T09:58:27Z",
+            "AkioJinsenji:9720",
+            3287,
+            "2026-07-27T09:58:27Z",
+            "2026-07-27T10:28:27Z",
+        )],
+    ));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        &[issue(3287, &["auto-improve"])],
+        "2026-08-19T00:17:00Z",
+    );
+
+    let launches =
+        monitor.claim_next_launch_requests(&client, "akiojin:41446", "2026-08-19T00:17:00Z");
+
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].issue_number, 3287);
+    assert_eq!(
+        monitor.inbox_item(3287).expect("launching item").state,
+        MonitorInboxState::Launching
+    );
+}
+
+/// Issue #3683 AC-3: an operator release of a claim block is published through
+/// the versioned failure-release machinery, so the driver holding the
+/// in-memory `BlockedByClaim` row adopts it on its next prefs rebase and the
+/// issue returns to the queue even while the foreign claim is still live.
+#[test]
+fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
+    let mut daemon = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let candidate = issue(42, &["bug"]);
+    scan_issue_monitor_candidates(
+        &mut daemon,
+        std::slice::from_ref(&candidate),
+        "2026-08-19T00:00:00Z",
+    );
+    assert!(daemon.record_blocked_by_claim(
+        candidate,
+        "AkioJinsenji:9720",
+        // Far in the future: the expiry sweep must not release this hold on
+        // its own; only the explicit operator release may.
+        "2027-01-01T00:00:00Z",
+    ));
+
+    // The CLI process only sees the persisted prefs, never the daemon inbox.
+    let mut cli = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+    let outcome = cli.release_claim_block(
+        42,
+        "operator: stale claim from a pre-migration owner",
+        "2026-08-19T00:10:00Z",
+    );
+    assert!(matches!(
+        outcome,
+        IssueMonitorRequeueOutcome::Requeued {
+            stale_window_id: None
+        }
+    ));
+
+    daemon.rebase_daemon_driver_prefs(&cli.prefs());
+
+    assert_eq!(
+        daemon.inbox_item(42).expect("released item").state,
+        MonitorInboxState::Queued
+    );
+    assert!(daemon.queued_issue_numbers().contains(&42));
+}
+
+/// Issue #3683 AC-3: the release fails closed on anything a launch still owns,
+/// mirroring `requeue_failed_issue` — releasing a claim out from under a live
+/// launch would let a second agent claim the same issue.
+#[test]
+fn claim_block_release_refuses_while_a_launch_is_live() {
+    let client = FakeIssueClient::new();
+    client.seed(github_issue_number(42, vec![]));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-06-23T10:01:00Z");
+    let launches =
+        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-06-23T10:01:00Z");
+    assert_eq!(launches.len(), 1, "the launch must be live for this test");
+
+    let outcome = monitor.release_claim_block(42, "operator mistake", "2026-06-23T10:02:00Z");
+
+    assert!(matches!(outcome, IssueMonitorRequeueOutcome::LaunchLive));
 }
 
 /// The stall must not be maskable by an unrelated per-issue error. In
