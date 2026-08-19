@@ -426,13 +426,127 @@ mod installer {
             "Acquire::http::Timeout",
             "Acquire::https::Timeout",
             "Acquire::Retries",
+            "DPkg::Lock::Timeout",
         ] {
             assert!(
                 conf.contains(setting),
                 "apt must be configured with {setting} so a stalled mirror \
-                 cannot hang the job:\n{conf}"
+                 or a held dpkg lock cannot hang the job:\n{conf}"
             );
         }
+    }
+
+    /// Issue #3701: Ubuntu runners often hold the dpkg lock for 1–3 minutes
+    /// while unattended-upgrades finishes. A 10s retry gap is shorter than
+    /// that window, so three immediate `Could not get lock` failures look
+    /// like a hard bootstrap break.
+    #[test]
+    fn system_deps_retry_delay_covers_a_background_apt_window() {
+        let delay = default_numeric_env(INSTALLER, "GWT_PLAYWRIGHT_RETRY_DELAY")
+            .expect("installer must default GWT_PLAYWRIGHT_RETRY_DELAY");
+        assert!(
+            delay >= 30,
+            "system-deps retry delay must cover a typical unattended-upgrades \
+             window (at least 30s), found {delay}s in {INSTALLER}"
+        );
+    }
+
+    /// Issue #3701: a lock-held apt-get fails in a few milliseconds. The
+    /// log used to say only `status=failed exit=1`, so the next person
+    /// bisecting a red PR could not tell the runner was busy.
+    #[test]
+    fn a_dpkg_lock_error_is_named_in_the_log() {
+        let harness = Harness::new("dpkg-lock", DPKG_LOCK_FAIL);
+        let output = harness.run("system-deps", &[("GWT_PLAYWRIGHT_INSTALL_RETRIES", "2")]);
+        let log = combined(&output);
+
+        assert!(
+            !output.status.success(),
+            "a held dpkg lock that never clears must fail the phase:\n{log}"
+        );
+        assert!(
+            log.contains("reason=dpkg lock contention"),
+            "the log must name the lock contention so a red PR is not \
+             mistaken for a product regression:\n{log}"
+        );
+    }
+
+    /// Issue #3701: wait for the lock *before* spending an install attempt,
+    /// so a typical unattended-upgrades window is absorbed instead of
+    /// burning the retry budget on instant failures.
+    #[test]
+    fn system_deps_waits_for_a_held_dpkg_lock_before_apt() {
+        let harness = Harness::new("lock-wait", ALWAYS_OK);
+        let probe = harness.path("lock-probe");
+        write_executable(
+            &probe,
+            r#"#!/usr/bin/env bash
+counter="${GWT_PLAYWRIGHT_STATE_DIR}/lock-probes"
+mkdir -p "${GWT_PLAYWRIGHT_STATE_DIR}"
+printf 'x' >> "${counter}"
+n=$(wc -c < "${counter}" | tr -d ' ')
+# First two probes: lock held. Afterwards: released.
+if [ "${n}" -le 2 ]; then
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let output = harness.run(
+            "system-deps",
+            &[
+                ("GWT_APT_LOCK_PROBE", probe.to_string_lossy().as_ref()),
+                ("GWT_APT_LOCK_POLL", "1"),
+                ("GWT_APT_LOCK_TIMEOUT", "10"),
+            ],
+        );
+        let log = combined(&output);
+
+        assert!(
+            output.status.success(),
+            "system-deps must wait out a short-lived dpkg lock:\n{log}"
+        );
+        assert!(
+            log.contains("waiting for dpkg lock"),
+            "waiting on the lock must be visible in the log:\n{log}"
+        );
+        assert!(
+            log.contains("phase=system-deps attempt=1"),
+            "the apt phase must still run after the lock is released:\n{log}"
+        );
+    }
+
+    /// A lock that never clears must fail on the wait budget, not hang
+    /// until the GitHub step timeout.
+    #[test]
+    fn a_held_dpkg_lock_fails_within_the_wait_budget() {
+        let harness = Harness::new("lock-timeout", ALWAYS_OK);
+        let probe = harness.path("lock-probe");
+        write_executable(&probe, "#!/usr/bin/env bash\nexit 0\n");
+        let started = std::time::Instant::now();
+        let output = harness.run(
+            "system-deps",
+            &[
+                ("GWT_APT_LOCK_PROBE", probe.to_string_lossy().as_ref()),
+                ("GWT_APT_LOCK_POLL", "1"),
+                ("GWT_APT_LOCK_TIMEOUT", "2"),
+            ],
+        );
+        let elapsed = started.elapsed();
+        let log = combined(&output);
+
+        assert!(
+            !output.status.success(),
+            "a lock that never clears must fail:\n{log}"
+        );
+        assert!(
+            elapsed.as_secs() < 30,
+            "the wait must stop on its own budget, took {elapsed:?}:\n{log}"
+        );
+        assert!(
+            log.contains("reason=dpkg lock contention"),
+            "the failure must name the lock contention:\n{log}"
+        );
     }
 
     /// `--with-deps` shells out to `apt-get install`. Any interactive prompt
@@ -521,6 +635,35 @@ mod installer {
         fs::read_to_string(&entries[0]).expect("read apt config")
     }
 
+    fn write_executable(path: &Path, body: &str) {
+        fs::write(path, body).unwrap_or_else(|error| {
+            panic!("write {}: {error}", path.display());
+        });
+        let mut perms = fs::metadata(path)
+            .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap_or_else(|error| {
+            panic!("chmod {}: {error}", path.display());
+        });
+    }
+
+    fn default_numeric_env(relative: &str, name: &str) -> Option<u64> {
+        let marker = format!("{name}:-");
+        let body = read(relative);
+        for line in body.lines() {
+            let Some(start) = line.find(&marker) else {
+                continue;
+            };
+            let rest = &line[start + marker.len()..];
+            let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            if let Ok(value) = digits.parse() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
     const FAIL_TWICE: &str = r#"#!/usr/bin/env bash
 counter="${GWT_PLAYWRIGHT_STATE_DIR}/attempts"
 mkdir -p "${GWT_PLAYWRIGHT_STATE_DIR}"
@@ -537,5 +680,11 @@ exit 0
 mkdir -p "${GWT_PLAYWRIGHT_STATE_DIR}"
 env > "${GWT_PLAYWRIGHT_STATE_DIR}/env"
 exit 0
+"#;
+
+    const DPKG_LOCK_FAIL: &str = r#"#!/usr/bin/env bash
+echo "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 3442 (apt-get)" >&2
+echo "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?" >&2
+exit 1
 "#;
 }
