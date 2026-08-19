@@ -79,6 +79,10 @@ pub struct LinkedPrSummary {
     pub url: String,
     #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
     pub will_close_target: bool,
+    /// GitHub merge instant used to prove that an ordinary Issue has not
+    /// advanced since the closing work was delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -265,6 +269,19 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
+    /// fold project stores that a pre-#3466 build split apart back into the
+    /// repository's canonical store.
+    ///
+    /// The dry run reports the plan and issues its `manifest_hash`; applying
+    /// requires that hash back *and* the recorded dry run that issued it, so a
+    /// store nobody reviewed can never be moved. `project_root` names the
+    /// project explicitly; authority still comes from the ambient Session.
+    StoreConsolidate {
+        project_root: Option<PathBuf>,
+        dry_run: bool,
+        manifest_hash: Option<String>,
+    },
     /// Issue #3448: settle incomplete Works whose owner Issue is already
     /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
     /// reports the plan without emitting close events. `project_root` targets
@@ -792,6 +809,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -860,6 +878,7 @@ mod tests {
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
             will_close_target: true,
+            merged_at: None,
         }];
 
         assert!(

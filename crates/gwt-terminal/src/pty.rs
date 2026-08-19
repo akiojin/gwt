@@ -58,6 +58,10 @@ const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
 const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
 const START_GATE_HELLO: u8 = 1;
 const START_GATE_RELEASE: u8 = 2;
+/// `CSI 1 ; 1 R` — the reply Windows ConPTY waits for before it lets a console
+/// client finish attaching.
+#[cfg(windows)]
+const CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
 
 /// A PTY child that has completed its private start-gate handshake but whose
 /// real target has not begun executing.
@@ -245,6 +249,15 @@ impl PtyHandle {
             .insert(START_GATE_TARGET_ENV.to_string(), target);
 
         let handle = Self::spawn(gate_config)?;
+        // Windows ConPTY parks a freshly attached console client inside its
+        // startup handshake until the terminal answers the cursor-position
+        // query the pseudoconsole emitted on creation. A gated launch only
+        // installs its pane — and therefore its frontend terminal — after
+        // release, so the gate helper would never reach the handshake below.
+        // Answering here is what a real terminal does anyway; conhost consumes
+        // the report instead of forwarding it to the released target.
+        #[cfg(windows)]
+        let _ = handle.write_input(CURSOR_POSITION_REPORT);
         if handle.process_id().is_none() {
             return Err(pending_spawn_error(
                 handle,
@@ -414,7 +427,10 @@ impl PtyHandle {
         })
     }
 
-    #[cfg(test)]
+    // Only the unix reaping tests inject a spawn failure; gating on `test`
+    // alone left this dead on Windows, where `-D warnings` then failed a lint
+    // CI never runs (its clippy job is Linux-only).
+    #[cfg(all(test, unix))]
     fn spawn_with_test_failure(
         config: SpawnConfig,
         failure: SpawnTestFailure,

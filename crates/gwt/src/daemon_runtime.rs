@@ -1,4 +1,8 @@
-use std::{io::Read, path::PathBuf, time::Duration};
+use std::{
+    io::Read,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
@@ -14,7 +18,59 @@ use crate::cli::hook::{
 };
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
+const HOOK_LIVE_OVERALL_DEADLINE_MS: u64 = 1_000;
+const HOOK_LIVE_RETRY_DELAY_MS: u64 = 25;
 const AGENT_BRIDGE_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct HookLiveRetryPolicy {
+    per_attempt_timeout: Duration,
+    overall_deadline: Duration,
+    retry_delay: Duration,
+}
+
+impl HookLiveRetryPolicy {
+    fn production() -> Self {
+        Self {
+            per_attempt_timeout: Duration::from_millis(HOOK_LIVE_TIMEOUT_MS),
+            overall_deadline: Duration::from_millis(HOOK_LIVE_OVERALL_DEADLINE_MS),
+            retry_delay: Duration::from_millis(HOOK_LIVE_RETRY_DELAY_MS),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HookLiveAttemptFailure {
+    Timeout,
+    Transport,
+    Http(reqwest::StatusCode),
+}
+
+impl HookLiveAttemptFailure {
+    fn is_retryable(self) -> bool {
+        match self {
+            Self::Timeout | Self::Transport => true,
+            Self::Http(status) => {
+                status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error()
+            }
+        }
+    }
+
+    fn diagnostic(self) -> String {
+        match self {
+            Self::Timeout => "hook live event transport timed out".to_string(),
+            Self::Transport => "hook live event transport failed".to_string(),
+            Self::Http(status) => {
+                format!(
+                    "hook live endpoint returned http_status={}",
+                    status.as_u16()
+                )
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentBridgeFailureReason {
@@ -790,24 +846,70 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     let Some(target) = HookForwardTarget::from_env() else {
         return Ok(());
     };
+    emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+}
+
+fn emit_live_event_with_policy(
+    event: &RuntimeHookEvent,
+    target: &HookForwardTarget,
+    policy: HookLiveRetryPolicy,
+) -> Result<(), String> {
     target.validate()?;
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(HOOK_LIVE_TIMEOUT_MS))
         .build()
         .map_err(|err| format!("build hook live client failed: {err}"))?;
-    let response = client
-        .post(&target.url)
-        .bearer_auth(&target.token)
-        .json(event)
-        .send()
-        .map_err(|err| format!("send hook live event failed: {err}"))?;
+    let readiness_delivery = event.source_event.as_deref() == Some("SessionStart")
+        && event.continuation_readiness_nonce.is_some();
+    let overall_timeout = if readiness_delivery {
+        policy.overall_deadline
+    } else {
+        policy.per_attempt_timeout
+    };
+    let started = Instant::now();
+    let deadline = started.checked_add(overall_timeout).unwrap_or(started);
+    let mut attempts = 0usize;
 
-    if !response.status().is_success() {
-        return Err(format!("hook live endpoint returned {}", response.status()));
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(format!(
+                "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
+            ));
+        };
+        if remaining.is_zero() {
+            return Err(format!(
+                "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
+            ));
+        }
+        attempts += 1;
+        let attempt_timeout = policy.per_attempt_timeout.min(remaining);
+        let failure = match client
+            .post(&target.url)
+            .bearer_auth(&target.token)
+            .json(event)
+            .timeout(attempt_timeout)
+            .send()
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => HookLiveAttemptFailure::Http(response.status()),
+            Err(error) if error.is_timeout() => HookLiveAttemptFailure::Timeout,
+            Err(_) => HookLiveAttemptFailure::Transport,
+        };
+
+        if !readiness_delivery || !failure.is_retryable() {
+            return Err(failure.diagnostic());
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
+        if remaining <= policy.retry_delay {
+            return Err(format!(
+                "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts: {}",
+                failure.diagnostic()
+            ));
+        }
+        std::thread::sleep(policy.retry_delay);
     }
-
-    Ok(())
 }
 
 fn parse_hook_event_best_effort(input: &str) -> Option<RawHookEvent> {
@@ -858,7 +960,13 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc,
+        },
+        time::{Duration, Instant},
+    };
 
     use super::*;
     use axum::{
@@ -877,6 +985,240 @@ mod tests {
 
     use gwt_core::test_support::ScopedEnvVar;
     use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
+
+    #[derive(Clone)]
+    struct HookLiveTestState {
+        attempts: Arc<AtomicUsize>,
+        responses: Arc<Vec<(Duration, StatusCode)>>,
+    }
+
+    struct HookLiveTestServer {
+        runtime: Runtime,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        attempts: Arc<AtomicUsize>,
+        forward_url: String,
+    }
+
+    impl HookLiveTestServer {
+        fn start(responses: Vec<(Duration, StatusCode)>) -> Self {
+            assert!(!responses.is_empty(), "at least one response is required");
+            let runtime = Runtime::new().expect("hook live test runtime");
+            let listener = runtime
+                .block_on(TcpListener::bind(("127.0.0.1", 0)))
+                .expect("hook live test listener");
+            let address = listener.local_addr().expect("hook live test address");
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let state = HookLiveTestState {
+                attempts: Arc::clone(&attempts),
+                responses: Arc::new(responses),
+            };
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let app = Router::new()
+                .route(
+                    "/internal/hook-live",
+                    post(
+                        |State(state): State<HookLiveTestState>,
+                         Json(_body): Json<RuntimeHookEvent>| async move {
+                            let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
+                            let &(delay, status) = state
+                                .responses
+                                .get(attempt)
+                                .unwrap_or_else(|| state.responses.last().expect("response"));
+                            tokio::time::sleep(delay).await;
+                            status
+                        },
+                    ),
+                )
+                .with_state(state);
+            runtime.spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("hook live test server");
+            });
+            Self {
+                runtime,
+                shutdown_tx: Some(shutdown_tx),
+                attempts,
+                forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
+            }
+        }
+
+        fn target(&self, token: &str) -> HookForwardTarget {
+            HookForwardTarget {
+                url: self.forward_url.clone(),
+                token: token.to_string(),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for HookLiveTestServer {
+        fn drop(&mut self) {
+            if let Some(shutdown_tx) = self.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+            self.runtime
+                .block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        }
+    }
+
+    fn hook_live_test_event(source_event: &str, readiness_nonce: Option<&str>) -> RuntimeHookEvent {
+        RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some(source_event.to_string()),
+            gwt_session_id: Some("gwt-session-test".to_string()),
+            continuation_readiness_nonce: readiness_nonce.map(str::to_string),
+            agent_session_id: Some("agent-session-test".to_string()),
+            project_root: Some("/tmp/project".to_string()),
+            branch: Some("work/issue-3480".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-08-15T00:00:00Z".to_string(),
+        }
+    }
+
+    fn short_hook_live_retry_policy() -> HookLiveRetryPolicy {
+        HookLiveRetryPolicy {
+            per_attempt_timeout: Duration::from_millis(40),
+            overall_deadline: Duration::from_millis(250),
+            retry_delay: Duration::from_millis(5),
+        }
+    }
+
+    fn hook_live_status_retry_policy() -> HookLiveRetryPolicy {
+        HookLiveRetryPolicy {
+            per_attempt_timeout: Duration::from_secs(2),
+            overall_deadline: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(5),
+        }
+    }
+
+    #[test]
+    fn hook_live_failure_retryability_matches_transport_and_http_contract() {
+        assert!(HookLiveAttemptFailure::Timeout.is_retryable());
+        assert!(HookLiveAttemptFailure::Transport.is_retryable());
+        assert!(HookLiveAttemptFailure::Http(StatusCode::REQUEST_TIMEOUT).is_retryable());
+        assert!(HookLiveAttemptFailure::Http(StatusCode::TOO_MANY_REQUESTS).is_retryable());
+        assert!(HookLiveAttemptFailure::Http(StatusCode::INTERNAL_SERVER_ERROR).is_retryable());
+        assert!(!HookLiveAttemptFailure::Http(StatusCode::BAD_REQUEST).is_retryable());
+        assert!(!HookLiveAttemptFailure::Http(StatusCode::UNAUTHORIZED).is_retryable());
+    }
+
+    #[test]
+    fn readiness_hook_retries_after_first_attempt_timeout_and_succeeds_within_deadline() {
+        let server = HookLiveTestServer::start(vec![
+            (Duration::from_millis(80), StatusCode::NO_CONTENT),
+            (Duration::ZERO, StatusCode::NO_CONTENT),
+        ]);
+        let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
+
+        emit_live_event_with_policy(
+            &event,
+            &server.target("private-forward-token"),
+            short_hook_live_retry_policy(),
+        )
+        .expect("readiness hook should recover within its bounded deadline");
+
+        assert_eq!(server.attempts(), 2);
+    }
+
+    #[test]
+    fn readiness_hook_stops_retrying_at_overall_deadline_without_exposing_secrets() {
+        let server =
+            HookLiveTestServer::start(vec![(Duration::from_millis(100), StatusCode::NO_CONTENT)]);
+        let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
+        let policy = HookLiveRetryPolicy {
+            per_attempt_timeout: Duration::from_millis(30),
+            overall_deadline: Duration::from_millis(120),
+            retry_delay: Duration::from_millis(10),
+        };
+        let started = Instant::now();
+
+        let error =
+            emit_live_event_with_policy(&event, &server.target("private-forward-token"), policy)
+                .expect_err("all delayed readiness attempts must fail");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(80),
+            "bounded retry must continue near its deadline"
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert_eq!(
+            server.attempts(),
+            3,
+            "30ms attempts plus 10ms delays should consume three attempts before the 120ms deadline"
+        );
+        assert!(!error.contains("private-readiness-nonce"), "{error}");
+        assert!(!error.contains("private-forward-token"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_hook_does_not_retry_after_attempt_timeout() {
+        let server = HookLiveTestServer::start(vec![
+            (Duration::from_millis(80), StatusCode::NO_CONTENT),
+            (Duration::ZERO, StatusCode::NO_CONTENT),
+        ]);
+        let event = hook_live_test_event("PreToolUse", None);
+
+        emit_live_event_with_policy(
+            &event,
+            &server.target("private-forward-token"),
+            short_hook_live_retry_policy(),
+        )
+        .expect_err("ordinary hook remains a single fail-open transport attempt");
+
+        assert_eq!(server.attempts(), 1);
+    }
+
+    #[test]
+    fn readiness_hook_does_not_retry_permanent_client_error() {
+        let server = HookLiveTestServer::start(vec![
+            (Duration::ZERO, StatusCode::BAD_REQUEST),
+            (Duration::ZERO, StatusCode::NO_CONTENT),
+        ]);
+        let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
+
+        emit_live_event_with_policy(
+            &event,
+            &server.target("private-forward-token"),
+            hook_live_status_retry_policy(),
+        )
+        .expect_err("permanent client error must fail immediately");
+
+        assert_eq!(server.attempts(), 1);
+    }
+
+    #[test]
+    fn readiness_hook_retries_transient_http_statuses() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let server = HookLiveTestServer::start(vec![
+                (Duration::ZERO, status),
+                (Duration::ZERO, StatusCode::NO_CONTENT),
+            ]);
+            let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
+
+            emit_live_event_with_policy(
+                &event,
+                &server.target("private-forward-token"),
+                hook_live_status_retry_policy(),
+            )
+            .unwrap_or_else(|error| panic!("{status} should be retried: {error}"));
+
+            assert_eq!(server.attempts(), 2, "status={status}");
+        }
+    }
 
     struct BindingProbeServer {
         runtime: Runtime,

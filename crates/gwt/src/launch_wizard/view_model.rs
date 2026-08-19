@@ -392,7 +392,8 @@ impl LaunchWizardState {
     }
 
     fn reasoning_options_view(&self) -> Vec<LaunchWizardOptionView> {
-        self.current_reasoning_options()
+        let mut options: Vec<_> = self
+            .current_reasoning_options()
             .iter()
             .map(|option| LaunchWizardOptionView {
                 value: option.stored_value.to_string(),
@@ -400,7 +401,16 @@ impl LaunchWizardState {
                 description: Some(option.description.to_string()),
                 color: None,
             })
-            .collect()
+            .collect();
+        if let Some(reasoning) = self.unlisted_grok_reasoning() {
+            options.push(LaunchWizardOptionView {
+                value: reasoning.to_string(),
+                label: reasoning.to_string(),
+                description: Some("Saved custom effort; passed through unchanged".to_string()),
+                color: None,
+            });
+        }
+        options
     }
 
     fn docker_service_options_view(&self) -> Vec<LaunchWizardOptionView> {
@@ -472,10 +482,10 @@ impl LaunchWizardState {
                     .map(|agent| agent.name.clone())
                     .unwrap_or_else(|| "Unavailable".to_string()),
             });
-            if is_explicit_model_selection(&self.model) {
+            if let Some(model) = self.explicit_model_for_launch() {
                 summary.push(LaunchWizardSummaryView {
                     label: "Model".to_string(),
-                    value: self.model.clone(),
+                    value: model.to_string(),
                 });
             }
             if let Some(reasoning) = self.reasoning_level_for_launch() {
@@ -824,16 +834,7 @@ impl LaunchWizardState {
                     color: None,
                 })
                 .collect(),
-            LaunchWizardStep::ReasoningLevel => self
-                .current_reasoning_options()
-                .iter()
-                .map(|option| LaunchWizardOptionView {
-                    value: option.stored_value.to_string(),
-                    label: option.label.to_string(),
-                    description: Some(option.description.to_string()),
-                    color: None,
-                })
-                .collect(),
+            LaunchWizardStep::ReasoningLevel => self.reasoning_options_view(),
             LaunchWizardStep::RuntimeTarget => RUNTIME_TARGET_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
@@ -908,6 +909,63 @@ mod tests {
     use super::super::profiles::load_launch_sessions;
     use super::super::test_support::*;
     use super::*;
+
+    fn grok_manual_state() -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_agent_id("grok");
+        state
+    }
+
+    #[test]
+    fn grok_build_view_exposes_freetext_model_and_common_effort_surface() {
+        // SPEC-1921 T483: the Rust view model must expose the Grok launch
+        // values without substituting a fixed model catalog.
+        let mut state = grok_manual_state();
+        state.set_model("grok-4.20-beta");
+        state.set_reasoning("high");
+
+        let view = state.view();
+        let effort_values: Vec<&str> = view
+            .reasoning_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+
+        assert!(view.show_agent_settings);
+        assert!(view.show_reasoning);
+        assert!(view.model_options.is_empty());
+        assert_eq!(view.selected_model, "grok-4.20-beta");
+        assert_eq!(view.selected_reasoning, "high");
+        assert_eq!(
+            effort_values,
+            ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Model" && item.value == "grok-4.20-beta"));
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Effort" && item.value == "high"));
+    }
 
     #[test]
     fn normal_wizard_view_has_no_holder_decision() {
@@ -1644,6 +1702,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1683,6 +1742,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.2-codex".to_string()),
@@ -1734,6 +1794,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1808,6 +1869,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1849,6 +1911,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2244,6 +2307,7 @@ mod tests {
             ),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "proxy-agent".to_string(),
                 tool_label: "Claude Proxy".to_string(),
                 model: None,

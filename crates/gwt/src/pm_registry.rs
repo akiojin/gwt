@@ -20,6 +20,27 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+/// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
+/// injects into the resident PM must end.
+///
+/// Three separate injection points drive a PM cycle — the delta wake, the
+/// periodic wake, and the Stop-gate forced continuation — and each used to
+/// phrase the reporting expectation itself. Injected text outranks the gwt-pm
+/// skill body for the reading agent, so those three sentences, not the
+/// milestone-only cadence in `gwt_skills::pm_guidance`, decided what the PM
+/// actually did: both wakes closed with a flat "report the milestone digest"
+/// and produced a digest on every tick, change or no change.
+///
+/// One canonical clause, used verbatim by all three, keeps the wordings from
+/// drifting apart again. It constrains the *report* and never the cycle: the
+/// reconcile still runs in full, and the wake that drove it is recorded in
+/// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
+/// distinguishable from a dead one without a keepalive line in the
+/// conversation (FR-4).
+pub const PM_CYCLE_REPORTING_CLAUSE: &str =
+    "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
+     changed, end the cycle with no user-facing output.";
+
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmRegistration {
@@ -71,10 +92,12 @@ pub const PM_DEFAULT_AGENT: &str = "claude";
 /// Agents that can resolve the `$gwt-pm` bootstrap prompt.
 ///
 /// Managed assets only reach agents with a skills mirror, and `pm_guidance`
-/// writes the `.claude` and `.codex` mirrors. Launching the PM as any other
-/// agent would hand it a prompt that resolves to nothing — the exact failure
-/// the T-052 materialization fix removed, reintroduced through configuration.
-pub const PM_SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
+/// writes the `.claude` and `.codex` mirrors. Grok consumes the existing
+/// Claude-compatible target rather than inventing a third mirror. Launching
+/// the PM as any other agent would hand it a prompt that resolves to nothing —
+/// the exact failure the T-052 materialization fix removed, reintroduced
+/// through configuration.
+pub const PM_SUPPORTED_AGENTS: &[&str] = &["claude", "codex", "grok"];
 
 pub fn pm_agent_is_supported(agent_id: &str) -> bool {
     PM_SUPPORTED_AGENTS.contains(&agent_id)
@@ -115,7 +138,9 @@ impl PmSettings {
     /// true even for prefs written by a newer or misconfigured build.
     pub fn launch_profile_or_default(&self) -> PmLaunchProfile {
         match self.launch_profile.as_ref() {
-            Some(profile) if pm_agent_is_supported(&profile.agent_id) => profile.clone(),
+            Some(profile) if pm_agent_is_supported(&profile.agent_id) => {
+                profile.clone().normalized()
+            }
             Some(profile) => {
                 tracing::warn!(
                     agent_id = %profile.agent_id,
@@ -129,6 +154,30 @@ impl PmSettings {
 }
 
 impl PmLaunchProfile {
+    /// Canonicalize user-entered optional tuning without changing the agent
+    /// identity or the legacy optional schema. Blank values mean provider
+    /// defaults; non-blank values are persisted and launched without their UI
+    /// padding.
+    pub fn normalized(mut self) -> Self {
+        let normalize = |value: Option<String>| {
+            value.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        };
+        self.model = normalize(self.model);
+        self.reasoning = normalize(self.reasoning);
+        if self.agent_id == "grok"
+            && self
+                .reasoning
+                .as_deref()
+                .is_some_and(|effort| effort.eq_ignore_ascii_case("auto"))
+        {
+            self.reasoning = None;
+        }
+        self
+    }
+
     pub fn default_profile() -> Self {
         Self {
             agent_id: PM_DEFAULT_AGENT.to_string(),
@@ -566,6 +615,26 @@ pub fn save_pm_loop_state(path: &Path, state: &PmLoopState) -> io::Result<()> {
 /// segments alone — a production branch literally named `pm/worktree` would
 /// otherwise be handed the PM operating contract.
 pub fn is_pm_worktree(path: &Path) -> bool {
+    pm_worktree_store_dir(path).is_some()
+}
+
+/// [`is_pm_worktree`] for callers holding an already-canonicalized path.
+///
+/// The Work mutation paths canonicalize every path they touch, while
+/// [`gwt_projects_dir`](gwt_core::paths::gwt_projects_dir) is built from `HOME`
+/// verbatim. When `HOME` traverses a symlink — macOS `/var` -> `/private/var`
+/// is the everyday case under a temporary home — the two spellings disagree
+/// and the plain shape test rejects a genuine PM worktree. Comparing both
+/// spellings keeps the answer about the path, not about how it was spelled.
+pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    if is_pm_worktree(path) {
+        return true;
+    }
+    let Some(canonical_projects_dir) =
+        dunce::canonicalize(gwt_core::paths::gwt_projects_dir()).ok()
+    else {
+        return false;
+    };
     let Some(pm_dir) = path.parent() else {
         return false;
     };
@@ -577,7 +646,138 @@ pub fn is_pm_worktree(path: &Path) -> bool {
     pm_dir
         .parent()
         .and_then(Path::parent)
-        .is_some_and(|projects_dir| projects_dir == gwt_core::paths::gwt_projects_dir())
+        .is_some_and(|projects_dir| projects_dir == canonical_projects_dir)
+}
+
+/// The project store that owns `path`, when `path` is that store's PM
+/// worktree: `<gwt projects dir>/<repo hash>` for
+/// `<gwt projects dir>/<repo hash>/pm/worktree`.
+///
+/// Issue #3607 needs the owning store, not just the yes/no shape test, because
+/// a PM worktree from *another* store is exactly what session restore must
+/// refuse (AC-3).
+pub fn pm_worktree_store_dir(path: &Path) -> Option<PathBuf> {
+    let pm_dir = path.parent()?;
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return None;
+    }
+    let project_dir = pm_dir.parent()?;
+    (project_dir.parent()? == gwt_core::paths::gwt_projects_dir())
+        .then(|| project_dir.to_path_buf())
+}
+
+/// Issue #3607 AC-3: whether restoring a session rooted at `session_worktree`
+/// into the store at `own_project_dir` would resurrect a *different* store's
+/// PM.
+///
+/// The stopped store in the incident was not even open in the app, yet its PM
+/// came back: the current store's `workspace.json` still held a window whose
+/// Session pointed at the other store's `pm/worktree`. Restore reached it
+/// through the window's session id alone, so nothing on that path ever
+/// compared the two stores. Dropping the `auto_start` flag cannot close this —
+/// restore never consults a registration.
+///
+/// Ordinary work worktrees are unaffected: only a path shaped like some
+/// store's PM worktree can be foreign here.
+pub fn is_foreign_pm_worktree(session_worktree: &Path, own_project_dir: &Path) -> bool {
+    let Some(store_dir) = pm_worktree_store_dir(session_worktree) else {
+        return false;
+    };
+    !paths_are_same_store(&store_dir, own_project_dir)
+}
+
+fn paths_are_same_store(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let canonical = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(left) == canonical(right)
+}
+
+/// A PM registration together with the project store holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmStoreRegistration {
+    /// `<gwt projects dir>/<repo hash>`.
+    pub project_dir: PathBuf,
+    /// `<project_dir>/project-state/pm.json`.
+    pub prefs_path: PathBuf,
+    pub registration: PmRegistration,
+}
+
+/// Issue #3607 AC-1: the identity PM uniqueness is judged on.
+///
+/// `~/.gwt/projects/<hash>` is a *store* scope. One repository can own two
+/// stores once scope resolution splits (#3466), and each store then keeps its
+/// own `pm.json` with its own `auto_start` — neither can see the other, so
+/// "one PM per project" silently became "one PM per store". The git common dir
+/// is the scope that does not split.
+pub fn pm_repository_key(path: &Path) -> Option<PathBuf> {
+    gwt_core::repo_hash::repository_common_dir(path)
+}
+
+/// Every PM registration on this machine belonging to `repository_key`,
+/// ordered by store directory so callers and diagnostics are deterministic.
+///
+/// A registration whose worktree no longer resolves to a repository is skipped:
+/// its PM cannot be running, so it must not block a fresh one.
+pub fn pm_registrations_for_repository(repository_key: &Path) -> Vec<PmStoreRegistration> {
+    let projects_dir = gwt_core::paths::gwt_projects_dir();
+    let Ok(entries) = fs::read_dir(&projects_dir) else {
+        return Vec::new();
+    };
+    let mut project_dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    project_dirs.sort();
+
+    project_dirs
+        .into_iter()
+        .filter_map(|project_dir| {
+            let prefs_path = project_dir.join("project-state/pm.json");
+            let registration = load_pm_prefs(&prefs_path).ok()?.registration?;
+            let worktree = PathBuf::from(&registration.worktree_path);
+            (pm_repository_key(&worktree).as_deref() == Some(repository_key)).then_some(
+                PmStoreRegistration {
+                    project_dir,
+                    prefs_path,
+                    registration,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Issue #3607 AC-5: clear the registration naming `session_id` from whichever
+/// store in `repository_key` holds it.
+///
+/// Addressing by session id rather than by store is what makes an orphan
+/// stoppable: the PM asking for the stop only knows the id it saw in
+/// `pm.status`, not which of the split stores the orphan registered in.
+/// Returns the record that was cleared, or `None` when no store in this
+/// repository registered that session.
+pub fn stop_pm_registration_in_repository(
+    repository_key: &Path,
+    session_id: &str,
+) -> Option<PmStoreRegistration> {
+    let target = pm_registrations_for_repository(repository_key)
+        .into_iter()
+        .find(|record| record.registration.session_id == session_id)?;
+    match deregister_pm(&target.prefs_path, session_id) {
+        Ok((_, true)) => Some(target),
+        Ok((_, false)) => None,
+        Err(error) => {
+            tracing::warn!(
+                path = %target.prefs_path.display(),
+                %error,
+                "failed to clear the PM registration"
+            );
+            None
+        }
+    }
 }
 
 /// Per-writer-unique scratch path in the same directory as `path` so the
@@ -779,6 +979,48 @@ pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
     })
 }
 
+/// SPEC-3431 FR-032 (Issue #3477): is `session_id` this project's registered
+/// PM, running in this project's canonical PM worktree?
+///
+/// The Work mutation paths use this to grant a branchless identity to the one
+/// Session that has no branch by design. It is stricter than
+/// [`session_is_registered_pm`] on purpose: PM privilege over conversational
+/// operations only needs the subject, but rewriting Work state also needs the
+/// *container* to be the exact worktree this project's PM was given. Three
+/// facts must agree, and any disagreement is not privileged (fail-closed):
+///
+/// 1. the durable registration names `session_id`,
+/// 2. the registration's worktree is `worktree`, and
+/// 3. `worktree` is the canonical PM worktree derived from
+///    `project_state_root` itself.
+///
+/// (3) is what keeps a stale registration pointing at some other directory —
+/// or a foreign project's PM path — from authorizing anything here. Paths are
+/// compared canonically because callers hand us an already-canonicalized
+/// worktree while the derived and stored paths may still contain symlinks.
+pub fn registered_pm_worktree_authority(
+    project_state_root: &Path,
+    session_id: &str,
+    worktree: &Path,
+) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let canonical = |path: &Path| dunce::canonicalize(path).ok();
+    let Some(worktree) = canonical(worktree) else {
+        return false;
+    };
+    if canonical(&pm_worktree_path_for_repo_path(project_state_root)).as_ref() != Some(&worktree) {
+        return false;
+    }
+    load_pm_prefs(&pm_prefs_path_for_repo_path(project_state_root)).is_ok_and(|prefs| {
+        prefs.registration.is_some_and(|registration| {
+            registration.session_id == session_id
+                && canonical(Path::new(&registration.worktree_path)).as_ref() == Some(&worktree)
+        })
+    })
+}
+
 /// FR-003 crash-loop damper: uptime beyond this resets the consecutive-crash
 /// count (the PM ran healthily, so the next crash starts a fresh series).
 pub const PM_HEALTHY_UPTIME_SECS: i64 = 600;
@@ -870,6 +1112,45 @@ pub struct PmStatusReport {
     /// session identity to judge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_is_registered_pm: Option<bool>,
+    /// Issue #3607: every PM registration in this *repository*, including ones
+    /// held by another project store.
+    ///
+    /// `registration` above is this store's only, which is exactly the blind
+    /// spot that let a second PM run unnoticed. A PM cannot ask another store
+    /// to identify itself, so the orphan's session id has to be discoverable
+    /// here — it is the input `pm.stop` needs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repository_registrations: Vec<PmRepositoryRegistrationView>,
+}
+
+/// One row of [`PmStatusReport::repository_registrations`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PmRepositoryRegistrationView {
+    pub project_dir: String,
+    pub session_id: String,
+    pub agent_id: String,
+    pub worktree_path: String,
+    /// Whether this row is the store the report was asked about. A `false` row
+    /// is a PM this store cannot see through its own `pm.json`.
+    pub is_current_store: bool,
+}
+
+/// Build the repository-scoped rows for `repo_path`'s report.
+pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryRegistrationView> {
+    let Some(repository_key) = pm_repository_key(repo_path) else {
+        return Vec::new();
+    };
+    let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
+    pm_registrations_for_repository(&repository_key)
+        .into_iter()
+        .map(|record| PmRepositoryRegistrationView {
+            is_current_store: record.project_dir == own_project_dir,
+            project_dir: record.project_dir.display().to_string(),
+            session_id: record.registration.session_id,
+            agent_id: record.registration.agent_id,
+            worktree_path: record.registration.worktree_path,
+        })
+        .collect()
 }
 
 /// Build the `pm.status` report from loaded prefs. The durable-session probe
@@ -906,6 +1187,7 @@ pub fn pm_status_report_for_caller(
         registration,
         session_record_present: record_present,
         stale_hint: record_present.map(|present| !present),
+        repository_registrations: Vec::new(),
     }
 }
 
@@ -928,6 +1210,206 @@ mod tests {
             consecutive_crashes: 0,
             next_not_before: None,
         }
+    }
+
+    /// Issue #3607: reproduce the observed split — one repository whose
+    /// `pm/worktree` linked worktrees live in two different project stores.
+    ///
+    /// The `.git` file / `commondir` pair is written by hand rather than by
+    /// `git worktree add` so the fixture stays hermetic and fast; it is the
+    /// exact on-disk shape git itself materializes.
+    struct SplitStoreFixture {
+        _home: tempfile::TempDir,
+        _repo_dir: tempfile::TempDir,
+        repo: PathBuf,
+        stores: Vec<PathBuf>,
+        _home_guard: gwt_core::test_support::ScopedGwtHome,
+    }
+
+    impl SplitStoreFixture {
+        fn new(store_hashes: &[&str]) -> Self {
+            let home = tempfile::tempdir().expect("home");
+            let home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let repo_dir = tempfile::tempdir().expect("repo dir");
+            let repo = repo_dir.path().join("repo");
+            let git_dir = repo.join(".git");
+            fs::create_dir_all(git_dir.join("worktrees")).expect("git dir");
+            fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+            fs::write(git_dir.join("config"), "[core]\n\tbare = false\n").expect("config");
+
+            let stores = store_hashes
+                .iter()
+                .map(|hash| {
+                    let project_dir = gwt_core::paths::gwt_project_dir(
+                        &gwt_core::repo_hash::compute_repo_hash(hash),
+                    );
+                    // Use the caller's literal hash for the directory name so
+                    // assertions can name the store the way the incident report
+                    // does.
+                    let project_dir = project_dir.with_file_name(hash);
+                    let worktree = project_dir.join("pm/worktree");
+                    fs::create_dir_all(&worktree).expect("pm worktree");
+                    let admin = git_dir.join("worktrees").join(hash);
+                    fs::create_dir_all(&admin).expect("worktree admin dir");
+                    fs::write(admin.join("commondir"), "../..\n").expect("commondir");
+                    fs::write(
+                        worktree.join(".git"),
+                        format!("gitdir: {}\n", admin.display()),
+                    )
+                    .expect(".git file");
+                    project_dir
+                })
+                .collect();
+
+            Self {
+                _home: home,
+                _repo_dir: repo_dir,
+                repo,
+                stores,
+                _home_guard: home_guard,
+            }
+        }
+
+        fn register(&self, store_index: usize, session_id: &str) -> PathBuf {
+            let project_dir = &self.stores[store_index];
+            let prefs_path = project_dir.join("project-state/pm.json");
+            let mut candidate = registration(session_id);
+            candidate.worktree_path = project_dir.join("pm/worktree").display().to_string();
+            save_pm_prefs(
+                &prefs_path,
+                &PmPrefs {
+                    registration: Some(candidate),
+                    settings: PmSettings::default(),
+                },
+            )
+            .expect("save prefs");
+            prefs_path
+        }
+    }
+
+    /// AC-1 / AC-4: with two split stores holding a registration each, the
+    /// repository-scoped view must see both. Store-scoped uniqueness cannot —
+    /// that blindness is what let two PMs run against one repository.
+    #[test]
+    fn repository_scoped_scan_sees_registrations_in_every_split_store() {
+        let fixture = SplitStoreFixture::new(&["99a8660247f5bc49", "b19aac38305901f5"]);
+        fixture.register(0, "fedf798b-current");
+        fixture.register(1, "b0801016-orphan");
+
+        let key = pm_repository_key(&fixture.repo).expect("repository key");
+        let found = pm_registrations_for_repository(&key);
+
+        let sessions: Vec<&str> = found
+            .iter()
+            .map(|record| record.registration.session_id.as_str())
+            .collect();
+        assert_eq!(
+            sessions.len(),
+            2,
+            "both split stores belong to one repository: {sessions:?}"
+        );
+        assert!(sessions.contains(&"fedf798b-current"));
+        assert!(sessions.contains(&"b0801016-orphan"));
+    }
+
+    /// The repository key must also be derivable from a PM worktree, because
+    /// that is all a registration records about its repository.
+    #[test]
+    fn repository_key_from_a_pm_worktree_matches_the_repository() {
+        let fixture = SplitStoreFixture::new(&["store-a", "store-b"]);
+        let expected = pm_repository_key(&fixture.repo).expect("repository key");
+        for store in &fixture.stores {
+            assert_eq!(
+                pm_repository_key(&store.join("pm/worktree")).as_ref(),
+                Some(&expected),
+                "every store's PM worktree belongs to the one repository"
+            );
+        }
+    }
+
+    /// Registrations for an unrelated repository must never be pulled in.
+    #[test]
+    fn repository_scoped_scan_excludes_other_repositories() {
+        let fixture = SplitStoreFixture::new(&["store-a"]);
+        fixture.register(0, "mine");
+
+        let unrelated = tempfile::tempdir().expect("unrelated");
+        let unrelated_repo = unrelated.path().join("repo");
+        fs::create_dir_all(unrelated_repo.join(".git")).expect("git dir");
+        fs::write(unrelated_repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+
+        let key = pm_repository_key(&unrelated_repo).expect("repository key");
+        assert!(
+            pm_registrations_for_repository(&key).is_empty(),
+            "another repository's PM must not appear in this repository's scan"
+        );
+    }
+
+    /// AC-3: session restore must be able to tell "this session's worktree is
+    /// another store's PM worktree" without loading any registration.
+    #[test]
+    fn foreign_pm_worktree_is_recognised_across_stores() {
+        let fixture = SplitStoreFixture::new(&["current", "orphan"]);
+        let current = &fixture.stores[0];
+        let orphan_pm_worktree = fixture.stores[1].join("pm/worktree");
+
+        assert_eq!(
+            pm_worktree_store_dir(&orphan_pm_worktree).as_ref(),
+            Some(&fixture.stores[1]),
+            "a PM worktree names the store that owns it"
+        );
+        assert!(
+            is_foreign_pm_worktree(&orphan_pm_worktree, current),
+            "the orphan store's PM worktree is foreign to the current store"
+        );
+        assert!(
+            !is_foreign_pm_worktree(&current.join("pm/worktree"), current),
+            "the current store's own PM worktree must still restore"
+        );
+        assert!(
+            !is_foreign_pm_worktree(Path::new("/tmp/ordinary/worktree"), current),
+            "an ordinary work worktree is not a PM worktree at all"
+        );
+    }
+
+    /// AC-5: the orphan's registration is cleared from whichever store holds
+    /// it, addressed only by session id.
+    #[test]
+    fn repository_scoped_stop_clears_the_orphans_registration() {
+        let fixture = SplitStoreFixture::new(&["current", "orphan"]);
+        let current_prefs = fixture.register(0, "live-pm");
+        let orphan_prefs = fixture.register(1, "orphan-pm");
+
+        let key = pm_repository_key(&fixture.repo).expect("repository key");
+        let stopped = stop_pm_registration_in_repository(&key, "orphan-pm").expect("stop");
+
+        assert_eq!(stopped.registration.session_id, "orphan-pm");
+        assert_eq!(stopped.prefs_path, orphan_prefs);
+        assert_eq!(
+            load_pm_prefs(&orphan_prefs)
+                .expect("load orphan")
+                .registration,
+            None,
+            "the orphan registration is gone"
+        );
+        assert!(
+            load_pm_prefs(&current_prefs)
+                .expect("load current")
+                .registration
+                .is_some(),
+            "stopping the orphan must not disturb the live PM"
+        );
+    }
+
+    /// Stopping a session that is not a PM of this repository must fail rather
+    /// than silently succeed — the caller has to learn it named the wrong one.
+    #[test]
+    fn repository_scoped_stop_refuses_an_unknown_session() {
+        let fixture = SplitStoreFixture::new(&["current"]);
+        fixture.register(0, "live-pm");
+        let key = pm_repository_key(&fixture.repo).expect("repository key");
+
+        assert!(stop_pm_registration_in_repository(&key, "no-such-session").is_none());
     }
 
     #[test]
@@ -1107,6 +1589,96 @@ mod tests {
         let reloaded = load_pm_prefs(&path).expect("reload");
         assert_eq!(reloaded.settings.launch_profile, Some(configured.clone()));
         assert_eq!(reloaded.settings.launch_profile_or_default(), configured);
+    }
+
+    /// SPEC-3431 FR-119/FR-120 / T-484: Grok uses the existing
+    /// Claude-compatible managed target, but its PM identity and launch
+    /// tuning remain Grok-specific in durable project settings. Older prefs
+    /// may omit every optional tuning value and must still deserialize.
+    #[test]
+    fn grok_launch_profile_is_supported_and_preserves_optional_launch_tuning() {
+        let (_dir, path) = temp_prefs_path();
+        let configured = PmLaunchProfile {
+            agent_id: "grok".to_string(),
+            model: Some("grok-4.20-beta".to_string()),
+            reasoning: Some("xhigh".to_string()),
+            version: None,
+        };
+        let prefs = PmPrefs {
+            settings: PmSettings {
+                launch_profile: Some(configured.clone()),
+                ..PmSettings::default()
+            },
+            ..PmPrefs::default()
+        };
+
+        assert!(
+            pm_agent_is_supported("grok"),
+            "Grok is a valid PM agent through the Claude-compatible managed target"
+        );
+        assert_eq!(prefs.settings.launch_profile_or_default(), configured);
+
+        save_pm_prefs(&path, &prefs).expect("save Grok PM profile");
+        let reloaded = load_pm_prefs(&path).expect("reload Grok PM profile");
+        assert_eq!(
+            reloaded.settings.launch_profile,
+            prefs.settings.launch_profile
+        );
+
+        let legacy: PmPrefs = serde_json::from_str(
+            r#"{"settings":{"auto_start":true,"launch_profile":{"agent_id":"grok"}}}"#,
+        )
+        .expect("legacy profile with omitted optional tuning remains readable");
+        assert_eq!(
+            legacy.settings.launch_profile_or_default(),
+            PmLaunchProfile {
+                agent_id: "grok".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+            }
+        );
+    }
+
+    #[test]
+    fn launch_profile_normalizes_model_and_reasoning_whitespace() {
+        let settings = PmSettings {
+            launch_profile: Some(PmLaunchProfile {
+                agent_id: "codex".to_string(),
+                model: Some("  gpt-5.6  ".to_string()),
+                reasoning: Some("  xhigh  ".to_string()),
+                version: None,
+            }),
+            ..PmSettings::default()
+        };
+        let normalized = settings.launch_profile_or_default();
+        assert_eq!(normalized.model.as_deref(), Some("gpt-5.6"));
+        assert_eq!(normalized.reasoning.as_deref(), Some("xhigh"));
+
+        let blank = PmSettings {
+            launch_profile: Some(PmLaunchProfile {
+                agent_id: "codex".to_string(),
+                model: Some(" \t ".to_string()),
+                reasoning: Some("  ".to_string()),
+                version: None,
+            }),
+            ..PmSettings::default()
+        }
+        .launch_profile_or_default();
+        assert_eq!(blank.model, None);
+        assert_eq!(blank.reasoning, None);
+
+        let grok_auto = PmSettings {
+            launch_profile: Some(PmLaunchProfile {
+                agent_id: "grok".to_string(),
+                model: None,
+                reasoning: Some(" AUTO ".to_string()),
+                version: None,
+            }),
+            ..PmSettings::default()
+        }
+        .launch_profile_or_default();
+        assert_eq!(grok_auto.reasoning, None);
     }
 
     /// A profile naming an agent with no skills mirror would hand the PM a

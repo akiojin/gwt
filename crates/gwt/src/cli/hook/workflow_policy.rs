@@ -1173,6 +1173,8 @@ mod tests {
             "issue.monitor.stop",
             // SPEC-3431 FR-029〜031: failover revokes it and requeues.
             "issue.monitor.failover",
+            // Issue #3645 / #3628: requeue releases a dead failure hold.
+            "issue.monitor.requeue",
         ] {
             assert!(!is_read_only_json_envelope_operation(operation));
         }
@@ -1187,6 +1189,7 @@ mod tests {
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",
+            "issue.monitor.requeue",
         ] {
             let command = format!(
                 "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
