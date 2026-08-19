@@ -5339,6 +5339,20 @@ mod tests {
             }),
             Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
         ));
+        // Issue #3552 AC-4: unblocking peer *close* (Issue #3629 AC-9) must not
+        // leak into peer *injection*. An ordinary agent — even a fully bound,
+        // producing one — keeps the SPEC-3050 FR-002 self-only contract here;
+        // the only route into another pane's keyboard stays the registered-PM
+        // path of SPEC-3431 FR-111.
+        assert!(
+            bound_scope
+                .filter_inbound(FrontendEvent::PaneSendInput {
+                    session_id: "session-peer".to_string(),
+                    text: "hello".to_string(),
+                })
+                .is_none(),
+            "a producing ordinary agent still cannot inject into a peer Session's pane"
+        );
 
         let prepared_principal = AgentSessionPrincipal::new_prepared(
             project.path(),
