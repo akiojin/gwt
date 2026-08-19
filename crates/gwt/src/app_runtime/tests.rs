@@ -63,11 +63,11 @@ use super::{
     AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
     CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
     IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
-    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
-    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
+    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchPaneDisposition, LaunchWizardMemoryCache,
+    LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
     PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
-    ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    ReadinessDeadlineDecision, ReadinessPaneEvidence, ScheduledIssueMonitorScanOutcome, UserEvent,
+    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::embedded_server::AgentPmSendResponder;
 use crate::{
@@ -11323,21 +11323,50 @@ fn continue_work_readiness_deadline_extends_while_the_pane_is_alive_and_producin
         extensions: 0,
         silent_extensions: 1,
         observed_output_bytes: 128,
+        handed_off: false,
     };
 
     assert_eq!(
-        continue_work_readiness_decision(&watch, true, 4096),
+        continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Live, 4096),
         ReadinessDeadlineDecision::Extend(ContinueWorkReadinessWatch {
             operation_id: "op".to_string(),
             extensions: 1,
             silent_extensions: 0,
             observed_output_bytes: 4096,
+            handed_off: false,
+        }),
+    );
+}
+
+/// Issue #3482 AC-4 (slow progress): a pane that is nearly out of extension
+/// budget but still emitting output keeps extending. Slowness alone is never
+/// evidence that the launch is dead.
+#[test]
+fn continue_work_readiness_deadline_extends_a_slow_but_progressing_pane() {
+    let watch = ContinueWorkReadinessWatch {
+        operation_id: "op".to_string(),
+        extensions: 3,
+        silent_extensions: 2,
+        observed_output_bytes: 12_288,
+        handed_off: false,
+    };
+
+    assert_eq!(
+        continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Live, 12_289),
+        ReadinessDeadlineDecision::Extend(ContinueWorkReadinessWatch {
+            operation_id: "op".to_string(),
+            extensions: 4,
+            silent_extensions: 0,
+            observed_output_bytes: 12_289,
+            handed_off: false,
         }),
     );
 }
 
 /// Issue #3475: no liveness evidence means the deadline still aborts on the
 /// spot — the extension budget must never keep a dead launch pending.
+/// Issue #3482 AC-3: a dead pane is exactly the case that may still be torn
+/// down, because there is no live process left to destroy.
 #[test]
 fn continue_work_readiness_deadline_aborts_at_once_when_the_pane_process_is_gone() {
     let watch = ContinueWorkReadinessWatch {
@@ -11345,67 +11374,164 @@ fn continue_work_readiness_deadline_aborts_at_once_when_the_pane_process_is_gone
         extensions: 1,
         silent_extensions: 0,
         observed_output_bytes: 10,
+        handed_off: false,
     };
 
-    let ReadinessDeadlineDecision::Abort { detail } =
-        continue_work_readiness_decision(&watch, false, 4096)
+    let ReadinessDeadlineDecision::Abort { detail, pane } =
+        continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Dead, 4096)
     else {
         panic!("a dead pane must abort the readiness deadline");
     };
+    assert_eq!(pane, LaunchPaneDisposition::Teardown);
     assert!(detail.contains("after 150s"), "{detail}");
     assert!(detail.contains("no longer running"), "{detail}");
 }
 
-/// Issue #3475: a live but permanently silent pane is bounded by the silent
-/// streak cap, and the abort names the total wait plus what never happened.
+/// Issue #3482 AC-3 (identity mismatch): when another runtime owns the launch
+/// window, the durable candidate is still rolled back — but the pane that is
+/// there now belongs to somebody else and must survive untouched.
 #[test]
-fn continue_work_readiness_deadline_abort_is_bounded_when_a_live_pane_stays_silent() {
+fn continue_work_readiness_deadline_retains_a_foreign_pane_while_rolling_the_candidate_back() {
+    let watch = ContinueWorkReadinessWatch {
+        operation_id: "op".to_string(),
+        extensions: 1,
+        silent_extensions: 0,
+        observed_output_bytes: 10,
+        handed_off: false,
+    };
+
+    let ReadinessDeadlineDecision::Abort { detail, pane } =
+        continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Foreign, 4096)
+    else {
+        panic!("a foreign pane must still roll the candidate back");
+    };
+    assert_eq!(
+        pane,
+        LaunchPaneDisposition::Retain,
+        "cleanup must never terminate a pane this launch does not own",
+    );
+    assert!(detail.contains("after 150s"), "{detail}");
+    assert!(detail.contains("no longer owns"), "{detail}");
+}
+
+/// Issue #3482 AC-2 (silent live): the silent streak still bounds *waiting*,
+/// but reaching the bound hands the launch to the user instead of killing a
+/// process that is demonstrably alive.
+#[test]
+fn continue_work_readiness_deadline_hands_off_a_silent_live_pane_without_killing_it() {
     let mut watch = ContinueWorkReadinessWatch::new("op".to_string());
     let mut granted = 0_u32;
-    let detail = loop {
-        match continue_work_readiness_decision(&watch, true, 0) {
+    let (handoff, detail) = loop {
+        match continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Live, 0) {
             ReadinessDeadlineDecision::Extend(next) => {
                 granted += 1;
                 assert!(granted <= 8, "a silent pane must not extend forever");
                 watch = next;
             }
-            ReadinessDeadlineDecision::Abort { detail } => break detail,
+            ReadinessDeadlineDecision::HandOff {
+                watch: next,
+                detail,
+            } => {
+                break (
+                    next,
+                    detail.expect("the handoff transition must be diagnosable"),
+                )
+            }
+            ReadinessDeadlineDecision::Abort { .. } => {
+                panic!("a live pane must never be aborted by the readiness deadline")
+            }
         }
     };
 
     assert_eq!(granted, 2);
+    assert!(handoff.handed_off);
     assert!(detail.contains("after 210s"), "{detail}");
     assert!(detail.contains("never produced any output"), "{detail}");
 }
 
-/// Issue #3475: progress buys time but not an unbounded wait — the absolute
-/// extension cap still terminates a pane that keeps talking without ever
-/// reporting an authenticated SessionStart.
+/// Issue #3482 AC-2: progress buys time but not an unbounded wait. Reaching the
+/// absolute cap stops the waiting, not the agent — the launch is handed off
+/// with the pane and its in-flight resume intact.
 #[test]
-fn continue_work_readiness_deadline_abort_is_bounded_even_while_output_keeps_flowing() {
+fn continue_work_readiness_deadline_hands_off_a_progressing_pane_at_the_absolute_cap() {
     let mut watch = ContinueWorkReadinessWatch::new("op".to_string());
     let mut output_bytes = 0_u64;
     let mut granted = 0_u32;
-    let detail = loop {
+    let (handoff, detail) = loop {
         output_bytes += 4096;
-        match continue_work_readiness_decision(&watch, true, output_bytes) {
+        match continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Live, output_bytes) {
             ReadinessDeadlineDecision::Extend(next) => {
                 granted += 1;
                 assert!(granted <= 8, "a progressing pane must not extend forever");
                 watch = next;
             }
-            ReadinessDeadlineDecision::Abort { detail } => break detail,
+            ReadinessDeadlineDecision::HandOff {
+                watch: next,
+                detail,
+            } => {
+                break (
+                    next,
+                    detail.expect("the handoff transition must be diagnosable"),
+                )
+            }
+            ReadinessDeadlineDecision::Abort { .. } => {
+                panic!("a live pane must never be aborted by the readiness deadline")
+            }
         }
     };
 
     assert_eq!(granted, 4);
+    assert!(handoff.handed_off);
     assert!(detail.contains("after 330s"), "{detail}");
     assert!(detail.contains("never reported"), "{detail}");
 }
 
+/// Issue #3482: after the handoff the deadline degrades into a supervision
+/// loop. It keeps re-arming so a later death is still reaped, but it must not
+/// repeat the diagnostic every minute for a pane the user already owns.
+#[test]
+fn continue_work_readiness_supervision_stays_quiet_while_the_handed_off_pane_lives() {
+    let watch = ContinueWorkReadinessWatch {
+        operation_id: "op".to_string(),
+        extensions: 4,
+        silent_extensions: 0,
+        observed_output_bytes: 4096,
+        handed_off: true,
+    };
+
+    assert_eq!(
+        continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Live, 8192),
+        ReadinessDeadlineDecision::HandOff {
+            watch: watch.clone(),
+            detail: None,
+        },
+    );
+}
+
+/// Issue #3482 AC-3: handing off does not abandon the durable candidate. Once
+/// the supervised pane really dies, the same bounded cleanup runs.
+#[test]
+fn continue_work_readiness_supervision_cleans_up_once_the_handed_off_pane_dies() {
+    let watch = ContinueWorkReadinessWatch {
+        operation_id: "op".to_string(),
+        extensions: 4,
+        silent_extensions: 0,
+        observed_output_bytes: 4096,
+        handed_off: true,
+    };
+
+    let ReadinessDeadlineDecision::Abort { detail, pane } =
+        continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Dead, 8192)
+    else {
+        panic!("a supervised pane that died must roll the candidate back");
+    };
+    assert_eq!(pane, LaunchPaneDisposition::Teardown);
+    assert!(detail.contains("no longer running"), "{detail}");
+}
+
 /// Issue #3475: walk the pure readiness policy forward until it is one deadline
 /// away from giving up. Runtime-level tests use this to reach the terminal
-/// abort without hard-coding the extension budget and without sleeping on a
+/// deadline without hard-coding the extension budget and without sleeping on a
 /// wall clock (Issue #3339).
 fn readiness_watch_at_last_extension(
     operation_id: &str,
@@ -11413,9 +11539,11 @@ fn readiness_watch_at_last_extension(
 ) -> ContinueWorkReadinessWatch {
     let mut watch = ContinueWorkReadinessWatch::new(operation_id.to_string());
     loop {
-        match continue_work_readiness_decision(&watch, true, output_bytes) {
+        match continue_work_readiness_decision(&watch, ReadinessPaneEvidence::Live, output_bytes) {
             ReadinessDeadlineDecision::Extend(next) => watch = next,
-            ReadinessDeadlineDecision::Abort { .. } => return watch,
+            ReadinessDeadlineDecision::HandOff { .. } | ReadinessDeadlineDecision::Abort { .. } => {
+                return watch
+            }
         }
     }
 }
@@ -11459,6 +11587,284 @@ fn continue_work_ready_timeout_extends_while_the_agent_pty_is_still_live() {
         Some(fixture.predecessor_binding.clone()),
         "extending must not touch the predecessor generation",
     );
+}
+
+/// Issue #3482 AC-1: liveness is not identity. The deadline classifies the pane
+/// it is about to act on by window presence, the Session bound to that window,
+/// and the PTY process — in that order.
+#[test]
+fn readiness_pane_evidence_separates_live_dead_and_foreign_panes() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-evidence");
+    let window_id = fixture.window_id.clone();
+    let session_id = fixture.candidate_session_id.clone();
+
+    assert_eq!(
+        fixture
+            .runtime
+            .readiness_pane_evidence(&window_id, &session_id),
+        ReadinessPaneEvidence::Dead,
+        "the exact Session is bound but no PTY runtime was ever installed",
+    );
+
+    insert_test_pane_runtime(&mut fixture.runtime, &window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    assert_eq!(
+        fixture
+            .runtime
+            .readiness_pane_evidence(&window_id, &session_id),
+        ReadinessPaneEvidence::Live,
+    );
+
+    assert_eq!(
+        fixture
+            .runtime
+            .readiness_pane_evidence(&window_id, "another-session"),
+        ReadinessPaneEvidence::Foreign,
+        "a live pane bound to a different Session is not this launch's pane",
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .readiness_pane_evidence("tab-1::never-registered", &session_id),
+        ReadinessPaneEvidence::Foreign,
+        "a window gwt does not track cannot be torn down by this launch",
+    );
+
+    fixture
+        .runtime
+        .stop_window_runtime_without_session_projection(&window_id);
+    assert_eq!(
+        fixture
+            .runtime
+            .readiness_pane_evidence(&window_id, &session_id),
+        ReadinessPaneEvidence::Dead,
+    );
+}
+
+/// Issue #3482 AC-2: the readiness deadline bounds *waiting*, not the life of
+/// the agent. When the budget runs out on a pane that is still the exact live
+/// launch pane, the launch is handed to the user with its process, its window,
+/// and its prepared candidate intact.
+#[test]
+fn continue_work_ready_timeout_hands_off_a_live_pane_instead_of_killing_it() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-handoff-live-pane");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+
+    let events = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, detail: Some(detail), .. }
+                if id == &fixture.window_id && detail.contains("210s")
+        )),
+        "the handoff must be diagnosable on the pane: {events:#?}"
+    );
+    assert!(
+        fixture.runtime.runtimes.contains_key(&fixture.window_id),
+        "a live agent pane must survive the readiness deadline",
+    );
+    assert!(
+        fixture
+            .runtime
+            .window_lookup
+            .contains_key(&fixture.window_id),
+        "the launch window must stay open for the handoff",
+    );
+    assert!(
+        fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id),
+        "a handed-off launch stays pending so a late SessionStart can still activate it",
+    );
+    assert!(
+        durable_launch_recovery_exists(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id,
+        ),
+        "the handoff must not discard the candidate's durable recovery receipt",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read continuation attempt")
+        .expect("continuation attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        "the handoff must leave the prepared candidate alone",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read binding after handoff"),
+        Some(fixture.predecessor_binding.clone()),
+        "handing off must not touch the predecessor generation",
+    );
+
+    fixture
+        .runtime
+        .stop_window_runtime_without_session_projection(&fixture.window_id);
+}
+
+/// Issue #3482 AC-4 (late ready): the whole point of keeping the pane is that a
+/// slow resume can still finish. A SessionStart that lands after the handoff
+/// activates the candidate exactly as an on-time one would.
+#[test]
+fn continue_work_ready_timeout_late_session_start_still_activates_after_a_handoff() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-late-session-start");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+
+    let _handoff = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
+    assert!(
+        fixture
+            .runtime
+            .window_details
+            .contains_key(&fixture.window_id),
+        "the handoff must leave a diagnostic a reconnecting client can replay",
+    );
+    let events = fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+
+    assert!(
+        !events.is_empty(),
+        "a late authenticated SessionStart must still complete the launch"
+    );
+    assert!(
+        !fixture
+            .runtime
+            .window_details
+            .contains_key(&fixture.window_id),
+        "activating must retire the readiness handoff diagnostic",
+    );
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read binding after late SessionStart"),
+        Some(fixture.binding.identity.clone()),
+        "the handed-off candidate must become the current generation",
+    );
+
+    fixture
+        .runtime
+        .stop_window_runtime_without_session_projection(&fixture.window_id);
+}
+
+/// Issue #3482 AC-3 (identity mismatch): a readiness deadline that fires for a
+/// window another Session now owns still rolls its own candidate back, but it
+/// must not stop or close the pane that is there now.
+#[test]
+fn continue_work_ready_timeout_does_not_terminate_a_window_owned_by_another_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-foreign-window");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+    fixture
+        .runtime
+        .active_agent_sessions
+        .get_mut(&fixture.window_id)
+        .expect("active candidate Session")
+        .session_id = "some-other-session".to_string();
+
+    let events = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &ContinueWorkReadinessWatch::new(fixture.operation_id.clone()),
+    );
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, status: WindowProcessStatus::Error, .. }
+                if id == &fixture.window_id
+        )),
+        "cleanup must not paint a window this launch no longer owns as failed: {events:#?}"
+    );
+    assert!(
+        fixture.runtime.runtimes.contains_key(&fixture.window_id),
+        "cleanup must not terminate a pane this launch no longer owns",
+    );
+    assert!(
+        fixture
+            .runtime
+            .window_lookup
+            .contains_key(&fixture.window_id),
+        "cleanup must not remove a window this launch no longer owns",
+    );
+    assert!(
+        !fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id),
+        "the mismatched candidate must still be rolled back",
+    );
+    assert!(
+        !durable_launch_recovery_exists(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id,
+        ),
+        "the mismatched candidate must release its durable recovery receipt",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read binding after mismatch cleanup"),
+        Some(fixture.predecessor_binding.clone()),
+    );
+
+    fixture
+        .runtime
+        .stop_window_runtime_without_session_projection(&fixture.window_id);
 }
 
 #[test]
@@ -20047,8 +20453,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
     )));
 
     // Issue #3475: the spawned pane is alive but silent, so the deadline first
-    // spends its bounded extension budget; only the terminal deadline rolls the
-    // candidate back.
+    // spends its bounded extension budget.
     assert!(fixture
         .runtime
         .handle_continue_work_ready_timeout(
@@ -20056,9 +20461,34 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
             &ContinueWorkReadinessWatch::new(fixture.operation_id.clone()),
         )
         .is_empty());
-    let cleanup = fixture.runtime.handle_continue_work_ready_timeout(
+    // Issue #3482: the terminal deadline hands the launch off instead of
+    // killing a pane whose process is still the exact live launch pane.
+    let handoff = fixture.runtime.handle_continue_work_ready_timeout(
         &fixture.window_id,
         &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
+    assert!(!handoff.is_empty());
+    assert!(fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fixture.runtime.runtimes.contains_key(&fixture.window_id));
+
+    // Issue #3482 AC-3: once that pane really dies, the supervised deadline
+    // still performs the same bounded rollback.
+    fixture
+        .runtime
+        .stop_window_runtime_without_session_projection(&fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Stopped);
+    let cleanup = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &ContinueWorkReadinessWatch {
+            handed_off: true,
+            ..readiness_watch_at_last_extension(&fixture.operation_id, 0)
+        },
     );
     assert!(!cleanup.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
