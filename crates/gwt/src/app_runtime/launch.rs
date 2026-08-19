@@ -1123,6 +1123,10 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     )
                     .map(|_| ())
                 }
+                // A settled Completed predecessor needs no liveness proof: the
+                // holder already handed its authority back, so the transaction
+                // only has to re-prove that the exact generation it settled is
+                // still the current one.
                 FreshSuccessorRoute::Completed => {
                     gwt::cli::execution_state::prepare_exact_manual_launch_successor(
                         worktree,
@@ -1135,7 +1139,8 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                             binding: &current,
                             status:
                                 gwt::cli::execution_state::SuccessorPredecessorStatus::Completed,
-                            terminal_reason: "unused",
+                            terminal_reason:
+                                "predecessor generation settled Completed before this launch",
                         },
                     )
                     .map(|_| ())
@@ -5683,12 +5688,15 @@ mod agent_endpoint_env_tests {
         );
     }
 
-    /// Issue #3472: a Completed generation is terminal — its holder can never
-    /// produce again, so nothing is protected by refusing a fresh launch. The
-    /// genesis path must create a successor exactly like Continue work does,
-    /// and the audit trail must record the Completed predecessor.
+    /// Issue #3472: a `Completed` generation is already settled — its holder
+    /// returned its authority on the way out, so nothing can ever reopen it in
+    /// place. Refusing a later fresh launch there permanently strands the
+    /// owner: only the manual Launch Agent wizard reaches the Completed
+    /// successor route, so Issue Monitor retries and Start Work collide
+    /// forever with a generation that finished successfully. A Completed
+    /// predecessor must mint the next lifetime instead of blocking it.
     #[test]
-    fn fresh_launch_creates_successor_for_completed_predecessor() {
+    fn fresh_launch_succeeds_over_a_completed_generation() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5696,7 +5704,6 @@ mod agent_endpoint_env_tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut launch = persisted_execution_launch(home.path());
-
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45123/internal/hook-live",
             "ws://127.0.0.1:46234/ws",
@@ -5719,15 +5726,36 @@ mod agent_endpoint_env_tests {
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
 
-        let settled = gwt::cli::execution_state::settle(
-            &launch.project,
-            &launch.session.id,
-            gwt::cli::execution_state::ExecutionSettlement::Completed,
-        )
-        .expect("settle the predecessor generation");
+        // The predecessor settles cleanly and its Host exits. The durable
+        // Session and its runtime sidecar both survive, so the holder is
+        // *reachable* evidence — the unreachable-holder route of Issue #3457
+        // deliberately does not fire here.
+        let holder_id = launch.session.id.clone();
         assert!(
-            matches!(settled, gwt::cli::execution_state::SettleResult::Settled(_)),
-            "the predecessor must settle Completed: {settled:?}"
+            matches!(
+                gwt::cli::execution_state::settle(
+                    &launch.project,
+                    &holder_id,
+                    gwt::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("settle the predecessor generation"),
+                gwt::cli::execution_state::SettleResult::Settled(_)
+            ),
+            "the fixture must reach a Completed generation"
+        );
+        let mut holder =
+            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+                .expect("reload holder Session");
+        holder.update_status(gwt_agent::AgentStatus::Stopped);
+        holder
+            .save(&launch.sessions_dir)
+            .expect("persist stopped holder");
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read ledger")
+                .expect("ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Completed)
         );
 
         let mut relaunch = gwt_agent::Session::new(
@@ -5754,7 +5782,7 @@ mod agent_endpoint_env_tests {
             container_runtime: None,
         }
         .install(&mut env)
-        .expect("a fresh launch must create a successor for a Completed predecessor");
+        .expect("a fresh launch must start a successor over a Completed generation");
 
         assert!(
             env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
@@ -5767,27 +5795,44 @@ mod agent_endpoint_env_tests {
         assert_eq!(binding.session_id, relaunch.id);
         let ledger =
             gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
-                .expect("load owner ledger")
-                .expect("owner ledger exists");
+                .expect("read ledger after the successor launch")
+                .expect("ledger after the successor launch");
+        assert_ne!(
+            binding.identity.generation_id,
+            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+                .expect("reload holder Session")
+                .execution_binding
+                .expect("holder binding")
+                .identity
+                .generation_id,
+            "the successor must own a new generation, not the settled one"
+        );
+        // The audit trail must state which terminal state the successor left,
+        // so a later reader can tell a completed handoff from a recovery.
         let attempt = ledger
             .continuation_attempts
-            .iter()
-            .rev()
-            .find(|attempt| attempt.request.initial_session_id == relaunch.id)
-            .expect("the successor attempt must be audited");
+            .last()
+            .expect("the successor launch must append a continuation attempt");
         assert_eq!(
             attempt.predecessor_status,
             gwt::cli::execution_state::SuccessorPredecessorStatus::Completed,
-            "the audit trail must record the Completed predecessor"
+            "the attempt must record that its predecessor was Completed"
         );
         assert_eq!(
             attempt.request.source,
             gwt::cli::execution_state::MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
-            "a Completed predecessor must use the canonical completed-owner source"
+            "a Completed predecessor uses the Completed owner-launch source"
         );
-        assert_ne!(
-            binding.identity.generation_id, attempt.predecessor.generation_id,
-            "the successor must own a new generation, not the settled one"
+        assert!(
+            gwt::cli::execution_state::is_owner_launch_successor_attempt(attempt),
+            "the attempt must classify as an owner launch successor"
+        );
+        assert!(
+            ledger.lifecycle_events.iter().any(|event| {
+                event.to_status == gwt::cli::execution_state::ExecutionControlStatus::Completed
+                    && event.session_id == holder_id
+            }),
+            "the settled predecessor transition must remain in the lifecycle audit trail"
         );
     }
 
