@@ -21,7 +21,7 @@
 //! properties that keep an install stall from looking like a test failure.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -248,6 +248,7 @@ mod installer {
     use super::*;
     use gwt_core::process::{resolved_command, ProcessPlanRequest};
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::process::Output;
 
     struct Harness {
