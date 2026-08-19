@@ -502,3 +502,86 @@ fn malformed_or_origin_missing_child_bare_repository_is_ignored() {
         "a candidate without origin must not hide the unique valid identity"
     );
 }
+
+/// Issue #3606: every project store scope has a stable wire name and a single
+/// answer to "is this store shared with other views of the repository".
+///
+/// The report turned on that distinction — a store keyed by path looks exactly
+/// like a store keyed by identity until you compare mtimes — so the names and
+/// the `identity_resolved` verdict are part of the contract, not a debug
+/// convenience. Pinning them here keeps a reporter from inventing a second
+/// spelling for the same condition.
+#[test]
+fn project_scope_source_reports_a_stable_wire_name_and_sharing_verdict() {
+    let cases = [
+        (
+            ProjectScopeSource::Repository(RepoIdentitySource::Origin),
+            "origin",
+            true,
+        ),
+        (
+            ProjectScopeSource::Repository(RepoIdentitySource::NestedBareRepository(
+                PathBuf::from("workbench/gwt.git"),
+            )),
+            "nested_bare_repository",
+            true,
+        ),
+        (ProjectScopeSource::PathFallback, "path_fallback", false),
+        (
+            ProjectScopeSource::AmbiguousNestedBareRepositories(Vec::new()),
+            "ambiguous_nested_bare_repositories",
+            false,
+        ),
+    ];
+
+    for (source, name, identity_resolved) in cases {
+        assert_eq!(source.as_str(), name, "wire name for {source:?}");
+        assert_eq!(
+            source.identity_resolved(),
+            identity_resolved,
+            "sharing verdict for {source:?}"
+        );
+    }
+}
+
+/// The recorded store is the one an operation acts on, and the first recording
+/// wins so an incidental resolution deeper in the call graph cannot overwrite
+/// the root the caller actually asked about.
+///
+/// The record is process-global — a `gwtd` process runs one operation — so this
+/// must remain the only test in this binary that records one.
+#[test]
+fn recorded_operation_project_store_keeps_the_first_root_it_resolved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workbench");
+    let (_bare, _worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
+    let unrelated = tmp.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated).expect("unrelated dir");
+
+    assert!(
+        gwt_core::paths::operation_project_store().is_none(),
+        "nothing is recorded until an operation resolves a project root"
+    );
+
+    gwt_core::paths::record_operation_project_store(&root);
+    assert_eq!(
+        gwt_core::paths::operation_project_store()
+            .expect("recorded store")
+            .scope
+            .hash
+            .as_str(),
+        compute_repo_hash(LAYOUT_ORIGIN).as_str()
+    );
+
+    gwt_core::paths::record_operation_project_store(&unrelated);
+    let recorded = gwt_core::paths::operation_project_store().expect("recorded store");
+    assert_eq!(
+        recorded.scope.hash.as_str(),
+        compute_repo_hash(LAYOUT_ORIGIN).as_str(),
+        "a later resolution must not relabel the store the caller asked about"
+    );
+    assert!(
+        recorded.store_path.ends_with(recorded.scope.hash.as_str()),
+        "the recorded store path must point at the store directory: {recorded:?}"
+    );
+}
