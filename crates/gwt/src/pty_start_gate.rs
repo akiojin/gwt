@@ -86,11 +86,21 @@ mod tests {
         assert_eq!(resolved, PathBuf::from("/opt/gwt/bin/gwt"));
     }
 
+    /// A `C:\...` literal is a single path component on POSIX hosts, so
+    /// `with_file_name` would replace the whole string and the sibling rule
+    /// under test would never be exercised there. The rule is about the
+    /// install directory, not about a separator, so build the layout with
+    /// `join` and let every development host run these.
+    fn install_dir() -> PathBuf {
+        PathBuf::from("gwt-install-dir")
+    }
+
     #[test]
     fn windows_hosts_the_gate_in_the_gwtd_companion() {
-        let companion = PathBuf::from(r"C:\Program Files\gwt\gwtd.exe");
+        let front_door = install_dir().join("gwt.exe");
+        let companion = install_dir().join("gwtd.exe");
         let resolved = resolve_pty_start_gate_program_for_platform(
-            Path::new(r"C:\Program Files\gwt\gwt.exe"),
+            &front_door,
             GateHostPlatform::Windows,
             &|path| path == companion,
         )
@@ -101,7 +111,7 @@ mod tests {
 
     #[test]
     fn windows_keeps_an_already_console_subsystem_host() {
-        let companion = PathBuf::from(r"C:\Program Files\gwt\gwtd.exe");
+        let companion = install_dir().join("gwtd.exe");
         let resolved = resolve_pty_start_gate_program_for_platform(
             &companion,
             GateHostPlatform::Windows,
@@ -115,7 +125,7 @@ mod tests {
     #[test]
     fn windows_refuses_to_fall_back_to_the_gui_front_door() {
         let error = resolve_pty_start_gate_program_for_platform(
-            Path::new(r"C:\Program Files\gwt\gwt.exe"),
+            &install_dir().join("gwt.exe"),
             GateHostPlatform::Windows,
             &|_| false,
         )
