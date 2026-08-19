@@ -50,6 +50,27 @@ fn first_inline_code(line: &str) -> &str {
         .unwrap_or_else(|| panic!("missing inline code in {line:?}"))
 }
 
+#[cfg(unix)]
+fn browser_check_shell_block(name: &str) -> String {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let skill = fs::read_to_string(&skill_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+    let begin = format!("# browser-check-{name}-begin");
+    let end = format!("# browser-check-{name}-end");
+    let body = skill
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {begin}"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {end}"))
+        .0;
+    body.lines()
+        .map(|line| line.strip_prefix("     ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -80,7 +101,7 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
 }
 
 #[test]
-fn repo_keeps_managed_claude_and_codex_skill_assets_in_parity() {
+fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let claude_root = workspace_root.join(".claude/skills");
     let codex_root = workspace_root.join(".codex/skills");
@@ -103,6 +124,157 @@ fn repo_keeps_managed_claude_and_codex_skill_assets_in_parity() {
             "managed gwt-* skill asset must be byte-identical between .claude and .codex: {relative:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let claude_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let codex_path = workspace_root.join(".codex/skills/browser-check/SKILL.md");
+    let claude = fs::read_to_string(&claude_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", claude_path.display()));
+    let codex = fs::read_to_string(&codex_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", codex_path.display()));
+
+    assert_eq!(
+        claude, codex,
+        "browser-check must stay byte-identical across Claude and Codex"
+    );
+    assert!(
+        claude.contains("cargo build -p gwt --bin gwt --bin gwtd"),
+        "browser-check must build the exact GUI and audit binaries together"
+    );
+
+    let script = format!(
+        "{}\nfor candidate in \"$@\"; do if is_checkout_local_hook_bin \"$candidate\"; then printf 'reject\\n'; else printf 'allow\\n'; fi; done",
+        browser_check_shell_block("hook-authority")
+    );
+    let output = hidden_command("bash")
+        .args([
+            "-c",
+            &script,
+            "browser-check-test",
+            "/repo/target/debug/gwtd",
+            "/repo/target/aarch64-apple-darwin/debug/gwtd",
+            r"C:\repo\TARGET\x86_64-pc-windows-msvc\RELEASE\GWTD.EXE",
+            "/Applications/GWT.app/Contents/MacOS/gwtd",
+        ])
+        .env("GWT_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run executable authority resolver");
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "reject\nreject\nreject\nallow\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tools = tempfile::tempdir().expect("tools tempdir");
+    let fake_gwtd = tools.path().join("gwtd");
+    fs::write(&fake_gwtd, "#!/bin/sh\nexit 0\n").expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(tools.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose PATH");
+
+    let script = format!(
+        "{}\nprintf '%s\\n' \"$CHECK_HOOK_BIN\"",
+        browser_check_shell_block("hook-authority")
+    );
+    let output = hidden_command("bash")
+        .args(["-c", &script])
+        .env_remove("GWT_HOOK_BIN")
+        .env("PATH", path)
+        .output()
+        .expect("run authority resolver with stable PATH entry");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "gwtd\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_repairs_exact_hook_fallback_before_launch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    let capture = dir.path().join("capture.txt");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"healthy\\\",\\\"issues\\\":[]}}\"}'\n",
+    )
+    .expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", &fake_gwtd)
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .env("CAPTURE", &capture)
+        .env("GWT_BIN_PATH", "/stale/target/debug/gwtd")
+        .output()
+        .expect("run hook repair block");
+
+    assert!(
+        output.status.success(),
+        "hook repair failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let captured = fs::read_to_string(capture).expect("read captured doctor request");
+    assert!(captured.contains("GWT_BIN_PATH=unset"), "{captured}");
+    assert!(captured.contains("GWT_HOOK_BIN=gwtd"), "{captured}");
+    let request = captured.lines().skip(2).collect::<Vec<_>>().join("\n");
+    let request: serde_json::Value = serde_json::from_str(&request).expect("doctor request JSON");
+    assert_eq!(request["operation"], "hook.doctor");
+    assert_eq!(request["params"]["repair"], true);
+    assert_eq!(request["params"]["expected_hook_bin"], "gwtd");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_launch_script_unsets_ambient_runtime_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwt = dir.path().join("target/debug/gwt");
+    fs::create_dir_all(fake_gwt.parent().expect("fake gwt parent")).unwrap();
+    fs::write(
+        &fake_gwt,
+        "#!/bin/sh\nprintf '%s\\n' \"${GWT_BIN_PATH-unset}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gwt, fs::Permissions::from_mode(0o755)).unwrap();
+    let log = dir.path().join("launch.log");
+    let script = format!(
+        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}",
+        browser_check_shell_block("launch")
+    );
+    let output = hidden_command("bash")
+        .args(["-c", &script])
+        .env("CHECKOUT_GWT", &fake_gwt)
+        .env("LOG_FILE", &log)
+        .env("GWT_BIN_PATH", "/ambient/stale/gwtd")
+        .output()
+        .expect("run executable fresh GUI launch block");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset\n");
+    assert_eq!(fs::read_to_string(log).unwrap(), "unset\n");
 }
 
 #[test]
@@ -390,7 +562,10 @@ fn collect_gwt_skill_files(skills_root: &Path) -> BTreeSet<PathBuf> {
         let file_type = entry.file_type().expect("read skill root entry type");
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if file_type.is_dir() && name.starts_with("gwt-") {
+        // gwt-coordination is generated from coordination_guidance.rs at
+        // materialization time and has its own dual-target contract below.
+        // This parity check owns only source-controlled bundle assets.
+        if file_type.is_dir() && name.starts_with("gwt-") && name != "gwt-coordination" {
             collect_files_relative_to(skills_root, &entry.path(), &mut files);
         }
     }
@@ -450,6 +625,29 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
+        assert!(
+            content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
+                && content.contains("immutable event shard"),
+            "generated guidance must deliver new Work events as immutable shards"
+        );
+        assert!(
+            content.contains("frozen read-only compatibility history"),
+            "generated guidance must freeze the legacy events.jsonl monolith"
+        );
+        assert!(
+            content.contains(".gwt/work/events/<digest-prefix>/.*.jsonl.create-*"),
+            "generated guidance must identify writer temp residue as non-delivery state"
+        );
+        assert!(
+            content.contains("git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl"),
+            "generated guidance must explain exact force-add recovery beneath broad ignores"
+        );
+        assert!(
+            content
+                .contains("git ls-files --others --ignored --exclude-standard -- .gwt/work/events")
+                && content.contains("<2hex>/<64hex>.jsonl"),
+            "generated guidance must safely discover every ignored canonical shard"
+        );
     }
 }
 
@@ -483,4 +681,120 @@ fn update_git_exclude_inserts_managed_block_and_preserves_user_entries() {
         "managed block must not be duplicated on repeated calls"
     );
     assert_eq!(content.matches("# gwt-managed-end").count(), 1);
+}
+
+#[test]
+fn git_exclude_tracks_only_canonical_work_history_and_ignores_writer_temp() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    update_git_exclude(dir.path()).expect("update exclude");
+
+    let work = dir.path().join(".gwt/work");
+    let events = work.join("events");
+    fs::create_dir_all(&events).expect("create events dir");
+    fs::write(work.join("events.jsonl"), "legacy\n").expect("write legacy store");
+    let bucket = events.join("aa");
+    fs::create_dir_all(&bucket).expect("create canonical bucket");
+    fs::write(bucket.join(format!("{}.jsonl", "a".repeat(64))), "shard\n")
+        .expect("write canonical bucketed shard");
+    fs::write(events.join(format!("{}.jsonl", "b".repeat(64))), "flat\n")
+        .expect("write flat compatibility shard");
+    fs::write(events.join("not-a-hash.jsonl"), "invalid\n").expect("write noncanonical shard");
+    fs::write(
+        bucket.join(format!(".{}.jsonl.create-123-test", "c".repeat(64))),
+        "temp\n",
+    )
+    .expect("write writer temp");
+    fs::write(work.join("memory.md"), "local note\n").expect("write local note");
+
+    let output = hidden_command("git")
+        .args(["status", "--short", "--ignored", "--untracked-files=all"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git status");
+    assert!(output.status.success(), "git status failed: {output:?}");
+    let status = String::from_utf8(output.stdout).expect("utf-8 status");
+
+    assert!(status.contains("?? .gwt/work/events.jsonl\n"), "{status}");
+    assert!(
+        status.contains(&format!(
+            "?? .gwt/work/events/aa/{}.jsonl\n",
+            "a".repeat(64)
+        )),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!(
+            "!! .gwt/work/events/aa/.{}.jsonl.create-123-test\n",
+            "c".repeat(64)
+        )),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!("!! .gwt/work/events/{}.jsonl\n", "b".repeat(64))),
+        "flat compatibility is read-only and must stay ignored for new writes: {status}"
+    );
+    assert!(
+        status.contains("!! .gwt/work/events/not-a-hash.jsonl\n"),
+        "{status}"
+    );
+    assert!(status.contains("!! .gwt/work/memory.md\n"), "{status}");
+}
+
+#[test]
+fn repository_attributes_leave_immutable_shards_on_default_merge() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let attributes = fs::read_to_string(workspace_root.join(".gitattributes"))
+        .expect("read repository .gitattributes");
+
+    assert!(
+        attributes.contains("frozen read-only compatibility history"),
+        "attributes must document that the legacy union file is frozen"
+    );
+    assert!(
+        attributes.contains("bucketed") && attributes.contains("flat compatibility"),
+        "attributes must document that bucketed and compatible flat shards use the default driver"
+    );
+    assert!(
+        attributes
+            .lines()
+            .any(|line| line == "**/.gwt/work/events.jsonl merge=union"),
+        "legacy union behavior must remain compatible"
+    );
+    assert!(
+        !attributes
+            .lines()
+            .any(|line| { line.contains(".gwt/work/events/") && line.contains("merge=") }),
+        "immutable shards must use Git's default merge behavior"
+    );
+}
+
+#[test]
+fn repository_gitignore_tracks_only_bucketed_new_event_shards() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ignore =
+        fs::read_to_string(workspace_root.join(".gitignore")).expect("read repository .gitignore");
+
+    assert!(
+        ignore
+            .lines()
+            .any(|line| line == "!.gwt/work/events/[0-9a-f][0-9a-f]/"),
+        "canonical two-hex bucket directories must be re-included"
+    );
+    assert!(
+        ignore.lines().any(|line| {
+            line.starts_with("!.gwt/work/events/[0-9a-f][0-9a-f]/")
+                && line.ends_with(".jsonl")
+                && line.matches("[0-9a-f]").count() == 66
+        }),
+        "canonical bucketed full-digest shard files must be re-included"
+    );
+    assert!(
+        !ignore.lines().any(|line| {
+            line.starts_with("!.gwt/work/events/")
+                && !line.starts_with("!.gwt/work/events/[0-9a-f][0-9a-f]/")
+                && line.ends_with(".jsonl")
+        }),
+        "W-33 flat shards are read compatibility only and must not be re-included for new writes"
+    );
 }

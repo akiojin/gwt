@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use gwt_core::index_coordinator::{
-    IndexCoordinator, JobAdmission, JobOutcome, JobPriority, OwnerIdentity, TargetKey, Ticket,
-    COORDINATOR_SCHEMA_VERSION,
+    IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind, OwnerIdentity,
+    TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
 };
 
 const POLL: Duration = Duration::from_millis(25);
@@ -60,6 +60,47 @@ fn run_helper_role(role: &str) {
                 .complete(JobOutcome::Completed)
                 .expect("helper: complete");
             write_result("done");
+        }
+        "verification-job" => {
+            // SPEC #3576 T-001: a heavy verification run is an ordinary
+            // claimant of the same host-wide heavy lease, so it must
+            // serialize against index jobs on the shared ledger.
+            let key = verification_target_from_env();
+            let hold = Duration::from_millis(required_env_u64("GWT_COORD_HOLD_MS"));
+            let ttl = Duration::from_millis(required_env_u64("GWT_COORD_TTL_MS"));
+            let ledger = PathBuf::from(required_env("GWT_COORD_LEDGER"));
+            let admission = coordinator
+                .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(20))
+                .expect("helper: request verification job");
+            let guard = expect_owner(admission);
+            let lease = guard
+                .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
+                .expect("helper: acquire verification lease");
+            locked_counter_add(&ledger, 1);
+            std::thread::sleep(hold);
+            locked_counter_add(&ledger, -1);
+            lease.release().expect("helper: release verification lease");
+            guard
+                .complete(JobOutcome::Completed)
+                .expect("helper: complete");
+            write_result("done");
+        }
+        "hold-verification-and-park" => {
+            // SPEC #3576 T-006: the owner parks while holding the lease so
+            // the parent can kill it and prove kernel auto-release still
+            // wins over a not-yet-expired TTL.
+            let key = verification_target_from_env();
+            let ttl = Duration::from_millis(required_env_u64("GWT_COORD_TTL_MS"));
+            let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
+            let admission = coordinator
+                .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(20))
+                .expect("helper: request verification job");
+            let guard = expect_owner(admission);
+            let _lease = guard
+                .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
+                .expect("helper: acquire verification lease");
+            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            std::thread::sleep(Duration::from_secs(60));
         }
         "own-until-waiters" => {
             let key = target_from_env();
@@ -178,6 +219,16 @@ fn target_from_env() -> TargetKey {
     } else {
         TargetKey::worktree(repo, scope, worktree)
     }
+}
+
+/// `GWT_COORD_VERIFY_TARGET` is `repo_hash|worktree_hash`; the scope is fixed
+/// by [`TargetKey::verification`].
+fn verification_target_from_env() -> TargetKey {
+    let raw = required_env("GWT_COORD_VERIFY_TARGET");
+    let mut parts = raw.split('|');
+    let repo = parts.next().expect("verification repo");
+    let worktree = parts.next().expect("verification worktree");
+    TargetKey::verification(repo, worktree)
 }
 
 fn required_env(name: &str) -> String {
@@ -346,6 +397,8 @@ fn write_stale_ticket(path: &Path, target: &TargetKey, pid: u32, start_id: &str)
             start_id: start_id.to_string(),
         },
         acquired_at_ms: 0,
+        lease_id: None,
+        expires_at_ms: None,
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create ticket dir");
@@ -558,6 +611,196 @@ fn waiter_departure_keeps_shared_job_running() {
         staying_result.contains("Completed"),
         "remaining waiter must still receive the shared outcome, got {staying_result}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SPEC #3576 T-001 / T-003 / T-006: verification as a heavy-lease claimant
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verification_serializes_against_index_jobs_host_wide() {
+    let arena = TestArena::new();
+    let ledger = arena.path("ledger.json");
+    // Two index jobs across different repos plus two verification runs from
+    // different worktrees. Every one of them owns a distinct target job, so
+    // only the host-wide heavy lease can keep them from overlapping (FR-1:
+    // the contended resource is host CPU, not the repository).
+    let mut children = Vec::new();
+    for (label, target) in [
+        ("index-a", "repo-a|files|wt-1"),
+        ("index-b", "repo-b|issues|"),
+    ] {
+        children.push(spawn_helper(
+            label,
+            &[
+                ("GWT_COORD_ROLE", "heavy-job".to_string()),
+                arena.coord_env(),
+                ("GWT_COORD_TARGET", target.to_string()),
+                ("GWT_COORD_HOLD_MS", "250".to_string()),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+                (
+                    "GWT_COORD_RESULT",
+                    arena
+                        .path(&format!("result-{label}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        ));
+    }
+    for (label, target) in [("verify-a", "repo-a|wt-1"), ("verify-b", "repo-b|wt-9")] {
+        children.push(spawn_helper(
+            label,
+            &[
+                ("GWT_COORD_ROLE", "verification-job".to_string()),
+                arena.coord_env(),
+                ("GWT_COORD_VERIFY_TARGET", target.to_string()),
+                ("GWT_COORD_HOLD_MS", "250".to_string()),
+                ("GWT_COORD_TTL_MS", "120000".to_string()),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+                (
+                    "GWT_COORD_RESULT",
+                    arena
+                        .path(&format!("result-{label}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        ));
+    }
+    for child in children {
+        wait_success(child, Duration::from_secs(90));
+    }
+    for label in ["index-a", "index-b", "verify-a", "verify-b"] {
+        assert_eq!(
+            fs::read_to_string(arena.path(&format!("result-{label}"))).expect("read result"),
+            "done",
+            "claimant {label} must finish through the queued heavy lease"
+        );
+    }
+    let (current, max) = read_counter(&ledger);
+    assert_eq!(current, 0, "all heavy leases must be released");
+    assert_eq!(
+        max, 1,
+        "verification and index jobs must never hold the heavy lease at the same time"
+    );
+
+    // FR-5: acquire / release are recorded per lease id.
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let events = coordinator.lease_events().expect("read lease events");
+    let released: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == LeaseEventKind::Released)
+        .collect();
+    assert_eq!(
+        released.len(),
+        2,
+        "both verification leases must record an explicit release: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.kind == LeaseEventKind::Acquired)
+            .count()
+            >= 2,
+        "verification acquisitions must be recorded: {events:?}"
+    );
+}
+
+#[test]
+fn verification_lease_holds_its_target_job_lock() {
+    let arena = TestArena::new();
+    let ready = arena.path("verify-ready");
+    let key = TargetKey::verification("repo-a", "wt-1");
+
+    let mut parked = spawn_helper(
+        "verify-holder",
+        &[
+            ("GWT_COORD_ROLE", "hold-verification-and-park".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_VERIFY_TARGET", "repo-a|wt-1".to_string()),
+            ("GWT_COORD_TTL_MS", "120000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+
+    // Lock order target job -> heavy (FR-392 / FR-2b): holding the heavy
+    // lease implies the verification target job is still owned, so a
+    // same-key claimant joins instead of taking a second target slot.
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    match coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+        .expect("request verification job")
+    {
+        JobAdmission::Joined(waiter) => drop(waiter),
+        JobAdmission::Owner(_) => {
+            let _ = parked.child.kill();
+            panic!("verification lease must keep its target job lock held");
+        }
+    }
+
+    let status = coordinator
+        .heavy_lease_status()
+        .expect("read heavy lease status");
+    assert!(status.held, "the verification lease must read as held");
+    assert_eq!(
+        status.target.as_deref(),
+        Some(key.file_stem().as_str()),
+        "status must name the verification claimant"
+    );
+    assert!(
+        !status.expired,
+        "a lease inside its TTL must not read as expired"
+    );
+    assert!(
+        status.remaining_ms.is_some_and(|remaining| remaining > 0),
+        "status must report the remaining TTL, got {:?}",
+        status.remaining_ms
+    );
+
+    parked.child.kill().expect("kill verification holder");
+    let _ = parked.child.wait();
+}
+
+#[test]
+fn killed_verification_owner_releases_lease_before_ttl_expiry() {
+    let arena = TestArena::new();
+    let ready = arena.path("verify-ready");
+    let key = TargetKey::verification("repo-a", "wt-1");
+
+    let mut parked = spawn_helper(
+        "verify-holder",
+        &[
+            ("GWT_COORD_ROLE", "hold-verification-and-park".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_VERIFY_TARGET", "repo-a|wt-1".to_string()),
+            // A TTL far beyond the test: only the kernel auto-release can
+            // hand the lease over (the pre-existing T-IDX-383 guarantee must
+            // survive the TTL addition).
+            ("GWT_COORD_TTL_MS", "3600000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+    parked.child.kill().expect("kill verification holder");
+    let _ = parked.child.wait();
+
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let guard = match coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
+        .expect("request verification job after kill")
+    {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("dead verification owner must not hold the target job"),
+    };
+    let lease = guard
+        .acquire_heavy_with_ttl(Duration::from_secs(10), Duration::from_secs(60))
+        .expect("verification lease after owner kill");
+    lease.release().expect("release recovered lease");
+    guard
+        .complete(JobOutcome::Completed)
+        .expect("complete recovered job");
 }
 
 // ---------------------------------------------------------------------------

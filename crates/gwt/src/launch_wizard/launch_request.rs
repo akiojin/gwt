@@ -81,8 +81,8 @@ impl LaunchWizardState {
             }
         }
 
-        if is_explicit_model_selection(&self.model) {
-            builder = builder.model(self.model.clone());
+        if let Some(model) = self.explicit_model_for_launch() {
+            builder = builder.model(model.to_string());
         }
 
         if !self.version.is_empty() {
@@ -141,6 +141,27 @@ impl LaunchWizardState {
             builder = builder.docker_service(docker_service.to_string());
         }
         builder = builder.docker_lifecycle_intent(self.docker_lifecycle_intent);
+        let quick_start_predecessor = matches!(self.mode.as_str(), "resume" | "continue")
+            .then(|| {
+                self.selected_quick_start_index
+                    .and_then(|index| self.quick_start_entries.get(index))
+            })
+            .flatten()
+            .filter(|_| self.launch_path == LaunchWizardLaunchPath::QuickStart);
+        let linked_issue_number = if let Some(predecessor) = quick_start_predecessor {
+            match (self.linked_issue_number, predecessor.linked_issue_number) {
+                (Some(context_owner), Some(predecessor_owner))
+                    if context_owner != predecessor_owner =>
+                {
+                    return Err(format!(
+                        "Quick Start Session owner mismatch: context Issue #{context_owner}, predecessor Issue #{predecessor_owner}"
+                    ));
+                }
+                (_, owner) => owner,
+            }
+        } else {
+            self.linked_issue_number
+        };
         // SPEC-2014 2026-05-18 amendment FR-A:
         // Execution Mode `"resume"` always maps to `SessionMode::Resume`.
         // - Quick Start Resume (with id)       → SessionMode::Resume + id
@@ -160,7 +181,11 @@ impl LaunchWizardState {
             _ => builder.session_mode(gwt_agent::SessionMode::Normal),
         };
 
-        if let Some(n) = self.linked_issue_number {
+        if let Some(predecessor) = quick_start_predecessor {
+            builder = builder.predecessor_session_id(predecessor.session_id.clone());
+        }
+
+        if let Some(n) = linked_issue_number {
             builder = builder.linked_issue_number(n);
         }
 
@@ -170,6 +195,20 @@ impl LaunchWizardState {
         }
 
         let mut config = builder.build();
+        // A saved Session owns the exact tool-runtime provenance only when the
+        // launch continues that Session. StartNew and the interactive picker
+        // intentionally have no source so `latest` is resolved again.
+        let reuses_saved_session = match config.session_mode {
+            gwt_agent::SessionMode::Continue => true,
+            gwt_agent::SessionMode::Resume => config.resume_session_id.is_some(),
+            gwt_agent::SessionMode::Normal => false,
+        };
+        if self.launch_path == LaunchWizardLaunchPath::QuickStart && reuses_saved_session {
+            config.tool_runtime_source_session_id = self
+                .selected_quick_start_index
+                .and_then(|index| self.quick_start_entries.get(index))
+                .map(|entry| entry.session_id.clone());
+        }
         if !self.version.is_empty() {
             config.tool_version = Some(self.version.clone());
         }
@@ -254,6 +293,103 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    fn grok_launch_state(mode: &str, resume_session_id: Option<&str>) -> LaunchWizardState {
+        let mut agents = sample_agent_options();
+        agents.push(AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("1.0.3".to_string()),
+            versions: vec!["1.0.3".to_string()],
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/grok"), "feature/grok"),
+            agents,
+            Vec::new(),
+        );
+        state.set_agent_id("grok");
+        state.version = "installed".to_string();
+        state.mode = mode.to_string();
+        state.resume_session_id = resume_session_id.map(str::to_string);
+        state
+    }
+
+    #[test]
+    fn build_launch_config_maps_grok_model_and_effort_for_every_launch_mode() {
+        // SPEC-1921 T483: wizard values must survive into LaunchConfig and the
+        // exact Grok CLI option/value pairs for all supported session modes.
+        let cases = [
+            ("normal", gwt_agent::SessionMode::Normal, None),
+            ("continue", gwt_agent::SessionMode::Continue, None),
+            (
+                "resume",
+                gwt_agent::SessionMode::Resume,
+                Some("grok-session-42"),
+            ),
+        ];
+
+        for (mode, expected_mode, resume_session_id) in cases {
+            let mut state = grok_launch_state(mode, resume_session_id);
+            state.model = "grok-4.20-beta".to_string();
+            state.reasoning = "xhigh".to_string();
+
+            let config = state.build_launch_config().expect("Grok launch config");
+
+            assert_eq!(config.session_mode, expected_mode);
+            assert_eq!(config.model.as_deref(), Some("grok-4.20-beta"));
+            assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+            assert_eq!(
+                config
+                    .args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--model" && pair[1] == "grok-4.20-beta")
+                    .count(),
+                1,
+                "missing exact Grok model argv in {:?}",
+                config.args
+            );
+            assert_eq!(
+                config
+                    .args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--effort" && pair[1] == "xhigh")
+                    .count(),
+                1,
+                "missing exact Grok effort argv in {:?}",
+                config.args
+            );
+        }
+    }
+
+    #[test]
+    fn build_launch_config_omits_grok_whitespace_model_and_auto_effort_flags() {
+        let mut state = grok_launch_state("normal", None);
+        state.model = " \t ".to_string();
+        state.reasoning = "auto".to_string();
+
+        let config = state.build_launch_config().expect("Grok launch config");
+
+        assert!(config.model.is_none());
+        assert_eq!(config.reasoning_level, None);
+        assert!(!config.args.iter().any(|arg| arg == "--model"));
+        assert!(!config.args.iter().any(|arg| arg == "--effort"));
+    }
+
+    #[test]
+    fn build_launch_config_preserves_default_prefixed_grok_model_as_free_text() {
+        let mut state = grok_launch_state("normal", None);
+        state.set_model("DefaultXL");
+
+        let config = state.build_launch_config().expect("Grok launch config");
+
+        assert_eq!(config.model.as_deref(), Some("DefaultXL"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "DefaultXL"));
+    }
+
     #[test]
     fn build_launch_config_for_intake_is_ephemeral_and_branchless() {
         // SPEC-3214 Phase 3: an intake session wizard produces an ephemeral,
@@ -330,18 +466,232 @@ mod tests {
         assert_eq!(config.reasoning_level.as_deref(), Some("high"));
         assert_eq!(config.tool_version.as_deref(), Some("0.110.0"));
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
+        // Issue #3462: Resume inherits the Skip Permissions preference.
         assert!(
-            !config.skip_permissions,
-            "a Resume launch must never inherit a permission bypass"
+            config.skip_permissions,
+            "a Resume launch must inherit the Skip Permissions preference"
         );
         assert!(
-            !config
-                .args
-                .iter()
-                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
-            "a Resume launch must not carry Codex's dangerous bypass flag"
+            config.args.contains(&"--yolo".to_string()),
+            "a Resume launch must carry Codex's skip-permissions flag"
         );
         assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_resume_and_continue_launches_carry_durable_lineage() {
+        for (mode, provider_session_id) in [
+            ("resume", Some("provider-conversation")),
+            ("continue", None),
+        ] {
+            let mut entry = quick_start_entry(
+                "durable-session-3457",
+                "codex",
+                provider_session_id,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            );
+            entry.linked_issue_number = Some(3457);
+            let mut state = LaunchWizardState::open_with(
+                context(branch("work/issue-3457"), "work/issue-3457"),
+                sample_agent_options(),
+                vec![entry],
+            );
+            state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+            state.apply(LaunchWizardAction::SetAgent {
+                agent_id: "codex".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetModel {
+                model: "gpt-5.4".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetReasoning {
+                reasoning: "high".to_string(),
+            });
+            state.mode = mode.to_string();
+            state.resume_session_id = provider_session_id.map(str::to_string);
+
+            let config = state
+                .build_launch_config()
+                .expect("Quick Start launch config");
+
+            assert_eq!(
+                config.predecessor_session_id.as_deref(),
+                Some("durable-session-3457"),
+                "{mode} must carry the exact durable predecessor"
+            );
+            assert_eq!(
+                config.linked_issue_number,
+                Some(3457),
+                "{mode} must carry the predecessor owner"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_start_lineage_uses_the_durable_selection_after_step_cursor_changes() {
+        let mut first = quick_start_entry(
+            "durable-session-old",
+            "codex",
+            Some("provider-old"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        first.linked_issue_number = Some(1111);
+        let mut selected = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        selected.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![first, selected],
+        );
+
+        // Reuse actions occupy indexes 0 and 2 because each reusable entry is
+        // followed by a Start New action. Advancing the real UI flow then
+        // repurposes `selected` as the next step's cursor.
+        state.apply(LaunchWizardAction::Select { index: 2 });
+        assert_eq!(state.selected_quick_start_index, Some(1));
+        state.step = LaunchWizardStep::ModelSelect;
+        state.apply(LaunchWizardAction::Select { index: 0 });
+        state.step = LaunchWizardStep::ReasoningLevel;
+        state.apply(LaunchWizardAction::Select { index: 0 });
+        state.completion = None;
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+
+        let config = state
+            .build_launch_config()
+            .expect("Quick Start launch config after UI step cursor changes");
+
+        assert_eq!(
+            config.predecessor_session_id.as_deref(),
+            Some("durable-session-3457")
+        );
+        assert_eq!(config.linked_issue_number, Some(3457));
+    }
+
+    #[test]
+    fn quick_start_unlinked_predecessor_stays_observation_only_in_linked_context() {
+        let entry = quick_start_entry(
+            "legacy-unlinked-session",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+        state.linked_issue_number = Some(3457);
+
+        let config = state
+            .build_launch_config()
+            .expect("legacy unlinked Quick Start remains observation-only");
+
+        assert_eq!(
+            config.predecessor_session_id.as_deref(),
+            Some("legacy-unlinked-session")
+        );
+        assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn quick_start_relaunch_rejects_a_conflicting_context_owner() {
+        let mut entry = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+        state.linked_issue_number = Some(9999);
+
+        let error = state
+            .build_launch_config()
+            .expect_err("conflicting Quick Start owner must fail closed");
+
+        assert!(error.contains("owner mismatch"), "{error}");
+        assert!(error.contains("#9999"), "{error}");
+        assert!(error.contains("#3457"), "{error}");
+    }
+
+    // Issue #3462: Resume / Continue launches must inherit the Skip
+    // Permissions preference from the same source as Normal launches.
+    // Dropping the flag on resume left restored agents stuck at permission
+    // prompts and persisted `skip_permissions = false`, poisoning every
+    // later restore of the same session lineage.
+    #[test]
+    fn build_launch_config_resume_inherits_skip_permissions_for_claude() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "claude".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("session-123".to_string());
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(
+            config.skip_permissions,
+            "a Resume launch must inherit the Skip Permissions preference"
+        );
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(
+            config
+                .args
+                .contains(&"--dangerously-skip-permissions".to_string()),
+            "a Resume launch must carry Claude's skip-permissions flag"
+        );
+    }
+
+    #[test]
+    fn build_launch_config_continue_inherits_skip_permissions_for_codex() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.mode = "continue".to_string();
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+        assert!(
+            config.skip_permissions,
+            "a Continue launch must inherit the Skip Permissions preference"
+        );
+        assert!(
+            config.args.contains(&"--yolo".to_string()),
+            "a Continue launch must carry Codex's skip-permissions flag"
+        );
     }
 
     // SPEC-2014 2026-05-18 amendment FR-A / SC-A / SC-B:
@@ -960,10 +1310,11 @@ mod tests {
         assert_eq!(config.display_name, "Claude Proxy");
         assert!(config.args.contains(&"--serve".to_string()));
         assert!(config.args.contains(&"--resume".to_string()));
-        assert!(!config.skip_permissions);
+        // Issue #3462: Resume inherits the Skip Permissions preference.
+        assert!(config.skip_permissions);
         assert!(
-            !config.args.contains(&"--unsafe".to_string()),
-            "a Resume launch must not carry the custom agent permission bypass"
+            config.args.contains(&"--unsafe".to_string()),
+            "a Resume launch must carry the custom agent skip-permissions args"
         );
         assert_eq!(
             config.env_vars.get("API_KEY").map(String::as_str),

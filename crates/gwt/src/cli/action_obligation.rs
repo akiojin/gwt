@@ -1039,6 +1039,11 @@ mod tests {
 
     #[test]
     fn revival_record_write_failure_cannot_report_revived() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();

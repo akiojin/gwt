@@ -3,6 +3,11 @@ version: 2
 # Dependabot はデフォルトでは Conventional Commits を満たさない
 # (例: "Bump foo from 1.0.0 to 1.0.1") ため commitlint に弾かれる。
 # commit-message 設定で `chore(deps): ...` 形式に統一し、CI の commitlint を通過させる。
+#
+# GitHub の security update PR は下記の target-branch 設定ではなく default branch
+# (main) を向く。main は pr-source-check により develop からの PR だけを許可するため、
+# security alert は develop 側で修正版へ更新し、main 宛ての security PR はその
+# develop 側変更で supersede して close する。main の source protection は緩和しない。
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"

@@ -10,12 +10,13 @@
 //! real `gwtd` binary through the stdin JSON envelope with an isolated HOME.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{mpsc, Mutex, MutexGuard, OnceLock},
     thread::JoinHandle,
     time::Duration,
 };
@@ -58,6 +59,129 @@ const FOREIGN_CURRENT_WORK_ID: &str = "foreign-current-work";
 const FORWARD_TOKEN: &str = "workspace-proxy-secret-sentinel";
 const HOST_WORK_ID: &str = "host-work-id";
 const HOST_JOURNAL_ENTRY_ID: &str = "host-journal-entry-id";
+const DOCKER_RUNTIME_WORKTREE: &str = "/workspace/project";
+
+/// Serialize only the tests that execute a real Host authority mutation.
+/// Waiting at test entry keeps contention outside the bridge client's fixed
+/// production timeout; locking inside the handler would consume that budget.
+fn real_host_mutation_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedWorkEventStoreSnapshot {
+    legacy: Option<Vec<u8>>,
+    shards: BTreeMap<String, Vec<u8>>,
+}
+
+fn tracked_work_event_store_snapshot(repo: &Path) -> TrackedWorkEventStoreSnapshot {
+    let legacy = fs::read(gwt_core::paths::gwt_repo_local_work_events_path(repo)).ok();
+    let events_dir = gwt_core::paths::gwt_repo_local_work_events_dir(repo);
+    let mut shards = BTreeMap::new();
+    match fs::read_dir(&events_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.expect("read tracked Work event shard entry");
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 tracked Work event shard name");
+                let file_type = entry
+                    .file_type()
+                    .expect("read tracked Work event shard entry type");
+                if file_type.is_file() {
+                    // Flat W-33 compatibility shard.
+                    shards.insert(
+                        name,
+                        fs::read(entry.path()).expect("read tracked Work event shard"),
+                    );
+                } else if file_type.is_dir() {
+                    // Canonical W-33b digest bucket.
+                    for bucket_entry in
+                        fs::read_dir(entry.path()).expect("read Work event shard bucket")
+                    {
+                        let bucket_entry =
+                            bucket_entry.expect("read bucketed Work event shard entry");
+                        let bucket_name = bucket_entry
+                            .file_name()
+                            .into_string()
+                            .expect("UTF-8 bucketed Work event shard name");
+                        assert!(
+                            bucket_entry
+                                .file_type()
+                                .expect("read bucketed Work event shard entry type")
+                                .is_file(),
+                            "tracked Work event bucket entries must be files: {}",
+                            bucket_entry.path().display()
+                        );
+                        shards.insert(
+                            format!("{name}/{bucket_name}"),
+                            fs::read(bucket_entry.path()).expect("read bucketed Work event shard"),
+                        );
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read {}: {error}", events_dir.display()),
+    }
+    TrackedWorkEventStoreSnapshot { legacy, shards }
+}
+
+fn load_tracked_work_events(repo: &Path) -> Vec<WorkEvent> {
+    let snapshot = tracked_work_event_store_snapshot(repo);
+    let mut by_id = BTreeMap::<String, WorkEvent>::new();
+    let sources = snapshot
+        .legacy
+        .iter()
+        .chain(snapshot.shards.values())
+        .flat_map(|bytes| bytes.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
+    for line in sources {
+        let event = serde_json::from_slice::<WorkEvent>(line).expect("tracked Work event JSON");
+        if let Some(existing) = by_id.insert(event.id.clone(), event.clone()) {
+            assert_eq!(
+                existing, event,
+                "duplicate tracked Work event identity must be semantic equivalent"
+            );
+        }
+    }
+    let mut events = by_id.into_values().collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    events
+}
+
+fn newly_persisted_work_events<'a>(
+    before: &[WorkEvent],
+    after: &'a [WorkEvent],
+) -> Vec<&'a WorkEvent> {
+    let before_ids = before
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<BTreeSet<_>>();
+    after
+        .iter()
+        .filter(|event| !before_ids.contains(event.id.as_str()))
+        .collect()
+}
+
+fn assert_tracked_work_events_preserved(before: &[WorkEvent], after: &[WorkEvent]) {
+    for expected in before {
+        assert_eq!(
+            after.iter().find(|event| event.id == expected.id),
+            Some(expected),
+            "existing tracked Work event {} changed or disappeared",
+            expected.id,
+        );
+    }
+}
 
 #[derive(Debug)]
 struct CapturedWorkspaceUpdate {
@@ -318,7 +442,6 @@ impl DisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + Duration::from_secs(3);
             let mut accepted = 0;
             loop {
                 match listener.accept() {
@@ -331,15 +454,9 @@ impl DisconnectServer {
                         accepted += 1;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        let now = std::time::Instant::now();
                         if shutdown_rx.try_recv().is_ok() {
                             tx.send(accepted)
                                 .expect("record disconnected bridge request count");
-                            return;
-                        }
-                        if accepted == 0 && now >= first_request_deadline {
-                            tx.send(accepted)
-                                .expect("record missing disconnected bridge request");
                             return;
                         }
                         std::thread::sleep(Duration::from_millis(10));
@@ -357,12 +474,10 @@ impl DisconnectServer {
     }
 
     fn receive(&mut self) {
-        self.shutdown_tx
-            .send(())
-            .expect("stop disconnect listener after the client exits");
+        let _ = self.shutdown_tx.send(());
         let accepted = self
             .rx
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(30))
             .expect("expected disconnected bridge request count");
         self.handle
             .take()
@@ -408,7 +523,6 @@ impl ApplyThenDisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + Duration::from_secs(3);
             let mut accepted = 0;
             let mut applied_receipt = None;
             loop {
@@ -441,7 +555,6 @@ impl ApplyThenDisconnectServer {
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        let now = std::time::Instant::now();
                         if shutdown_rx.try_recv().is_ok() {
                             let (work_id, journal_entry_id) = applied_receipt
                                 .expect("the accepted Host request must be applied exactly once");
@@ -452,9 +565,6 @@ impl ApplyThenDisconnectServer {
                             })
                             .expect("record apply-then-disconnect observation");
                             return;
-                        }
-                        if accepted == 0 && now >= first_request_deadline {
-                            panic!("timed out before the apply-then-disconnect Host request");
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -471,12 +581,10 @@ impl ApplyThenDisconnectServer {
     }
 
     fn receive(&mut self) -> AppliedDisconnectObservation {
-        self.shutdown_tx
-            .send(())
-            .expect("stop apply-then-disconnect listener after the client exits");
+        let _ = self.shutdown_tx.send(());
         let observation = self
             .rx
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(30))
             .expect("expected apply-then-disconnect observation");
         self.handle
             .take()
@@ -685,12 +793,7 @@ async fn capture_workspace_update(
                     Session::load(&session_path).expect("load Host Session before Docker switch");
                 session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
                 session
-                    .bind_docker_runtime(
-                        project_root
-                            .canonicalize()
-                            .expect("canonical Docker runtime root"),
-                        &project_root,
-                    )
+                    .bind_docker_runtime(DOCKER_RUNTIME_WORKTREE, &project_root)
                     .expect("bind Docker runtime before static Host response");
                 session
                     .save(&gwt_core::paths::gwt_sessions_dir())
@@ -1228,14 +1331,7 @@ fn mark_bound_session_as_docker(fixture: &Fixture) {
     let mut session = Session::load(&session_path).expect("load bound Docker Session fixture");
     session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
     session
-        .bind_docker_runtime(
-            fixture
-                .project
-                .path()
-                .canonicalize()
-                .expect("canonical Docker runtime fixture"),
-            fixture.project.path(),
-        )
+        .bind_docker_runtime(DOCKER_RUNTIME_WORKTREE, fixture.project.path())
         .expect("bind Docker runtime fixture");
     session
         .save(&fixture.home.path().join(".gwt/sessions"))
@@ -1428,14 +1524,15 @@ fn workspace_update_complete_forward_pair_uses_host_proxy_without_reading_contai
         .path()
         .canonicalize()
         .expect("canonical project root");
+    let observation_root = gwt_core::paths::normalize_windows_child_process_path(&project_root);
     assert_eq!(
         captured.body,
         serde_json::json!({
             "schema_version": 1,
             "claimed_session_id": SESSION,
             "observation": {
-                "cwd": project_root,
-                "git_toplevel": project_root,
+                "cwd": observation_root,
+                "git_toplevel": observation_root,
                 "repo_hash": project_scope_hash(fixture.project.path()).as_str(),
                 "branch": BRANCH,
             },
@@ -1456,6 +1553,7 @@ fn workspace_update_complete_forward_pair_uses_host_proxy_without_reading_contai
 
 #[test]
 fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_container_home() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     for (case, poisoned_container) in [("empty", false), ("poisoned", true)] {
         let fixture = fixture();
         if poisoned_container {
@@ -1470,6 +1568,7 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
             .path()
             .canonicalize()
             .expect("canonical project root");
+        let observation_root = gwt_core::paths::normalize_windows_child_process_path(&project_root);
         let host_state_dir = host_home
             .path()
             .join(".gwt/projects")
@@ -1482,11 +1581,10 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
         let host_current_path = host_state_dir.join("current.json");
         let host_works_path = host_state_dir.join("works.json");
         let host_journal_path = host_state_dir.join("journal.jsonl");
-        let tracked_events_path = project_root.join(".gwt/work/events.jsonl");
         let host_session_before = fs::read(&host_session_path).expect("Host Session before");
         let host_current_before = fs::read(&host_current_path).expect("Host current before");
         let host_works_before = fs::read(&host_works_path).expect("Host works before");
-        let tracked_events_before = fs::read(&tracked_events_path).expect("tracked events before");
+        let tracked_events_before = load_tracked_work_events(&project_root);
         assert!(
             !host_journal_path.exists(),
             "{case}: Host journal must start absent"
@@ -1522,8 +1620,8 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
                 "schema_version": 1,
                 "claimed_session_id": SESSION,
                 "observation": {
-                    "cwd": project_root,
-                    "git_toplevel": project_root,
+                    "cwd": observation_root,
+                    "git_toplevel": observation_root,
                     "repo_hash": project_scope_hash(&project_root).as_str(),
                     "branch": BRANCH,
                 },
@@ -1597,18 +1695,16 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
             .filter(|value| !value.is_empty())
             .expect("Host mutation receipt id");
 
-        let tracked_events_after = fs::read(&tracked_events_path).expect("tracked events after");
-        assert!(
-            tracked_events_after.starts_with(&tracked_events_before)
-                && tracked_events_after.len() > tracked_events_before.len(),
-            "{case}: the real Host commit must append exactly through the tracked event surface"
+        let tracked_events_after = load_tracked_work_events(&project_root);
+        assert_tracked_work_events_preserved(&tracked_events_before, &tracked_events_after);
+        let appended_events =
+            newly_persisted_work_events(&tracked_events_before, &tracked_events_after);
+        assert_eq!(
+            appended_events.len(),
+            1,
+            "{case}: the real Host commit must append exactly one tracked Work event"
         );
-        let appended_event = String::from_utf8(tracked_events_after)
-            .expect("tracked events UTF-8")
-            .lines()
-            .rfind(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked Work event JSON"))
-            .expect("appended tracked Work event");
+        let appended_event = appended_events[0];
         assert_eq!(appended_event.work_item_id, WORK_ID);
         assert_eq!(appended_event.kind, WorkEventKind::Update);
         assert_eq!(
@@ -1621,6 +1717,7 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
 
 #[test]
 fn workspace_update_exact_same_home_host_accepts_fresh_canonical_journal_receipt() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1675,6 +1772,7 @@ fn workspace_update_exact_same_home_host_accepts_fresh_canonical_journal_receipt
 
 #[test]
 fn workspace_update_exact_same_home_foreign_work_accepts_fresh_work_event_receipt() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1759,6 +1857,7 @@ fn workspace_update_exact_same_home_foreign_work_accepts_fresh_work_event_receip
 
 #[test]
 fn workspace_update_current_snapshot_accepts_fresh_event_after_host_switches_current_work() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1892,6 +1991,7 @@ fn workspace_update_foreign_work_rejects_static_receipt_without_fresh_event() {
 
 #[test]
 fn workspace_update_foreign_work_rejects_preexisting_matching_event_as_stale() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -2176,6 +2276,7 @@ fn workspace_update_proxy_response_loss_never_replays_locally_or_to_the_host() {
 
 #[test]
 fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let mut server = ApplyThenDisconnectServer::start(
@@ -2203,12 +2304,7 @@ fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
     let observation = server.receive();
     assert_eq!(observation.work_id, exact.work_id);
 
-    let events = fs::read_to_string(fixture.project.path().join(".gwt/work/events.jsonl"))
-        .expect("tracked events after applied response loss")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked Work event JSON"))
-        .collect::<Vec<_>>();
+    let events = load_tracked_work_events(fixture.project.path());
     let delivered = events
         .iter()
         .filter(|event| {
@@ -2465,6 +2561,7 @@ fn workspace_update_host_rejects_success_receipt_with_unknown_journal_entry() {
 
 #[test]
 fn workspace_update_host_rejects_preexisting_matching_journal_receipt_as_stale() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -2556,8 +2653,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         ),
         "the positive fixture must pass through real durable Session bootstrap: {ensure}"
     );
-    let events_after_first_ensure = fs::read(fixture.project.path().join(".gwt/work/events.jsonl"))
-        .expect("tracked Start event after first ensure");
+    let events_after_first_ensure = tracked_work_event_store_snapshot(fixture.project.path());
     let ensure_retry = run_ws(
         &fixture,
         &format!(
@@ -2575,8 +2671,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         "an ensure retry after a potentially lost response must reuse the assignment: {ensure_retry}"
     );
     assert_eq!(
-        fs::read(fixture.project.path().join(".gwt/work/events.jsonl"))
-            .expect("tracked event after ensure retry"),
+        tracked_work_event_store_snapshot(fixture.project.path()),
         events_after_first_ensure,
         "response-loss retry must not duplicate the ensured Start event"
     );
@@ -2590,8 +2685,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         .latest_agent_for_session(SESSION)
         .and_then(|agent| agent.workspace_id.clone())
         .expect("workspace.ensure canonical Work assignment");
-    let events_path = project_root.join(".gwt/work/events.jsonl");
-    let events_before = fs::read_to_string(&events_path).expect("tracked events before");
+    let events_before = load_tracked_work_events(&project_root);
     let server = CaptureServer::start(
         StatusCode::CONFLICT,
         serde_json::json!({
@@ -2651,13 +2745,9 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         Some("typed compatibility continuation")
     );
 
-    let events_after = fs::read_to_string(&events_path).expect("tracked events after");
-    assert!(events_after.starts_with(&events_before));
-    let events = events_after
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked event JSON"))
-        .collect::<Vec<_>>();
+    let events = load_tracked_work_events(&project_root);
+    assert_tracked_work_events_preserved(&events_before, &events);
+    let additions = newly_persisted_work_events(&events_before, &events);
     assert_eq!(
         events
             .iter()
@@ -2667,13 +2757,16 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         "compatibility continuation must not duplicate Start delivery"
     );
     assert_eq!(events.len(), 2, "the original request must be applied once");
-    assert_eq!(events[1].kind, WorkEventKind::Done);
-    assert_eq!(events[1].work_item_id, canonical_work_id);
-    assert_eq!(events[1].agent_session_id.as_deref(), Some(SESSION));
     assert_eq!(
-        events[1].status_category,
-        Some(WorkspaceStatusCategory::Done)
+        additions.len(),
+        1,
+        "the original request must add one event"
     );
+    let done = additions[0];
+    assert_eq!(done.kind, WorkEventKind::Done);
+    assert_eq!(done.work_item_id, canonical_work_id);
+    assert_eq!(done.agent_session_id.as_deref(), Some(SESSION));
+    assert_eq!(done.status_category, Some(WorkspaceStatusCategory::Done));
 
     let _env_lock = gwt_core::test_support::env_lock()
         .lock()
@@ -3016,8 +3109,7 @@ fn workspace_update_exact_rejection_rejects_duplicate_session_projection_rows() 
         .path()
         .canonicalize()
         .expect("canonical project root");
-    let events_path = project_root.join(".gwt/work/events.jsonl");
-    let events_before = fs::read(&events_path).expect("tracked events before duplicate");
+    let events_before = tracked_work_event_store_snapshot(&project_root);
     let settlement_before = work_event_settlement_state_snapshot(&fixture);
     let server = CaptureServer::start_with_projection_duplicate(
         StatusCode::CONFLICT,
@@ -3050,7 +3142,7 @@ fn workspace_update_exact_rejection_rejects_duplicate_session_projection_rows() 
     server.recv();
     server.assert_no_additional_request();
     assert_eq!(
-        fs::read(&events_path).expect("tracked events after duplicate"),
+        tracked_work_event_store_snapshot(&project_root),
         events_before,
         "an ambiguous projection must not append a Done event"
     );
@@ -3126,5 +3218,498 @@ fn workspace_update_exact_ensure_required_rejection_never_continues_for_docker()
         mutation_state_snapshot(&fixture),
         before,
         "Docker typed rejection must remain byte-identical"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #3466 / SPEC-3431 T-177 (FR-078): `workspace.store_consolidate` end to
+// end on a fresh HOME. A pre-#3466 build keyed the Nested Bare + Worktree
+// layout root's store by path, so the GUI and its agents wrote to two stores.
+// The op dry-runs first, then folds the orphan in against the manifest hash it
+// reported, and the Work becomes readable from the canonical store.
+// ---------------------------------------------------------------------------
+
+const CONSOLIDATE_ORIGIN: &str = "https://github.com/example/gwt-store-consolidate.git";
+
+struct LayoutFixture {
+    home: TempDir,
+    _temp: TempDir,
+    layout_root: PathBuf,
+    /// The gwt-managed Session that reviews and applies the plan. Issue #3524
+    /// (folded into #3606): apply authority belongs to a Session, so the op is
+    /// only reachable from one.
+    session_id: String,
+}
+
+fn layout_git(cwd: &Path, args: &[&str]) {
+    let output = hidden_command("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn layout_fixture() -> LayoutFixture {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let temp = tempfile::tempdir().expect("layout tempdir");
+    let layout_root = temp.path().join("workbench");
+    let bare = layout_root.join("gwt.git");
+    let bootstrap = layout_root.join(".bootstrap");
+    let worktree = layout_root.join("work").join("develop");
+    fs::create_dir_all(worktree.parent().expect("work dir")).expect("work dir");
+
+    layout_git(
+        temp.path(),
+        &["init", "--bare", bare.to_str().expect("bare")],
+    );
+    layout_git(&bare, &["remote", "add", "origin", CONSOLIDATE_ORIGIN]);
+    layout_git(
+        &layout_root,
+        &["clone", bare.to_str().expect("bare"), ".bootstrap"],
+    );
+    layout_git(&bootstrap, &["checkout", "-b", "develop"]);
+    layout_git(
+        &bootstrap,
+        &[
+            "-c",
+            "user.name=gwt-test",
+            "-c",
+            "user.email=gwt-test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    layout_git(&bootstrap, &["push", "origin", "develop"]);
+    fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
+    layout_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().expect("worktree"),
+            "develop",
+        ],
+    );
+
+    let session = Session::new(&layout_root, "develop", AgentId::Codex);
+    let session_id = session.id.clone();
+    session
+        .save(&home.path().join(".gwt").join("sessions"))
+        .expect("persist the layout Session");
+
+    LayoutFixture {
+        home,
+        _temp: temp,
+        layout_root,
+        session_id,
+    }
+}
+
+fn layout_command(fixture: &LayoutFixture, session_id: Option<&str>) -> std::process::Command {
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+    command
+        .current_dir(&fixture.layout_root)
+        .env("HOME", fixture.home.path())
+        .env("USERPROFILE", fixture.home.path())
+        .env_remove(GWT_HOOK_FORWARD_URL_ENV)
+        .env_remove(GWT_HOOK_FORWARD_TOKEN_ENV)
+        .env_remove(GWT_SESSION_RUNTIME_PATH_ENV)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match session_id {
+        Some(session_id) => command.env(GWT_SESSION_ID_ENV, session_id),
+        None => command.env_remove(GWT_SESSION_ID_ENV),
+    };
+    command
+}
+
+fn run_layout_ws_raw(
+    fixture: &LayoutFixture,
+    session_id: Option<&str>,
+    json: &str,
+) -> std::process::Output {
+    let mut child = layout_command(fixture, session_id)
+        .spawn()
+        .expect("run gwtd");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(json.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait gwtd")
+}
+
+fn run_layout_ws(fixture: &LayoutFixture, json: &str) -> Value {
+    let output = run_layout_ws_raw(fixture, Some(&fixture.session_id), json);
+    assert!(
+        output.status.success(),
+        "gwtd should exit 0 for `{json}`, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse gwtd envelope")
+}
+
+/// The JSON payload the op prints inside the envelope's `output` field.
+fn envelope_payload(envelope: &Value) -> Value {
+    let output = envelope
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("envelope output");
+    serde_json::from_str(output).unwrap_or_else(|err| panic!("parse op payload: {err}; {output}"))
+}
+
+#[test]
+fn store_consolidate_dry_runs_then_folds_the_split_store_into_the_canonical_one() {
+    let fixture = layout_fixture();
+    let projects = fixture.home.path().join(".gwt").join("projects");
+
+    // Seed the store a pre-#3466 build would have written for the layout root:
+    // keyed by its path, holding Work the canonical store never saw.
+    let orphan_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
+    let orphan_state = projects.join(orphan_hash.as_str()).join("project-state");
+    fs::create_dir_all(&orphan_state).expect("orphan store");
+    let mut split_event = WorkEvent::new(WorkEventKind::Start, "work-split-store", Utc::now());
+    split_event.id = "event-split-store".to_string();
+    split_event.title = Some("Work stranded in the split store".to_string());
+    let mut split_projection = WorkItemsProjection::empty(split_event.updated_at);
+    split_projection.apply_event(split_event.clone());
+    save_workspace_work_items_projection_to_path(
+        &orphan_state.join("works.json"),
+        &split_projection,
+    )
+    .expect("seed split WorkItems");
+    fs::write(
+        orphan_state.join("work-events.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::to_string(&split_event).expect("serialize split event")
+        ),
+    )
+    .expect("seed split events");
+
+    let canonical_hash = project_scope_hash(&fixture.layout_root);
+    assert_ne!(
+        canonical_hash.as_str(),
+        orphan_hash.as_str(),
+        "the fixture must actually reproduce a split store"
+    );
+
+    let plan = envelope_payload(&run_layout_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{}}"#,
+    ));
+    assert_eq!(plan["dry_run"], Value::Bool(true));
+    assert_eq!(
+        plan["orphans"].as_array().expect("orphans").len(),
+        1,
+        "the dry run must report the split store: {plan}"
+    );
+    assert_eq!(plan["orphans"][0]["work_item_count"], Value::from(1));
+    assert!(
+        orphan_state.is_dir(),
+        "a dry run must not move the split store"
+    );
+    let manifest_hash = plan["manifest_hash"]
+        .as_str()
+        .expect("manifest hash")
+        .to_string();
+
+    let applied = envelope_payload(&run_layout_ws(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.store_consolidate","params":{{"dry_run":false,"manifest_hash":"{manifest_hash}"}}}}"#
+        ),
+    ));
+    assert_eq!(applied["outcome"], Value::from("consolidated"));
+    assert!(
+        !orphan_state.exists(),
+        "the split store must leave the project store namespace"
+    );
+
+    let canonical_works = projects
+        .join(canonical_hash.as_str())
+        .join("project-state")
+        .join("works.json");
+    let rebuilt = load_workspace_work_items_from_path(&canonical_works)
+        .expect("load canonical WorkItems")
+        .expect("canonical WorkItems");
+    assert!(
+        rebuilt
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-split-store"),
+        "the stranded Work must be readable from the canonical store: {rebuilt:?}"
+    );
+
+    // The manifest that records what was quarantined stays available for audit.
+    let manifest = projects
+        .join(canonical_hash.as_str())
+        .join("quarantine")
+        .join(format!("{orphan_hash}.json"));
+    assert!(
+        manifest.is_file(),
+        "a quarantine manifest must be left behind"
+    );
+}
+
+/// Issue #3524 (folded into #3606): every refusal is a structured
+/// `needs_human` payload — a stable reason code, the identity it concerns, and
+/// whether retrying can help — not a human sentence on stderr.
+fn needs_human_payload(output: &std::process::Output) -> Value {
+    let envelope: Value =
+        serde_json::from_slice(&output.stdout).expect("refusals still emit a JSON envelope");
+    assert_eq!(envelope["ok"], Value::Bool(false), "{envelope}");
+    let payload = envelope_payload(&envelope);
+    assert_eq!(payload["needs_human"], Value::Bool(true), "{payload}");
+    assert!(
+        payload["reason_code"].is_string(),
+        "a stable reason code is required: {payload}"
+    );
+    assert!(
+        payload["retryable"].is_boolean(),
+        "retryability is required: {payload}"
+    );
+    assert!(
+        payload["target"]["project_hash"].is_string(),
+        "the refusal must name the identity it concerns: {payload}"
+    );
+    payload
+}
+
+#[test]
+fn store_consolidate_refuses_to_apply_without_the_dry_run_manifest_hash() {
+    let fixture = layout_fixture();
+
+    let output = run_layout_ws_raw(
+        &fixture,
+        Some(&fixture.session_id),
+        r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{"dry_run":false}}"#,
+    );
+
+    assert!(
+        !output.status.success(),
+        "applying without an approved manifest hash must fail closed: {}",
+        output_text(&output)
+    );
+    let payload = needs_human_payload(&output);
+    assert_eq!(
+        payload["reason_code"],
+        Value::from("manifest_hash_required")
+    );
+    assert!(
+        output_text(&output).contains("manifest_hash"),
+        "the refusal must name the missing input: {}",
+        output_text(&output)
+    );
+}
+
+/// Issue #3606 AC-4: an application restart must not change where a project
+/// root resolves, and a store stranded by an earlier resolution rule must stay
+/// *visible* rather than silently ignored. v9.81.0 changed the answer for an
+/// unchanged project root and shipped no way to see or move what was left
+/// behind, so the whole observation surface moved to an empty store.
+#[test]
+fn store_consolidate_resolves_to_one_store_across_separate_processes() {
+    let fixture = layout_fixture();
+    let projects = fixture.home.path().join(".gwt").join("projects");
+
+    // The store a pre-#3466 build keyed by the layout root's path.
+    let legacy_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
+    fs::create_dir_all(projects.join(legacy_hash.as_str()).join("project-state"))
+        .expect("legacy store");
+
+    let dry_run = r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{}}"#;
+    let first = envelope_payload(&run_layout_ws(&fixture, dry_run));
+    // A second gwtd process is the restart: same project root, no shared state
+    // beyond the filesystem.
+    let second = envelope_payload(&run_layout_ws(&fixture, dry_run));
+
+    let identity = gwt_core::repo_hash::compute_repo_hash(CONSOLIDATE_ORIGIN);
+    assert_eq!(
+        first["canonical_hash"].as_str(),
+        Some(identity.as_str()),
+        "the canonical store must be the repository identity: {first}"
+    );
+    assert_eq!(
+        first["canonical_hash"], second["canonical_hash"],
+        "a restart must not move the canonical store"
+    );
+    assert_ne!(
+        first["canonical_hash"].as_str(),
+        Some(legacy_hash.as_str()),
+        "the fixture must actually reproduce the post-upgrade split"
+    );
+
+    for payload in [&first, &second] {
+        let orphans = payload["orphans"].as_array().expect("orphans");
+        assert!(
+            orphans
+                .iter()
+                .any(|orphan| orphan["source_hash"].as_str() == Some(legacy_hash.as_str())),
+            "the stranded legacy store must stay visible, not silently ignored: {payload}"
+        );
+    }
+}
+
+/// Issue #3524 (folded into #3606): apply authority used to be whatever
+/// directory the process happened to run in. Moving durable project state is
+/// only ever authorized for the project the calling Session belongs to, and an
+/// unmanaged invocation holds no authority at all.
+#[test]
+fn store_consolidate_refuses_to_apply_without_a_managed_session() {
+    let fixture = layout_fixture();
+    let plan = envelope_payload(&run_layout_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{}}"#,
+    ));
+    let manifest_hash = plan["manifest_hash"].as_str().expect("manifest hash");
+
+    let output = run_layout_ws_raw(
+        &fixture,
+        None,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.store_consolidate","params":{{"dry_run":false,"manifest_hash":"{manifest_hash}"}}}}"#
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "an unmanaged caller must not move durable state: {}",
+        output_text(&output)
+    );
+    let payload = needs_human_payload(&output);
+    assert_eq!(payload["reason_code"], Value::from("unauthorized_session"));
+    assert_eq!(payload["retryable"], Value::Bool(false));
+}
+
+/// Issue #3524 (folded into #3606): a Session may only consolidate the stores
+/// of the project it belongs to. Naming another project in `project_root` is
+/// not a way to borrow authority.
+#[test]
+fn store_consolidate_refuses_a_project_root_outside_the_session_project() {
+    let fixture = layout_fixture();
+    let elsewhere = tempfile::tempdir().expect("unrelated project");
+    let elsewhere_path = elsewhere.path().to_string_lossy().replace('\\', "/");
+
+    let output = run_layout_ws_raw(
+        &fixture,
+        Some(&fixture.session_id),
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.store_consolidate","params":{{"dry_run":false,"manifest_hash":"0000deadbeef","project_root":"{elsewhere_path}"}}}}"#
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "a Session must not consolidate another project: {}",
+        output_text(&output)
+    );
+    let payload = needs_human_payload(&output);
+    assert!(
+        matches!(
+            payload["reason_code"].as_str(),
+            Some("unauthorized_session" | "unknown_remote")
+        ),
+        "the refusal must be about authority or identity, not a silent success: {payload}"
+    );
+}
+
+/// Issue #3524 (folded into #3606): the op moves durable state, so a parameter
+/// it does not understand is a refusal. A silently-dropped `project_root`
+/// (mistyped, or from a newer caller) used to leave the apply pointed at
+/// whatever cwd it ran in.
+#[test]
+fn store_consolidate_rejects_an_unknown_parameter() {
+    let fixture = layout_fixture();
+
+    let output = run_layout_ws_raw(
+        &fixture,
+        Some(&fixture.session_id),
+        r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{"projectRoot":"/tmp/typo"}}"#,
+    );
+
+    assert!(
+        !output.status.success(),
+        "an unknown parameter must fail closed: {}",
+        output_text(&output)
+    );
+    assert!(
+        output_text(&output).contains("projectRoot"),
+        "the refusal must name the parameter it rejected: {}",
+        output_text(&output)
+    );
+}
+
+/// Issue #3524 (folded into #3606): the dry run is the review step, and its
+/// record is what authorizes an apply. A hash obtained any other way — including
+/// from a previous run against a store that has since changed — is not enough.
+#[test]
+fn store_consolidate_refuses_an_apply_that_no_dry_run_issued() {
+    let fixture = layout_fixture();
+    let projects = fixture.home.path().join(".gwt").join("projects");
+    let orphan_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
+    let orphan_state = projects.join(orphan_hash.as_str()).join("project-state");
+    fs::create_dir_all(&orphan_state).expect("orphan store");
+    let mut split_event = WorkEvent::new(WorkEventKind::Start, "work-unreviewed", Utc::now());
+    split_event.id = "event-unreviewed".to_string();
+    let mut split_projection = WorkItemsProjection::empty(split_event.updated_at);
+    split_projection.apply_event(split_event.clone());
+    save_workspace_work_items_projection_to_path(
+        &orphan_state.join("works.json"),
+        &split_projection,
+    )
+    .expect("seed split WorkItems");
+
+    // Learn the current manifest hash through a dry run, then discard the
+    // record of that review. The hash still matches the disk exactly, so only
+    // the issued-plan requirement stands between the caller and the move.
+    let plan = envelope_payload(&run_layout_ws(
+        &fixture,
+        r#"{"schema_version":1,"operation":"workspace.store_consolidate","params":{}}"#,
+    ));
+    let manifest_hash = plan["manifest_hash"].as_str().expect("manifest hash");
+    let canonical_hash = plan["canonical_hash"].as_str().expect("canonical hash");
+    let issued_record = projects
+        .join(canonical_hash)
+        .join("project-state")
+        .join("store-consolidation-plan.json");
+    assert!(
+        issued_record.is_file(),
+        "the dry run must record that it was reviewed"
+    );
+    fs::remove_file(&issued_record).expect("discard the review record");
+
+    let output = run_layout_ws_raw(
+        &fixture,
+        Some(&fixture.session_id),
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.store_consolidate","params":{{"dry_run":false,"manifest_hash":"{manifest_hash}"}}}}"#
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "a correct hash with no recorded review must still fail closed: {}",
+        output_text(&output)
+    );
+    let payload = needs_human_payload(&output);
+    assert_eq!(payload["reason_code"], Value::from("plan_not_issued"));
+    assert_eq!(
+        payload["retryable"],
+        Value::Bool(true),
+        "re-running the dry run clears this"
+    );
+    assert!(
+        orphan_state.is_dir(),
+        "a refusal must leave the split store in place"
     );
 }

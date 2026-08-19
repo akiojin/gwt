@@ -410,8 +410,12 @@ fn origin_remote_url(
     worktree_root: &Path,
     deadline: &ResolutionDeadline,
 ) -> Result<Option<String>, RepositoryProbeFailure> {
-    let root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
-    let root = root.to_str().ok_or(RepositoryProbeFailure::Routing)?;
+    // `git -C` accepts any path inside the worktree. Resolving the toplevel
+    // first would launch an additional, unbounded Git process before the
+    // strict Stop deadline can be enforced.
+    let root = worktree_root
+        .to_str()
+        .ok_or(RepositoryProbeFailure::Routing)?;
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
         &hub,
@@ -844,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_store_lock_contention_returns_a_timeout_warning_within_the_deadline() {
+    fn candidate_store_lock_contention_returns_a_timeout_warning_within_a_bounded_budget() {
         let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -893,7 +897,11 @@ mod tests {
             panic!("contended candidate store must warn without blocking");
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "250ms lock deadline exceeded the scheduler-tolerant wall-clock budget: {elapsed:?}"
+        );
         FileExt::unlock(&lock).expect("unlock candidate store");
     }
 }

@@ -1,6 +1,6 @@
 use gwt::{
     BackendEvent, FrontendEvent, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorLaunchPlan, IssueMonitorStatusView, MonitorInboxState,
+    IssueMonitorLaunchPlan, IssueMonitorStatusView, KnowledgeListItem, MonitorInboxState,
 };
 
 #[test]
@@ -90,6 +90,17 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     ));
 
     let event: FrontendEvent = serde_json::from_str(
+        r#"{"kind":"agent_issue_monitor_scan_now","expected_project_scope":"scope-123"}"#,
+    )
+    .expect("authenticated agent scan-now event");
+    assert!(matches!(
+        event,
+        FrontendEvent::AgentIssueMonitorScanNow {
+            expected_project_scope,
+        } if expected_project_scope == "scope-123"
+    ));
+
+    let event: FrontendEvent = serde_json::from_str(
         r#"{"kind":"quick_register_issue","title":"Investigate Intake registration","launch":true}"#,
     )
     .expect("quick issue event");
@@ -98,6 +109,39 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         FrontendEvent::QuickRegisterIssue { title, launch: true }
             if title == "Investigate Intake registration"
     ));
+}
+
+#[test]
+fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
+    let accepted = serde_json::to_value(BackendEvent::IssueMonitorScanRequestResult {
+        accepted: true,
+        reason: None,
+    })
+    .expect("accepted result");
+    assert_eq!(
+        accepted,
+        serde_json::json!({
+            "kind": "issue_monitor_scan_request_result",
+            "accepted": true,
+            "reason": null,
+        })
+    );
+
+    let unavailable = serde_json::to_value(BackendEvent::IssueMonitorScanRequestResult {
+        accepted: false,
+        reason: Some("scan_already_in_flight".to_string()),
+    })
+    .expect("unavailable result");
+    assert_eq!(unavailable["accepted"], false);
+    assert_eq!(unavailable["reason"], "scan_already_in_flight");
+
+    let policy = BackendEvent::IssueMonitorScanRequestResult {
+        accepted: true,
+        reason: None,
+    }
+    .delivery_policy();
+    assert_eq!(policy.kind, "issue_monitor_scan_request_result");
+    assert_eq!(format!("{:?}", policy.backpressure), "ClientScopedSnapshot");
 }
 
 #[test]
@@ -146,6 +190,8 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
             state: IssueMonitorIssueState::Open,
             body: Some("Issue body".to_string()),
             url: Some("https://github.com/example/repo/issues/42".to_string()),
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         },
         state: MonitorInboxState::Queued,
         claim_id: Some("claim-a".to_string()),
@@ -158,6 +204,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
             prompt: "$gwt-execute #42".to_string(),
         }),
         error_message: None,
+        exclusion_reason: None,
     };
     let inbox = serde_json::to_value(BackendEvent::IssueMonitorInbox { items: vec![item] })
         .expect("serialize inbox");
@@ -194,4 +241,83 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     assert_eq!(launch_failed["kind"], "issue_monitor_launch_failed");
     assert_eq!(launch_failed["issue_number"], 42);
     assert_eq!(launch_failed["message"], "Launch failed");
+}
+
+#[test]
+fn backend_exclusion_states_and_reason_use_stable_wire_names() {
+    for (state, wire_state) in [
+        (MonitorInboxState::NotReady, "not_ready"),
+        (MonitorInboxState::HoldExcluded, "hold_excluded"),
+    ] {
+        let item = IssueMonitorInboxItem {
+            issue: IssueMonitorIssue {
+                number: 42,
+                title: "Excluded issue".to_string(),
+                labels: vec!["hold".to_string()],
+                state: IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+                readiness: gwt::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
+            },
+            state,
+            claim_id: None,
+            blocked_by_owner: None,
+            claim_expires_at: None,
+            launched_window_id: None,
+            launch_plan: None,
+            error_message: None,
+            exclusion_reason: Some("matched label: hold".to_string()),
+        };
+
+        let value = serde_json::to_value(item).expect("serialize excluded inbox item");
+        assert_eq!(value["state"], wire_state);
+        assert_eq!(value["exclusion_reason"], "matched label: hold");
+    }
+}
+
+#[test]
+fn knowledge_list_item_monitor_projection_is_backward_compatible() {
+    let legacy = serde_json::json!({
+        "number": 42,
+        "title": "Legacy issue",
+        "state": "open",
+        "meta": "Updated now",
+        "labels": ["bug"],
+        "linked_branch_count": 0,
+        "related_work_count": 0,
+        "related_session_count": 0,
+        "match_score": null,
+        "phase": null,
+        "has_unknown_phase": false,
+        "is_spec": false
+    });
+    let legacy_item: KnowledgeListItem =
+        serde_json::from_value(legacy).expect("legacy knowledge item must deserialize");
+    assert_eq!(legacy_item.monitor_state, None);
+    assert_eq!(legacy_item.queue_position, None);
+    assert_eq!(legacy_item.exclusion_reason, None);
+
+    let projected = KnowledgeListItem {
+        number: 42,
+        title: "Excluded issue".to_string(),
+        state: "open".to_string(),
+        meta: "Updated now".to_string(),
+        labels: vec!["hold".to_string()],
+        linked_branch_count: 0,
+        related_work_count: 0,
+        related_session_count: 0,
+        match_score: None,
+        phase: None,
+        has_unknown_phase: false,
+        is_spec: false,
+        monitor_state: Some(MonitorInboxState::HoldExcluded),
+        queue_position: Some(3),
+        exclusion_reason: Some("matched label: hold".to_string()),
+    };
+    let value = serde_json::to_value(projected).expect("serialize projected knowledge item");
+    assert_eq!(value["state"], "open");
+    assert_eq!(value["monitor_state"], "hold_excluded");
+    assert_eq!(value["queue_position"], 3);
+    assert_eq!(value["exclusion_reason"], "matched label: hold");
 }

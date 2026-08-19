@@ -58,6 +58,8 @@ fn auto_issue() -> IssueMonitorIssue {
         state: IssueMonitorIssueState::Open,
         body: Some(BODY.to_string()),
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: Some("2026-06-29T00:00:00Z".to_string()),
     }
 }
 
@@ -122,6 +124,9 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     let orig_path = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{}", bin.display(), orig_path));
     std::env::set_var("GWT_MOCK_GH_LOG", &merge_log);
+    // Issue #3675: mark the mock as installed so the unsandboxed-gh spawn
+    // guard lets the pipeline's gh spawns through.
+    std::env::set_var("GWT_TEST_GH_SANDBOX", "1");
 
     let now = "2026-06-29T00:10:00Z";
     let issues = [auto_issue()];
@@ -208,5 +213,6 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
 fn cleanup(tmp: &Path, orig_path: &str) {
     std::env::set_var("PATH", orig_path);
     std::env::remove_var("GWT_MOCK_GH_LOG");
+    std::env::remove_var("GWT_TEST_GH_SANDBOX");
     let _ = fs::remove_dir_all(tmp);
 }

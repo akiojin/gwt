@@ -29,6 +29,8 @@ fn auto_issue(number: u64) -> IssueMonitorIssue {
         state: IssueMonitorIssueState::Open,
         body: Some(BODY.to_string()),
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: Some("2026-06-29T00:00:00Z".to_string()),
     }
 }
 

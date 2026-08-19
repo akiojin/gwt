@@ -28,15 +28,25 @@ an old browser tab.
    - Treat the current working directory at skill start as the launch
      checkout.
    - Resolve the repository root and current branch from that same checkout.
+   - Record the exact paths used by the launch and hook audit:
+
+     ```bash
+     REPO_ROOT="$(git rev-parse --show-toplevel)"
+     CHECKOUT_GWT="$REPO_ROOT/target/debug/gwt"
+     CHECKOUT_GWTD="$REPO_ROOT/target/debug/gwtd"
+     ```
+
    - Run remaining commands from the repository root or with absolute paths
      under it.
    - Do not switch branches, switch worktrees, or reuse another checkout.
 
 2. Build/resolve the binary:
-   - Use only `<repo-root>/target/debug/gwt`.
+   - Use only `<repo-root>/target/debug/gwt` for the GUI and
+     `<repo-root>/target/debug/gwtd` for the read-only convergence audit.
    - If the user is verifying freshly edited code, run
-     `cargo build -p gwt --bin gwt` first even if the binary already exists.
-   - If the binary is missing, build it.
+     `cargo build -p gwt --bin gwt --bin gwtd` first even if the binaries
+     already exist.
+   - If either binary is missing, build both with the same command.
 
 3. Prepare an isolated check home:
    - Create `CHECK_HOME="$(mktemp -d -t gwt-fresh-home.XXXXXX)"`.
@@ -69,6 +79,97 @@ an old browser tab.
    - Create temp files:
      - `URL_FILE="$(mktemp -t gwt-fresh-url.XXXXXX)"`
      - `LOG_FILE="$(mktemp -t gwt-fresh-startup.XXXXXX)"`
+   - Resolve a stable/public-or-logical hook-generation fallback. Never use a
+     checkout-local `target/*/gwtd` as `GWT_HOOK_BIN`, even when it is inherited
+     or first on `PATH`:
+
+     ```bash
+     # browser-check-hook-authority-begin
+     CHECKOUT_LOCAL_HOOK_PATTERN='(^|[/\\])target[/\\]([^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?([^[:alnum:]_.-]|$)'
+
+     is_checkout_local_hook_bin() {
+       [ -n "$1" ] \
+         && printf '%s\n' "$1" | grep -qiE -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
+     }
+
+     CHECK_HOOK_BIN="${GWT_HOOK_BIN:-}"
+     if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then
+       CHECK_HOOK_BIN=""
+     fi
+     if [ -n "$CHECK_HOOK_BIN" ] && [ "$CHECK_HOOK_BIN" != "gwtd" ] \
+       && [ ! -x "$CHECK_HOOK_BIN" ]; then
+       CHECK_HOOK_BIN=""
+     fi
+     if [ -z "$CHECK_HOOK_BIN" ]; then
+       PATH_HOOK_BIN="$(command -v gwtd 2>/dev/null || true)"
+       if [ -n "$PATH_HOOK_BIN" ] \
+         && ! is_checkout_local_hook_bin "$PATH_HOOK_BIN"; then
+         CHECK_HOOK_BIN="gwtd"
+       fi
+     fi
+     if [ -z "$CHECK_HOOK_BIN" ] \
+       && [ -x /Applications/GWT.app/Contents/MacOS/gwtd ]; then
+       CHECK_HOOK_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
+     fi
+     if [ -z "$CHECK_HOOK_BIN" ]; then
+       CHECK_HOOK_BIN="gwtd"
+     fi
+     # browser-check-hook-authority-end
+     ```
+
+   - Before launch, repair existing managed hook surfaces to the selected
+     fallback with the checkout `gwtd`. This keeps a portable bare `gwtd`
+     fallback when `PATH` already resolves a stable install, preserves user
+     hooks, and prevents the fresh GUI from inheriting provider-to-provider
+     fallback skew:
+
+     ```bash
+     # browser-check-hook-repair-begin
+     HOOK_DOCTOR_ENVELOPE="$(
+       jq -n \
+         --arg expected_hook_bin "$CHECK_HOOK_BIN" \
+         --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
+         '{schema_version:1,operation:"hook.doctor",params:{repair:true,expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+       | (cd "$REPO_ROOT" && env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD")
+     )"
+     if ! HOOK_DOCTOR_HEALTH_JSON="$(
+       printf '%s' "$HOOK_DOCTOR_ENVELOPE" \
+       | jq -er 'select(.ok == true) | .output | fromjson | .health'
+     )"; then
+       echo "browser-check hook convergence failed: hook.doctor did not return evidence" >&2
+       exit 1
+     fi
+     ALLOW_MISSING_LOGICAL_FALLBACK=false
+     if [ "$CHECK_HOOK_BIN" = "gwtd" ] && ! command -v gwtd >/dev/null 2>&1; then
+       ALLOW_MISSING_LOGICAL_FALLBACK=true
+     fi
+     if ! printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" \
+       | jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
+           [
+             .issues[]
+             | select(
+                 ($allow_missing_logical
+                   and startswith("managed hook binary missing: ")
+                   and endswith(" uses gwtd"))
+                 | not
+               )
+           ] as $blocking_issues
+           | .status != "inactive" and ($blocking_issues | length == 0)
+         ' >/dev/null; then
+       echo "browser-check hook convergence failed: hook.doctor could not converge managed surfaces" >&2
+       printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | jq '{status, issues}' >&2
+       exit 1
+     fi
+     # browser-check-hook-repair-end
+     ```
+
+   - Do not set `GWT_BIN_PATH` on the fresh GUI process. It is launch-scoped:
+     the checkout GUI's agent launch pipeline injects `CHECKOUT_GWTD` into the
+     agent process as `GWT_BIN_PATH`, and generated hooks select that edited
+     runtime before the stable `GWT_HOOK_BIN` fallback. Keeping the two values
+     separate prevents an older debug GUI from persisting its disposable
+     daemon path while still exercising edited hook behavior in launched
+     agents.
    - Run:
 
      ```bash
@@ -82,12 +183,15 @@ an old browser tab.
        GIT_TERMINAL_PROMPT=0
        GH_PROMPT_DISABLED=1
        GWT_BROWSER_URL_FILE="$URL_FILE"
+       GWT_HOOK_BIN="$CHECK_HOOK_BIN"
      )
      if [ -n "$CHECK_GH_TOKEN" ]; then
        ENV_ARGS+=(GH_TOKEN="$CHECK_GH_TOKEN" GITHUB_TOKEN="$CHECK_GH_TOKEN")
      fi
-     env "${ENV_ARGS[@]}" \
-       <repo-root>/target/debug/gwt --no-tray --no-open 2>&1 | tee "$LOG_FILE"
+     # browser-check-launch-begin
+     env -u GWT_BIN_PATH "${ENV_ARGS[@]}" \
+       "$CHECKOUT_GWT" --no-tray --no-open 2>&1 | tee "$LOG_FILE"
+     # browser-check-launch-end
      ```
 
    - Keep this process running until the user says the check is finished.
@@ -99,6 +203,54 @@ an old browser tab.
    - Fall back to the fresh process's stdout line only if the URL file is
      empty.
    - Verify with `curl -fsS -I <url>`.
+   - Run the Post-launch hook convergence audit before sharing the URL. The
+     canonical `hook.health` operation inspects each existing Claude, Codex,
+     OpenCode, OpenClaw, and Hermes surface, requires its provider-native
+     runtime indirection plus the exact stable fallback, and rejects any
+     checkout-local daemon fallback:
+
+     ```bash
+     # browser-check-hook-audit-begin
+     HOOK_HEALTH_ENVELOPE="$(
+       jq -n \
+         --arg expected_hook_bin "$CHECK_HOOK_BIN" \
+         --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
+         '{schema_version:1,operation:"hook.health",params:{expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+       | (cd "$REPO_ROOT" && env -u GWT_BIN_PATH "$CHECKOUT_GWTD")
+     )"
+     if ! HOOK_HEALTH_JSON="$(
+       printf '%s' "$HOOK_HEALTH_ENVELOPE" \
+       | jq -er 'select(.ok == true) | .output | fromjson'
+     )"; then
+       echo "browser-check hook convergence failed: hook.health did not return evidence" >&2
+       exit 1
+     fi
+     ALLOW_MISSING_LOGICAL_FALLBACK=false
+     if [ "$CHECK_HOOK_BIN" = "gwtd" ] && ! command -v gwtd >/dev/null 2>&1; then
+       ALLOW_MISSING_LOGICAL_FALLBACK=true
+     fi
+     if ! printf '%s' "$HOOK_HEALTH_JSON" \
+       | jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
+           [
+             .issues[]
+             | select(
+                 ($allow_missing_logical
+                   and startswith("managed hook binary missing: ")
+                   and endswith(" uses gwtd"))
+                 | not
+               )
+           ] as $blocking_issues
+           | .status != "inactive" and ($blocking_issues | length == 0)
+         ' >/dev/null; then
+       echo "browser-check hook convergence failed: managed hook surfaces did not converge" >&2
+       printf '%s' "$HOOK_HEALTH_JSON" | jq '{status, issues}' >&2
+       exit 1
+     fi
+     # browser-check-hook-audit-end
+     ```
+
+   - If the audit fails, stop the fresh process and diagnose materialization.
+     Do not share the URL or replace `CHECK_HOOK_BIN` with `CHECKOUT_GWTD`.
    - Optionally use browser automation once to confirm the page is past
      startup and has a project tab for the seeded checkout.
    - Do not make `Start Work` the user's verification path unless the task is
