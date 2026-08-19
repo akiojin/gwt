@@ -1,4 +1,6 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
+use gwt_core::paths::ProjectScopeSource;
+use gwt_core::repo_hash::RepoIdentitySource;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::str::FromStr;
@@ -61,12 +63,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     let declared_block = parsed.declared_block;
     match super::run_collect(env, parsed.command) {
         Ok((code, output)) => {
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "ok": code == 0,
                 "operation": operation,
                 "exit_code": code,
                 "output": output,
             });
+            attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{}", payload);
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
@@ -81,12 +84,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // process never answered". The stderr line stays for humans.
         Err(err) => {
             let message = err.to_string();
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
                 "error": message,
             });
+            attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{payload}");
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
             // Issue #3655 AC-2: a governance refusal reaches the PM without
@@ -97,6 +101,67 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+/// Issue #3606: name the project store the operation acted on.
+///
+/// A `project_root` that resolves no repository identity still produces a
+/// perfectly working store — just an isolated one, keyed by path, that no
+/// running gwt opened under a different path will ever read. The PM lost half a
+/// day to exactly that: `issue.monitor.priority.move` answered `ok: true` and
+/// read the new order straight back, from a store nothing else was using. The
+/// envelope now carries the store's hash, its directory, and whether the hash
+/// came from a repository identity, so the caller can assert on the landing
+/// instead of comparing mtimes under `~/.gwt/projects/`.
+///
+/// Absent when the operation never resolved a project store — including when it
+/// failed before doing so. Absence therefore means "no store was touched", not
+/// "the store is fine".
+fn attach_project_store(payload: &mut Value) {
+    let Some(store) = gwt_core::paths::operation_project_store() else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    // Windows canonicalization yields `\\?\` verbatim paths. Reporting those
+    // would hand the caller a path it cannot paste back into a shell.
+    let readable = |path: &std::path::Path| {
+        gwt_core::paths::normalize_windows_child_process_path_text(&path.display().to_string())
+    };
+    let mut reported = serde_json::json!({
+        "project_root": readable(&store.project_root),
+        "hash": store.scope.hash.as_str(),
+        "source": store.scope.source.as_str(),
+        "identity_resolved": store.scope.source.identity_resolved(),
+        "store_path": readable(&store.store_path),
+    });
+    match &store.scope.source {
+        // The bare repository that lent the layout root its identity. Without
+        // it, "nested_bare_repository" names the mechanism but not the repo.
+        ProjectScopeSource::Repository(RepoIdentitySource::NestedBareRepository(path)) => {
+            reported["repository_path"] = Value::from(readable(path));
+        }
+        // Every rejected candidate, so a human can see *why* no identity was
+        // chosen rather than only that none was.
+        ProjectScopeSource::AmbiguousNestedBareRepositories(candidates) => {
+            reported["candidates"] = Value::Array(
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        serde_json::json!({
+                            "path": readable(&candidate.path),
+                            "normalized_origin": candidate.normalized_origin,
+                            "hash": candidate.hash.as_str(),
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        ProjectScopeSource::Repository(RepoIdentitySource::Origin)
+        | ProjectScopeSource::PathFallback => {}
+    }
+    object.insert("project_store".to_string(), reported);
 }
 
 fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
