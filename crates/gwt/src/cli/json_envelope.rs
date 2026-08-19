@@ -3102,10 +3102,19 @@ mod tests {
             ok("pane.close", json!({"id": "p1"})),
             CliCommand::Pane(PaneCommand::Close { .. })
         ));
-        assert!(matches!(
+        // Issue #3552 AC-2: `pane.stop` is not a second implementation to keep
+        // in step — it resolves to the very same command, so whatever AC-1
+        // fixes for `pane.close` it inherits by construction.
+        match (
+            ok("pane.close", json!({"id": "p1"})),
             ok("pane.stop", json!({"id": "p1"})),
-            CliCommand::Pane(PaneCommand::Close { .. })
-        ));
+        ) {
+            (
+                CliCommand::Pane(PaneCommand::Close { id: closed }),
+                CliCommand::Pane(PaneCommand::Close { id: stopped }),
+            ) => assert_eq!(closed, stopped),
+            other => panic!("unexpected commands: {other:?}"),
+        }
         assert!(matches!(
             ok("pane.send", json!({"text": "hi"})),
             CliCommand::Pane(PaneCommand::Send { .. })
