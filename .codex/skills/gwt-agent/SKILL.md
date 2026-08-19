@@ -166,6 +166,44 @@ the GUI and daemon on their next scan/rebase. Configuration changes use an
 atomic daemon control when it is available; the fence-aware local fallback is
 observed on the next scan.
 
+### Checking which project store the operation reached
+
+`ok: true` proves the operation ran; it does not prove *where*. A `project_root`
+whose repository identity cannot be resolved still gets a working project store
+— just an isolated one, keyed by path, that no running gwt opened under a
+different path will ever read. A write there succeeds and reads straight back
+while changing nothing the GUI or daemon sees.
+
+Every `issue.monitor.*` response therefore carries a `project_store` block on
+the envelope, next to `ok`:
+
+```json
+{
+  "ok": true,
+  "operation": "issue.monitor.status",
+  "project_store": {
+    "project_root": "/Users/you/Workbench/gwt",
+    "hash": "99a8660247f5bc49",
+    "source": "nested_bare_repository",
+    "identity_resolved": true,
+    "store_path": "/Users/you/.gwt/projects/99a8660247f5bc49"
+  }
+}
+```
+
+- `identity_resolved: true` — the store is keyed by the repository's origin, so
+  every worktree and layout root of that repository shares it. `source` is
+  `origin` or `nested_bare_repository`.
+- `identity_resolved: false` — the store is isolated to this path. `source` is
+  `path_fallback` (no repository identity was resolvable) or
+  `ambiguous_nested_bare_repositories` (several direct-child bare repositories
+  name different origins; the rejected `candidates` are listed).
+
+Check `identity_resolved` and `hash` after any write that matters. A path
+fallback usually means the `project_root` was a directory that only *contains*
+the repository — pass the repository or a worktree inside it instead. Do not
+infer the landing from file mtimes under `~/.gwt/projects/`.
+
 ## Parked Question Handoffs
 
 An unattended autonomous execution never waits on a confirmation question. A

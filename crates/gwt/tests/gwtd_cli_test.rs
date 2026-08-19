@@ -1,10 +1,17 @@
-use std::{collections::BTreeSet, env, fs, io::Write, path::Path, process::Stdio};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 use chrono::Utc;
 use gwt_agent::{AgentId, Session};
 use gwt_core::process::hidden_command;
 use gwt_core::{
     paths::project_scope_hash,
+    repo_hash::{compute_path_hash, compute_repo_hash},
     workspace_projection::{
         append_workspace_work_event_to_path, load_workspace_projection_from_path,
         save_workspace_projection_to_path, save_workspace_work_items_projection_to_path, WorkEvent,
@@ -791,4 +798,285 @@ fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// Issue #3606: a JSON operation that acts on the project store must name the
+/// store it landed in.
+///
+/// The PM ran `issue.monitor.priority.move` against a `project_root` whose
+/// identity did not resolve, got `ok: true` plus a successful readback, and
+/// nearly reported the wrong queue state to the user — the write had gone to an
+/// isolated path-fallback store no running gwt reads. `ok: true` proves the
+/// operation ran; it never proved *where*. These tests pin the proof onto the
+/// envelope so the landing is checkable instead of inferable from file mtimes.
+const STORE_LANDING_ORIGIN: &str = "https://example.invalid/acme/store-landing.git";
+
+struct StoreLandingFixture {
+    home: TempDir,
+    _temp: TempDir,
+    layout_root: PathBuf,
+    worktree: PathBuf,
+}
+
+fn store_landing_git(cwd: &Path, args: &[&str]) {
+    let output = hidden_command("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git store-landing fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A Nested Bare + Worktree layout: `<root>/gwt.git` plus `<root>/work/develop`.
+/// This is the shape `E:/gwt` has in the report, where the layout root itself is
+/// not a repository but still scopes exactly one project.
+fn store_landing_fixture() -> StoreLandingFixture {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let temp = tempfile::tempdir().expect("layout tempdir");
+    let layout_root = temp.path().join("workbench");
+    let bare = layout_root.join("gwt.git");
+    let bootstrap = layout_root.join(".bootstrap");
+    let worktree = layout_root.join("work").join("develop");
+    fs::create_dir_all(worktree.parent().expect("work dir")).expect("create work dir");
+
+    store_landing_git(
+        temp.path(),
+        &["init", "--bare", bare.to_str().expect("bare path utf8")],
+    );
+    store_landing_git(&bare, &["remote", "add", "origin", STORE_LANDING_ORIGIN]);
+    store_landing_git(
+        &layout_root,
+        &[
+            "clone",
+            bare.to_str().expect("bare path utf8"),
+            ".bootstrap",
+        ],
+    );
+    store_landing_git(&bootstrap, &["checkout", "-b", "develop"]);
+    store_landing_git(
+        &bootstrap,
+        &[
+            "-c",
+            "user.name=gwt-test",
+            "-c",
+            "user.email=gwt-test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    store_landing_git(&bootstrap, &["push", "origin", "develop"]);
+    fs::remove_dir_all(&bootstrap).expect("remove bootstrap clone");
+    store_landing_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().expect("worktree path utf8"),
+            "develop",
+        ],
+    );
+
+    StoreLandingFixture {
+        home,
+        _temp: temp,
+        layout_root,
+        worktree,
+    }
+}
+
+fn run_store_landing_envelope(
+    home: &Path,
+    cwd: &Path,
+    envelope: &serde_json::Value,
+) -> serde_json::Value {
+    let mut child = isolated_gwtd_command()
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gwtd");
+    write!(child.stdin.take().expect("stdin"), "{envelope}").expect("write JSON envelope");
+    let output = child.wait_with_output().expect("wait gwtd");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "gwtd stdout must be a JSON envelope ({error}); stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+#[test]
+fn issue_monitor_status_names_the_project_store_it_resolved() {
+    let fixture = store_landing_fixture();
+    let expected = compute_repo_hash(STORE_LANDING_ORIGIN);
+
+    let response = run_store_landing_envelope(
+        fixture.home.path(),
+        &fixture.layout_root,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.status",
+            "params": { "project_root": fixture.layout_root.to_str().expect("layout path utf8") },
+        }),
+    );
+
+    assert_eq!(response["ok"].as_bool(), Some(true), "response: {response}");
+    let store = &response["project_store"];
+    assert_eq!(
+        store["hash"].as_str(),
+        Some(expected.as_str()),
+        "the envelope must name the store the operation resolved; response: {response}"
+    );
+    assert_eq!(
+        store["identity_resolved"].as_bool(),
+        Some(true),
+        "a Nested Bare + Worktree layout root resolves a repository identity; response: {response}"
+    );
+    assert_eq!(
+        store["source"].as_str(),
+        Some("nested_bare_repository"),
+        "response: {response}"
+    );
+    let store_path = store["store_path"].as_str().expect("store_path");
+    assert!(
+        Path::new(store_path).ends_with(expected.as_str()),
+        "store_path must point at the store directory the caller can inspect, got {store_path}"
+    );
+}
+
+#[test]
+fn issue_monitor_status_reports_the_same_store_from_a_linked_worktree() {
+    let fixture = store_landing_fixture();
+    let expected = compute_repo_hash(STORE_LANDING_ORIGIN);
+
+    // Issue #3606 AC-5': a linked worktree — the shape of a gwt `work/` checkout
+    // and of the PM's `~/.gwt/projects/<hash>/pm/worktree` — must converge on the
+    // same store as the layout root it was materialized from.
+    let response = run_store_landing_envelope(
+        fixture.home.path(),
+        &fixture.worktree,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.status",
+            "params": { "project_root": fixture.worktree.to_str().expect("worktree path utf8") },
+        }),
+    );
+
+    assert_eq!(response["ok"].as_bool(), Some(true), "response: {response}");
+    assert_eq!(
+        response["project_store"]["hash"].as_str(),
+        Some(expected.as_str()),
+        "a linked worktree must resolve the repository identity store; response: {response}"
+    );
+    assert_eq!(
+        response["project_store"]["source"].as_str(),
+        Some("origin"),
+        "response: {response}"
+    );
+}
+
+#[test]
+fn issue_monitor_write_reports_an_isolated_path_fallback_landing() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let unresolvable = tempfile::tempdir().expect("project tempdir");
+    let expected = compute_path_hash(unresolvable.path());
+
+    let response = run_store_landing_envelope(
+        home.path(),
+        unresolvable.path(),
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.config.set",
+            "params": {
+                "project_root": unresolvable.path().to_str().expect("project path utf8"),
+                "max_active": 7,
+            },
+        }),
+    );
+
+    // The write still succeeds — the store is simply isolated. What must change
+    // is that the caller can see that from the response alone.
+    assert_eq!(response["ok"].as_bool(), Some(true), "response: {response}");
+    let store = &response["project_store"];
+    assert_eq!(
+        store["identity_resolved"].as_bool(),
+        Some(false),
+        "a path-fallback landing must be visible without reading store mtimes; response: {response}"
+    );
+    assert_eq!(
+        store["source"].as_str(),
+        Some("path_fallback"),
+        "response: {response}"
+    );
+    assert_eq!(
+        store["hash"].as_str(),
+        Some(expected.as_str()),
+        "response: {response}"
+    );
+}
+
+#[test]
+fn issue_monitor_status_lists_the_candidates_of_an_ambiguous_layout_root() {
+    let fixture = store_landing_fixture();
+    let second = fixture.layout_root.join("aa-other.git");
+    store_landing_git(
+        &fixture.layout_root,
+        &["init", "--bare", second.to_str().expect("second path utf8")],
+    );
+    store_landing_git(
+        &second,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/acme/other.git",
+        ],
+    );
+
+    let response = run_store_landing_envelope(
+        fixture.home.path(),
+        &fixture.layout_root,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.status",
+            "params": { "project_root": fixture.layout_root.to_str().expect("layout path utf8") },
+        }),
+    );
+
+    let store = &response["project_store"];
+    assert_eq!(
+        store["source"].as_str(),
+        Some("ambiguous_nested_bare_repositories"),
+        "response: {response}"
+    );
+    assert_eq!(
+        store["identity_resolved"].as_bool(),
+        Some(false),
+        "response: {response}"
+    );
+    let origins: BTreeSet<&str> = store["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .filter_map(|candidate| candidate["normalized_origin"].as_str())
+        .collect();
+    assert_eq!(
+        origins,
+        BTreeSet::from([
+            "example.invalid/acme/other",
+            "example.invalid/acme/store-landing"
+        ]),
+        "an ambiguous layout root must say which origins it refused to choose between; \
+         response: {response}"
+    );
 }

@@ -256,7 +256,13 @@ fn issue_monitor_project_root<E: CliEnv>(
             ),
         )));
     }
-    Ok(gwt_core::paths::resolve_current_worktree_root(&canonical))
+    let resolved = gwt_core::paths::resolve_current_worktree_root(&canonical);
+    // Issue #3606: this is the one place an `issue.monitor.*` operation turns a
+    // caller-supplied `project_root` into a project store. Recording it here is
+    // what lets the JSON envelope answer "which store did this land in", which
+    // `ok: true` alone never did.
+    gwt_core::paths::record_operation_project_store(&resolved);
+    Ok(resolved)
 }
 
 /// Issue #3655 AC-4 / AC-9: fold Board escalations into `needs_human`.
