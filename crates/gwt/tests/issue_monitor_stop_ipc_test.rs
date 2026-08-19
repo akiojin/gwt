@@ -50,6 +50,7 @@ fn issue(number: u64) -> IssueMonitorIssue {
         body: None,
         url: None,
         readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
     }
 }
 

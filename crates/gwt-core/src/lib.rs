@@ -4,11 +4,13 @@
 //! execution helpers. No business logic lives here — domain crates
 //! (gwt-git, gwt-agent, etc.) build on top of these primitives.
 
+pub mod board_escalation;
 pub mod board_remote_roots;
 pub mod config;
 pub mod coordination;
 pub mod daemon;
 pub mod error;
+pub mod github_quota;
 pub mod index;
 pub mod index_coordinator;
 pub mod logging;

@@ -256,6 +256,19 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         coordination_body.contains("regardless of project AGENTS.md / CLAUDE.md content"),
         "coordination skill description must declare project-AGENTS.md-independence"
     );
+    assert!(
+        coordination_body.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
+            && coordination_body.contains("immutable event shard"),
+        "materialized coordination guidance must deliver new Work events as bucketed immutable shards"
+    );
+    assert!(
+        coordination_body.contains("frozen read-only compatibility history"),
+        "materialized coordination guidance must make legacy events.jsonl read-only"
+    );
+    assert!(
+        coordination_body.contains(".gwt/work/events/<digest-prefix>/.*.jsonl.create-*"),
+        "materialized guidance must exclude writer temp residue from delivery"
+    );
     let claude_settings = std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
         .expect("read claude");
     let codex_hooks =
@@ -793,6 +806,50 @@ fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
     assert!(
         !worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
         "a Codex-only target must not write the Claude mirror"
+    );
+}
+
+/// SPEC-3431 FR-122 / T-484: Grok consumes the existing Claude-compatible
+/// managed target. It gets the canonical PM and coordination guidance plus
+/// Claude hook settings, while tracked project assets remain untouched and no
+/// parallel `.grok` managed tree is invented.
+#[test]
+fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::GrokBuild, |worktree| {
+        let tracked = worktree.join(".claude/skills/gwt-register-issue/SKILL.md");
+        std::fs::create_dir_all(tracked.parent().expect("tracked skill parent"))
+            .expect("create tracked skill parent");
+        std::fs::write(&tracked, "tracked project skill").expect("seed tracked skill");
+        run_git(
+            worktree,
+            &["add", ".claude/skills/gwt-register-issue/SKILL.md"],
+        );
+    });
+
+    assert!(
+        worktree.join(".claude/skills/gwt-pm/SKILL.md").is_file(),
+        "Grok PM must receive the canonical Claude-compatible gwt-pm skill"
+    );
+    assert!(
+        worktree
+            .join(".claude/skills/gwt-coordination/SKILL.md")
+            .is_file(),
+        "Grok PM must receive Claude-compatible coordination guidance"
+    );
+    assert!(
+        worktree.join(".claude/settings.local.json").is_file(),
+        "Grok PM must receive Claude-compatible managed hook settings"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".claude/skills/gwt-register-issue/SKILL.md"))
+            .expect("read preserved tracked skill"),
+        "tracked project skill",
+        "persistent PM materialization must preserve tracked project assets"
+    );
+    assert!(
+        !worktree.join(".grok").exists(),
+        "Claude compatibility must not create a duplicate .grok managed tree"
     );
 }
 
