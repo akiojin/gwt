@@ -720,6 +720,10 @@ fn committed_self_improvement_stop_commands() -> Vec<String> {
     commands
 }
 
+// Only the `#[cfg(unix)]` Stop-hook guard below calls this. Leaving it
+// ungated left it dead on Windows, where `-D warnings` then failed a lint CI
+// never runs (its clippy job is Linux-only).
+#[cfg(unix)]
 fn posix_shell_fixture(path: &Path) -> (&'static str, String) {
     let normalized = path.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]

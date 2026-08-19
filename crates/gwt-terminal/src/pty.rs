@@ -427,7 +427,10 @@ impl PtyHandle {
         })
     }
 
-    #[cfg(test)]
+    // Only the unix reaping tests inject a spawn failure; gating on `test`
+    // alone left this dead on Windows, where `-D warnings` then failed a lint
+    // CI never runs (its clippy job is Linux-only).
+    #[cfg(all(test, unix))]
     fn spawn_with_test_failure(
         config: SpawnConfig,
         failure: SpawnTestFailure,
