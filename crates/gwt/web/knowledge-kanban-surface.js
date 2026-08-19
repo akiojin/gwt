@@ -69,6 +69,31 @@ export function issuePreviewStatusView(windowData) {
     : { status, label: status ? `Unknown (${status})` : "Unknown", tone: "needs-input" };
 }
 
+function normalizeWorkBranch(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replace(/^refs\/heads\//, "").replace(/^origin\//, "");
+}
+
+// SPEC-3671 FR-012: join an Issue row to the active Work projection the frontend
+// already receives. The Issue row carries only the backend's correlation
+// (`related_work_refs`); every displayed field stays owned by the projection, so
+// there is no second derivation of Work state and no new data path.
+export function issueWorkRowForEntry(projection, entry) {
+  const refs = Array.isArray(entry?.related_work_refs) ? entry.related_work_refs : [];
+  if (refs.length === 0) return null;
+  const works = Array.isArray(projection?.active_works) ? projection.active_works : [];
+  if (works.length === 0) return null;
+  const refIds = new Set(refs.map((ref) => ref?.id).filter(Boolean));
+  const byId = works.find((work) => refIds.has(work?.id));
+  if (byId) return byId;
+  const refBranches = new Set(
+    refs.map((ref) => normalizeWorkBranch(ref?.branch)).filter(Boolean),
+  );
+  if (refBranches.size === 0) return null;
+  return works.find((work) => refBranches.has(normalizeWorkBranch(work?.branch))) || null;
+}
+
 // SPEC-3671 FR-007 / FR-009: the previews the given Issue window is responsible for
 // mirroring. A preview whose host Issue window no longer exists is adopted by any Issue
 // window so an auto-launched agent is never left unreachable.
@@ -114,6 +139,16 @@ export function createKnowledgeKanbanSurface({
   windowDisplayTitle,
   windowRoleBadgeLabel,
   windowizeIssuePreviewWindow,
+  // SPEC-3671 FR-012 / FR-013: Work state and Work actions on the Issue row. The
+  // projection and the derivation helpers are the Work surface's own — the Issue
+  // surface never re-derives lifecycle or attention rules.
+  getActiveWorkProjection,
+  workAttentionFor,
+  formatWorkLifecycleLabel,
+  continueWork,
+  openWorkspaceResumePicker,
+  openWorkspaceCleanup,
+  getResumeBounds,
 }) {
       const knowledgeBridgeStateMap = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
@@ -2234,6 +2269,95 @@ export function createKnowledgeKanbanSurface({
         return button;
       }
 
+      // SPEC-3671 FR-012 / FR-013: the Work block on an Issue row. Everything it
+      // renders comes from the active Work projection row joined by
+      // `issueWorkRowForEntry`; the Issue surface adds no Work state of its own.
+      function renderIssueRowWork(windowId, entry) {
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        if (!work) return null;
+
+        const block = createNode("div", "knowledge-row-work");
+        block.dataset.workId = work.id || "";
+
+        const summary = createNode("div", "knowledge-work-summary");
+        const lifecycle = createNode(
+          "span",
+          "knowledge-work-lifecycle",
+          formatWorkLifecycleLabel?.(work.lifecycle_state) || "Active",
+        );
+        lifecycle.dataset.lifecycle = String(work.lifecycle_state || "active").toLowerCase();
+        summary.appendChild(lifecycle);
+
+        const attention = workAttentionFor?.(work);
+        if (attention?.lane === "needs_attention" && attention.reason) {
+          const reason = createNode("span", "knowledge-work-attention", attention.reason);
+          reason.dataset.lane = attention.lane;
+          summary.appendChild(reason);
+        }
+
+        if (work.pr_number) {
+          const prState = String(work.pr_state || "").trim();
+          const pr = createNode(
+            "span",
+            "knowledge-work-pr",
+            prState ? `PR #${work.pr_number} · ${prState}` : `PR #${work.pr_number}`,
+          );
+          pr.dataset.prState = prState;
+          if (work.pr_url) {
+            pr.title = work.pr_url;
+          }
+          summary.appendChild(pr);
+        }
+        block.appendChild(summary);
+
+        const actions = createNode("div", "knowledge-work-actions");
+        actions.setAttribute("role", "group");
+        actions.setAttribute("aria-label", `Issue #${entry.number} work actions`);
+
+        const continueButton = createNode("button", "wizard-button", "Continue work");
+        continueButton.type = "button";
+        continueButton.dataset.action = "continue-work";
+        continueButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          continueWork?.(work.id, getResumeBounds?.());
+        });
+        actions.appendChild(continueButton);
+
+        const resumeButton = createNode("button", "wizard-button", "Resume");
+        resumeButton.type = "button";
+        resumeButton.dataset.action = "resume-work";
+        resumeButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openWorkspaceResumePicker?.(work.id);
+        });
+        actions.appendChild(resumeButton);
+
+        if (work.cleanup_candidate || work.cleanup_blocked_reason) {
+          const cleanupButton = createNode("button", "wizard-button", "Clean Up");
+          cleanupButton.type = "button";
+          cleanupButton.dataset.action = "cleanup-work";
+          if (work.cleanup_candidate) {
+            cleanupButton.addEventListener("click", (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              openWorkspaceCleanup?.(work.cleanup_candidate, windowId);
+            });
+          } else {
+            // The backend owns cleanup eligibility (live agent / live process).
+            // The row must never infer it from merged state alone.
+            cleanupButton.disabled = true;
+            cleanupButton.dataset.blockedReason = work.cleanup_blocked_reason;
+            cleanupButton.title = `Cleanup unavailable: ${work.cleanup_blocked_reason}`;
+          }
+          actions.appendChild(cleanupButton);
+        }
+
+        block.appendChild(actions);
+        return block;
+      }
+
       function renderIssueRow(windowId, state, entry) {
         const row = createNode("div", "knowledge-row");
         row.dataset.issueNumber = String(entry.number);
@@ -2321,6 +2445,9 @@ export function createKnowledgeKanbanSurface({
 
         row.addEventListener("click", (event) => {
           if (event.target?.closest?.(".knowledge-row-actions")) return;
+          // SPEC-3671 FR-013: the Work actions live on the row but are not a
+          // selection gesture.
+          if (event.target?.closest?.(".knowledge-work-actions")) return;
           requestKnowledgeDetail(windowId, state.kind, entry.number);
         });
         row.appendChild(select);
@@ -2383,6 +2510,12 @@ export function createKnowledgeKanbanSurface({
         }
         if (actions.childElementCount > 0) {
           row.appendChild(actions);
+        }
+        // SPEC-3671 FR-012 / FR-013: the Work block sits outside `.knowledge-row-select`
+        // so its controls are never nested inside the row's select button.
+        const workBlock = renderIssueRowWork(windowId, entry);
+        if (workBlock) {
+          row.appendChild(workBlock);
         }
         return row;
       }

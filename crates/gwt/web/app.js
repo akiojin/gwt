@@ -18,7 +18,11 @@
         findTitlebarDockTarget,
         resolveDragReleasePoint,
       } from "/window-docking.js";
-      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import {
+        attentionForWorkspace,
+        createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
+        formatLifecycleStateLabel,
+      } from "/workspace-kanban-surface.js";
       import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -1520,9 +1524,15 @@
           profile: "Profile",
           logs: "Logs",
           agent_kanban: "Agent Kanban",
+          // SPEC-3671 FR-014: these three presets share the Knowledge surface but
+          // are different faces. Collapsing them to one "Issue" label made an open
+          // window's title unable to say which face it was.
           issue: "Issue",
-          issue_monitor: "Issue",
-          spec: "Issue",
+          issue_monitor: "Issue Monitor",
+          spec: "SPEC",
+          // SPEC-3671 FR-015: the wire preset is `work` (`workspace` is only a
+          // legacy deserialization alias), and the surface lists Works.
+          work: "Work",
           workspace: "Work",
           board: "Board",
           pr: "PR",
@@ -4551,6 +4561,18 @@
           focusWindowLocally(id);
           socketTransport.send({ kind: "focus_window", id });
         },
+        // SPEC-3671 FR-012 / FR-013: the Issue row reads the active Work
+        // projection that is already broadcast, and reuses the Work surface's own
+        // derivations and action paths rather than re-deriving them.
+        getActiveWorkProjection: () => activeWorkProjection,
+        workAttentionFor: attentionForWorkspace,
+        formatWorkLifecycleLabel: formatLifecycleStateLabel,
+        continueWork: (workId, bounds) => continueWorkDispatcher.dispatch(workId, bounds),
+        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        // Lazy: the Branches & cleanup surface is constructed after this factory.
+        openWorkspaceCleanup: (candidate, sourceWindowId) =>
+          openWorkspaceCleanup(candidate, sourceWindowId),
+        getResumeBounds: () => visibleBounds(),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log

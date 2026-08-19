@@ -297,6 +297,9 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
     assert_eq!(legacy_item.monitor_state, None);
     assert_eq!(legacy_item.queue_position, None);
     assert_eq!(legacy_item.exclusion_reason, None);
+    // SPEC-3671 FR-012: the Issue -> Work correlation defaults to empty on rows
+    // written before it existed.
+    assert!(legacy_item.related_work_refs.is_empty());
 
     let projected = KnowledgeListItem {
         number: 42,
@@ -314,10 +317,18 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         monitor_state: Some(MonitorInboxState::HoldExcluded),
         queue_position: Some(3),
         exclusion_reason: Some("matched label: hold".to_string()),
+        related_work_refs: vec![gwt::KnowledgeWorkRefView {
+            id: "work-42".to_string(),
+            branch: Some("work/issue-42".to_string()),
+            worktree_path: None,
+            updated_at: "2026-08-19T00:00:00Z".to_string(),
+        }],
     };
     let value = serde_json::to_value(projected).expect("serialize projected knowledge item");
     assert_eq!(value["state"], "open");
     assert_eq!(value["monitor_state"], "hold_excluded");
     assert_eq!(value["queue_position"], 3);
     assert_eq!(value["exclusion_reason"], "matched label: hold");
+    assert_eq!(value["related_work_refs"][0]["id"], "work-42");
+    assert_eq!(value["related_work_refs"][0]["branch"], "work/issue-42");
 }

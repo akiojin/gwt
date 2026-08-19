@@ -124,6 +124,36 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
   });
+
+  // 受け入れシナリオ 8 / FR-012 / FR-013 / T-025: the Work information and the
+  // Work actions are reachable without ever opening the Work window.
+  test("the Issue row carries Work state and Work actions without a Work window", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-window.surface-work")).toHaveCount(0);
+
+    const work = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .knowledge-row-work",
+    );
+    await expect(work).toHaveCount(1);
+    await expect(work.locator(".knowledge-work-lifecycle")).toHaveText("Active");
+    await expect(work.locator(".knowledge-work-attention")).toHaveText("Waiting on review");
+    await expect(work.locator(".knowledge-work-pr")).toHaveText("PR #3699 · open");
+    await expect(work.locator('[data-action="continue-work"]')).toBeEnabled();
+    await expect(work.locator('[data-action="resume-work"]')).toBeEnabled();
+    // The backend owns cleanup eligibility; a live agent keeps the action off.
+    await expect(work.locator('[data-action="cleanup-work"]')).toBeDisabled();
+
+    // An Issue with no correlated Work row shows no Work band.
+    await expect(
+      page.locator(".surface-knowledge [data-issue-number='3672'] .knowledge-row-work"),
+    ).toHaveCount(0);
+  });
 });
 
 async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}) {
@@ -211,7 +241,48 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
         monitor_state: "launched",
         queue_position: null,
         exclusion_reason: null,
+        // SPEC-3671 FR-012: the backend-computed Issue -> Work correlation.
+        related_work_refs: [
+          { id: `work-${number}`, branch: `work/issue-${number}`, updated_at: "" },
+        ],
       }));
+
+      // SPEC-3671 FR-012: the active Work projection the frontend already
+      // receives. The Issue row joins it; it is never re-derived.
+      const activeWorkProjection = {
+        id: "projection-1",
+        title: "Fixture Project",
+        status_category: "active",
+        status_text: "",
+        board_refs: [],
+        journal_entries: [],
+        works: [],
+        agents: [],
+        unassigned_agents: [],
+        active_works: [
+          {
+            id: "work-3671",
+            title: "Issue window as the primary surface",
+            status_category: "blocked",
+            status_text: "Implementing P4",
+            blocked_reason: "Waiting on review",
+            lifecycle_state: "active",
+            active_agents: 1,
+            blocked_agents: 1,
+            branch: "work/issue-3671",
+            worktree_path: "/fixture/work/issue-3671",
+            pr_number: 3699,
+            pr_url: "https://example.invalid/pull/3699",
+            pr_state: "open",
+            board_refs: [],
+            agents: [],
+            works: [],
+            cleanup_candidate: null,
+            cleanup_blocked_reason: "live_agent",
+            updated_at: "2026-08-19T00:00:00Z",
+          },
+        ],
+      };
 
       class FixtureWebSocket extends EventTarget {
         static CONNECTING = 0;
@@ -235,6 +306,10 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
           window.__knowledgeLoadMessages.push(message);
           if (message.kind === "frontend_ready") {
             this.emit(workspaceState());
+            this.emit({
+              kind: "active_work_projection",
+              projection: activeWorkProjection,
+            });
             return;
           }
           if (message.kind === "load_knowledge_bridge") {

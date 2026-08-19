@@ -111,10 +111,13 @@ impl WindowPreset {
             Self::Memo => "Memo",
             Self::Profile => "Profile",
             Self::Logs => "Logs",
+            // SPEC-3671 FR-014: the three Knowledge-surface faces must be
+            // tellable apart from an open window's title.
             Self::Issue => "Issue",
-            Self::IssueMonitor => "Issue",
-            Self::Spec => "Issue",
-            Self::Work => "Workspace",
+            Self::IssueMonitor => "Issue Monitor",
+            Self::Spec => "SPEC",
+            // SPEC-3671 FR-015: the surface lists Works (launches).
+            Self::Work => "Work",
             Self::Index => "Index",
             Self::Improvement => "Improvement Inbox",
             Self::Board => "Board",
@@ -139,7 +142,7 @@ impl WindowPreset {
             Self::Issue => "Browse cached issues and launch agents",
             Self::IssueMonitor => "Browse cached issues and manage agent execution",
             Self::Spec => "Browse cached issues and launch agents",
-            Self::Work => "Workspace overview",
+            Self::Work => "Work overview",
             Self::Index => "Search indexed project knowledge",
             Self::Improvement => "Review gwt improvement candidates",
             Self::Board => "Placeholder board surface",
@@ -517,11 +520,12 @@ mod tests {
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
         assert_eq!(WindowPreset::ALL.len(), 17);
+        // SPEC-3671 FR-014 / FR-015: each face is identifiable from its title.
         assert_eq!(WindowPreset::Issue.title(), "Issue");
-        assert_eq!(WindowPreset::IssueMonitor.title(), "Issue");
-        assert_eq!(WindowPreset::Spec.title(), "Issue");
+        assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
+        assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
-        assert_eq!(WindowPreset::Work.title(), "Workspace");
+        assert_eq!(WindowPreset::Work.title(), "Work");
         assert_eq!(WindowPreset::Index.title(), "Index");
         assert_eq!(WindowPreset::Improvement.title(), "Improvement Inbox");
         assert_eq!(WindowPreset::Pr.title(), "PR");
