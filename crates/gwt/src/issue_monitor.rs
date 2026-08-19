@@ -9011,6 +9011,41 @@ mod tests {
         );
     }
 
+    /// Issue #3503: cleaning up a pane whose launch failed before its PTY
+    /// started is not a retry. The failure already went through the failure
+    /// path, which detached the window, so the later close has no launch to
+    /// requeue and charges nothing. Without this, the diagnostic cleanup the
+    /// PM performs would spend a second attempt on one failure and walk the
+    /// issue to `NeedsHuman` early.
+    #[test]
+    fn closing_a_launch_failed_pane_consumes_no_retry_attempt() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_launch_failed(42, "Launch failed before PTY started.");
+        let attempts_before = monitor
+            .autonomous_record(42)
+            .map(|record| record.attempts)
+            .unwrap_or_default();
+
+        assert_eq!(
+            monitor.requeue_window("tab-1::agent-1"),
+            None,
+            "a launch-failed pane has no live launch to requeue"
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .map(|record| record.attempts)
+                .unwrap_or_default(),
+            attempts_before,
+            "closing the leftover error pane must not consume a retry attempt"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "the close must not overwrite the recorded failure with a fresh queue entry"
+        );
+    }
+
     /// SPEC-3431 FR-033 / T-086: the exact identity a stop_only request must
     /// carry for a launched issue in [`launched_monitor`].
     fn stop_target(monitor: &IssueMonitorState, issue_number: u64) -> IssueMonitorStopTarget {

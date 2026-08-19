@@ -58,6 +58,15 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
 }
 
+// Issue #3675: unit tests must never reach the real GitHub API. Armed before
+// any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
+// SAFETY(pre-main): only stores a relaxed AtomicBool.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn forbid_real_gh_in_tests() {
+    gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
+}
+
 #[cfg(test)]
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
@@ -8080,10 +8089,10 @@ fn apply_agent_frontend_dispatch_outcome(
 
 fn main() -> std::io::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
-    if matches!(
-        argv.get(1).map(String::as_str),
-        Some("__internal-pty-start-gate")
-    ) {
+    // POSIX bound launches still host the gate here (the gate `exec`s the target
+    // so the gated PID survives). Windows routes it to the console-subsystem
+    // `gwtd` companion instead — see `gwt::pty_start_gate` and issue #3631.
+    if argv.get(1).map(String::as_str) == Some(gwt::pty_start_gate::PTY_START_GATE_ARG) {
         let exit_code = match gwt_terminal::pty::run_start_gate_from_env() {
             Ok(exit_code) => exit_code,
             Err(error) => {

@@ -1,6 +1,33 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.83.2] - 2026-08-19
+
+### Bug Fixes
+
+- **windows:** PTY start gate を console subsystem の gwtd で実行する
+- **test:** Gh 依存テストの実 GitHub API 到達を遮断する unsandboxed-gh guard を導入
+- **pane:** PM セッションから残置 agent pane を close / stop できるようにする
+- **test:** 新規 pane close テストに gwt home の所有を強制する
+
+### Miscellaneous Tasks
+
+- **lint:** Windows 専用テストの result_large_err を許可する
+- **work:** Issue #3631 の start event を記録する
+- **work:** Work event shard を追記 (#3675 done 終端)
+- **work:** Work event shard を追跡へ追加
+- **work:** Work event shard を追跡へ追加
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+
+### Testing
+
+- **windows:** Agent launch E2E の marker 待ちを飽和耐性の予算と診断に変更 (#3656)
+- **launch:** PTY start gate の sibling 解決テストを POSIX host でも成立させる
+- **pane:** #3503 / #3552 の受け入れ条件を回帰ロックとして固定する
+
 
 ## [9.83.1] - 2026-08-18
 

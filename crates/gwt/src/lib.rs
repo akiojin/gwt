@@ -43,6 +43,7 @@ pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
+pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
@@ -52,6 +53,9 @@ pub mod window_state;
 pub mod work_notes;
 pub mod worktree_form;
 pub mod worktree_inventory;
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+mod test_guard;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {

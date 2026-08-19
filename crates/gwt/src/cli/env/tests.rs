@@ -220,6 +220,9 @@ fn with_fake_gh<T>(test: impl FnOnce(&Path) -> T) -> T {
     fs::create_dir_all(&repo_path).expect("create repo");
     let outcome = {
         let _path = crate::cli::test_support::ScopedEnvVar::set("PATH", joined_path);
+        // Issue #3675: mark the fake as installed so the unsandboxed-gh spawn
+        // guard lets ProcessKind::Gh spawns through inside this scope.
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&repo_path)))
     };
     assert_eq!(

@@ -1,7 +1,29 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+// Issue #3675: unit tests must never reach the real GitHub API. Armed before
+// any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
+// SAFETY(pre-main): only stores a relaxed AtomicBool.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn forbid_real_gh_in_tests() {
+    gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    // Issue #3631: bound launches host their PTY start gate here rather than in
+    // the GUI front door, because only a console subsystem image is attached to
+    // the pane's pseudoconsole. Handle it before anything else touches stdio.
+    if argv.get(1).map(String::as_str) == Some(gwt::pty_start_gate::PTY_START_GATE_ARG) {
+        let exit_code = match gwt_terminal::pty::run_start_gate_from_env() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("PTY start gate failed: {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code.clamp(0, 255));
+    }
     match argv.get(1).map(String::as_str) {
         Some("-V" | "--version" | "version") => {
             println!("gwtd {}", env!("CARGO_PKG_VERSION"));
