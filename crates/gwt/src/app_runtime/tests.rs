@@ -3776,6 +3776,97 @@ fn agent_pane_close_replies_with_pane_close_result() {
         .contains_key("tab-authenticated::agent-authenticated"));
 }
 
+/// Issue #3705 AC-1/AC-2: consecutive close of live-PTY panes must keep the
+/// agent pane route answering. The hang was the GUI event loop joining PTY
+/// reader threads and waiting for child exit on each close; `pane.list` then
+/// sat behind that queue until the websocket timed out.
+#[test]
+fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab(
+        "tab-project",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+        ],
+    );
+    let window_ids: Vec<String> = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| combined_window_id("tab-project", &window.id))
+        .collect();
+    assert_eq!(window_ids.len(), 4, "AC-1 requires four live panes");
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    for window_id in &window_ids {
+        let pane = Arc::new(Mutex::new(long_running_test_pane(window_id)));
+        runtime.runtimes.insert(
+            window_id.clone(),
+            WindowRuntime {
+                incarnation: super::next_window_runtime_incarnation(),
+                pane,
+                output_thread: Some(thread::spawn(|| loop {
+                    thread::park();
+                })),
+                status_thread: Some(thread::spawn(|| loop {
+                    thread::park();
+                })),
+            },
+        );
+    }
+    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+
+    let started = Instant::now();
+    for window_id in &window_ids {
+        let closed = runtime.handle_agent_frontend_event(
+            "pane-client".to_string(),
+            principal.clone(),
+            AgentFrontendRequest::CloseWindow {
+                id: window_id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        );
+        assert!(
+            matches!(
+                closed.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: true, .. },
+                    ..
+                })
+            ),
+            "live PTY close must answer ok, got: {closed:?}"
+        );
+        assert!(
+            !runtime.window_lookup.contains_key(window_id),
+            "closed window {window_id} must leave the lookup"
+        );
+    }
+    let listed = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::ListWindows,
+    );
+    assert!(
+        !listed.is_empty(),
+        "pane.list must still answer after consecutive live PTY closes"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "four live-PTY closes plus pane.list blocked the agent route for {elapsed:?}"
+    );
+}
+
 /// Issue #3629 AC-12: an uncorrelated self-close stays refused, but the
 /// refusal must be explicit so the CLI stops guessing at session correlation.
 #[test]
