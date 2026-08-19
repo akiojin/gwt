@@ -3830,6 +3830,87 @@ fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
         .contains_key("tab-project::agent-project"));
 }
 
+/// Issue #3503 / #3552 AC-1: the pane the PM could never clean up had failed
+/// *before* its PTY started, so it carries no session binding at all. The
+/// self-session protection compares the window's real binding, so `None` is
+/// not "this may be you" — it is a peer pane and it closes. Locking both
+/// halves in one test keeps the guard identity-shaped, so it cannot drift back
+/// into the state- or authority-shaped gate that made every PM cleanup close
+/// fail regardless of the target pane's state. `pane.stop` resolves to this
+/// same command, so it is covered here too.
+#[test]
+fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-caller",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-caller", Some("caller-session".to_string())));
+    let launch_failed = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    let launch_failed_window_id = combined_window_id("tab-project", &launch_failed.id);
+    assert!(
+        tab.workspace
+            .window(&launch_failed.id)
+            .expect("launch-failed window")
+            .session_id
+            .is_none(),
+        "a pane that failed before PTY start carries no session binding"
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    // The PM is a conversational role with no linked owner, so its principal
+    // never carries an active execution binding.
+    let owner_less_principal =
+        AgentSessionPrincipal::for_test(&project, "caller-session").expect("owner-less principal");
+    assert!(!owner_less_principal.authorizes_producing_mutation());
+
+    let closed = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        owner_less_principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: launch_failed_window_id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(!closed.is_empty());
+    assert!(!runtime.window_lookup.contains_key(&launch_failed_window_id));
+
+    let refused = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        owner_less_principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-caller".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(
+        matches!(
+            refused.as_slice(),
+            [OutboundEvent {
+                event: BackendEvent::PaneCloseResult { ok: false, .. },
+                ..
+            }]
+        ),
+        "self-session protection still refuses an uncorrelated close of the caller's own pane, got: {refused:?}"
+    );
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-project::agent-caller"));
+}
+
 /// Issue #3629 AC-9: a husk window (workspace record without a lookup entry,
 /// left behind by an app restart) must still close through the agent route.
 #[test]
