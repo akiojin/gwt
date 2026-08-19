@@ -1673,6 +1673,44 @@ mod tests {
         assert!(rendered.contains("tab-1::agent-1\twaiting\tcodex"));
     }
 
+    // SPEC-3671 FR-005 / T-012: PM observability must never depend on placement. An
+    // Issue-preview window is listed, resolvable, and addressable exactly like a canvas
+    // window — losing this is what would take down autonomous operation.
+    #[test]
+    fn pm_operations_treat_issue_preview_windows_like_canvas_windows() {
+        let mut canvas = window("tab-1::agent-1", WindowPreset::Agent, Some("codex"));
+        canvas.session_id = Some("01JCANVASSESSION0000000000".to_string());
+        let mut preview = window("tab-1::agent-2", WindowPreset::Agent, Some("codex"));
+        preview.session_id = Some("01JPREVIEWSESSION0000000000".to_string());
+        preview.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "tab-1::issue-1".to_string(),
+            issue_number: 3671,
+        };
+        let windows = vec![canvas, preview];
+
+        // pane.list
+        let rendered = render_pane_list(&windows);
+        assert!(rendered.contains("tab-1::agent-1\trunning\tcodex"));
+        assert!(
+            rendered.contains("tab-1::agent-2\trunning\tcodex"),
+            "issue_preview panes must stay visible to pane.list: {rendered}"
+        );
+
+        // pane.read / pane.close target resolution
+        assert_eq!(
+            resolve_window_id(&windows, "agent-2"),
+            Some("tab-1::agent-2")
+        );
+
+        // pm.message.send target arbitration
+        assert_eq!(
+            resolve_pm_send_target(&windows, "tab-1::agent-2")
+                .expect("issue_preview pane must accept PM messages")
+                .id,
+            "tab-1::agent-2"
+        );
+    }
+
     #[test]
     fn workspace_windows_are_scoped_to_project_root() {
         let value = serde_json::json!({

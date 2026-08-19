@@ -3350,6 +3350,65 @@ body {
   color: var(--color-text-muted);
 }
 
+/* SPEC-3671 FR-007: the Issue window's read-only agent mirror. It sits above the
+ * Issue detail so an auto-launched agent is visible without opening a window. */
+.issue-preview {
+  display: grid;
+  grid-template-rows: auto minmax(160px, 1fr);
+  min-height: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.issue-preview-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.issue-preview-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.issue-preview-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.issue-preview-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-preview-terminal {
+  position: relative;
+  min-height: 160px;
+  height: clamp(160px, 32vh, 340px);
+  overflow: hidden;
+}
+
+.issue-preview-terminal .terminal-root {
+  position: absolute;
+  inset: 0;
+}
+
 .knowledge-detail-header {
   padding: 12px;
   border-bottom: 1px solid var(--color-border);

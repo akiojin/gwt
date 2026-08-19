@@ -50,6 +50,44 @@ export function monitorStateView(value) {
     : { state, label: `Unknown (${state})`, tone: "needs-input" };
 }
 
+// SPEC-3671 FR-011: an auto-launched agent that errors or waits for a human ruling
+// announces itself through this badge. It never opens a canvas window.
+const ISSUE_PREVIEW_STATUS_VIEWS = Object.freeze({
+  running: Object.freeze({ label: "Running", tone: "active" }),
+  starting: Object.freeze({ label: "Starting", tone: "active" }),
+  idle: Object.freeze({ label: "Idle", tone: "idle" }),
+  waiting: Object.freeze({ label: "Needs input", tone: "needs-input" }),
+  stopped: Object.freeze({ label: "Stopped", tone: "idle" }),
+  error: Object.freeze({ label: "Error", tone: "blocked" }),
+});
+
+export function issuePreviewStatusView(windowData) {
+  const status = String(windowData?.status || "").trim().toLowerCase();
+  const known = ISSUE_PREVIEW_STATUS_VIEWS[status];
+  return known
+    ? { status, label: known.label, tone: known.tone }
+    : { status, label: status ? `Unknown (${status})` : "Unknown", tone: "needs-input" };
+}
+
+// SPEC-3671 FR-007 / FR-009: the previews the given Issue window is responsible for
+// mirroring. A preview whose host Issue window no longer exists is adopted by any Issue
+// window so an auto-launched agent is never left unreachable.
+export function issuePreviewWindowsForIssue(windows, issueWindowId, issueNumber) {
+  const number = Number(issueNumber);
+  if (!Number.isFinite(number)) return [];
+  const list = Array.isArray(windows) ? windows : [];
+  const knownIds = new Set(list.map((windowData) => windowData?.id).filter(Boolean));
+  return list.filter((windowData) => {
+    const placement = windowData?.placement;
+    if (placement?.kind !== "issue_preview") return false;
+    if (Number(placement.issue_number) !== number) return false;
+    return (
+      placement.issue_window_id === issueWindowId ||
+      !knownIds.has(placement.issue_window_id)
+    );
+  });
+}
+
 export function createKnowledgeKanbanSurface({
   send,
   // Semantic search must never use the reconnect queue. This dependency
@@ -69,6 +107,13 @@ export function createKnowledgeKanbanSurface({
   openIssueLaunchWizard,
   visibleBounds,
   launchPending,
+  // SPEC-3671 FR-007 / FR-008 / FR-010: the Issue preview pane. The terminal
+  // runtime factory is the shared one from app.js; `readOnly` keeps every input
+  // path unattached. `windowizeIssuePreviewWindow` performs the Canvas handoff.
+  createTerminalRuntime,
+  windowDisplayTitle,
+  windowRoleBadgeLabel,
+  windowizeIssuePreviewWindow,
 }) {
       const knowledgeBridgeStateMap = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
@@ -1894,8 +1939,76 @@ export function createKnowledgeKanbanSurface({
         return card;
       }
 
+      // SPEC-3671 FR-007 / FR-008 / FR-009 / FR-010 / FR-011: the read-only live
+      // mirror of the agent working on the selected Issue. Exactly one terminal is
+      // mounted, and the only control it offers is Windowize.
+      function renderIssueAgentPreview(windowId, state) {
+        const previews = issuePreviewWindowsForIssue(
+          typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
+          windowId,
+          state.selectedNumber,
+        );
+        if (previews.length === 0) {
+          return null;
+        }
+        const target = previews[0];
+        const section = createNode("section", "issue-preview");
+        section.dataset.windowId = target.id;
+        section.dataset.issueNumber = String(state.selectedNumber);
+
+        const header = createNode("div", "issue-preview-header");
+        const titleWrap = createNode("div", "issue-preview-title-wrap");
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-preview-title",
+            windowDisplayTitle?.(target) || target.title || target.id,
+          ),
+        );
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-preview-meta",
+            windowRoleBadgeLabel?.(target) || target.agent_id || "Agent",
+          ),
+        );
+        header.appendChild(titleWrap);
+
+        const statusView = issuePreviewStatusView(target);
+        const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
+        badge.dataset.tone = statusView.tone;
+        badge.dataset.status = statusView.status;
+        header.appendChild(badge);
+
+        const windowize = createNode("button", "wizard-button", "Windowize");
+        windowize.type = "button";
+        windowize.dataset.action = "windowize-issue-preview";
+        windowize.setAttribute("aria-label", "Windowize agent preview");
+        windowize.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          windowizeIssuePreviewWindow?.(target.id);
+        });
+        header.appendChild(windowize);
+        section.appendChild(header);
+
+        const shell = createNode("div", "issue-preview-terminal");
+        const terminalRoot = createNode("div", "terminal-root");
+        // The mirror is read-only, but a stray mousedown must still not start a
+        // window drag on the host Issue window.
+        terminalRoot.addEventListener("mousedown", (event) => event.stopPropagation());
+        shell.appendChild(terminalRoot);
+        section.appendChild(shell);
+        createTerminalRuntime?.(target.id, terminalRoot, { readOnly: true });
+        return section;
+      }
+
       function renderKnowledgeDetailPane(windowId, state, detailPane) {
         detailPane.innerHTML = "";
+        const preview = renderIssueAgentPreview(windowId, state);
+        if (preview) {
+          detailPane.appendChild(preview);
+        }
         const detail = state.detail;
         if (!detail) {
           detailPane.appendChild(

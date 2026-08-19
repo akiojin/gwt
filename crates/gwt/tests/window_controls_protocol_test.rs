@@ -1,4 +1,4 @@
-use gwt::{AgentKanbanLane, FrontendEvent, WindowPreset, WindowSurface};
+use gwt::{AgentKanbanLane, FrontendEvent, WindowPlacement, WindowPreset, WindowSurface};
 use serde_json::json;
 
 // SPEC-2008 FR-096/FR-097: the canvas window model dropped manual
@@ -242,6 +242,35 @@ fn frontend_event_deserializes_agent_kanban_commands() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+}
+
+// SPEC-3671 FR-001 / FR-004: the wire kind the frontend `isOffCanvasPlacement()` seam
+// matches on. The JS predicate and this string must move in lockstep.
+#[test]
+fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
+    let placement = WindowPlacement::IssuePreview {
+        issue_window_id: "project-1::issue-1".to_string(),
+        issue_number: 3671,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&placement).expect("serialize placement"),
+        json!({
+            "kind": "issue_preview",
+            "issue_window_id": "project-1::issue-1",
+            "issue_number": 3671
+        })
+    );
+    assert!(placement.is_off_canvas());
+    assert!(!placement.is_canvas());
+    assert!(WindowPlacement::AgentKanban {
+        board_id: "project-1::agent-kanban-1".to_string(),
+        lane_id: AgentKanbanLane::Active,
+        order: 0,
+        collapsed: false,
+    }
+    .is_off_canvas());
+    assert!(!WindowPlacement::Canvas.is_off_canvas());
 }
 
 #[test]

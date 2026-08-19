@@ -196,6 +196,13 @@ impl WindowPreset {
         matches!(self.surface(), WindowSurface::Terminal)
     }
 
+    /// SPEC-3671: the Issue window is the surface that mirrors auto-launched
+    /// agents in its preview pane. `Spec` and `Pr` share the Knowledge surface
+    /// but are different faces, so they never host a preview.
+    pub fn hosts_issue_preview(self) -> bool {
+        matches!(self, Self::Issue | Self::IssueMonitor)
+    }
+
     pub fn is_agent_terminal(self) -> bool {
         matches!(self, Self::Agent | Self::Claude | Self::Codex)
     }
