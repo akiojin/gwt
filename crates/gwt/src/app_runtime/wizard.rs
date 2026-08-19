@@ -400,6 +400,23 @@ impl AppRuntime {
         linked_issue_kind: LinkedIssueKind,
         previous_profiles: gwt::LaunchWizardPreviousProfiles,
     ) -> LaunchWizardSession {
+        // #3426: the unified Issue surface preset collapses SPEC entries to
+        // LinkedIssueKind::Issue, so re-canonicalize the kind from the cached
+        // label evidence before it seeds the Work owner label. Absent evidence
+        // keeps the caller-declared kind. This stays scoped to the owner label:
+        // `linked_issue_kind` also drives `show_linked_issue` and the manual
+        // branch suffix, and flipping those from a cache label would hide the
+        // wizard's Linked issue section and seed `spec-N` instead of the
+        // unified `issue-N` branch convention.
+        let canonical_owner_kind =
+            match gwt::cli::execution_state::detect_owner_kind_evidence(project_root, issue_number)
+            {
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Spec) => LinkedIssueKind::Spec,
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Issue) => {
+                    LinkedIssueKind::Issue
+                }
+                None => linked_issue_kind,
+            };
         let base_branch_name = normalize_branch_name(base_branch_name);
         let target_branch_name =
             knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
@@ -413,7 +430,7 @@ impl AppRuntime {
         // SPEC #3431 FR-070: this must be the spelling the durable execution
         // binding produces, not a display label. `workspace.ensure` compares
         // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
-        let owner_label = match linked_issue_kind {
+        let owner_label = match canonical_owner_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
             LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };

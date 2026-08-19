@@ -2879,6 +2879,7 @@ impl AppRuntime {
                                     &active_session,
                                     base_branch,
                                     linked_issue_number,
+                                    materialized_genesis.as_ref().map(|genesis| genesis.owner),
                                     workspace_resume_context.as_ref(),
                                     &live_session_ids,
                                 ) {
