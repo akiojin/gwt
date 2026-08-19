@@ -7962,35 +7962,34 @@ fn materialize_at_launch_locked(
         },
     )
 }
-
 /// Best-effort owner-kind detection from the local issue cache: a
 /// `gwt-spec`-labeled owner is a SPEC owner; uncached or unreadable owners
 /// default to plain Issue (the gate mechanics do not depend on the kind).
 #[must_use]
 pub fn detect_owner_kind(repo_path: &Path, number: u64) -> ExecutionOwnerKind {
-    let Some(cache_root) = crate::issue_cache::issue_cache_root_for_repo_path(repo_path) else {
-        return ExecutionOwnerKind::Issue;
-    };
+    detect_owner_kind_evidence(repo_path, number).unwrap_or(ExecutionOwnerKind::Issue)
+}
+
+/// Owner-kind evidence from the local issue cache. Returns `None` when the
+/// cache entry is missing or unreadable so callers holding an already trusted
+/// owner kind can retain it instead of silently downgrading to Issue (#3426).
+#[must_use]
+pub fn detect_owner_kind_evidence(repo_path: &Path, number: u64) -> Option<ExecutionOwnerKind> {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)?;
     let meta_path = cache_root.join(number.to_string()).join("meta.json");
-    let Ok(contents) = fs::read_to_string(&meta_path) else {
-        return ExecutionOwnerKind::Issue;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return ExecutionOwnerKind::Issue;
-    };
-    let is_spec = value
-        .get("labels")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|labels| {
-            labels
-                .iter()
-                .any(|label| label.as_str() == Some("gwt-spec"))
-        });
-    if is_spec {
+    let contents = fs::read_to_string(&meta_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    let labels = value.get("labels").and_then(serde_json::Value::as_array)?;
+    let is_spec = labels.iter().any(|label| {
+        label
+            .as_str()
+            .is_some_and(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    });
+    Some(if is_spec {
         ExecutionOwnerKind::Spec
     } else {
         ExecutionOwnerKind::Issue
-    }
+    })
 }
 
 /// Derive the launch entrypoint for the record: the `$gwt-*` skill token from
@@ -17067,6 +17066,79 @@ mod tests {
         );
     }
 
+    fn write_issue_cache_meta(repo_path: &Path, number: u64, labels: serde_json::Value) {
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(repo_path).expect("cache root");
+        let entry = cache_root.join(number.to_string());
+        fs::create_dir_all(&entry).expect("create cache entry");
+        fs::write(
+            entry.join("meta.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "number": number,
+                "title": format!("Issue #{number}"),
+                "labels": labels,
+                "state": "open",
+            }))
+            .expect("serialize meta"),
+        )
+        .expect("write meta");
+    }
+
+    // #3426: positive SPEC detection from a cached `gwt-spec` label.
+    #[test]
+    fn detect_owner_kind_reads_spec_label_from_cache() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write_issue_cache_meta(dir.path(), 1921, serde_json::json!(["gwt-spec", "phase/x"]));
+        assert_eq!(
+            detect_owner_kind(dir.path(), 1921),
+            ExecutionOwnerKind::Spec
+        );
+    }
+
+    // #3426: label matching must not depend on the label's letter case.
+    #[test]
+    fn detect_owner_kind_matches_gwt_spec_label_case_insensitively() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write_issue_cache_meta(dir.path(), 1921, serde_json::json!(["GWT-Spec"]));
+        assert_eq!(
+            detect_owner_kind(dir.path(), 1921),
+            ExecutionOwnerKind::Spec
+        );
+    }
+
+    // #3426: absent/unreadable cache evidence must be distinguishable from a
+    // genuinely plain Issue so trusted owners are never silently downgraded.
+    #[test]
+    fn detect_owner_kind_evidence_distinguishes_missing_cache_from_plain_issue() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        assert_eq!(detect_owner_kind_evidence(dir.path(), 77), None);
+
+        write_issue_cache_meta(dir.path(), 77, serde_json::json!(["bug"]));
+        assert_eq!(
+            detect_owner_kind_evidence(dir.path(), 77),
+            Some(ExecutionOwnerKind::Issue)
+        );
+
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(dir.path())
+            .expect("cache root")
+            .join("78");
+        fs::create_dir_all(&cache_root).expect("create cache entry");
+        fs::write(cache_root.join("meta.json"), b"{ not json").expect("write malformed meta");
+        assert_eq!(detect_owner_kind_evidence(dir.path(), 78), None);
+    }
+
     // ------------------------------------------------------------------
     // execution.complete / execution.blocked command behavior
     // ------------------------------------------------------------------
@@ -17120,13 +17192,31 @@ mod tests {
                 .collect()
         }
 
+        /// Compare authority paths the way the trusted store keys them.
+        /// Canonicalize the parent (the file itself may already have been
+        /// quarantined) so a Windows 8.3 short name such as `AKIOJI~1` and its
+        /// long form resolve to the same string, then unify separators and
+        /// case-fold where the filesystem does. macOS `/private` stays
+        /// stripped for the same reason it always was.
         fn normalized_test_path(path: &Path) -> String {
-            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            let rendered = canonical.to_string_lossy();
-            rendered
+            // Canonicalize the parent and re-join the file name: the file
+            // itself may already have been quarantined (moved away), and a
+            // failed whole-path canonicalize would fall back to the raw 8.3
+            // spelling and re-fork the comparison this helper exists to fix.
+            let resolved = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => dunce::canonicalize(parent)
+                    .map(|parent| parent.join(name))
+                    .unwrap_or_else(|_| path.to_path_buf()),
+                _ => path.to_path_buf(),
+            };
+            let rendered = resolved.to_string_lossy().replace('\\', "/");
+            let rendered = rendered
                 .strip_prefix("/private")
                 .unwrap_or(&rendered)
-                .to_string()
+                .to_string();
+            #[cfg(windows)]
+            let rendered = rendered.to_lowercase();
+            rendered
         }
 
         fn mirror_pointer_partial_authority(
