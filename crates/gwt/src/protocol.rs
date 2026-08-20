@@ -3108,6 +3108,31 @@ mod tests {
         ));
     }
 
+    /// SPEC-3431 FR-131 / T252: the authenticated runtime-inventory request
+    /// carries both the exact project guard and response correlation. Matching
+    /// the typed variant prevents serde from accepting and then discarding the
+    /// required `request_id` as an unknown field.
+    #[test]
+    fn t252_agent_issue_monitor_runtime_inventory_parses_exact_typed_fields() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "agent_issue_monitor_runtime_inventory",
+            "expected_project_scope": "/repo/gwt",
+            "request_id": "runtime-inventory-3712-1",
+        }))
+        .expect("runtime inventory request must be a typed FrontendEvent");
+
+        match event {
+            FrontendEvent::AgentIssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            } => {
+                assert_eq!(expected_project_scope, "/repo/gwt");
+                assert_eq!(request_id, "runtime-inventory-3712-1");
+            }
+            other => panic!("unexpected runtime inventory event: {other:?}"),
+        }
+    }
+
     #[test]
     fn pane_send_result_serializes_kind_and_has_delivery_policy() {
         let event = BackendEvent::PaneSendResult {

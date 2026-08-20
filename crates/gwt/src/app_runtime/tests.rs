@@ -52868,6 +52868,134 @@ fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overl
 }
 
 #[test]
+fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    for window_id in ["tab-1::pm-window", "tab-1::other-window"] {
+        runtime
+            .window_hook_states
+            .insert(window_id.to_string(), WindowProcessStatus::Running);
+    }
+    let pm =
+        AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("registered PM principal");
+    let project_scope = gwt_core::paths::project_scope_hash(&repo)
+        .as_str()
+        .to_string();
+
+    let accepted = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm.clone(),
+        AgentFrontendRequest::IssueMonitorRuntimeInventory {
+            expected_project_scope: project_scope.clone(),
+            request_id: "inventory-accepted-3712".to_string(),
+        },
+    );
+    assert_eq!(accepted.len(), 1, "one request yields one correlated reply");
+    let first_revision = match &accepted[0] {
+        OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event:
+                BackendEvent::IssueMonitorRuntimeInventory {
+                    request_id,
+                    inventory:
+                        gwt::IssueMonitorRuntimeInventory::Available {
+                            project_scope: observed_scope,
+                            revision,
+                            observed_at,
+                            windows,
+                        },
+                },
+            ..
+        } => {
+            assert_eq!(client_id, "pm-client", "inventory is origin-client-only");
+            assert_eq!(request_id, "inventory-accepted-3712");
+            assert_eq!(observed_scope, &project_scope);
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(observed_at).is_ok(),
+                "runtime must author an RFC3339 observation instant"
+            );
+            assert_eq!(windows.len(), 2, "every exact project window is observed");
+            for expected_window_id in ["tab-1::pm-window", "tab-1::other-window"] {
+                let window = windows
+                    .iter()
+                    .find(|window| window.window_id == expected_window_id)
+                    .unwrap_or_else(|| panic!("missing exact runtime window {expected_window_id}"));
+                assert_eq!(window.pane_state, gwt::IssueMonitorPaneState::Running);
+                assert_eq!(window.wait_signal, None);
+            }
+            *revision
+        }
+        other => panic!("unexpected runtime inventory reply: {other:?}"),
+    };
+
+    let next = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm.clone(),
+        AgentFrontendRequest::IssueMonitorRuntimeInventory {
+            expected_project_scope: project_scope.clone(),
+            request_id: "inventory-accepted-3712-next".to_string(),
+        },
+    );
+    assert_eq!(next.len(), 1, "the next observation also has one reply");
+    match &next[0] {
+        OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event:
+                BackendEvent::IssueMonitorRuntimeInventory {
+                    request_id,
+                    inventory:
+                        gwt::IssueMonitorRuntimeInventory::Available {
+                            revision: next_revision,
+                            ..
+                        },
+                },
+            ..
+        } => {
+            assert_eq!(client_id, "pm-client");
+            assert_eq!(request_id, "inventory-accepted-3712-next");
+            assert!(
+                *next_revision > first_revision,
+                "fresh server observations must carry a strictly newer revision"
+            );
+        }
+        other => panic!("unexpected next runtime inventory reply: {other:?}"),
+    }
+
+    let refused = runtime.handle_agent_frontend_event(
+        "pm-client".to_string(),
+        pm,
+        AgentFrontendRequest::IssueMonitorRuntimeInventory {
+            expected_project_scope: "scope-foreign".to_string(),
+            request_id: "inventory-refused-3712".to_string(),
+        },
+    );
+    assert_eq!(refused.len(), 1, "a refusal is also one correlated reply");
+    assert!(matches!(
+        &refused[0],
+        OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::IssueMonitorRuntimeInventory {
+                request_id,
+                inventory: gwt::IssueMonitorRuntimeInventory::Unavailable {
+                    project_scope: observed_scope,
+                    reason,
+                    ..
+                },
+            },
+            ..
+        } if client_id == "pm-client"
+            && request_id == "inventory-refused-3712"
+            && observed_scope == &project_scope
+            && reason == "project_scope_mismatch"
+    ));
+}
+
+#[test]
 fn authenticated_scan_now_rejects_non_pm_and_disabled_monitor_without_enqueuing() {
     let _env_lock = env_test_lock()
         .lock()

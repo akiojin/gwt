@@ -5293,6 +5293,39 @@ mod tests {
                 expected_project_scope,
             }) if expected_project_scope == "scope-123"
         ));
+        let inventory_request = scope
+            .filter_inbound(FrontendEvent::AgentIssueMonitorRuntimeInventory {
+                expected_project_scope: "scope-123".to_string(),
+                request_id: "inventory-request-3712".to_string(),
+            })
+            .expect("authenticated agent route must accept runtime inventory observation");
+        assert!(matches!(
+            &inventory_request,
+            AgentFrontendRequest::IssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            } if expected_project_scope == "scope-123"
+                && request_id == "inventory-request-3712"
+        ));
+        assert!(
+            !inventory_request.mutates_host_state(),
+            "runtime inventory is an observation and must not require producing authority"
+        );
+        assert!(scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "issue_monitor_runtime_inventory",
+                    "request_id": "inventory-request-3712",
+                    "inventory": {
+                        "availability": "unavailable",
+                        "project_scope": "scope-123",
+                        "observed_at": "2026-08-20T00:00:00Z",
+                        "reason": "project_scope_mismatch"
+                    }
+                })
+                .to_string()
+            )
+            .is_some());
         assert!(scope
             .filter_outbound(
                 serde_json::json!({

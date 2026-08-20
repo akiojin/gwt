@@ -7524,6 +7524,310 @@ mod tests {
         monitor
     }
 
+    fn t252_runtime_window(
+        pane_state: IssueMonitorPaneState,
+        wait_signal: Option<IssueMonitorRuntimeWaitSignal>,
+    ) -> IssueMonitorRuntimeWindow {
+        IssueMonitorRuntimeWindow {
+            window_id: "tab-1::agent-42".to_string(),
+            pane_state,
+            wait_signal,
+        }
+    }
+
+    fn t252_available_runtime_inventory(
+        revision: u64,
+        windows: Vec<IssueMonitorRuntimeWindow>,
+    ) -> IssueMonitorRuntimeInventory {
+        IssueMonitorRuntimeInventory::Available {
+            project_scope: "scope-gwt".to_string(),
+            revision,
+            observed_at: "2026-08-20T00:10:00Z".to_string(),
+            windows,
+        }
+    }
+
+    fn t252_runtime_status_row(
+        monitor: &IssueMonitorState,
+        inventory: &IssueMonitorRuntimeInventory,
+        now: &str,
+    ) -> IssueMonitorInboxSummary {
+        monitor
+            .agent_status_with_runtime_inventory(inventory, now)
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 42)
+            .expect("launched issue status row")
+    }
+
+    /// SPEC-3431 AS-PM-CONTROL-STATUS-001 / T252: the status join is typed
+    /// end-to-end. This intentionally references the desired production API
+    /// directly so a String-valued `runtime_consistency` cannot make the test
+    /// compile, even if its serialized spelling happens to match.
+    #[test]
+    fn t252_status_projection_joins_typed_runtime_inventory_and_consistency() {
+        let monitor = launched_monitor(42, "tab-1::agent-42");
+        let cases = vec![
+            (
+                "running_consistent",
+                t252_available_runtime_inventory(
+                    7,
+                    vec![t252_runtime_window(IssueMonitorPaneState::Running, None)],
+                ),
+                Some(IssueMonitorPaneState::Running),
+                IssueMonitorRuntimeConsistency::Consistent,
+            ),
+            (
+                "stopped_is_terminal_mismatch",
+                t252_available_runtime_inventory(
+                    8,
+                    vec![t252_runtime_window(IssueMonitorPaneState::Stopped, None)],
+                ),
+                Some(IssueMonitorPaneState::Stopped),
+                IssueMonitorRuntimeConsistency::Terminal,
+            ),
+            (
+                "error_is_terminal_mismatch",
+                t252_available_runtime_inventory(
+                    9,
+                    vec![t252_runtime_window(IssueMonitorPaneState::Error, None)],
+                ),
+                Some(IssueMonitorPaneState::Error),
+                IssueMonitorRuntimeConsistency::Terminal,
+            ),
+            (
+                "missing_exact_window",
+                t252_available_runtime_inventory(10, Vec::new()),
+                None,
+                IssueMonitorRuntimeConsistency::Missing,
+            ),
+            (
+                "ambiguous_exact_window",
+                t252_available_runtime_inventory(
+                    11,
+                    vec![
+                        t252_runtime_window(IssueMonitorPaneState::Running, None),
+                        t252_runtime_window(IssueMonitorPaneState::Idle, None),
+                    ],
+                ),
+                None,
+                IssueMonitorRuntimeConsistency::Ambiguous,
+            ),
+            (
+                "canonical_inventory_unavailable",
+                IssueMonitorRuntimeInventory::Unavailable {
+                    project_scope: "scope-gwt".to_string(),
+                    observed_at: "2026-08-20T00:15:00Z".to_string(),
+                    reason: "app_runtime_not_connected".to_string(),
+                },
+                None,
+                IssueMonitorRuntimeConsistency::Unavailable,
+            ),
+        ];
+
+        for (name, inventory, expected_pane_state, expected_consistency) in cases {
+            let row = t252_runtime_status_row(&monitor, &inventory, "2026-08-20T00:15:00Z");
+            assert_eq!(
+                row.state,
+                MonitorInboxState::Launched,
+                "{name}: runtime facts augment the existing launched row"
+            );
+            assert_eq!(row.pane_state, expected_pane_state, "{name}: pane state");
+            assert_eq!(
+                row.runtime_consistency,
+                Some(expected_consistency),
+                "{name}: typed consistency"
+            );
+            assert_eq!(row.wait_reason, None, "{name}: no explicit wait signal");
+        }
+
+        let row = t252_runtime_status_row(
+            &monitor,
+            &t252_available_runtime_inventory(
+                12,
+                vec![t252_runtime_window(IssueMonitorPaneState::Running, None)],
+            ),
+            "2026-08-20T00:16:00Z",
+        );
+        let wire = serde_json::to_value(row).expect("serialize typed status row");
+        assert_eq!(wire.get("pane_state"), Some(&serde_json::json!("running")));
+        assert_eq!(
+            wire.get("runtime_consistency"),
+            Some(&serde_json::json!("consistent"))
+        );
+        assert_eq!(
+            wire.get("wait_reason"),
+            Some(&serde_json::Value::Null),
+            "structured wait_reason remains present even when no wait is active"
+        );
+    }
+
+    /// Runtime inventory is exact project-scoped AppRuntime evidence, not a
+    /// transport for generic `pane.list` rows. Rejecting unknown fields keeps
+    /// a foreign fallback structurally outside the authoritative join input.
+    #[test]
+    fn t252_runtime_inventory_schema_rejects_foreign_pane_list_fallback() {
+        let valid = serde_json::json!({
+            "availability": "available",
+            "project_scope": "scope-gwt",
+            "revision": 13,
+            "observed_at": "2026-08-20T00:17:00Z",
+            "windows": []
+        });
+        assert!(
+            serde_json::from_value::<IssueMonitorRuntimeInventory>(valid.clone()).is_ok(),
+            "precondition: exact project-scoped inventory shape is accepted"
+        );
+
+        let mut with_foreign_fallback = valid;
+        with_foreign_fallback["foreign_pane_list"] = serde_json::json!([{
+            "project_scope": "scope-other",
+            "window_id": "tab-1::agent-42",
+            "pane_state": "running"
+        }]);
+        assert!(
+            serde_json::from_value::<IssueMonitorRuntimeInventory>(with_foreign_fallback).is_err(),
+            "generic or foreign pane.list rows must never become authoritative inventory proof"
+        );
+    }
+
+    /// SPEC-3431 AS-PM-CONTROL-STATUS-001 / T252: provider and approval waits
+    /// come only from typed AppRuntime signals. Unresponsive comes only from
+    /// the Monitor's canonical stuck predicate; the inventory type has no
+    /// stuck/elapsed input that the runtime could use to author that verdict.
+    #[test]
+    fn t252_status_projection_derives_typed_wait_reason_from_the_owning_signal() {
+        let ordinary = launched_monitor(42, "tab-1::agent-42");
+        let provider_inventory = t252_available_runtime_inventory(
+            14,
+            vec![t252_runtime_window(
+                IssueMonitorPaneState::Waiting,
+                Some(IssueMonitorRuntimeWaitSignal::ProviderUsageLimit {
+                    provider: "codex".to_string(),
+                    resets_at: Some("2026-08-22T03:46:00Z".to_string()),
+                }),
+            )],
+        );
+        let provider_row =
+            t252_runtime_status_row(&ordinary, &provider_inventory, "2026-08-20T00:20:00Z");
+        assert_eq!(
+            provider_row.wait_reason,
+            Some(IssueMonitorWaitReason::ProviderUsageLimit {
+                provider: "codex".to_string(),
+                resets_at: Some("2026-08-22T03:46:00Z".to_string()),
+            })
+        );
+        let provider_wire =
+            serde_json::to_value(provider_row).expect("serialize provider wait status row");
+        assert_eq!(
+            provider_wire.get("wait_reason"),
+            Some(&serde_json::json!({
+                "kind": "provider_usage_limit",
+                "provider": "codex",
+                "resets_at": "2026-08-22T03:46:00Z"
+            }))
+        );
+
+        let approval_inventory = t252_available_runtime_inventory(
+            15,
+            vec![t252_runtime_window(
+                IssueMonitorPaneState::Waiting,
+                Some(IssueMonitorRuntimeWaitSignal::ApprovalRequired),
+            )],
+        );
+        let approval_row =
+            t252_runtime_status_row(&ordinary, &approval_inventory, "2026-08-20T00:21:00Z");
+        assert_eq!(
+            approval_row.wait_reason,
+            Some(IssueMonitorWaitReason::ApprovalRequired)
+        );
+        let approval_wire =
+            serde_json::to_value(approval_row).expect("serialize approval wait status row");
+        assert_eq!(
+            approval_wire.get("wait_reason"),
+            Some(&serde_json::json!({"kind": "approval_required"}))
+        );
+
+        let ordinary_idle_inventory = t252_available_runtime_inventory(
+            16,
+            vec![t252_runtime_window(IssueMonitorPaneState::Idle, None)],
+        );
+        let mut canonical_stuck = ordinary.clone();
+        canonical_stuck.autonomous_tuning.stuck_timeout_secs = 1_800;
+        canonical_stuck.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        canonical_stuck.record_autonomous_heartbeat(42, "2026-08-20T00:00:00Z");
+        assert_eq!(
+            canonical_stuck.stuck_autonomous_issues("2026-08-20T00:31:00Z"),
+            vec![42],
+            "precondition: Monitor facts satisfy the canonical stuck predicate"
+        );
+        assert_eq!(
+            t252_runtime_status_row(
+                &canonical_stuck,
+                &provider_inventory,
+                "2026-08-20T00:31:00Z",
+            )
+            .wait_reason,
+            Some(IssueMonitorWaitReason::ProviderUsageLimit {
+                provider: "codex".to_string(),
+                resets_at: Some("2026-08-22T03:46:00Z".to_string()),
+            }),
+            "an explicit provider limit outranks the canonical stuck fallback"
+        );
+        assert_eq!(
+            t252_runtime_status_row(
+                &canonical_stuck,
+                &approval_inventory,
+                "2026-08-20T00:31:00Z",
+            )
+            .wait_reason,
+            Some(IssueMonitorWaitReason::ApprovalRequired),
+            "an explicit approval wait outranks the canonical stuck fallback"
+        );
+        let unresponsive_row = t252_runtime_status_row(
+            &canonical_stuck,
+            &ordinary_idle_inventory,
+            "2026-08-20T00:31:00Z",
+        );
+        assert_eq!(
+            unresponsive_row.wait_reason,
+            Some(IssueMonitorWaitReason::Unresponsive {
+                last_activity_at: "2026-08-20T00:00:00Z".to_string(),
+            }),
+            "ordinary inventory cannot author stuck; Monitor state derives it"
+        );
+        let unresponsive_wire =
+            serde_json::to_value(unresponsive_row).expect("serialize unresponsive status row");
+        assert_eq!(
+            unresponsive_wire.get("wait_reason"),
+            Some(&serde_json::json!({
+                "kind": "unresponsive",
+                "last_activity_at": "2026-08-20T00:00:00Z"
+            }))
+        );
+
+        let mut elapsed_only = ordinary;
+        elapsed_only.autonomous_tuning.stuck_timeout_secs = 1_800;
+        elapsed_only.set_autonomous_phase(42, AutonomousPhase::Reviewing);
+        elapsed_only.record_autonomous_heartbeat(42, "2026-08-20T00:00:00Z");
+        assert!(
+            elapsed_only
+                .stuck_autonomous_issues("2026-08-20T04:00:00Z")
+                .is_empty(),
+            "elapsed time alone is not canonical stuck evidence"
+        );
+        assert_eq!(
+            t252_runtime_status_row(
+                &elapsed_only,
+                &ordinary_idle_inventory,
+                "2026-08-20T04:00:00Z",
+            )
+            .wait_reason,
+            None,
+            "even a very old idle row is not unresponsive without the canonical predicate"
+        );
+    }
+
     fn assert_manual_relaunch_accepts_fresh_lifecycle_failures(base: &IssueMonitorState) {
         for (agent_failure, expected_state) in [
             (false, MonitorInboxState::LaunchFailed),
