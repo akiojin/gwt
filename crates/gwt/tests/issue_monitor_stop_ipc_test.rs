@@ -79,6 +79,9 @@ fn stop_target() -> IssueMonitorStopTarget {
         claim_id: None,
         delivery_id: None,
         window_id: Some("tab-1::window-1".to_string()),
+        launch_generation: None,
+        claim_owner: None,
+        materializer_window_id: None,
     }
 }
 

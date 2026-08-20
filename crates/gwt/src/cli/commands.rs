@@ -144,9 +144,13 @@ pub enum IssueCommand {
     MonitorStop {
         project_root: Option<std::path::PathBuf>,
         number: u64,
+        operation_id: Option<String>,
         reason: String,
+        launch_generation: Option<u64>,
         claim_id: Option<String>,
+        claim_owner: Option<String>,
         delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
         window_id: Option<String>,
     },
     /// SPEC-3431 FR-029〜031: revoke one launch and requeue its issue at the
@@ -157,10 +161,35 @@ pub enum IssueCommand {
     MonitorFailover {
         project_root: Option<std::path::PathBuf>,
         number: u64,
+        operation_id: Option<String>,
         reason: String,
+        launch_generation: Option<u64>,
         claim_id: Option<String>,
+        claim_owner: Option<String>,
         delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
         window_id: Option<String>,
+    },
+    /// SPEC-3431 FR-130: settle one unreachable launch generation while
+    /// retaining the complete source authority as an exact recovery target.
+    MonitorRecover {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        operation_id: String,
+        reason: String,
+        launch_generation: u64,
+        claim_id: Option<String>,
+        claim_owner: Option<String>,
+        delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
+        window_id: Option<String>,
+    },
+    /// SPEC-3431 FR-131: reconcile pending control receipts after a PM
+    /// takeover without allowing them to address a different generation.
+    MonitorControlReconcile {
+        project_root: Option<std::path::PathBuf>,
+        operation_id: String,
+        revoked_generation: u64,
     },
     /// Issue #3645 / #3628: release the failure holding one issue out of the
     /// queue, for rows that have no live launch left to identify.

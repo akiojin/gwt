@@ -1958,6 +1958,27 @@ impl AppRuntime {
         profiles.with_repo_local(fallback_profile)
     }
 
+    fn issue_monitor_delivery_previous_profiles(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: Option<&str>,
+    ) -> gwt::LaunchWizardPreviousProfiles {
+        if let Some(delivery_id) = delivery_id {
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+            if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+                if let Some(profile) = prefs.pending_launch_deliveries.iter().find_map(|delivery| {
+                    (delivery.issue_number == issue_number && delivery.delivery_id == delivery_id)
+                        .then(|| delivery.launch_profile_snapshot.clone())
+                        .flatten()
+                }) {
+                    return gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.into()));
+                }
+            }
+        }
+        self.issue_monitor_previous_profiles(project_root)
+    }
+
     #[cfg(test)]
     pub(crate) fn auto_launch_issue_monitor_request_events_for_project(
         &mut self,
@@ -2321,7 +2342,11 @@ impl AppRuntime {
         }
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
-        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        let previous_profiles = self.issue_monitor_delivery_previous_profiles(
+            &project_root,
+            issue_number,
+            delivery_id.as_deref(),
+        );
         let Some(profile_agent_id) = previous_profiles
             .preferred_profile()
             .map(|profile| profile.agent_id.clone())

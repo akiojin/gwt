@@ -532,6 +532,8 @@ impl AppRuntime {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let issue_monitor_execution_snapshots =
+            self.issue_monitor_window_close_execution_snapshots(&closing_project_root, &window_ids);
         for window_id in &window_ids {
             self.clear_agent_window_startup_restore(window_id);
             self.stop_window_runtime(window_id);
@@ -543,8 +545,12 @@ impl AppRuntime {
         // Return any Issue Monitor launched windows to pending before the tab is
         // removed. The closing tab owns this lifecycle even when another tab is
         // active. Closing a project pauses (does not complete) its in-flight work.
-        let issue_monitor_events =
-            self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
+        let issue_monitor_events = self
+            .issue_monitor_windows_closed_events_with_execution_snapshots(
+                &closing_project_root,
+                &window_ids,
+                issue_monitor_execution_snapshots,
+            );
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {

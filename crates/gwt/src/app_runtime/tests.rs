@@ -54,20 +54,20 @@ use super::{
     active_work_projection_from_saved, continue_work_readiness_decision,
     dispatch_agent_launch_success, drive_local_issue_monitor_claim_effects_with,
     local_issue_monitor_fallback_commit_count, local_issue_monitor_remote_scan_count,
-    prepare_local_issue_monitor_claim_proposals, rebase_mutate_and_persist_issue_monitor_state,
-    record_issue_monitor_scan_failures, reset_local_issue_monitor_fallback_commit_count,
-    reset_local_issue_monitor_remote_scan_count, save_resumed_workspace_projection,
-    save_start_work_workspace_projection, save_workspace_launch_projection,
-    set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AgentLaunchRuntimeContext,
-    AppEventProxy, AppRuntime, ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner,
-    CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
-    IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
-    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
-    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
-    ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    next_issue_monitor_runtime_inventory_revision, prepare_local_issue_monitor_claim_proposals,
+    rebase_mutate_and_persist_issue_monitor_state, record_issue_monitor_scan_failures,
+    reset_local_issue_monitor_fallback_commit_count, reset_local_issue_monitor_remote_scan_count,
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    save_workspace_launch_projection, set_scheduled_scan_after_lease_before_commit_test_hook,
+    ActiveAgentSession, AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult,
+    AgentLaunchRuntimeContext, AppEventProxy, AppRuntime, ApprovalPromptLatch,
+    AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch,
+    ProjectTabRuntime, ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent,
+    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::embedded_server::AgentPmSendResponder;
 use crate::{
@@ -38733,8 +38733,9 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
             )),
             "2026-08-05T10:01:00Z",
         )
-        .expect("commit exact local effect result"),
-        1
+        .expect("commit exact local effect result")
+        .progress,
+        super::LocalIssueMonitorEffectProgress::Settled
     );
 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
@@ -38748,6 +38749,459 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
             owner,
         } if claim_id == "claim-42" && owner == "host/session"
     )));
+}
+
+fn local_pm_release_fixture(
+    action: gwt::IssueMonitorPmControlAction,
+    waits_for_disarm: bool,
+) -> (gwt::IssueMonitorPrefs, gwt::PendingIssueMonitorEffect) {
+    let effect_id = format!("local-release-{action:?}");
+    let mut effect = gwt::PendingIssueMonitorEffect::prepared(
+        effect_id.clone(),
+        9,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42,
+            claim_id: "claim-42".to_string(),
+            owner: "host/agent-42".to_string(),
+        },
+    );
+    effect.state = gwt::IssueMonitorEffectState::Attempting;
+    let profile = sample_issue_monitor_launch_profile();
+    let target = gwt::IssueMonitorStopTarget {
+        issue_number: 42,
+        claim_id: Some("claim-42".to_string()),
+        delivery_id: Some("delivery-42".to_string()),
+        window_id: Some("tab-1::agent-42".to_string()),
+        launch_generation: Some(7),
+        claim_owner: Some("host/agent-42".to_string()),
+        materializer_window_id: Some("tab-1::materializer-42".to_string()),
+    };
+    let operation_id = format!("local-{action:?}-3712");
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        effect_authority_epoch: 9,
+        control_state_revision: 11,
+        pending_effects: vec![effect.clone()],
+        pm_control_receipts: vec![gwt::IssueMonitorPmControlReceipt {
+            operation_id: operation_id.clone(),
+            action,
+            actor_session: "pm-session".to_string(),
+            pm_registration_generation: 3,
+            issue_number: 42,
+            target_fingerprint: "target-fingerprint".to_string(),
+            pinned_profile_digest: "profile-fingerprint".to_string(),
+            reason: "operator recovery".to_string(),
+            outcome: match action {
+                gwt::IssueMonitorPmControlAction::Stop => {
+                    gwt::IssueMonitorPmControlOutcome::Stopped
+                }
+                gwt::IssueMonitorPmControlAction::Failover => {
+                    gwt::IssueMonitorPmControlOutcome::FailoverPending
+                }
+                gwt::IssueMonitorPmControlAction::Recover => {
+                    gwt::IssueMonitorPmControlOutcome::RecoveryPending
+                }
+            },
+            requested_at: "2026-08-21T00:00:00Z".to_string(),
+            settled_at: None,
+        }],
+        pending_controls: vec![gwt::IssueMonitorPendingControl {
+            operation_id,
+            project_key: "scope-gwt".to_string(),
+            action,
+            target,
+            source_identity: gwt::IssueMonitorPmControlSourceIdentity {
+                issue_number: 42,
+                launch_generation: 7,
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/agent-42".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: Some("tab-1::materializer-42".to_string()),
+                window_id: Some("tab-1::agent-42".to_string()),
+                launch_profile_snapshot: Some(profile.clone()),
+                launch_profile_fingerprint: Some("profile-fingerprint".to_string()),
+            },
+            next_launch_profile: (action != gwt::IssueMonitorPmControlAction::Stop)
+                .then_some(profile),
+            reason: "operator recovery".to_string(),
+            requested_at: "2026-08-21T00:00:00Z".to_string(),
+            control_state_revision: 11,
+            admission_runtime_fence: None,
+            teardown_required: true,
+            teardown_settled: true,
+            teardown_settled_at: Some("2026-08-21T00:00:01Z".to_string()),
+            teardown_inventory_revision: None,
+            teardown_runtime_fence: None,
+            claim_renewal_effect_id: None,
+            claim_renewal_sequence: 0,
+            claim_renewal_due_at: None,
+            claim_release_required: true,
+            claim_release_prepared: true,
+            claim_release_effect_id: Some(effect_id),
+            claim_release_settled: false,
+            claim_release_settled_at: None,
+            auto_merge_disarm_required: waits_for_disarm,
+            auto_merge_disarm_effect_id: waits_for_disarm
+                .then(|| "local-disarm-Recover".to_string()),
+            auto_merge_disarm_settled: !waits_for_disarm,
+            auto_merge_disarm_settled_at: (!waits_for_disarm)
+                .then(|| "2026-08-21T00:00:01Z".to_string()),
+            execution_settlement: (action == gwt::IssueMonitorPmControlAction::Recover).then(
+                || gwt::issue_monitor::IssueMonitorPmControlExecutionSettlement {
+                    generation_id: "generation-42-7".to_string(),
+                    session_id: "source-agent-session".to_string(),
+                    settlement_operation_id: "local-control:execution-settlement".to_string(),
+                    settled: true,
+                    settled_at: Some("2026-08-21T00:00:01Z".to_string()),
+                },
+            ),
+            held: action == gwt::IssueMonitorPmControlAction::Stop,
+        }],
+        launch_generations: BTreeMap::from([(42, 7)]),
+        revoked_through_generation: BTreeMap::from([(42, 7)]),
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    (prefs, effect)
+}
+
+fn local_pm_renewal_fixture() -> gwt::IssueMonitorPrefs {
+    let (mut prefs, _) = local_pm_release_fixture(gwt::IssueMonitorPmControlAction::Recover, false);
+    prefs.pending_effects.clear();
+    let pending = prefs
+        .pending_controls
+        .first_mut()
+        .expect("pending recovery control");
+    pending.teardown_settled = false;
+    pending.teardown_settled_at = None;
+    pending.teardown_runtime_fence = None;
+    pending.teardown_inventory_revision = None;
+    pending.claim_renewal_effect_id = None;
+    pending.claim_renewal_sequence = 0;
+    pending.claim_renewal_due_at = Some("2000-01-01T00:00:00Z".to_string());
+    pending.claim_release_prepared = false;
+    pending.claim_release_effect_id = None;
+    pending.claim_release_settled = false;
+    pending.claim_release_settled_at = None;
+    prefs
+}
+
+#[test]
+fn t255_local_driver_prepares_exact_renewal_patches_readback_and_continues_ttl() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = local_pm_renewal_fixture();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed due renewal");
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let fake_client = Arc::new(FakeIssueClient::new());
+    let exact_claim = gwt_github::issue_auto_claim::ClaimComment {
+        comment_id: Some(CommentId(42)),
+        claim_id: "claim-42".to_string(),
+        owner: "host/agent-42".to_string(),
+        issue_number: 42,
+        status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+        heartbeat_at: "2026-08-20T10:00:00Z".to_string(),
+        expires_at: "2099-08-20T10:30:00Z".to_string(),
+        launched_work_id: Some("work/issue-42".to_string()),
+    };
+    let foreign_claim = gwt_github::issue_auto_claim::ClaimComment {
+        comment_id: Some(CommentId(43)),
+        claim_id: "claim-foreign".to_string(),
+        owner: "host/foreign".to_string(),
+        ..exact_claim.clone()
+    };
+    fake_client.seed(IssueSnapshot {
+        number: IssueNumber(42),
+        title: "Issue 42".to_string(),
+        body: String::new(),
+        labels: Vec::new(),
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("t1"),
+        comments: vec![
+            CommentSnapshot {
+                id: CommentId(42),
+                body: gwt_github::issue_auto_claim::render_claim_comment(&exact_claim),
+                updated_at: UpdatedAt::new("t1"),
+            },
+            CommentSnapshot {
+                id: CommentId(43),
+                body: gwt_github::issue_auto_claim::render_claim_comment(&foreign_claim),
+                updated_at: UpdatedAt::new("t1"),
+            },
+        ],
+    });
+    let factory: super::RuntimeIssueClientFactory = Arc::new({
+        let fake_client = Arc::clone(&fake_client);
+        move |_owner, _repo| Ok(fake_client.clone() as Arc<dyn IssueClient>)
+    });
+
+    assert!(!super::execute_local_issue_monitor_claim_effects(
+        &prefs_path,
+        "owner",
+        "repo",
+        &mut monitor,
+        &factory,
+    )
+    .expect("execute exact local renewal"));
+
+    assert_eq!(
+        fake_client.call_log(),
+        vec!["fetch:#42", "patch_comment:comment:42", "fetch:#42"],
+        "renewal must fetch, patch only the exact claim, and read it back"
+    );
+    let FetchResult::Updated(snapshot) = fake_client
+        .fetch(IssueNumber(42), None)
+        .expect("read renewed claims")
+    else {
+        panic!("expected full issue snapshot");
+    };
+    let claims = gwt_github::issue_auto_claim::extract_claim_comments(&snapshot.comments);
+    assert_eq!(claims.len(), 2, "renewal cannot create or erase a sibling");
+    let exact = claims
+        .iter()
+        .find(|claim| claim.claim_id == "claim-42")
+        .expect("exact renewed claim");
+    assert_ne!(exact.heartbeat_at, "2026-08-20T10:00:00Z");
+    assert!(claims.iter().any(|claim| {
+        claim.claim_id == "claim-foreign"
+            && claim.owner == "host/foreign"
+            && claim.heartbeat_at == "2026-08-20T10:00:00Z"
+    }));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload renewal");
+    let pending = &persisted.pending_controls[0];
+    assert_eq!(pending.claim_renewal_sequence, 1);
+    assert!(pending.claim_renewal_effect_id.is_none());
+    assert!(pending.claim_renewal_due_at.is_some());
+    assert!(!pending.claim_release_prepared);
+}
+
+#[test]
+fn t255_local_renewal_close_during_attempting_orders_release_after_readback() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut prefs = local_pm_renewal_fixture();
+    let renewal = gwt::PendingIssueMonitorEffect {
+        effect_id: "pm-control:local-Recover-3712:renew-claim:0".to_string(),
+        authority_epoch: prefs.effect_authority_epoch,
+        attempt: 0,
+        state: gwt::IssueMonitorEffectState::Attempting,
+        payload: gwt::IssueMonitorEffectPayload::RenewClaim {
+            issue_number: 42,
+            claim_id: "claim-42".to_string(),
+            owner: "host/agent-42".to_string(),
+            heartbeat_at: "2026-08-21T00:00:00Z".to_string(),
+            expires_at: "2026-08-21T00:30:00Z".to_string(),
+        },
+    };
+    prefs.pending_controls[0].claim_renewal_effect_id = Some(renewal.effect_id.clone());
+    prefs.pending_controls[0].claim_renewal_due_at = None;
+    prefs.pending_effects.push(renewal);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed Attempting renewal");
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let mut remote_calls = 0;
+
+    drive_local_issue_monitor_claim_effects_with(
+        &prefs_path,
+        &mut monitor,
+        |_effect, _authority_current, _now, now_text| {
+            remote_calls += 1;
+            gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |disk| {
+                let mut latest = gwt::IssueMonitorState::with_prefs(
+                    gwt::IssueMonitorConfig::default(),
+                    disk.clone(),
+                );
+                assert!(matches!(
+                    latest.settle_pm_control_window_closed("tab-1::agent-42", Some(7), now_text,),
+                    gwt::IssueMonitorPmControlSettlement::PrerequisiteSettled { .. }
+                ));
+                *disk = latest.prefs();
+                Ok(())
+            })
+            .expect("persist close behind Attempting renewal");
+            Ok(LocalIssueMonitorEffectOutcome::Claim(Ok(
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                    gwt_github::issue_auto_claim::ClaimComment {
+                        comment_id: Some(CommentId(42)),
+                        claim_id: "claim-42".to_string(),
+                        owner: "host/agent-42".to_string(),
+                        issue_number: 42,
+                        status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                        heartbeat_at: now_text.to_string(),
+                        expires_at: "2099-08-21T00:30:00Z".to_string(),
+                        launched_work_id: Some("work/issue-42".to_string()),
+                    },
+                ),
+            )))
+        },
+    )
+    .expect("drive close-during-renewal ordering");
+
+    assert_eq!(remote_calls, 1);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload ordered cleanup");
+    let pending = &persisted.pending_controls[0];
+    assert!(pending.teardown_settled);
+    assert_eq!(pending.claim_renewal_sequence, 1);
+    assert!(pending.claim_renewal_effect_id.is_none());
+    assert!(pending.claim_renewal_due_at.is_none());
+    assert!(pending.claim_release_prepared);
+    assert!(persisted.pending_effects.iter().any(|effect| matches!(
+        effect.payload,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
+    )));
+}
+
+#[test]
+fn t255_local_release_commit_preserves_only_restart_scan_signal() {
+    for (action, waits_for_disarm, expected_scan) in [
+        (gwt::IssueMonitorPmControlAction::Recover, false, true),
+        (gwt::IssueMonitorPmControlAction::Recover, true, false),
+        (gwt::IssueMonitorPmControlAction::Stop, false, false),
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let prefs_path = temp
+            .path()
+            .join(format!("{action:?}-{waits_for_disarm}.json"));
+        let (prefs, effect) = local_pm_release_fixture(action, waits_for_disarm);
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed local release");
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+        let outcome = super::commit_local_issue_monitor_effect_result(
+            &prefs_path,
+            &mut monitor,
+            effect,
+            LocalIssueMonitorEffectOutcome::Release(Ok(
+                gwt_github::issue_auto_claim::ClaimReleaseOutcome::AlreadyReleased(None),
+            )),
+            "2026-08-21T00:00:02Z",
+        )
+        .expect("durable local release commit");
+
+        assert_eq!(
+            outcome.progress,
+            super::LocalIssueMonitorEffectProgress::Settled
+        );
+        assert_eq!(outcome.should_scan, expected_scan);
+        let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload local release");
+        assert_eq!(
+            persisted.queued_launch_overrides.contains_key(&42),
+            expected_scan,
+            "only RestartQueued durably installs the restart override"
+        );
+    }
+}
+
+#[test]
+fn t255_durable_restart_scan_signal_enqueues_once_and_survives_enqueue_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let (prefs, effect) =
+        local_pm_release_fixture(gwt::IssueMonitorPmControlAction::Recover, false);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed local release");
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let commit = super::commit_local_issue_monitor_effect_result(
+        &prefs_path,
+        &mut monitor,
+        effect,
+        LocalIssueMonitorEffectOutcome::Release(Ok(
+            gwt_github::issue_auto_claim::ClaimReleaseOutcome::AlreadyReleased(None),
+        )),
+        "2026-08-21T00:00:02Z",
+    )
+    .expect("durable restart commit");
+    assert!(commit.should_scan);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab.clone()], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+    runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-21T00:00:02Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(monitor),
+            should_scan: commit.should_scan,
+        }),
+    );
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "RestartQueued schedules exactly one immediate follow-up scan"
+    );
+
+    runtime.issue_monitor_scheduled_scans_in_flight.clear();
+    tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+    let no_scan_monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("reload queued restart"),
+    );
+    runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-21T00:00:03Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(no_scan_monitor),
+            should_scan: false,
+        }),
+    );
+    assert!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "PrerequisiteSettled/Stop completion must not enqueue a scan"
+    );
+
+    let mut failed_runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    failed_runtime.blocking_tasks = BlockingTaskSpawner::failing("injected follow-up failure");
+    failed_runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+    let failed_monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("reload before failed enqueue"),
+    );
+    failed_runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-21T00:00:04Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(failed_monitor),
+            should_scan: true,
+        }),
+    );
+    assert!(!failed_runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&prefs_path));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload failed enqueue");
+    assert!(
+        persisted.queued_launch_overrides.contains_key(&42),
+        "worker spawn failure cannot roll back the durable queued restart"
+    );
 }
 
 #[test]
@@ -42684,6 +43138,103 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
             .values()
             .any(|context| context.issue_monitor_issue_number == Some(3165)),
         "saved-profile auto launch errors must be wired back to Issue Monitor"
+    );
+}
+
+/// SPEC #3431 T253 / FR-130: a durable delivery owns the launch profile that
+/// was captured when its claim committed. Later edits to the global profile
+/// must not change which provider materializes that already-issued delivery.
+#[test]
+fn t253_durable_delivery_materializes_with_persisted_profile_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+
+    let mut pinned_profile = sample_issue_monitor_launch_profile();
+    pinned_profile.agent_id = "codex".to_string();
+    pinned_profile.model = Some("gpt-5.6-codex".to_string());
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            launch_profile: Some(pinned_profile.clone()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3712,
+        title: "Persist launch profile snapshot".to_string(),
+        labels: vec!["bug".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3712,
+        "claim-3712",
+        "host/session",
+        "effect-3712",
+        "2026-08-21T00:00:00Z",
+    ));
+    let mut persisted = monitor.prefs();
+    assert_eq!(
+        persisted.pending_launch_deliveries[0].launch_profile_snapshot,
+        Some(pinned_profile)
+    );
+    persisted.launch_profile = Some(sample_issue_monitor_launch_profile());
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &persisted)
+        .expect("replace only the later global launch profile");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut agent_options = sample_agent_options();
+    agent_options.push(gwt::AgentOption {
+        id: "claude".to_string(),
+        name: "Claude Code".to_string(),
+        available: true,
+        installed_version: Some("latest".to_string()),
+        versions: vec!["latest".to_string()],
+        custom_agent: None,
+    });
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load_with_agent_options(
+        &temp.path().join("sessions"),
+        agent_options,
+    );
+
+    let events = runtime.auto_launch_issue_monitor_delivery_events(
+        3712,
+        LinkedIssueKind::Issue,
+        Some("launch:effect-3712".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+
+    let workspace = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("durable delivery materializes one window");
+    let agent_window = workspace.tabs[0]
+        .workspace
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("materialized agent window");
+    assert_eq!(
+        agent_window.agent_id.as_deref(),
+        Some("codex"),
+        "the persisted delivery snapshot must win over the later global Claude profile"
     );
 }
 
@@ -49855,6 +50406,399 @@ fn issue_monitor_windows_closed_requeue_is_non_scanning() {
     );
 }
 
+/// Issue #3712: a normal pane close is a terminal boundary for both the
+/// Monitor launch identity and its execution-control generation. Requeueing
+/// first used to leave the ECR Active, so the replacement launch collided
+/// with the closed predecessor and late lifecycle traffic could still target
+/// live authority.
+#[test]
+fn t255_normal_monitor_pane_close_settles_active_ecr_before_requeue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let window_id = "tab-1::agent-42";
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-42",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    fs::create_dir_all(&runtime.sessions_dir).expect("create sessions dir");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "monitor-close-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(window_id),
+    );
+    gwt_agent::SessionRuntimeState::for_execution_process(
+        gwt_agent::AgentStatus::Running,
+        &holder,
+        1,
+        gwt::process::host_process_start_time(std::process::id())
+            .expect("test Host process start time"),
+        i32::MAX as u32,
+        1,
+    )
+    .save(&gwt_agent::runtime_state_path(
+        &runtime.sessions_dir,
+        &holder.session_id,
+    ))
+    .expect("persist exact runtime evidence");
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+            }],
+            launched_control_identities: vec![gwt::IssueMonitorLaunchedControlIdentity {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/monitor-close-holder".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: Some("tab-1::materializer-42".to_string()),
+                launch_generation: 7,
+                launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+                launch_profile_fingerprint: Some("profile-42".to_string()),
+            }],
+            launch_generations: BTreeMap::from([(42, 7)]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed exact Monitor launch");
+
+    assert!(matches!(
+        runtime
+            .issue_monitor_window_close_execution_snapshots(&repo, &[window_id.to_string()])
+            .get(window_id),
+        Some(super::IssueMonitorWindowCloseExecutionSnapshot::Active { .. })
+    ));
+
+    runtime.close_window_events(window_id);
+
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("load generation ledger")
+        .expect("generation ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the exact Active generation must become terminal before Monitor requeue"
+    );
+    assert!(ledger.lifecycle_events.iter().any(|event| {
+        event.generation_id == holder.execution_binding.identity.generation_id
+            && event.session_id == holder.session_id
+            && event.from_status == gwt::cli::execution_state::ExecutionControlStatus::Active
+            && event.to_status == gwt::cli::execution_state::ExecutionControlStatus::Blocked
+    }));
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload requeued Monitor");
+    assert!(persisted.launched_issues.is_empty());
+    assert_eq!(persisted.revoked_through_generation.get(&42), Some(&7));
+    let mut late_prefs = persisted.clone();
+    late_prefs.pending_launch_deliveries.push(
+        gwt::issue_monitor::PendingIssueMonitorLaunchDelivery {
+            delivery_id: "delivery-42-late".to_string(),
+            issue_number: 42,
+            branch_name: "work/issue-42".to_string(),
+            linked_issue_kind: LinkedIssueKind::Issue,
+            claim_id: "claim-42".to_string(),
+            claim_owner: "host/monitor-close-holder".to_string(),
+            materializer_id: Some("late-materializer".to_string()),
+            materializer_pid: Some(std::process::id()),
+            materializer_window_id: Some("tab-1::late-materializer".to_string()),
+            materialized_window_id: Some("tab-1::late-agent".to_string()),
+            workspace_durable_window_id: Some("tab-1::late-agent".to_string()),
+            launch_session_strategy: Default::default(),
+            launch_generation: 7,
+            launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+            launch_profile_fingerprint: Some("profile-42".to_string()),
+            created_at: "2026-08-21T00:00:00Z".to_string(),
+        },
+    );
+    let mut late =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), late_prefs);
+    assert!(
+        !late.complete_active_launch_delivery(42, "tab-1::late-agent", Some("delivery-42-late"),),
+        "a late lifecycle ACK from the revoked generation must stay rejected"
+    );
+
+    let successor = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "monitor-close-fresh-successor".to_string(),
+        principal_id: "gwt-host-monitor-close".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "monitor-close-successor-binding".to_string(),
+        initial_session_id: "monitor-close-successor".to_string(),
+        entrypoint: "$gwt-execute #42".to_string(),
+        requested_at: Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+        &repo, owner, &successor,
+    )
+    .expect("a fresh successor is allowed after exact close settlement");
+}
+
+#[test]
+fn t255_monitor_tab_close_settles_active_ecr_before_requeue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let window_id = "tab-1::agent-42";
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-42",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    fs::create_dir_all(&runtime.sessions_dir).expect("create sessions dir");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "monitor-tab-close-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(window_id),
+    );
+    gwt_agent::SessionRuntimeState::for_execution_process(
+        gwt_agent::AgentStatus::Running,
+        &holder,
+        1,
+        gwt::process::host_process_start_time(std::process::id())
+            .expect("test Host process start time"),
+        i32::MAX as u32,
+        1,
+    )
+    .save(&gwt_agent::runtime_state_path(
+        &runtime.sessions_dir,
+        &holder.session_id,
+    ))
+    .expect("persist exact runtime evidence");
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+            }],
+            launched_control_identities: vec![gwt::IssueMonitorLaunchedControlIdentity {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/monitor-tab-close-holder".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: None,
+                launch_generation: 7,
+                launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+                launch_profile_fingerprint: Some("profile-42".to_string()),
+            }],
+            launch_generations: BTreeMap::from([(42, 7)]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed exact Monitor launch");
+
+    runtime.close_project_tab_events("tab-1");
+
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("load generation ledger")
+        .expect("generation ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
+    assert!(ledger.lifecycle_events.iter().any(|event| {
+        event.generation_id == holder.execution_binding.identity.generation_id
+            && event.session_id == holder.session_id
+            && event.from_status == gwt::cli::execution_state::ExecutionControlStatus::Active
+            && event.to_status == gwt::cli::execution_state::ExecutionControlStatus::Blocked
+    }));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload tab-close state");
+    assert!(persisted.launched_issues.is_empty());
+    assert_eq!(persisted.revoked_through_generation.get(&42), Some(&7));
+}
+
+#[test]
+fn t255_modern_monitor_close_with_unknown_runtime_retains_exact_target() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let window_id = "tab-1::agent-42";
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-42",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    fs::create_dir_all(&runtime.sessions_dir).expect("create sessions dir");
+    install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "monitor-close-unknown-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(window_id),
+    );
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+            }],
+            launched_control_identities: vec![gwt::IssueMonitorLaunchedControlIdentity {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/monitor-close-unknown-holder".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: None,
+                launch_generation: 7,
+                launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+                launch_profile_fingerprint: Some("profile-42".to_string()),
+            }],
+            launch_generations: BTreeMap::from([(42, 7)]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed exact Monitor launch");
+
+    // No exact process sidecar exists. The generic stop projection creates a
+    // terminal-looking but identity-less sidecar, which is deliberately
+    // Unknown rather than proof that the current ECR holder exited.
+    runtime.close_window_events(window_id);
+
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab remains")
+        .workspace
+        .window("agent-42")
+        .is_none());
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("load generation ledger")
+        .expect("generation ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload retained target");
+    assert_eq!(persisted.launched_issues[0].window_id, window_id);
+    assert_eq!(
+        persisted.launched_control_identities[0].launch_generation,
+        7
+    );
+    assert!(!persisted.revoked_through_generation.contains_key(&42));
+}
+
+#[test]
+fn t255_close_snapshot_missing_after_late_modern_ack_retains_exact_target() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed pre-ACK state");
+    let window_id = "tab-1::late-agent".to_string();
+
+    // The close caller snapshots before the daemon ACK is reflected in prefs.
+    let snapshots = runtime
+        .issue_monitor_window_close_execution_snapshots(&repo, std::slice::from_ref(&window_id));
+    assert!(
+        snapshots.is_empty(),
+        "the pre-ACK window is not yet monitored"
+    );
+
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.clone(),
+            }],
+            launched_control_identities: vec![gwt::IssueMonitorLaunchedControlIdentity {
+                issue_number: 42,
+                window_id: window_id.clone(),
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/late-agent".to_string(),
+                delivery_id: "delivery-late-42".to_string(),
+                materializer_window_id: None,
+                launch_generation: 7,
+                launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+                launch_profile_fingerprint: Some("profile-42".to_string()),
+            }],
+            launch_generations: BTreeMap::from([(42, 7)]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("persist late modern ACK");
+
+    runtime.issue_monitor_windows_closed_events_with_execution_snapshots(
+        &repo,
+        std::slice::from_ref(&window_id),
+        snapshots,
+    );
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload retained ACK");
+    assert_eq!(persisted.launched_issues[0].window_id, window_id);
+    assert_eq!(
+        persisted.launched_control_identities[0].launch_generation,
+        7
+    );
+    assert!(!persisted.revoked_through_generation.contains_key(&42));
+}
+
 /// Issue #3627: a launch whose agent window is gone from the tab canvas held
 /// its `max_active` slot forever, because release was driven exclusively by PTY
 /// exit events. A window reaped without one — app restart, crash, error pane
@@ -49909,6 +50853,262 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
         persisted.launched_issues.is_empty(),
         "a window the canvas no longer has cannot keep holding a slot"
     );
+}
+
+/// SPEC #3431 T255 / FR-131: periodic canvas reconciliation is only an
+/// inventory observation for an in-flight PM control. It must not forge a
+/// WindowClosed lifecycle edge, because that bypasses the admission fence.
+#[test]
+fn t255_pending_control_vanished_window_uses_fresh_runtime_absence_fence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let project_scope = gwt_core::paths::project_scope_hash(&repo)
+        .as_str()
+        .to_string();
+    let runtime_instance_id = super::issue_monitor_runtime_instance_id().to_string();
+    let (mut prefs, _) = local_pm_release_fixture(gwt::IssueMonitorPmControlAction::Recover, false);
+    let pending = prefs
+        .pending_controls
+        .first_mut()
+        .expect("pending recovery control");
+    pending.project_key = project_scope;
+    pending.admission_runtime_fence = Some(gwt::IssueMonitorRuntimeInventoryFence {
+        runtime_instance_id: runtime_instance_id.clone(),
+        revision: 0,
+    });
+    pending.teardown_settled = false;
+    pending.teardown_settled_at = None;
+    pending.teardown_runtime_fence = None;
+    pending.teardown_inventory_revision = None;
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed pending recovery");
+
+    // The canvas contains a live unrelated pane, but neither exact source
+    // identity window remains.
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-51",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    assert!(matches!(
+        runtime
+            .issue_monitor_window_close_execution_snapshots(&repo, &["tab-1::agent-42".to_string()])
+            .get("tab-1::agent-42"),
+        Some(super::IssueMonitorWindowCloseExecutionSnapshot::LegacyCompatible)
+    ));
+    runtime.issue_monitor_vanished_window_release_events(&repo);
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload runtime absence");
+    let pending = persisted
+        .pending_controls
+        .first()
+        .expect("claim cleanup remains pending");
+    let fence = pending
+        .teardown_runtime_fence
+        .as_ref()
+        .expect("periodic reconciliation must persist its runtime proof");
+    assert_eq!(fence.runtime_instance_id, runtime_instance_id);
+    assert!(
+        fence.revision > 0,
+        "the absence proof must be newer than the admission fence"
+    );
+    assert!(pending.teardown_settled);
+}
+
+#[test]
+fn t255_periodic_vanished_modern_launch_settles_active_ecr_before_release() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let vanished_window = "tab-1::agent-42";
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-51",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    fs::create_dir_all(&runtime.sessions_dir).expect("create sessions dir");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        "monitor-vanished-holder",
+        gwt_agent::AgentStatus::Stopped,
+        Some(vanished_window),
+    );
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: vanished_window.to_string(),
+            }],
+            launched_control_identities: vec![gwt::IssueMonitorLaunchedControlIdentity {
+                issue_number: 42,
+                window_id: vanished_window.to_string(),
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/monitor-vanished-holder".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: None,
+                launch_generation: 7,
+                launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+                launch_profile_fingerprint: Some("profile-42".to_string()),
+            }],
+            launch_generations: BTreeMap::from([(42, 7)]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed vanished modern launch");
+
+    runtime.issue_monitor_vanished_window_release_events(&repo);
+
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("load generation ledger")
+        .expect("generation ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "periodic release must settle the exact Active generation first"
+    );
+    assert!(ledger.lifecycle_events.iter().any(|event| {
+        event.generation_id == holder.execution_binding.identity.generation_id
+            && event.session_id == holder.session_id
+            && event.from_status == gwt::cli::execution_state::ExecutionControlStatus::Active
+            && event.to_status == gwt::cli::execution_state::ExecutionControlStatus::Blocked
+    }));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload periodic release");
+    assert!(persisted.launched_issues.is_empty());
+    assert_eq!(persisted.revoked_through_generation.get(&42), Some(&7));
+}
+
+#[test]
+fn t255_periodic_vanished_modern_launch_without_exact_session_is_retained() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let vanished_window = "tab-1::agent-42";
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-51",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: vanished_window.to_string(),
+            }],
+            launched_control_identities: vec![gwt::IssueMonitorLaunchedControlIdentity {
+                issue_number: 42,
+                window_id: vanished_window.to_string(),
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/missing-session".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: None,
+                launch_generation: 7,
+                launch_profile_snapshot: Some(sample_issue_monitor_launch_profile()),
+                launch_profile_fingerprint: Some("profile-42".to_string()),
+            }],
+            launch_generations: BTreeMap::from([(42, 7)]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed vanished modern launch without Session");
+
+    runtime.issue_monitor_vanished_window_release_events(&repo);
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload retained launch");
+    assert_eq!(persisted.launched_issues[0].window_id, vanished_window);
+    assert_eq!(
+        persisted.launched_control_identities[0].launch_generation,
+        7
+    );
+    assert!(!persisted.revoked_through_generation.contains_key(&42));
+}
+
+#[test]
+fn a_launch_with_a_terminal_existing_pane_releases_its_slot_on_the_scheduled_tick() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    for (label, status) in [
+        ("stopped", WindowProcessStatus::Stopped),
+        ("error", WindowProcessStatus::Error),
+    ] {
+        let repo = temp.path().join(label);
+        std::fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-24".to_string(),
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-24",
+            repo.clone(),
+            WindowPreset::Agent,
+            status,
+        );
+        let (mut runtime, _recorded) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        runtime.blocking_tasks = BlockingTaskSpawner::failing("scan worker is out of scope here");
+
+        runtime.issue_monitor_scheduled_tick_events_at("2026-08-20T09:00:00Z");
+
+        assert!(
+            gwt::load_issue_monitor_prefs(&prefs_path)
+                .expect("reload")
+                .launched_issues
+                .is_empty(),
+            "a {label} pane is terminal evidence and cannot keep an active slot"
+        );
+    }
 }
 
 /// Issue #3627 (companion to the release above): the reclaim must not fire on
@@ -52201,7 +53401,10 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
         &repo,
         &monitor_prefs_path,
         "2026-08-10T01:00:00Z",
-        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(monitor),
+            should_scan: false,
+        }),
     );
     assert!(events.iter().any(|event| matches!(
         &event.event,
@@ -52263,7 +53466,10 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
-        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(monitor),
+            should_scan: false,
+        }),
     );
 
     assert!(events.iter().any(|event| matches!(
@@ -52896,7 +54102,7 @@ fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope(
         },
     );
     assert_eq!(accepted.len(), 1, "one request yields one correlated reply");
-    let first_revision = match &accepted[0] {
+    let (first_runtime_instance_id, first_revision) = match &accepted[0] {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event:
@@ -52905,6 +54111,7 @@ fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope(
                     inventory:
                         gwt::IssueMonitorRuntimeInventory::Available {
                             project_scope: observed_scope,
+                            runtime_instance_id,
                             revision,
                             observed_at,
                             windows,
@@ -52928,7 +54135,8 @@ fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope(
                 assert_eq!(window.pane_state, gwt::IssueMonitorPaneState::Running);
                 assert_eq!(window.wait_signal, None);
             }
-            *revision
+            assert!(!runtime_instance_id.is_empty());
+            (runtime_instance_id.clone(), *revision)
         }
         other => panic!("unexpected runtime inventory reply: {other:?}"),
     };
@@ -52950,6 +54158,7 @@ fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope(
                     request_id,
                     inventory:
                         gwt::IssueMonitorRuntimeInventory::Available {
+                            runtime_instance_id,
                             revision: next_revision,
                             ..
                         },
@@ -52958,6 +54167,7 @@ fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope(
         } => {
             assert_eq!(client_id, "pm-client");
             assert_eq!(request_id, "inventory-accepted-3712-next");
+            assert_eq!(runtime_instance_id, &first_runtime_instance_id);
             assert!(
                 *next_revision > first_revision,
                 "fresh server observations must carry a strictly newer revision"
@@ -52993,6 +54203,287 @@ fn t252_authenticated_runtime_inventory_is_correlated_and_refuses_foreign_scope(
             && observed_scope == &project_scope
             && reason == "project_scope_mismatch"
     ));
+}
+
+#[test]
+fn t252_runtime_inventory_revision_exhaustion_fails_closed() {
+    let counter = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+    assert_eq!(
+        next_issue_monitor_runtime_inventory_revision(&counter),
+        None,
+        "revision exhaustion must not panic or reuse authority"
+    );
+}
+
+/// SPEC #3431 T255 / FR-131: lost-close recovery accepts only an
+/// AppRuntime-authored, exact-project absence proof strictly newer than the
+/// control admission. Every inconclusive proof leaves the durable control
+/// bytes untouched.
+#[test]
+fn t255_runtime_inventory_settles_only_newer_exact_absence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    runtime
+        .window_hook_states
+        .insert("tab-1::pm-window".to_string(), WindowProcessStatus::Running);
+    let pm =
+        AgentSessionPrincipal::for_test(&repo, "pm-session-live").expect("registered PM principal");
+    let project_scope = gwt_core::paths::project_scope_hash(&repo)
+        .as_str()
+        .to_string();
+
+    let mut observe = |request_id: &str| {
+        let events = runtime.handle_agent_frontend_event(
+            "pm-client".to_string(),
+            pm.clone(),
+            AgentFrontendRequest::IssueMonitorRuntimeInventory {
+                expected_project_scope: project_scope.clone(),
+                request_id: request_id.to_string(),
+            },
+        );
+        assert_eq!(events.len(), 1, "one inventory request has one response");
+        match &events[0].event {
+            BackendEvent::IssueMonitorRuntimeInventory {
+                request_id: observed_request_id,
+                inventory,
+            } => {
+                assert_eq!(observed_request_id, request_id);
+                inventory.clone()
+            }
+            other => panic!("unexpected inventory response: {other:?}"),
+        }
+    };
+    let stale_inventory = observe("inventory-at-admission");
+    let fresh_absence = observe("inventory-after-admission");
+    let (admission_runtime_instance_id, admission_revision) = match &stale_inventory {
+        gwt::IssueMonitorRuntimeInventory::Available {
+            runtime_instance_id,
+            revision,
+            ..
+        } => (runtime_instance_id.clone(), *revision),
+        other => panic!("server must author available inventory: {other:?}"),
+    };
+    let fresh_revision = match &fresh_absence {
+        gwt::IssueMonitorRuntimeInventory::Available { revision, .. } => *revision,
+        other => panic!("server must author available inventory: {other:?}"),
+    };
+    assert!(fresh_revision > admission_revision);
+
+    let pinned_profile = gwt::IssueMonitorLaunchProfile {
+        agent_id: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        reasoning: None,
+        version: None,
+        session_mode: Default::default(),
+        skip_permissions: false,
+        codex_fast_mode: false,
+        runtime_target: Default::default(),
+        docker_service: None,
+        docker_lifecycle_intent: Default::default(),
+        windows_shell: None,
+    };
+    let target = gwt::IssueMonitorStopTarget {
+        issue_number: 42,
+        claim_id: Some("claim-42".to_string()),
+        delivery_id: Some("delivery-42".to_string()),
+        window_id: Some("tab-1::lost-agent".to_string()),
+        launch_generation: Some(7),
+        claim_owner: Some("host/agent-42".to_string()),
+        materializer_window_id: Some("tab-1::lost-materializer".to_string()),
+    };
+    let baseline = gwt::IssueMonitorPrefs {
+        enabled: true,
+        effect_authority_epoch: 9,
+        launch_generations: BTreeMap::from([(42, 7)]),
+        revoked_through_generation: BTreeMap::from([(42, 7)]),
+        pm_control_receipts: vec![gwt::IssueMonitorPmControlReceipt {
+            operation_id: "recover-lost-close-3712".to_string(),
+            action: gwt::IssueMonitorPmControlAction::Recover,
+            actor_session: "pm-session-live".to_string(),
+            pm_registration_generation: 3,
+            issue_number: 42,
+            target_fingerprint: "recover-target-fingerprint".to_string(),
+            pinned_profile_digest: "pinned-profile-digest".to_string(),
+            reason: "recover lost close".to_string(),
+            outcome: gwt::IssueMonitorPmControlOutcome::RecoveryPending,
+            requested_at: "2026-08-20T10:00:00Z".to_string(),
+            settled_at: None,
+        }],
+        pending_controls: vec![gwt::IssueMonitorPendingControl {
+            operation_id: "recover-lost-close-3712".to_string(),
+            project_key: project_scope.clone(),
+            action: gwt::IssueMonitorPmControlAction::Recover,
+            target,
+            source_identity: gwt::IssueMonitorPmControlSourceIdentity {
+                issue_number: 42,
+                launch_generation: 7,
+                claim_id: "claim-42".to_string(),
+                claim_owner: "host/agent-42".to_string(),
+                delivery_id: "delivery-42".to_string(),
+                materializer_window_id: Some("tab-1::lost-materializer".to_string()),
+                window_id: Some("tab-1::lost-agent".to_string()),
+                launch_profile_snapshot: Some(pinned_profile.clone()),
+                launch_profile_fingerprint: Some("pinned-profile-digest".to_string()),
+            },
+            next_launch_profile: Some(pinned_profile),
+            reason: "recover lost close".to_string(),
+            requested_at: "2026-08-20T10:00:00Z".to_string(),
+            control_state_revision: admission_revision,
+            admission_runtime_fence: Some(gwt::IssueMonitorRuntimeInventoryFence {
+                runtime_instance_id: admission_runtime_instance_id,
+                revision: admission_revision,
+            }),
+            teardown_required: true,
+            teardown_settled: false,
+            teardown_settled_at: None,
+            teardown_inventory_revision: None,
+            teardown_runtime_fence: None,
+            claim_renewal_effect_id: None,
+            claim_renewal_sequence: 0,
+            claim_renewal_due_at: None,
+            claim_release_required: true,
+            claim_release_prepared: false,
+            claim_release_effect_id: None,
+            claim_release_settled: false,
+            claim_release_settled_at: None,
+            auto_merge_disarm_required: false,
+            auto_merge_disarm_effect_id: None,
+            auto_merge_disarm_settled: true,
+            auto_merge_disarm_settled_at: Some("2026-08-20T10:00:00Z".to_string()),
+            execution_settlement: Some(
+                gwt::issue_monitor::IssueMonitorPmControlExecutionSettlement {
+                    generation_id: "generation-42-7".to_string(),
+                    session_id: "source-agent-session".to_string(),
+                    settlement_operation_id: "recover-lost-close-3712:execution-settlement"
+                        .to_string(),
+                    settled: false,
+                    settled_at: None,
+                },
+            ),
+            held: false,
+        }],
+        control_state_revision: admission_revision,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+
+    let mut present = fresh_absence.clone();
+    if let gwt::IssueMonitorRuntimeInventory::Available { windows, .. } = &mut present {
+        windows.push(gwt::IssueMonitorRuntimeWindow {
+            window_id: "tab-1::lost-agent".to_string(),
+            pane_state: gwt::IssueMonitorPaneState::Running,
+            wait_signal: None,
+        });
+    }
+    let mut ambiguous = present.clone();
+    if let gwt::IssueMonitorRuntimeInventory::Available { windows, .. } = &mut ambiguous {
+        windows.push(gwt::IssueMonitorRuntimeWindow {
+            window_id: "tab-1::lost-agent".to_string(),
+            pane_state: gwt::IssueMonitorPaneState::Stopped,
+            wait_signal: None,
+        });
+    }
+    let unavailable = gwt::IssueMonitorRuntimeInventory::Unavailable {
+        project_scope: project_scope.clone(),
+        observed_at: "2026-08-20T10:00:02Z".to_string(),
+        reason: "runtime_unavailable".to_string(),
+    };
+    let foreign_absence = match fresh_absence.clone() {
+        gwt::IssueMonitorRuntimeInventory::Available {
+            runtime_instance_id,
+            revision,
+            observed_at,
+            windows,
+            ..
+        } => gwt::IssueMonitorRuntimeInventory::Available {
+            project_scope: "foreign-scope".to_string(),
+            runtime_instance_id,
+            revision,
+            observed_at,
+            windows,
+        },
+        other => other,
+    };
+
+    for (name, inconclusive) in [
+        ("stale", stale_inventory),
+        ("present", present),
+        ("ambiguous", ambiguous),
+        ("unavailable", unavailable),
+        ("foreign_scope", foreign_absence),
+    ] {
+        let mut state = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            baseline.clone(),
+        );
+        let before = state.prefs();
+
+        let outcome = state.settle_pm_control_runtime_absence(
+            "recover-lost-close-3712",
+            &inconclusive,
+            "2026-08-20T10:00:03Z",
+        );
+
+        assert_eq!(
+            outcome,
+            gwt::IssueMonitorPmControlSettlement::Unrelated,
+            "{name} inventory is not proof of exact absence"
+        );
+        assert_eq!(
+            state.prefs(),
+            before,
+            "{name} must be a zero-mutation refusal"
+        );
+    }
+
+    let mut state =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), baseline.clone());
+    let outcome = state.settle_pm_control_runtime_absence(
+        "recover-lost-close-3712",
+        &fresh_absence,
+        "2026-08-20T10:00:03Z",
+    );
+    assert!(matches!(
+        outcome,
+        gwt::IssueMonitorPmControlSettlement::PrerequisiteSettled {
+            operation_id,
+            release_effect: Some(_),
+        } if operation_id == "recover-lost-close-3712"
+    ));
+    let settled = state.prefs();
+    let pending = settled
+        .pending_controls
+        .first()
+        .expect("release barrier remains");
+    assert!(pending.teardown_settled);
+    assert_eq!(pending.teardown_inventory_revision, Some(fresh_revision));
+    assert!(pending.claim_release_prepared);
+    assert!(settled.pending_effects.iter().any(|effect| matches!(
+        &effect.payload,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42,
+            claim_id,
+            owner,
+        } if claim_id == "claim-42" && owner == "host/agent-42"
+    )));
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &baseline).expect("persist pending control");
+    runtime.issue_monitor_windows_closed_events(&repo, &["tab-1::lost-agent".to_string()]);
+    let closed = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload close settlement");
+    let pending = closed
+        .pending_controls
+        .first()
+        .expect("claim release remains pending after exact close");
+    assert!(
+        pending.teardown_settled && pending.claim_release_prepared,
+        "pane.close must route the pending source generation through teardown settlement"
+    );
 }
 
 #[test]
@@ -53188,7 +54679,10 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
-        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(scanned),
+            should_scan: false,
+        }),
     );
     let status = events
         .iter()
@@ -53240,9 +54734,10 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
             &repo,
             &prefs_path,
             "2026-08-10T01:00:00Z",
-            Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(
-                scanned.clone(),
-            ))),
+            Ok(ScheduledIssueMonitorScanOutcome::Applied {
+                monitor: Box::new(scanned.clone()),
+                should_scan: false,
+            }),
         )
         .is_empty());
 
@@ -53256,7 +54751,10 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
             &repo,
             &prefs_path,
             "2026-08-10T01:01:00Z",
-            Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
+            Ok(ScheduledIssueMonitorScanOutcome::Applied {
+                monitor: Box::new(scanned),
+                should_scan: false,
+            }),
         )
         .is_empty());
 }
@@ -53339,7 +54837,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     )
     .expect("an exhausted read phase must not fail the commit");
 
-    let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
+    let ScheduledIssueMonitorScanOutcome::Applied { monitor: state, .. } = outcome else {
         panic!("the scan holds authority, so it must commit its own findings");
     };
     let status = state.status_view();
@@ -53515,7 +55013,10 @@ fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
         &repo,
         &prefs_path,
         "2026-08-10T01:00:00Z",
-        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+        Ok(ScheduledIssueMonitorScanOutcome::Applied {
+            monitor: Box::new(monitor),
+            should_scan: false,
+        }),
     );
 
     assert!(events.iter().any(|event| matches!(

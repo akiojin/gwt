@@ -789,6 +789,10 @@ pub(crate) enum AgentFrontendRequest {
     IssueMonitorScanNow {
         expected_project_scope: String,
     },
+    IssueMonitorRuntimeInventory {
+        expected_project_scope: String,
+        request_id: String,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
@@ -807,6 +811,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             }
             Self::IssueMonitorScanNow { .. } => {
                 formatter.write_str("AgentFrontendRequest::IssueMonitorScanNow")
+            }
+            Self::IssueMonitorRuntimeInventory { .. } => {
+                formatter.write_str("AgentFrontendRequest::IssueMonitorRuntimeInventory")
             }
         }
     }
@@ -3339,6 +3346,13 @@ impl AgentPaneSessionScope {
             } => Some(AgentFrontendRequest::IssueMonitorScanNow {
                 expected_project_scope,
             }),
+            FrontendEvent::AgentIssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            } => Some(AgentFrontendRequest::IssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            }),
             _ => None,
         }
     }
@@ -3361,6 +3375,7 @@ impl AgentPaneSessionScope {
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            "issue_monitor_runtime_inventory" => Some(payload),
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.

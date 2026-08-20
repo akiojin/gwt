@@ -48,6 +48,7 @@ const PANE_CLOSE_RESULT_DEADLINE: Duration = Duration::from_secs(2);
 const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
 const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
 const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
+const ISSUE_MONITOR_RUNTIME_INVENTORY_DEADLINE: Duration = Duration::from_secs(5);
 const PM_TARGET_REFUSAL: &str =
     "pm.message.send refused: target is not an authorized live agent pane";
 
@@ -75,6 +76,83 @@ pub(super) fn request_issue_monitor_scan_now(project_root: &Path) -> Result<(), 
         &ws_url,
         expected_project_scope.as_str(),
     ))
+}
+
+/// Ask the authenticated AppRuntime authority for one exact-project pane
+/// inventory. Unlike `pane.list`, this response has no compatibility fallback
+/// and therefore cannot admit windows from another runtime/project.
+#[cfg_attr(unix, allow(dead_code))]
+pub(super) fn request_issue_monitor_runtime_inventory(
+    project_root: &Path,
+) -> Result<crate::issue_monitor::IssueMonitorRuntimeInventory, String> {
+    let ws_url = pane_websocket_url_from_env().map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor runtime inventory endpoint is unavailable");
+        "runtime_inventory_unavailable".to_string()
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to create Issue Monitor runtime inventory runtime");
+            "runtime_inventory_unavailable".to_string()
+        })?;
+    let expected_project_scope = gwt_core::paths::project_scope_hash(project_root);
+    runtime.block_on(request_issue_monitor_runtime_inventory_async(
+        &ws_url,
+        expected_project_scope.as_str(),
+    ))
+}
+
+async fn request_issue_monitor_runtime_inventory_async(
+    ws_url: &str,
+    expected_project_scope: &str,
+) -> Result<crate::issue_monitor::IssueMonitorRuntimeInventory, String> {
+    let request =
+        pane_websocket_request(ws_url).map_err(|_| "runtime_inventory_unavailable".to_string())?;
+    let mut socket = connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(|error| {
+            let code = issue_monitor_scan_connect_error(&error);
+            tracing::warn!(%error, code, "Issue Monitor runtime inventory connection failed");
+            code.to_string()
+        })?;
+    let request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "agent_issue_monitor_runtime_inventory",
+            "expected_project_scope": expected_project_scope,
+            "request_id": request_id,
+        }),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor runtime inventory request failed");
+        "runtime_inventory_unavailable".to_string()
+    })?;
+
+    tokio::time::timeout(ISSUE_MONITOR_RUNTIME_INVENTORY_DEADLINE, async {
+        loop {
+            let value = next_backend_json_unbounded(&mut socket)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "Issue Monitor runtime inventory response failed");
+                    "runtime_inventory_unavailable".to_string()
+                })?;
+            if let Some(inventory) =
+                parse_issue_monitor_runtime_inventory(&value, &request_id, expected_project_scope)
+                    .map_err(|error| {
+                    tracing::warn!(%error, "Issue Monitor runtime inventory response was invalid");
+                    "runtime_inventory_unavailable".to_string()
+                })?
+            {
+                return Ok(inventory);
+            }
+        }
+    })
+    .await
+    .map_err(|_| "runtime_inventory_unavailable".to_string())?
 }
 
 async fn request_issue_monitor_scan_now_async(
@@ -1027,6 +1105,36 @@ fn parse_issue_monitor_scan_result(value: &Value) -> Result<Option<IssueMonitorS
     Ok(Some(IssueMonitorScanReply { accepted, reason }))
 }
 
+fn parse_issue_monitor_runtime_inventory(
+    value: &Value,
+    expected_request_id: &str,
+    expected_project_scope: &str,
+) -> Result<Option<crate::issue_monitor::IssueMonitorRuntimeInventory>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("issue_monitor_runtime_inventory") {
+        return Ok(None);
+    }
+    if value.get("request_id").and_then(Value::as_str) != Some(expected_request_id) {
+        return Ok(None);
+    }
+    let inventory = value
+        .get("inventory")
+        .cloned()
+        .ok_or_else(|| "issue_monitor_runtime_inventory missing inventory".to_string())?;
+    let inventory =
+        serde_json::from_value::<crate::issue_monitor::IssueMonitorRuntimeInventory>(inventory)
+            .map_err(|error| format!("issue_monitor_runtime_inventory is invalid: {error}"))?;
+    let observed_project_scope = match &inventory {
+        crate::issue_monitor::IssueMonitorRuntimeInventory::Available { project_scope, .. }
+        | crate::issue_monitor::IssueMonitorRuntimeInventory::Unavailable {
+            project_scope, ..
+        } => project_scope,
+    };
+    if observed_project_scope != expected_project_scope {
+        return Err("issue_monitor_runtime_inventory project scope mismatch".to_string());
+    }
+    Ok(Some(inventory))
+}
+
 /// The injected text must end with a submit key so the runtime actually
 /// queues the line instead of leaving it in the composer.
 fn ensure_trailing_submit(text: &str) -> String {
@@ -1477,6 +1585,31 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn t252_runtime_inventory_parser_rejects_foreign_project_scope() {
+        let response = serde_json::json!({
+            "kind": "issue_monitor_runtime_inventory",
+            "request_id": "inventory-request-3712",
+            "inventory": {
+                "availability": "available",
+                "project_scope": "foreign-project-scope",
+                "runtime_instance_id": "foreign-runtime-instance",
+                "revision": 7,
+                "observed_at": "2026-08-20T00:00:00Z",
+                "windows": [],
+            },
+        });
+
+        let error = parse_issue_monitor_runtime_inventory(
+            &response,
+            "inventory-request-3712",
+            "expected-project-scope",
+        )
+        .expect_err("a correlated response from another project is not proof");
+
+        assert!(error.contains("project scope mismatch"), "{error}");
     }
 
     #[test]

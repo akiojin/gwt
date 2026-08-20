@@ -240,8 +240,9 @@ fn inject_recovery_session_race(session_id: &str, race: RecoverySessionRace) {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenerationWriteFailurePoint {
-    AfterLedger,
-    AfterProjection,
+    LedgerCommitted,
+    ProjectionPublished,
+    AuthorityCommittedBeforeHandoffClear,
 }
 
 #[cfg(test)]
@@ -291,7 +292,7 @@ fn set_generation_write_failure(point: GenerationWriteFailurePoint) {
 
 #[cfg(test)]
 pub(crate) fn set_generation_write_failure_after_ledger() {
-    set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
+    set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
 }
 
 #[cfg(test)]
@@ -305,6 +306,11 @@ fn fail_generation_write_if_requested(point: GenerationWriteFailurePoint) -> io:
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+fn take_generation_write_failure() -> Option<GenerationWriteFailurePoint> {
+    GENERATION_WRITE_FAILURE.with(std::cell::Cell::take)
 }
 
 #[cfg(test)]
@@ -1626,6 +1632,49 @@ fn validate_generation_ledger(
                 ));
             }
         }
+    }
+
+    let continuation_operation_ids = ledger
+        .continuation_attempts
+        .iter()
+        .map(|attempt| attempt.request.operation_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let takeover_operation_ids = ledger
+        .takeover_attempts
+        .iter()
+        .map(|attempt| attempt.request.operation_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let validation_operation_ids = ledger
+        .continuation_validations
+        .iter()
+        .map(|audit| audit.operation_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut lifecycle_operation_ids = std::collections::HashSet::new();
+    for operation_id in ledger
+        .lifecycle_events
+        .iter()
+        .filter_map(|event| event.operation_id.as_deref())
+    {
+        if !lifecycle_operation_ids.insert(operation_id) {
+            return Err(invalid_generation_data(
+                "execution lifecycle operation id appears more than once",
+            ));
+        }
+    }
+    let operation_namespace_collision = continuation_operation_ids.iter().any(|operation_id| {
+        takeover_operation_ids.contains(operation_id)
+            || validation_operation_ids.contains(operation_id)
+            || lifecycle_operation_ids.contains(operation_id)
+    }) || takeover_operation_ids.iter().any(|operation_id| {
+        validation_operation_ids.contains(operation_id)
+            || lifecycle_operation_ids.contains(operation_id)
+    }) || validation_operation_ids
+        .iter()
+        .any(|operation_id| lifecycle_operation_ids.contains(operation_id));
+    if operation_namespace_collision {
+        return Err(invalid_generation_data(
+            "execution operation id is shared across generation namespaces",
+        ));
     }
 
     let mut previous_attempt_hash = "";
@@ -4444,11 +4493,50 @@ fn write_activated_generation(
     // rather than accepting a ghost flat ECR.
     write_owner_ledger(context, ledger)?;
     #[cfg(test)]
-    fail_generation_write_if_requested(GenerationWriteFailurePoint::AfterLedger)?;
+    fail_generation_write_if_requested(GenerationWriteFailurePoint::LedgerCommitted)?;
     write_execution_projection(context, projection)?;
     #[cfg(test)]
-    fail_generation_write_if_requested(GenerationWriteFailurePoint::AfterProjection)?;
+    fail_generation_write_if_requested(GenerationWriteFailurePoint::ProjectionPublished)?;
     write_generation_pointer(context, ledger, projection)
+}
+
+/// Repair only the worktree-local publication of an already committed owner
+/// ledger. A strict read proves the fully committed replay and performs no
+/// writes. An interrupted pointer-last commit is repaired only after the
+/// global pointer/projection fence proves that no foreign owner replaced it.
+fn repair_generation_publication_if_needed(
+    context: &GenerationTransactionContext,
+    ledger: &ExecutionGenerationLedger,
+    projection: &str,
+) -> io::Result<()> {
+    if load_generation_ledger_from_context(context).is_ok_and(|strict| {
+        strict
+            .as_ref()
+            .is_some_and(|strict_ledger| strict_ledger == ledger)
+    }) {
+        return Ok(());
+    }
+    validate_generation_activation_owner(context, true)?;
+    let same_owner_publication = generation_pointer_owner_hint(&context.worktree)?
+        .is_some_and(|owner| owner == context.owner)
+        || recovery_projection_owner_hint(&context.worktree)?
+            .is_some_and(|owner| owner == context.owner);
+    if !same_owner_publication {
+        return Err(generation_conflict(
+            "generation publication repair has no same-owner pointer/projection fence",
+        ));
+    }
+    write_execution_projection(context, projection)?;
+    write_generation_pointer(context, ledger, projection)?;
+    let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+        invalid_generation_data("generation publication repair lost strict authority")
+    })?;
+    if readback != *ledger {
+        return Err(invalid_generation_data(
+            "generation publication repair changed owner ledger authority",
+        ));
+    }
+    Ok(())
 }
 
 fn deterministic_generation_id(seed: &[u8]) -> String {
@@ -5091,6 +5179,10 @@ pub fn record_rebound_continuation_validation(
                 .takeover_attempts
                 .iter()
                 .any(|attempt| attempt.request.operation_id == operation_id)
+            || ledger
+                .lifecycle_events
+                .iter()
+                .any(|event| event.operation_id.as_deref() == Some(operation_id))
         {
             return Err(generation_conflict(
                 "continuation operation id is already bound to another operation",
@@ -5363,9 +5455,17 @@ pub fn prepare_generation_takeover(
             .continuation_attempts
             .iter()
             .any(|attempt| attempt.request.operation_id == request.operation_id)
+            || ledger
+                .continuation_validations
+                .iter()
+                .any(|audit| audit.operation_id == request.operation_id)
+            || ledger
+                .lifecycle_events
+                .iter()
+                .any(|event| event.operation_id.as_deref() == Some(request.operation_id.as_str()))
         {
             return Err(generation_conflict(
-                "operation id is already bound to a successor generation",
+                "operation id is already bound to another generation operation",
             ));
         }
         if let Some(existing) =
@@ -6121,6 +6221,229 @@ pub fn prepare_exact_manual_launch_successor(
     })
 }
 
+/// Typed receipt for an exact terminal Active-generation settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", content = "receipt", rename_all = "snake_case")]
+pub enum ExactTerminalActiveSettlementResult {
+    Settled(GenerationLifecycleEvent),
+    Replayed(GenerationLifecycleEvent),
+}
+
+enum ExactTerminalActiveAction<'a> {
+    SettleOnly {
+        operation_id: &'a str,
+    },
+    PrepareSuccessor {
+        request: &'a SuccessorRequest,
+        settlement_operation_id: String,
+    },
+}
+
+enum ExactTerminalActiveTransactionResult {
+    Settlement(ExactTerminalActiveSettlementResult),
+    Successor(Box<ContinuationAttempt>),
+}
+
+impl ExactTerminalActiveAction<'_> {
+    fn operation_id(&self) -> &str {
+        match self {
+            Self::SettleOnly { operation_id } => operation_id,
+            Self::PrepareSuccessor {
+                settlement_operation_id,
+                ..
+            } => settlement_operation_id,
+        }
+    }
+
+    fn successor_request(&self) -> Option<&SuccessorRequest> {
+        match self {
+            Self::SettleOnly { .. } => None,
+            Self::PrepareSuccessor { request, .. } => Some(request),
+        }
+    }
+}
+
+/// Check whether the authoritative owner ledger contains one exact terminal
+/// settlement receipt without consulting ephemeral Session/runtime state.
+///
+/// A fully published receipt is a zero-write read. If the exact receipt is
+/// already authoritative but its same-owner projection/pointer publication is
+/// partial, the check repairs that publication and requires strict readback
+/// before returning `true`.
+///
+/// A missing operation is a normal `false`. Reuse of the operation id by a
+/// different generation namespace or by a differently targeted lifecycle
+/// event fails closed so callers cannot turn a collision into a recovery
+/// prerequisite.
+pub(crate) fn exact_terminal_settlement_receipt_committed(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+    expected_generation_id: &str,
+    expected_session_id: &str,
+    reason: &str,
+) -> io::Result<bool> {
+    if operation_id.trim() != operation_id
+        || operation_id.is_empty()
+        || operation_id.len() > 256
+        || operation_id.chars().any(char::is_control)
+        || expected_generation_id.trim().is_empty()
+        || expected_session_id.trim().is_empty()
+        || reason.trim().is_empty()
+    {
+        return Err(invalid_generation_data(
+            "exact-terminal settlement receipt identity is invalid",
+        ));
+    }
+    with_generation_owner_lease(worktree, owner, |context| {
+        let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+            return Ok(false);
+        };
+        if ledger
+            .continuation_attempts
+            .iter()
+            .any(|attempt| attempt.request.operation_id == operation_id)
+            || ledger
+                .takeover_attempts
+                .iter()
+                .any(|attempt| attempt.request.operation_id == operation_id)
+            || ledger
+                .continuation_validations
+                .iter()
+                .any(|audit| audit.operation_id == operation_id)
+        {
+            return Err(generation_conflict(
+                "exact-terminal settlement receipt operation id belongs to another generation operation",
+            ));
+        }
+        let Some(event) = ledger
+            .lifecycle_events
+            .iter()
+            .find(|event| event.operation_id.as_deref() == Some(operation_id))
+        else {
+            return Ok(false);
+        };
+        if event.generation_id != expected_generation_id
+            || event.from_status != ExecutionControlStatus::Active
+            || event.to_status != ExecutionControlStatus::Blocked
+            || event.session_id != expected_session_id
+            || event.reason != reason
+        {
+            return Err(generation_conflict(
+                "exact-terminal settlement receipt operation id targets a different generation, Session, or reason",
+            ));
+        }
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let projection = ledger.effective_projection_for(current).to_string();
+        repair_generation_publication_if_needed(context, &ledger, &projection)?;
+        let strict = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data(
+                "exact-terminal settlement receipt repair lost strict generation authority",
+            )
+        })?;
+        if strict != ledger {
+            return Err(invalid_generation_data(
+                "exact-terminal settlement receipt repair changed generation authority",
+            ));
+        }
+        Ok(true)
+    })
+}
+
+fn exact_terminal_replay_manual_handoff_under_lease(
+    sessions_dir: &Path,
+    expected_session: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<Option<gwt_agent::SessionManualHandoffFence>> {
+    if !gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "exact-terminal replay handoff inspection requires the Session lease",
+        ));
+    }
+    let path = gwt_agent::manual_handoff_path(sessions_dir, &expected_session.session_id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let handoff = serde_json::from_slice::<gwt_agent::SessionManualHandoffFence>(&bytes).map_err(
+        |error| {
+            invalid_generation_data(format!(
+                "exact-terminal replay manual handoff is malformed: {error}"
+            ))
+        },
+    )?;
+    if handoff.schema_version != gwt_agent::SessionManualHandoffFence::CURRENT_SCHEMA_VERSION
+        || handoff.nonce.trim().is_empty()
+        || handoff.host_pid == 0
+        || handoff.host_started_at == 0
+        || handoff.execution_identity.session_id != expected_session.session_id
+    {
+        return Err(invalid_generation_data(
+            "exact-terminal replay manual handoff is invalid",
+        ));
+    }
+    if handoff.execution_identity != *expected_session {
+        return Err(generation_conflict(
+            "exact-terminal settlement replay found a handoff for a different Session identity",
+        ));
+    }
+    Ok(Some(handoff))
+}
+
+fn clear_exact_terminal_replay_manual_handoff_under_lease(
+    sessions_dir: &Path,
+    expected_session: &gwt_agent::SessionExecutionIdentity,
+    expected_handoff: &gwt_agent::SessionManualHandoffFence,
+) -> io::Result<()> {
+    if exact_terminal_replay_manual_handoff_under_lease(sessions_dir, expected_session)?.as_ref()
+        != Some(expected_handoff)
+    {
+        return Err(generation_conflict(
+            "exact-terminal settlement replay lost its exact manual handoff fence",
+        ));
+    }
+    fs::remove_file(gwt_agent::manual_handoff_path(
+        sessions_dir,
+        &expected_session.session_id,
+    ))
+}
+
+/// Settle the exact current producing generation without preparing a
+/// continuation successor.
+///
+/// The operation revalidates the owner generation, complete persisted Session
+/// incarnation, and decisive runtime evidence while holding the canonical
+/// owner -> Session leases. A response-loss retry with the same operation
+/// identity returns [`ExactTerminalActiveSettlementResult::Replayed`] without
+/// rewriting any generation-authority bytes.
+pub fn settle_exact_terminal_active_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+    sessions_dir: &Path,
+    expected_session: &gwt_agent::SessionExecutionIdentity,
+    expected_runtime: impl Into<gwt_agent::ManualLaunchRuntimeEvidence>,
+    reason: &str,
+) -> io::Result<ExactTerminalActiveSettlementResult> {
+    match transact_exact_terminal_active_generation(
+        worktree,
+        owner,
+        ExactTerminalActiveAction::SettleOnly { operation_id },
+        sessions_dir,
+        expected_session,
+        expected_runtime.into(),
+        reason,
+    )? {
+        ExactTerminalActiveTransactionResult::Settlement(result) => Ok(result),
+        ExactTerminalActiveTransactionResult::Successor(_) => Err(io::Error::other(
+            "settlement-only transaction unexpectedly prepared a successor",
+        )),
+    }
+}
+
 /// Prepare a fresh successor after proving that the exact current producing
 /// Session is durably terminal.
 ///
@@ -6139,21 +6462,61 @@ pub fn prepare_exact_terminal_active_successor(
     expected_runtime: impl Into<gwt_agent::ManualLaunchRuntimeEvidence>,
     reason: &str,
 ) -> io::Result<ContinuationAttempt> {
-    let expected_runtime = expected_runtime.into();
-    validate_successor_request(request)?;
-    if request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
+    let settlement_operation_id = format!("{}:terminalize-predecessor", request.operation_id);
+    match transact_exact_terminal_active_generation(
+        worktree,
+        owner,
+        ExactTerminalActiveAction::PrepareSuccessor {
+            request,
+            settlement_operation_id,
+        },
+        sessions_dir,
+        expected_session,
+        expected_runtime.into(),
+        reason,
+    )? {
+        ExactTerminalActiveTransactionResult::Successor(attempt) => Ok(*attempt),
+        ExactTerminalActiveTransactionResult::Settlement(_) => Err(io::Error::other(
+            "successor transaction completed without preparing its successor",
+        )),
+    }
+}
+
+fn transact_exact_terminal_active_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    action: ExactTerminalActiveAction<'_>,
+    sessions_dir: &Path,
+    expected_session: &gwt_agent::SessionExecutionIdentity,
+    expected_runtime: gwt_agent::ManualLaunchRuntimeEvidence,
+    reason: &str,
+) -> io::Result<ExactTerminalActiveTransactionResult> {
+    let operation_id = action.operation_id();
+    if operation_id.trim() != operation_id
+        || operation_id.is_empty()
+        || operation_id.len() > 256
+        || operation_id.chars().any(char::is_control)
+    {
         return Err(invalid_generation_data(
-            "exact-terminal fresh successor must use the canonical source without a Continue Work identity",
+            "exact-terminal settlement operation id is invalid",
         ));
+    }
+    if let Some(request) = action.successor_request() {
+        validate_successor_request(request)?;
+        if request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
+            return Err(invalid_generation_data(
+                "exact-terminal fresh successor must use the canonical source without a Continue Work identity",
+            ));
+        }
+        if request.initial_session_id == expected_session.session_id {
+            return Err(invalid_generation_data(
+                "successor Session must differ from the terminal predecessor Session",
+            ));
+        }
     }
     if reason.trim().is_empty() {
         return Err(invalid_generation_data(
-            "exact-terminal fresh successor requires a non-empty settlement reason",
-        ));
-    }
-    if request.initial_session_id == expected_session.session_id {
-        return Err(invalid_generation_data(
-            "successor Session must differ from the terminal predecessor Session",
+            "exact-terminal settlement requires a non-empty reason",
         ));
     }
     if expected_session.execution_binding.session_id != expected_session.session_id
@@ -6166,6 +6529,122 @@ pub fn prepare_exact_terminal_active_successor(
         ));
     }
     with_generation_owner_lease(worktree, owner, |context| {
+        let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        if ledger
+            .continuation_attempts
+            .iter()
+            .any(|attempt| attempt.request.operation_id == operation_id)
+            || ledger
+                .takeover_attempts
+                .iter()
+                .any(|attempt| attempt.request.operation_id == operation_id)
+            || ledger
+                .continuation_validations
+                .iter()
+                .any(|audit| audit.operation_id == operation_id)
+        {
+            return Err(generation_conflict(
+                "exact-terminal settlement operation id is already bound to another operation",
+            ));
+        }
+        let mut matching_events = ledger
+            .lifecycle_events
+            .iter()
+            .filter(|event| event.operation_id.as_deref() == Some(operation_id));
+        let replay_event = matching_events.next().cloned();
+        if matching_events.next().is_some() {
+            return Err(invalid_generation_data(
+                "exact-terminal settlement operation id appears more than once",
+            ));
+        }
+        if let Some(replay_event) = replay_event {
+            if replay_event.generation_id != current.identity.generation_id
+                || replay_event.generation_id
+                    != expected_session.execution_binding.identity.generation_id
+                || replay_event.from_status != ExecutionControlStatus::Active
+                || replay_event.to_status != ExecutionControlStatus::Blocked
+                || replay_event.session_id != expected_session.session_id
+                || replay_event.reason != reason
+                || ledger.effective_status_for(&current) != ExecutionControlStatus::Blocked
+            {
+                return Err(generation_conflict(
+                    "exact-terminal settlement operation replay targets a different generation, Session, or reason",
+                ));
+            }
+            let projection = ledger.effective_projection_for(&current).to_string();
+            let replay_result = if let Some(request) = action.successor_request() {
+                let Some(replay) =
+                    latest_operation_attempt(&ledger, request, &context.worktree_binding_hash)?
+                        .cloned()
+                else {
+                    return Err(generation_conflict(
+                        "terminal predecessor was Blocked without the requested successor attempt",
+                    ));
+                };
+                if replay.predecessor.generation_id != current.identity.generation_id
+                    || replay.predecessor_status != SuccessorPredecessorStatus::Blocked
+                {
+                    return Err(generation_conflict(
+                        "terminal predecessor successor replay no longer targets the exact generation",
+                    ));
+                }
+                ExactTerminalActiveTransactionResult::Successor(Box::new(replay))
+            } else {
+                ExactTerminalActiveTransactionResult::Settlement(
+                    ExactTerminalActiveSettlementResult::Replayed(replay_event),
+                )
+            };
+            return gwt_agent::with_session_path_lease(
+                sessions_dir,
+                &expected_session.session_id,
+                |session_state| {
+                    match session_state {
+                        gwt_agent::SessionPathState::Present(session) => {
+                            if gwt_agent::SessionExecutionIdentity::from_session(&session)
+                                .map_err(invalid_generation_data)?
+                                .as_ref()
+                                != Some(expected_session)
+                            {
+                                return Err(generation_conflict(
+                                    "exact-terminal settlement replay found a retargeted Session",
+                                ));
+                            }
+                        }
+                        gwt_agent::SessionPathState::Missing => {}
+                        gwt_agent::SessionPathState::Error(error) => return Err(error),
+                    }
+                    let handoff = exact_terminal_replay_manual_handoff_under_lease(
+                        sessions_dir,
+                        expected_session,
+                    )?;
+                    repair_generation_publication_if_needed(context, &ledger, &projection)?;
+                    if let Some(handoff) = handoff.as_ref() {
+                        clear_exact_terminal_replay_manual_handoff_under_lease(
+                            sessions_dir,
+                            expected_session,
+                            handoff,
+                        )?;
+                    }
+                    Ok(replay_result)
+                },
+            );
+        }
+        if ledger.effective_status_for(&current) == ExecutionControlStatus::Blocked {
+            return Err(generation_conflict(
+                "terminal predecessor was Blocked by another operation",
+            ));
+        }
         gwt_agent::with_session_lease(sessions_dir, &expected_session.session_id, |session| {
             if gwt_agent::SessionExecutionIdentity::from_session(session)
                 .ok()
@@ -6176,7 +6655,7 @@ pub fn prepare_exact_terminal_active_successor(
                     != Some(&context.worktree)
             {
                 return Err(generation_conflict(
-                    "terminal predecessor Session changed before successor preparation",
+                    "terminal predecessor Session changed before exact settlement",
                 ));
             }
             // Issue #3457: `Absent` carries no sidecar to revalidate, so the
@@ -6190,7 +6669,7 @@ pub fn prepare_exact_terminal_active_successor(
                     {
                         return Err(io::Error::new(
                             ErrorKind::PermissionDenied,
-                            "terminal predecessor published runtime evidence before successor preparation",
+                            "terminal predecessor published runtime evidence before exact settlement",
                         ));
                     }
                     None
@@ -6333,57 +6812,6 @@ pub fn prepare_exact_terminal_active_successor(
                 }
             };
 
-            let mut ledger =
-                load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
-                    io::Error::new(
-                        ErrorKind::NotFound,
-                        "owner generation ledger is not initialized",
-                    )
-                })?;
-            let current = ledger
-                .current_generation()
-                .ok_or_else(|| {
-                    invalid_generation_data("execution generation ledger current id is missing")
-                })?
-                .clone();
-            if ledger.effective_status_for(&current) == ExecutionControlStatus::Blocked {
-                let replay = ledger
-                        .continuation_attempts
-                        .iter()
-                        .rev()
-                        .find(|attempt| {
-                            attempt.request.operation_id == request.operation_id
-                                && attempt.worktree_binding_hash == context.worktree_binding_hash
-                        })
-                        .cloned()
-                    .ok_or_else(|| {
-                        generation_conflict(
-                            "terminal predecessor was Blocked without the requested successor attempt",
-                        )
-                    })?;
-                if replay.predecessor.generation_id != current.identity.generation_id
-                    || replay.predecessor_status != SuccessorPredecessorStatus::Blocked
-                {
-                    return Err(generation_conflict(
-                            "terminal predecessor successor replay no longer targets the exact generation",
-                        ));
-                }
-                let attempt = plan_successor_for_status(
-                    context,
-                    &mut ledger,
-                    request,
-                    SuccessorPredecessorStatus::Blocked,
-                )?;
-                if let Some(handoff) = manual_handoff.as_ref() {
-                    if !gwt_agent::clear_session_manual_handoff_under_lease(sessions_dir, handoff)?
-                    {
-                        return Err(io::Error::other(
-                            "Prepared successor replay lost its exact manual handoff fence",
-                        ));
-                    }
-                }
-                return Ok(attempt);
-            }
             if execution_binding_for_generation(&ledger, &current)
                 != expected_session.execution_binding.identity
             {
@@ -6393,7 +6821,7 @@ pub fn prepare_exact_terminal_active_successor(
             }
             if ledger.effective_status_for(&current) != ExecutionControlStatus::Active {
                 return Err(generation_conflict(
-                    "exact-terminal successor requires a current Active generation",
+                    "exact-terminal settlement requires a current Active generation",
                 ));
             }
             if ledger.continuation_attempts.iter().any(|attempt| {
@@ -6404,7 +6832,7 @@ pub fn prepare_exact_terminal_active_successor(
                     && attempt.status == GenerationTakeoverAttemptStatus::Prepared
             }) {
                 return Err(generation_conflict(
-                        "exact-terminal successor refuses while a Prepared successor or takeover targets the current generation",
+                        "exact-terminal settlement refuses while a Prepared successor or takeover targets the current generation",
                     ));
             }
 
@@ -6454,38 +6882,52 @@ pub fn prepare_exact_terminal_active_successor(
             record.missing_verification = Some("authenticated SessionStart readiness".to_string());
             record.settled_at = Some(recorded_at);
             let projection = serialized_execution_projection(&record)?;
-            append_lifecycle_event(
-                &mut ledger,
-                GenerationLifecycleEvent {
-                    sequence: 0,
-                    generation_id: current.identity.generation_id,
-                    from_status: ExecutionControlStatus::Active,
-                    to_status: ExecutionControlStatus::Blocked,
-                    session_id: expected_session.session_id.clone(),
-                    reason: reason.to_string(),
-                    operation_id: Some(format!("{}:terminalize-predecessor", request.operation_id)),
-                    recorded_at,
-                    execution_control_json: projection.clone(),
-                    previous_event_hash: String::new(),
-                    content_hash: String::new(),
-                },
-            );
-            let attempt = plan_successor_for_status(
-                context,
-                &mut ledger,
-                request,
-                SuccessorPredecessorStatus::Blocked,
-            )?;
+            let event = GenerationLifecycleEvent {
+                sequence: 0,
+                generation_id: current.identity.generation_id,
+                from_status: ExecutionControlStatus::Active,
+                to_status: ExecutionControlStatus::Blocked,
+                session_id: expected_session.session_id.clone(),
+                reason: reason.to_string(),
+                operation_id: Some(operation_id.to_string()),
+                recorded_at,
+                execution_control_json: projection.clone(),
+                previous_event_hash: String::new(),
+                content_hash: String::new(),
+            };
+            append_lifecycle_event(&mut ledger, event);
+            let result = match action.successor_request() {
+                Some(request) => ExactTerminalActiveTransactionResult::Successor(Box::new(
+                    plan_successor_for_status(
+                        context,
+                        &mut ledger,
+                        request,
+                        SuccessorPredecessorStatus::Blocked,
+                    )?,
+                )),
+                None => {
+                    let event = ledger.lifecycle_events.last().cloned().ok_or_else(|| {
+                        io::Error::other("exact-terminal settlement lost its lifecycle receipt")
+                    })?;
+                    ExactTerminalActiveTransactionResult::Settlement(
+                        ExactTerminalActiveSettlementResult::Settled(event),
+                    )
+                }
+            };
             stamp_generation_ledger(&mut ledger);
             write_activated_generation(context, &ledger, &projection)?;
+            #[cfg(test)]
+            fail_generation_write_if_requested(
+                GenerationWriteFailurePoint::AuthorityCommittedBeforeHandoffClear,
+            )?;
             if let Some(handoff) = manual_handoff.as_ref() {
                 if !gwt_agent::clear_session_manual_handoff_under_lease(sessions_dir, handoff)? {
                     return Err(io::Error::other(
-                        "Prepared successor committed but its exact manual handoff fence could not be cleared",
+                        "exact-terminal settlement committed but its manual handoff fence could not be cleared",
                     ));
                 }
             }
-            Ok(attempt)
+            Ok(result)
         })
     })
 }
@@ -6531,9 +6973,17 @@ fn plan_successor_for_status(
         .takeover_attempts
         .iter()
         .any(|attempt| attempt.request.operation_id == request.operation_id)
+        || ledger
+            .continuation_validations
+            .iter()
+            .any(|audit| audit.operation_id == request.operation_id)
+        || ledger
+            .lifecycle_events
+            .iter()
+            .any(|event| event.operation_id.as_deref() == Some(request.operation_id.as_str()))
     {
         return Err(generation_conflict(
-            "operation id is already bound to a same-generation takeover",
+            "operation id is already bound to another generation operation",
         ));
     }
     if let Some(existing) =
@@ -12184,6 +12634,816 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn exact_terminal_active_generation_settles_without_successor_and_replays_byte_identically() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-settle-only";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+
+        let settled = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-generation",
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .expect("exact absent runtime should settle the current Active generation");
+        let ExactTerminalActiveSettlementResult::Settled(event) = settled else {
+            panic!("the first settlement must report Settled");
+        };
+        assert_eq!(event.generation_id, predecessor.generation_id);
+        assert_eq!(event.session_id, session_id);
+        assert_eq!(
+            event.operation_id.as_deref(),
+            Some("monitor-recover-generation")
+        );
+
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(ledger.current_generation_id, predecessor.generation_id);
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+        assert!(
+            ledger.continuation_attempts.is_empty(),
+            "settlement-only recovery must not create a continuation attempt"
+        );
+        let committed_bytes = generation_authority_bytes(dir.path(), owner);
+        fs::remove_file(sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let changed_runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        fs::create_dir_all(changed_runtime_path.parent().unwrap()).unwrap();
+        fs::write(&changed_runtime_path, b"{changed-after-commit").unwrap();
+        set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
+
+        let replayed = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-generation",
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .expect("durable authority should replay after ephemeral Session/runtime cleanup");
+        assert_eq!(
+            replayed,
+            ExactTerminalActiveSettlementResult::Replayed(event)
+        );
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_bytes
+        );
+        assert_eq!(
+            take_generation_write_failure(),
+            Some(GenerationWriteFailurePoint::LedgerCommitted),
+            "a fully committed replay must not enter the generation writer",
+        );
+    }
+
+    #[test]
+    fn exact_terminal_settlement_replay_clears_exact_handoff_left_after_authority_commit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-replay-handoff";
+        let operation_id = "monitor-recover-replay-handoff";
+        let reason = "exact producing Session is absent";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let host_started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        let lingering_handoff = gwt_agent::with_session_lease(&sessions_dir, session_id, |_| {
+            gwt_agent::begin_session_manual_handoff_under_lease(
+                &sessions_dir,
+                &identity,
+                "authority-commit-response-loss",
+                host_started_at,
+            )
+        })
+        .unwrap()
+        .expect("create the exact manual handoff fence");
+
+        set_generation_write_failure(
+            GenerationWriteFailurePoint::AuthorityCommittedBeforeHandoffClear,
+        );
+        assert_eq!(
+            settle_exact_terminal_active_generation(
+                dir.path(),
+                owner,
+                operation_id,
+                &sessions_dir,
+                &identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+                reason,
+            )
+            .expect_err("the post-commit response-loss boundary must surface")
+            .kind(),
+            ErrorKind::Other,
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked),
+            "the owner authority is already committed before handoff cleanup",
+        );
+        gwt_agent::with_session_lease(&sessions_dir, session_id, |_| {
+            assert!(gwt_agent::session_manual_handoff_matches_under_lease(
+                &sessions_dir,
+                &lingering_handoff,
+            )?);
+            Ok(())
+        })
+        .unwrap();
+        let committed_authority = generation_authority_bytes(dir.path(), owner);
+        let handoff_path = gwt_agent::manual_handoff_path(&sessions_dir, session_id);
+        let exact_handoff_bytes = fs::read(&handoff_path).unwrap();
+        let mut retargeted_handoff = lingering_handoff.clone();
+        retargeted_handoff.execution_identity.agent_id =
+            gwt_agent::AgentId::Custom("retargeted-after-commit".to_string());
+        fs::write(
+            &handoff_path,
+            serde_json::to_vec_pretty(&retargeted_handoff).unwrap(),
+        )
+        .unwrap();
+        let retargeted_handoff_bytes = fs::read(&handoff_path).unwrap();
+        assert_eq!(
+            settle_exact_terminal_active_generation(
+                dir.path(),
+                owner,
+                operation_id,
+                &sessions_dir,
+                &identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+                reason,
+            )
+            .expect_err("a retargeted residual handoff must fail closed")
+            .kind(),
+            ErrorKind::AlreadyExists,
+        );
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_authority,
+            "retargeted handoff refusal must not rewrite generation authority",
+        );
+        assert_eq!(
+            fs::read(&handoff_path).unwrap(),
+            retargeted_handoff_bytes,
+            "retargeted handoff refusal must preserve the foreign fence",
+        );
+        fs::write(&handoff_path, exact_handoff_bytes).unwrap();
+
+        set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
+        let replayed = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            operation_id,
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            reason,
+        )
+        .expect("the same operation replay must finish exact handoff cleanup");
+        assert!(matches!(
+            replayed,
+            ExactTerminalActiveSettlementResult::Replayed(_)
+        ));
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_authority,
+            "handoff recovery must not rewrite generation authority",
+        );
+        assert_eq!(
+            take_generation_write_failure(),
+            Some(GenerationWriteFailurePoint::LedgerCommitted),
+            "handoff recovery must not enter the generation writer",
+        );
+        gwt_agent::with_session_lease(&sessions_dir, session_id, |_| {
+            assert!(!gwt_agent::session_manual_handoff_matches_under_lease(
+                &sessions_dir,
+                &lingering_handoff,
+            )?);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn exact_terminal_settlement_receipt_check_is_exact_and_survives_session_cleanup() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-receipt-check";
+        let operation_id = "monitor-recover-receipt-check";
+        let reason = "exact producing Session is absent";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let session = gwt_agent::Session::load(&session_path).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+
+        assert!(!exact_terminal_settlement_receipt_committed(
+            dir.path(),
+            owner,
+            operation_id,
+            &predecessor.generation_id,
+            session_id,
+            reason,
+        )
+        .unwrap());
+        settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            operation_id,
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            reason,
+        )
+        .unwrap();
+        fs::remove_file(&session_path).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        fs::write(&runtime_path, b"{ephemeral-runtime-cleaned").unwrap();
+        let committed_authority = generation_authority_bytes(dir.path(), owner);
+
+        assert!(exact_terminal_settlement_receipt_committed(
+            dir.path(),
+            owner,
+            operation_id,
+            &predecessor.generation_id,
+            session_id,
+            reason,
+        )
+        .unwrap());
+        for (generation_id, replay_session_id, replay_reason) in [
+            ("foreign-generation", session_id, reason),
+            (
+                predecessor.generation_id.as_str(),
+                "retargeted-session",
+                reason,
+            ),
+            (
+                predecessor.generation_id.as_str(),
+                session_id,
+                "different terminal reason",
+            ),
+        ] {
+            assert_eq!(
+                exact_terminal_settlement_receipt_committed(
+                    dir.path(),
+                    owner,
+                    operation_id,
+                    generation_id,
+                    replay_session_id,
+                    replay_reason,
+                )
+                .expect_err("an operation-id collision must fail closed")
+                .kind(),
+                ErrorKind::AlreadyExists,
+            );
+        }
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_authority,
+            "receipt checks must never rewrite generation authority",
+        );
+    }
+
+    #[test]
+    fn exact_terminal_settlement_receipt_check_repairs_partial_publication_after_session_cleanup() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-receipt-partial";
+        let operation_id = "monitor-recover-receipt-partial";
+        let reason = "exact producing Session is absent";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let session = gwt_agent::Session::load(&session_path).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+
+        set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
+        settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            operation_id,
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            reason,
+        )
+        .expect_err("the fixture must stop after the authoritative ledger commit");
+        let owner_ledger_before = fs::read(generation_ledger_path(dir.path(), owner).unwrap())
+            .expect("the exact lifecycle receipt must already be authoritative");
+        assert!(
+            load_generation_ledger(dir.path(), owner).is_err(),
+            "the pointer/projection pair must still expose the partial publication",
+        );
+        fs::remove_file(session_path).unwrap();
+
+        assert!(exact_terminal_settlement_receipt_committed(
+            dir.path(),
+            owner,
+            operation_id,
+            &predecessor.generation_id,
+            session_id,
+            reason,
+        )
+        .expect("the exact receipt check must repair same-owner publication"));
+        assert!(
+            load_generation_ledger(dir.path(), owner).unwrap().is_some(),
+            "the receipt check must finish with strict pointer/projection readback",
+        );
+        assert_eq!(
+            fs::read(generation_ledger_path(dir.path(), owner).unwrap()).unwrap(),
+            owner_ledger_before,
+            "receipt repair must not rewrite the authoritative owner ledger",
+        );
+    }
+
+    #[test]
+    fn exact_terminal_settlement_replay_repairs_ledger_first_partial_commit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        for (index, failure_point) in [
+            GenerationWriteFailurePoint::LedgerCommitted,
+            GenerationWriteFailurePoint::ProjectionPublished,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                number: generation_owner().number + 200 + index as u64,
+                ..generation_owner()
+            };
+            let session_id = format!("session-terminal-partial-{index}");
+            let operation_id = format!("monitor-recover-partial-{index}");
+            let mut active = active_record(&session_id);
+            active.owner_number = owner.number;
+            save(dir.path(), &active).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let predecessor = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(dir.path(), owner, &session_id, predecessor);
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let session =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+
+            set_generation_write_failure(failure_point);
+            assert_eq!(
+                settle_exact_terminal_active_generation(
+                    dir.path(),
+                    owner,
+                    &operation_id,
+                    &sessions_dir,
+                    &identity,
+                    gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+                    "exact producing Session is absent",
+                )
+                .expect_err("the injected pointer-last boundary must surface")
+                .kind(),
+                ErrorKind::Other,
+            );
+            let owner_ledger_before = fs::read(generation_ledger_path(dir.path(), owner).unwrap())
+                .expect("the lifecycle event must be durable before publication repair");
+            assert_eq!(
+                load_owner_generation_ledger(dir.path(), owner)
+                    .unwrap()
+                    .unwrap()
+                    .current_effective_status(),
+                Some(ExecutionControlStatus::Blocked),
+            );
+            assert!(
+                load_generation_ledger(dir.path(), owner).is_err(),
+                "strict authority must reject the interrupted projection/pointer pair",
+            );
+            fs::remove_file(sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+
+            let replayed = settle_exact_terminal_active_generation(
+                dir.path(),
+                owner,
+                &operation_id,
+                &sessions_dir,
+                &identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+                "exact producing Session is absent",
+            )
+            .expect("the same operation must repair its ledger-first commit");
+
+            assert!(matches!(
+                replayed,
+                ExactTerminalActiveSettlementResult::Replayed(_)
+            ));
+            assert!(load_generation_ledger(dir.path(), owner).unwrap().is_some());
+            assert_eq!(
+                fs::read(generation_ledger_path(dir.path(), owner).unwrap()).unwrap(),
+                owner_ledger_before,
+                "partial replay must repair only projection/pointer publication",
+            );
+        }
+    }
+
+    #[test]
+    fn exact_terminal_settlement_partial_repair_refuses_foreign_owner_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let foreign_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: owner.number + 1,
+        };
+        let session_id = "session-terminal-partial-foreign";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+
+        set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
+        settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-partial-foreign",
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .expect_err("the fixture must stop after its authoritative ledger commit");
+        let foreign_before = replace_current_generation_authority(dir.path(), foreign_owner);
+
+        let error = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-partial-foreign",
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .expect_err("a stale settlement receipt must not overwrite foreign authority");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), foreign_owner),
+            foreign_before,
+        );
+        let receipt_error = exact_terminal_settlement_receipt_committed(
+            dir.path(),
+            owner,
+            "monitor-recover-partial-foreign",
+            &predecessor.generation_id,
+            session_id,
+            "exact producing Session is absent",
+        )
+        .expect_err("a stale receipt check must not repair over foreign authority");
+        assert_eq!(receipt_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), foreign_owner),
+            foreign_before,
+            "foreign receipt refusal must be zero mutation",
+        );
+    }
+
+    #[test]
+    fn exact_terminal_active_generation_retarget_conflicts_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-settlement-conflict";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        persist_generation_session_binding(
+            dir.path(),
+            owner,
+            "session-terminal-settlement-retarget",
+            predecessor,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-conflict",
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .unwrap();
+        let committed_bytes = generation_authority_bytes(dir.path(), owner);
+
+        let reason_error = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-conflict",
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "different settlement reason",
+        )
+        .expect_err("an operation id cannot be rebound to another reason");
+        assert_eq!(reason_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_bytes
+        );
+
+        let retargeted_session = gwt_agent::Session::load(
+            &sessions_dir.join("session-terminal-settlement-retarget.toml"),
+        )
+        .unwrap();
+        let retargeted_identity =
+            gwt_agent::SessionExecutionIdentity::from_session(&retargeted_session)
+                .unwrap()
+                .unwrap();
+        let session_error = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-conflict",
+            &sessions_dir,
+            &retargeted_identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .expect_err("an operation id cannot be rebound to another Session");
+        assert_eq!(session_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_bytes
+        );
+
+        let mut retargeted_generation = identity;
+        retargeted_generation
+            .execution_binding
+            .identity
+            .generation_id
+            .push_str("-retargeted");
+        let generation_error = settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            "monitor-recover-conflict",
+            &sessions_dir,
+            &retargeted_generation,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .expect_err("an operation id cannot be rebound to another generation");
+        assert_eq!(generation_error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            committed_bytes
+        );
+    }
+
+    #[test]
+    fn successor_writer_refuses_lifecycle_operation_id_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        with_active_generation_after_exact_settlement(
+            "shared-lifecycle-operation",
+            |worktree, owner, _, _| {
+                let before = generation_authority_bytes(worktree, owner);
+                let request = successor_request(
+                    "shared-lifecycle-operation",
+                    "continuation-principal",
+                    "execution-continue",
+                );
+
+                let error = prepare_active_continuation_successor(worktree, owner, &request)
+                    .expect_err("a later successor writer must not reuse a lifecycle operation id");
+
+                assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+                assert_eq!(generation_authority_bytes(worktree, owner), before);
+            },
+        );
+    }
+
+    #[test]
+    fn takeover_writer_refuses_lifecycle_operation_id_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        with_active_generation_after_exact_settlement(
+            "shared-lifecycle-operation",
+            |worktree, owner, session_id, _| {
+                let before = generation_authority_bytes(worktree, owner);
+                let request = GenerationTakeoverRequest {
+                    operation_id: "shared-lifecycle-operation".to_string(),
+                    principal_id: "takeover-principal".to_string(),
+                    work_id: None,
+                    source: None,
+                    from_session_id: session_id.to_string(),
+                    to_session_id: "session-lifecycle-takeover".to_string(),
+                    reason: "verified stale holder".to_string(),
+                    requested_at: Utc::now(),
+                };
+
+                let error = prepare_generation_takeover(worktree, owner, &request)
+                    .expect_err("a later takeover writer must not reuse a lifecycle operation id");
+
+                assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+                assert_eq!(generation_authority_bytes(worktree, owner), before);
+            },
+        );
+    }
+
+    #[test]
+    fn rebound_validation_refuses_lifecycle_operation_id_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        with_active_generation_after_exact_settlement(
+            "shared-lifecycle-operation",
+            |worktree, owner, session_id, binding| {
+                let before = generation_authority_bytes(worktree, owner);
+
+                let error = record_rebound_continuation_validation(
+                    worktree,
+                    owner,
+                    "shared-lifecycle-operation",
+                    session_id,
+                    binding,
+                )
+                .expect_err(
+                    "a later rebound-validation writer must not reuse a lifecycle operation id",
+                );
+
+                assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+                assert_eq!(generation_authority_bytes(worktree, owner), before);
+            },
+        );
+    }
+
+    #[test]
+    fn generation_ledger_rejects_lifecycle_operation_id_collision_and_duplicate() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        with_active_generation_after_exact_settlement(
+            "shared-lifecycle-operation",
+            |worktree, owner, _, _| {
+                let request = successor_request(
+                    "independent-continuation-operation",
+                    "continuation-principal",
+                    "execution-continue",
+                );
+                prepare_active_continuation_successor(worktree, owner, &request).unwrap();
+                let baseline = load_generation_ledger(worktree, owner).unwrap().unwrap();
+
+                let mut cross_namespace = baseline.clone();
+                cross_namespace.continuation_attempts[0]
+                    .request
+                    .operation_id = "shared-lifecycle-operation".to_string();
+                cross_namespace.continuation_attempts[0].content_hash =
+                    compute_continuation_attempt_hash(&cross_namespace.continuation_attempts[0]);
+                cross_namespace.content_hash = compute_generation_ledger_hash(&cross_namespace);
+                assert_eq!(
+                    validate_generation_ledger(&cross_namespace, owner)
+                        .expect_err("cross-namespace operation id reuse must invalidate the ledger")
+                        .kind(),
+                    ErrorKind::InvalidData,
+                );
+
+                let mut duplicate = baseline;
+                duplicate.lifecycle_events[1].operation_id =
+                    Some("shared-lifecycle-operation".to_string());
+                duplicate.lifecycle_events[1].content_hash =
+                    compute_lifecycle_event_hash(&duplicate.lifecycle_events[1]);
+                duplicate.content_hash = compute_generation_ledger_hash(&duplicate);
+                assert_eq!(
+                    validate_generation_ledger(&duplicate, owner)
+                        .expect_err("duplicate lifecycle operation ids must invalidate the ledger")
+                        .kind(),
+                    ErrorKind::InvalidData,
+                );
+            },
+        );
+    }
+
     /// Issue #3472: an exact terminal runtime exit record releases the holder
     /// to a fresh-launch supersede only once the durable Session agrees it
     /// stopped. A terminal sidecar under a still-Running durable Session is
@@ -13197,6 +14457,63 @@ mod tests {
             mirror_pointer: fs::read(generation_pointer_path(worktree)).unwrap(),
             owner_ledger: fs::read(context.owner_dir.join(GENERATION_LEDGER_FILE)).unwrap(),
         }
+    }
+
+    fn with_active_generation_after_exact_settlement(
+        operation_id: &str,
+        test: impl FnOnce(&Path, ExecutionOwnerKey, &str, &gwt_agent::SessionExecutionBinding),
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-lifecycle-operation";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        settle_exact_terminal_active_generation(
+            dir.path(),
+            owner,
+            operation_id,
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeEvidence::Absent,
+            "exact producing Session is absent",
+        )
+        .unwrap();
+
+        let mut reopened = load(dir.path()).unwrap().unwrap();
+        reopened.recoveries.push(test_recovery(session_id, 97));
+        reopened.blocked_reason = None;
+        reopened.missing_verification = None;
+        reopened.status = ExecutionControlStatus::Active;
+        reopened.settled_at = None;
+        assert!(persist_generation_lifecycle_transition_if_owned(
+            dir.path(),
+            &reopened,
+            ExecutionControlStatus::Blocked,
+            "verified lifecycle namespace fixture",
+        )
+        .unwrap());
+        let mut current_binding = identity.execution_binding;
+        current_binding.identity = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        test(dir.path(), owner, session_id, &current_binding);
     }
 
     fn persist_same_id_replacement(
@@ -14349,8 +15666,8 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let _session_env = unset_live_session_env();
         for (index, failure_point) in [
-            GenerationWriteFailurePoint::AfterLedger,
-            GenerationWriteFailurePoint::AfterProjection,
+            GenerationWriteFailurePoint::LedgerCommitted,
+            GenerationWriteFailurePoint::ProjectionPublished,
         ]
         .into_iter()
         .enumerate()
@@ -14415,8 +15732,8 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let _session_env = unset_live_session_env();
         for (index, failure_point) in [
-            GenerationWriteFailurePoint::AfterLedger,
-            GenerationWriteFailurePoint::AfterProjection,
+            GenerationWriteFailurePoint::LedgerCommitted,
+            GenerationWriteFailurePoint::ProjectionPublished,
         ]
         .into_iter()
         .enumerate()
@@ -14491,7 +15808,7 @@ mod tests {
         completed.settled_at = Some(Utc::now());
         save(dir.path(), &completed).unwrap();
 
-        set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
+        set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
         assert_eq!(
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown)
                 .unwrap_err()
@@ -20239,7 +21556,7 @@ exit 1
             let before = authority_bytes(&paths);
             let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
 
-            set_generation_write_failure(GenerationWriteFailurePoint::AfterProjection);
+            set_generation_write_failure(GenerationWriteFailurePoint::ProjectionPublished);
             let error = repair_corrupt_execution(
                 dir.path(),
                 "repair-session",
@@ -20576,7 +21893,7 @@ exit 1
             let ecr_path = context.worktree_trusted_dir.join("execution-control.json");
             fs::write(&ecr_path, b"{corrupt").unwrap();
 
-            set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
+            set_generation_write_failure(GenerationWriteFailurePoint::LedgerCommitted);
             let error = repair_corrupt_execution(
                 dir.path(),
                 "repair-session",

@@ -259,6 +259,7 @@ mod tests {
             pm_registry::save_pm_prefs(
                 &prefs_path,
                 &pm_registry::PmPrefs {
+                    registration_generation: 1,
                     registration: Some(pm_registry::PmRegistration {
                         session_id: session_id.to_string(),
                         agent_id: "claude".to_string(),

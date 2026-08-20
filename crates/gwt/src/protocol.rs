@@ -22,6 +22,29 @@ use crate::{
     worktree_inventory::WorktreeEntry,
 };
 
+/// Immutable source facts attached to Issue Monitor lifecycle controls.
+///
+/// AppRuntime copies these values from the durable pending/acknowledged launch
+/// record. The daemon can therefore reject a delayed event from a generation
+/// that PM control already revoked instead of treating the event's issue hint
+/// as fresh authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueMonitorLifecycleSourceIdentity {
+    pub issue_number: u64,
+    pub launch_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileContentMode {
@@ -379,6 +402,15 @@ pub enum FrontendEvent {
         /// Non-secret guard that binds the caller's persisted prefs target to
         /// the server-derived capability scope. It is never routing authority.
         expected_project_scope: String,
+    },
+    /// SPEC-3431 FR-131: request one authoritative AppRuntime snapshot for
+    /// the exact project carried by the authenticated agent capability.
+    AgentIssueMonitorRuntimeInventory {
+        /// Non-secret guard only; the authenticated principal remains the
+        /// source of project authority.
+        expected_project_scope: String,
+        /// Opaque correlation echoed by the origin-client-only reply.
+        request_id: String,
     },
     PasteImage {
         id: String,
@@ -1679,6 +1711,12 @@ pub enum BackendEvent {
         accepted: bool,
         reason: Option<String>,
     },
+    /// Origin-client-only authoritative pane inventory for one PM status
+    /// projection. The snapshot is authored on AppRuntime's event loop.
+    IssueMonitorRuntimeInventory {
+        request_id: String,
+        inventory: crate::IssueMonitorRuntimeInventory,
+    },
     /// Direct, origin-connection-only acceptance for an authenticated
     /// self-close. The internal close ticket never crosses the wire.
     PaneCloseAccepted {
@@ -2457,6 +2495,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_runtime_inventory",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
@@ -2908,6 +2951,7 @@ impl BackendEvent {
             BackendEvent::IssueMonitorScanRequestResult { .. } => {
                 "issue_monitor_scan_request_result"
             }
+            BackendEvent::IssueMonitorRuntimeInventory { .. } => "issue_monitor_runtime_inventory",
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
@@ -3066,8 +3110,8 @@ mod tests {
         backend_event_policy, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
-        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        IndexSearchScope, IndexSearchTarget, IssueMonitorLifecycleSourceIdentity, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -5259,5 +5303,26 @@ mod tests {
             event,
             FrontendEvent::RestartWindow { id } if id == "tab-1::agent-1"
         ));
+    }
+
+    #[test]
+    fn issue_monitor_lifecycle_source_identity_round_trips_exact_generation() {
+        let identity = IssueMonitorLifecycleSourceIdentity {
+            issue_number: 42,
+            launch_generation: 7,
+            claim_id: Some("claim-42".to_string()),
+            claim_owner: Some("host/session".to_string()),
+            delivery_id: Some("launch:effect-42".to_string()),
+            materializer_window_id: Some("tab-1::agent-42".to_string()),
+            window_id: Some("tab-1::agent-42".to_string()),
+        };
+
+        let encoded = serde_json::to_value(&identity).expect("serialize lifecycle identity");
+        assert_eq!(encoded["launch_generation"], 7);
+        assert_eq!(
+            serde_json::from_value::<IssueMonitorLifecycleSourceIdentity>(encoded)
+                .expect("deserialize lifecycle identity"),
+            identity
+        );
     }
 }

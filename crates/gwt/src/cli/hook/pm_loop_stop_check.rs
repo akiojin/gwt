@@ -275,6 +275,7 @@ mod tests {
             crate::pm_registry::save_pm_prefs(
                 &project_state.join("pm.json"),
                 &crate::pm_registry::PmPrefs {
+                    registration_generation: 1,
                     registration: Some(crate::pm_registry::PmRegistration {
                         session_id: FIXTURE_PM_SESSION.to_string(),
                         agent_id: "claude".to_string(),

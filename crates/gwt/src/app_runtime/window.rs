@@ -464,6 +464,12 @@ impl AppRuntime {
             .active_agent_sessions
             .get(id)
             .map(|session| session.session_id.clone());
+        let issue_monitor_execution_snapshots = issue_monitor_project_root
+            .as_ref()
+            .map(|project_root| {
+                self.issue_monitor_window_close_execution_snapshots(project_root, &[id.to_string()])
+            })
+            .unwrap_or_default();
         self.clear_agent_window_startup_restore(id);
         self.stop_window_runtime(id);
         self.remove_window_state_tracking(id);
@@ -502,7 +508,11 @@ impl AppRuntime {
         if notify_issue_monitor {
             if let Some(project_root) = issue_monitor_project_root {
                 events.extend(
-                    self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]),
+                    self.issue_monitor_windows_closed_events_with_execution_snapshots(
+                        &project_root,
+                        &[id.to_string()],
+                        issue_monitor_execution_snapshots,
+                    ),
                 );
             }
         }

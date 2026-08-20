@@ -198,10 +198,39 @@ impl Default for PmSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PmPrefs {
+    /// Durable PM-authority watermark. Every committed registration or stale
+    /// replacement advances this value; deregistration deliberately retains
+    /// it so an older principal can never regain authority by reusing a
+    /// vacated singleton slot. Prefs written before the fence existed read as
+    /// generation zero.
+    #[serde(default)]
+    pub registration_generation: u64,
     #[serde(default)]
     pub registration: Option<PmRegistration>,
     #[serde(default)]
     pub settings: PmSettings,
+}
+
+/// Lock-scoped identity of the project's currently registered PM.
+///
+/// Callers receive this value only from [`with_registered_pm_authority`],
+/// after the ambient Session has been matched exactly against the durable PM
+/// registration while holding the stable PM prefs lock. The generation lets
+/// downstream mutations fence out principals from an older registration.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RegisteredPmPrincipal {
+    session_id: String,
+    generation: u64,
+}
+
+impl RegisteredPmPrincipal {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// Outcome of a singleton registration attempt (FR-001).
@@ -935,7 +964,17 @@ pub fn try_register_pm(
             Some(stale) => PmRegisterOutcome::ReplacedStale { previous: stale },
             None => PmRegisterOutcome::Registered,
         };
+        let next_generation = prefs
+            .registration_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PM registration generation exhausted",
+                )
+            })?;
         prefs.registration = Some(candidate);
+        prefs.registration_generation = next_generation;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, outcome))
     })
@@ -976,6 +1015,39 @@ pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
         prefs
             .registration
             .is_some_and(|registration| registration.session_id == session_id)
+    })
+}
+
+/// Run `operation` only while `ambient_session` is the durable registered PM.
+///
+/// The stable PM prefs lock is acquired before the registration is read and
+/// remains held until `operation` returns. This is the mutation-safe authority
+/// path: callers must not perform a separate [`session_is_registered_pm`]
+/// probe followed by a privileged write, because registration could change in
+/// between. An empty, missing, or non-matching Session returns `Ok(None)` and
+/// never invokes the closure. Lock, read, and closure failures are propagated
+/// without granting authority.
+pub fn with_registered_pm_authority<T>(
+    prefs_path: &Path,
+    ambient_session: &str,
+    operation: impl FnOnce(&RegisteredPmPrincipal) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    with_pm_prefs_lock(prefs_path, || {
+        if ambient_session.is_empty() {
+            return Ok(None);
+        }
+        let prefs = load_pm_prefs_unlocked(prefs_path)?;
+        let Some(registration) = prefs.registration else {
+            return Ok(None);
+        };
+        if registration.session_id != ambient_session {
+            return Ok(None);
+        }
+        let principal = RegisteredPmPrincipal {
+            session_id: registration.session_id,
+            generation: prefs.registration_generation,
+        };
+        operation(&principal).map(Some)
     })
 }
 
@@ -1289,6 +1361,7 @@ mod tests {
             save_pm_prefs(
                 &prefs_path,
                 &PmPrefs {
+                    registration_generation: 1,
                     registration: Some(candidate),
                     settings: PmSettings::default(),
                 },
@@ -1467,6 +1540,7 @@ mod tests {
     fn save_then_load_roundtrips_and_leaves_no_scratch() {
         let (_dir, path) = temp_prefs_path();
         let prefs = PmPrefs {
+            registration_generation: 1,
             registration: Some(registration("session-a")),
             settings: PmSettings {
                 auto_start: false,
@@ -1888,6 +1962,7 @@ mod tests {
     #[test]
     fn status_report_without_registration_omits_liveness_fields() {
         let prefs = PmPrefs {
+            registration_generation: 0,
             registration: None,
             settings: PmSettings {
                 auto_start: false,

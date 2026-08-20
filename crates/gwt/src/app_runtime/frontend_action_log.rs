@@ -726,6 +726,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
+        | FrontendEvent::AgentIssueMonitorRuntimeInventory { .. }
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }

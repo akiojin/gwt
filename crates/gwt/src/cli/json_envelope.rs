@@ -322,25 +322,75 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 number: required_u64(params, "number")?,
             })
         }
-        "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
-            project_root: optional_path(params, "project_root")?,
-            number: required_u64(params, "number")?,
-            // FR-031: an unexplained stop is not auditable.
-            reason: required_string(params, "reason")?,
-            // Which identity components are required is a property of the live
-            // launch, not of the request shape, so the state layer decides.
-            claim_id: optional_string(params, "claim_id")?,
-            delivery_id: optional_string(params, "delivery_id")?,
-            window_id: optional_string(params, "window_id")?,
-        }),
-        "issue.monitor.failover" => CliCommand::Issue(IssueCommand::MonitorFailover {
-            project_root: optional_path(params, "project_root")?,
-            number: required_u64(params, "number")?,
-            reason: required_string(params, "reason")?,
-            claim_id: optional_string(params, "claim_id")?,
-            delivery_id: optional_string(params, "delivery_id")?,
-            window_id: optional_string(params, "window_id")?,
-        }),
+        "issue.monitor.stop" => {
+            reject_unknown_params(
+                params,
+                ISSUE_MONITOR_CONTROL_TARGET_PARAMS,
+                "issue.monitor.stop",
+            )?;
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                operation_id: optional_control_operation_id(params)?,
+                // FR-031: an unexplained stop is not auditable.
+                reason: required_issue_monitor_control_reason(params)?,
+                // Which identity components are required is a property of the
+                // live launch, not of the request shape, so the state layer decides.
+                launch_generation: optional_u64(params, "launch_generation")?,
+                claim_id: optional_string(params, "claim_id")?,
+                claim_owner: optional_string(params, "claim_owner")?,
+                delivery_id: optional_string(params, "delivery_id")?,
+                materializer_window_id: optional_string(params, "materializer_window_id")?,
+                window_id: optional_string(params, "window_id")?,
+            })
+        }
+        "issue.monitor.failover" => {
+            reject_unknown_params(
+                params,
+                ISSUE_MONITOR_CONTROL_TARGET_PARAMS,
+                "issue.monitor.failover",
+            )?;
+            CliCommand::Issue(IssueCommand::MonitorFailover {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                operation_id: optional_control_operation_id(params)?,
+                reason: required_issue_monitor_control_reason(params)?,
+                launch_generation: optional_u64(params, "launch_generation")?,
+                claim_id: optional_string(params, "claim_id")?,
+                claim_owner: optional_string(params, "claim_owner")?,
+                delivery_id: optional_string(params, "delivery_id")?,
+                materializer_window_id: optional_string(params, "materializer_window_id")?,
+                window_id: optional_string(params, "window_id")?,
+            })
+        }
+        "issue.monitor.recover" => {
+            reject_unknown_params(
+                params,
+                ISSUE_MONITOR_CONTROL_TARGET_PARAMS,
+                "issue.monitor.recover",
+            )?;
+            CliCommand::Issue(IssueCommand::MonitorRecover {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                operation_id: required_control_operation_id(params)?,
+                reason: required_issue_monitor_control_reason(params)?,
+                launch_generation: required_u64(params, "launch_generation")?,
+                claim_id: optional_string(params, "claim_id")?,
+                claim_owner: optional_string(params, "claim_owner")?,
+                delivery_id: optional_string(params, "delivery_id")?,
+                materializer_window_id: optional_string(params, "materializer_window_id")?,
+                window_id: optional_string(params, "window_id")?,
+            })
+        }
+        "issue.monitor.control.reconcile" => {
+            const ALLOWED: &[&str] = &["project_root", "operation_id", "revoked_generation"];
+            reject_unknown_params(params, ALLOWED, "issue.monitor.control.reconcile")?;
+            CliCommand::Issue(IssueCommand::MonitorControlReconcile {
+                project_root: optional_path(params, "project_root")?,
+                operation_id: required_control_operation_id(params)?,
+                revoked_generation: required_u64(params, "revoked_generation")?,
+            })
+        }
         "issue.monitor.requeue" => CliCommand::Issue(IssueCommand::MonitorRequeue {
             project_root: optional_path(params, "project_root")?,
             number: required_u64(params, "number")?,
@@ -1302,6 +1352,93 @@ fn optional_path(
     Ok(optional_string(params, key)?.map(std::path::PathBuf::from))
 }
 
+const ISSUE_MONITOR_CONTROL_TARGET_PARAMS: &[&str] = &[
+    "project_root",
+    "number",
+    "operation_id",
+    "reason",
+    "launch_generation",
+    "claim_id",
+    "claim_owner",
+    "delivery_id",
+    "materializer_window_id",
+    "window_id",
+];
+
+fn optional_control_operation_id(
+    params: &Map<String, Value>,
+) -> Result<Option<String>, CliParseError> {
+    control_operation_id(params, false)
+}
+
+fn required_control_operation_id(params: &Map<String, Value>) -> Result<String, CliParseError> {
+    control_operation_id(params, true)?.ok_or(CliParseError::MissingFlag("operation_id"))
+}
+
+fn control_operation_id(
+    params: &Map<String, Value>,
+    required: bool,
+) -> Result<Option<String>, CliParseError> {
+    let Some(value) = params.get("operation_id") else {
+        return if required {
+            Err(CliParseError::MissingFlag("operation_id"))
+        } else {
+            Ok(None)
+        };
+    };
+    let Value::String(value) = value else {
+        return Err(CliParseError::InvalidJson(
+            "operation_id must be an ASCII printable token of 1..=128 bytes".to_string(),
+        ));
+    };
+    if !value.is_ascii() || value.chars().any(char::is_control) {
+        return Err(CliParseError::InvalidJson(
+            "operation_id must be an ASCII printable token of 1..=128 bytes".to_string(),
+        ));
+    }
+    if value.is_empty()
+        || value.len() > 128
+        || value.trim() != value
+        || !value.as_bytes().iter().all(u8::is_ascii_graphic)
+    {
+        return Err(CliParseError::InvalidJson(
+            "operation_id must be an ASCII printable token of 1..=128 bytes".to_string(),
+        ));
+    }
+    Ok(Some(value.clone()))
+}
+
+fn required_issue_monitor_control_reason(
+    params: &Map<String, Value>,
+) -> Result<String, CliParseError> {
+    let Some(value) = params.get("reason") else {
+        return Err(CliParseError::MissingFlag("reason"));
+    };
+    let Value::String(value) = value else {
+        return Err(CliParseError::InvalidJson(
+            "reason must be a UTF-8 string of at most 1024 bytes without control characters"
+                .to_string(),
+        ));
+    };
+    if value.chars().any(char::is_control) {
+        return Err(CliParseError::InvalidJson(
+            "reason must be a UTF-8 string of at most 1024 bytes without control characters"
+                .to_string(),
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CliParseError::MissingFlag("reason"));
+    }
+    if value.len() > 1024 {
+        return Err(CliParseError::InvalidJson(
+            "reason must be a UTF-8 string of at most 1024 bytes without control characters"
+                .to_string(),
+        ));
+    }
+    Ok(value.to_string())
+}
+
 /// Refuse a parameter this operation does not understand.
 ///
 /// Only for operations where ignoring an unrecognised key would change what
@@ -2169,9 +2306,13 @@ mod tests {
             CliCommand::Issue(IssueCommand::MonitorStop {
                 project_root: None,
                 number: 42,
+                operation_id: None,
                 reason: "provider rate limit".to_string(),
+                launch_generation: None,
                 claim_id: None,
+                claim_owner: None,
                 delivery_id: None,
+                materializer_window_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
             })
         );
@@ -2189,9 +2330,13 @@ mod tests {
             CliCommand::Issue(IssueCommand::MonitorStop {
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
+                operation_id: None,
                 reason: "switch provider".to_string(),
+                launch_generation: None,
                 claim_id: Some("claim-1".to_string()),
+                claim_owner: None,
                 delivery_id: Some("launch:effect-1".to_string()),
+                materializer_window_id: None,
                 window_id: None,
             })
         );
@@ -2229,9 +2374,13 @@ mod tests {
             CliCommand::Issue(IssueCommand::MonitorFailover {
                 project_root: None,
                 number: 3476,
+                operation_id: None,
                 reason: "codex rate limit".to_string(),
+                launch_generation: None,
                 claim_id: Some("claim-1".to_string()),
+                claim_owner: None,
                 delivery_id: None,
+                materializer_window_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
             })
         );
@@ -2483,9 +2632,11 @@ mod tests {
         }
 
         for operation in operations {
-            for (boundary, operation_id) in
-                [("empty", "   ".to_string()), ("oversized", "x".repeat(129))]
-            {
+            for (boundary, operation_id) in [
+                ("empty", "   ".to_string()),
+                ("surrounding-whitespace", " operation-3712 ".to_string()),
+                ("oversized", "x".repeat(129)),
+            ] {
                 let result = parse(&envelope(
                     operation,
                     params(
