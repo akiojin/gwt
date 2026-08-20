@@ -5758,6 +5758,10 @@ mod agent_endpoint_env_tests {
                 .current_effective_status(),
             Some(gwt::cli::execution_state::ExecutionControlStatus::Completed)
         );
+        let predecessor_binding =
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read completed predecessor binding")
+                .expect("completed predecessor generation");
 
         let mut relaunch = gwt_agent::Session::new(
             &launch.project,
@@ -5785,6 +5789,12 @@ mod agent_endpoint_env_tests {
         .install(&mut env)
         .expect("a fresh launch must start a successor over a Completed generation");
 
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read current generation"),
+            Some(predecessor_binding),
+            "pre-readiness preparation must preserve the Completed predecessor as current",
+        );
         assert!(
             env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
             "the successor launch must receive its producing capability"
