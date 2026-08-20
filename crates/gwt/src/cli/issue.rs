@@ -2821,6 +2821,402 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum T254ControlAction {
+        Stop,
+        Failover,
+        Recover,
+    }
+
+    #[derive(Debug, Clone)]
+    struct T254ControlTarget {
+        launch_generation: Option<u64>,
+        claim_id: Option<String>,
+        claim_owner: Option<String>,
+        delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
+        window_id: Option<String>,
+    }
+
+    fn t254_exact_control_target() -> T254ControlTarget {
+        T254ControlTarget {
+            launch_generation: Some(7),
+            claim_id: Some("claim-42-generation-7".to_string()),
+            claim_owner: Some("host/pm-materializer".to_string()),
+            delivery_id: Some("delivery-42-generation-7".to_string()),
+            materializer_window_id: Some("tab-pm::materializer-7".to_string()),
+            window_id: Some("tab-work::agent-7".to_string()),
+        }
+    }
+
+    fn t254_control_command(
+        action: T254ControlAction,
+        project_root: &std::path::Path,
+        operation_id: &str,
+        target: &T254ControlTarget,
+    ) -> IssueCommand {
+        match action {
+            T254ControlAction::Stop => IssueCommand::MonitorStop {
+                project_root: Some(project_root.to_path_buf()),
+                number: 42,
+                operation_id: Some(operation_id.to_string()),
+                reason: "operator observed a stalled launch".to_string(),
+                launch_generation: target.launch_generation,
+                claim_id: target.claim_id.clone(),
+                claim_owner: target.claim_owner.clone(),
+                delivery_id: target.delivery_id.clone(),
+                materializer_window_id: target.materializer_window_id.clone(),
+                window_id: target.window_id.clone(),
+            },
+            T254ControlAction::Failover => IssueCommand::MonitorFailover {
+                project_root: Some(project_root.to_path_buf()),
+                number: 42,
+                operation_id: Some(operation_id.to_string()),
+                reason: "operator observed a stalled launch".to_string(),
+                launch_generation: target.launch_generation,
+                claim_id: target.claim_id.clone(),
+                claim_owner: target.claim_owner.clone(),
+                delivery_id: target.delivery_id.clone(),
+                materializer_window_id: target.materializer_window_id.clone(),
+                window_id: target.window_id.clone(),
+            },
+            T254ControlAction::Recover => IssueCommand::MonitorRecover {
+                project_root: Some(project_root.to_path_buf()),
+                number: 42,
+                operation_id: operation_id.to_string(),
+                reason: "operator observed a stalled launch".to_string(),
+                launch_generation: target
+                    .launch_generation
+                    .expect("recover fixture has a generation"),
+                claim_id: target.claim_id.clone(),
+                claim_owner: target.claim_owner.clone(),
+                delivery_id: target.delivery_id.clone(),
+                materializer_window_id: target.materializer_window_id.clone(),
+                window_id: target.window_id.clone(),
+            },
+        }
+    }
+
+    fn t254_seed_control_fixture(repo: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(repo).expect("create fixture repo");
+        crate::cli::trusted_store::init_git_repo_with_origin(repo);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-work::agent-7".to_string(),
+                }],
+                launched_control_identities: vec![
+                    crate::issue_monitor::IssueMonitorLaunchedControlIdentity {
+                        issue_number: 42,
+                        window_id: "tab-work::agent-7".to_string(),
+                        claim_id: "claim-42-generation-7".to_string(),
+                        claim_owner: "host/pm-materializer".to_string(),
+                        delivery_id: "delivery-42-generation-7".to_string(),
+                        materializer_window_id: Some("tab-pm::materializer-7".to_string()),
+                        launch_generation: 7,
+                        launch_profile_fingerprint: Some("profile-fingerprint-7".to_string()),
+                    },
+                ],
+                launch_generations: std::collections::BTreeMap::from([(42, 7)]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed modern control prefs");
+        crate::cli::trusted_store::write(
+            repo,
+            "execution-control.json",
+            br#"{"fixture":"t254-execution-authority"}"#,
+        )
+        .expect("seed execution authority marker");
+        crate::cli::trusted_store::write(
+            repo,
+            "execution-generation-pointer.json",
+            br#"{"fixture":"t254-generation-pointer"}"#,
+        )
+        .expect("seed generation pointer marker");
+        prefs_path
+    }
+
+    fn t254_register_replacement_pm(repo: &std::path::Path) {
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(repo);
+        let registration = |session_id: &str| crate::pm_registry::PmRegistration {
+            session_id: session_id.to_string(),
+            agent_id: "codex".to_string(),
+            worktree_path: repo.to_string_lossy().into_owned(),
+            created_at: None,
+            consecutive_crashes: 0,
+            next_not_before: None,
+        };
+        crate::pm_registry::try_register_pm(&prefs_path, registration("replaced-pm"), |_| false)
+            .expect("register old PM");
+        crate::pm_registry::try_register_pm(&prefs_path, registration("current-pm"), |_| false)
+            .expect("replace old PM");
+    }
+
+    fn t254_authority_bytes(repo: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+        let read = |name| {
+            crate::cli::trusted_store::read(repo, name)
+                .expect("read trusted authority")
+                .expect("trusted authority exists")
+                .into_bytes()
+        };
+        (
+            read("execution-control.json"),
+            read("execution-generation-pointer.json"),
+        )
+    }
+
+    fn t254_run_refused(
+        env: &mut crate::cli::TestEnv,
+        command: IssueCommand,
+        diagnostic_fragment: &str,
+    ) -> String {
+        let mut out = String::new();
+        let diagnostic = match run(env, command, &mut out) {
+            Ok(code) => {
+                assert_ne!(code, 0, "refusal must not report success: {out}");
+                out
+            }
+            Err(error) => format!("{error}\n{out}"),
+        };
+        assert!(
+            diagnostic.contains(diagnostic_fragment),
+            "refusal must remain typed as {diagnostic_fragment}: {diagnostic}"
+        );
+        diagnostic
+    }
+
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-AUTH-001: authority is the ambient,
+    /// current PM registration, not a caller-provided Session or a historical
+    /// PM identity. The check precedes both Monitor and execution authority.
+    #[test]
+    fn t254_control_operations_require_the_current_registered_pm_before_any_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        let prefs_path = t254_seed_control_fixture(&repo);
+        t254_register_replacement_pm(&repo);
+        let target = t254_exact_control_target();
+
+        for action in [
+            T254ControlAction::Stop,
+            T254ControlAction::Failover,
+            T254ControlAction::Recover,
+        ] {
+            for (label, session_id) in [
+                ("missing", None),
+                ("ordinary", Some("ordinary-agent")),
+                ("replaced", Some("replaced-pm")),
+            ] {
+                let before_prefs = std::fs::read(&prefs_path).expect("prefs bytes");
+                let before_authority = t254_authority_bytes(&repo);
+                let _session = session_id.map_or_else(
+                    || gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+                    |session_id| {
+                        gwt_core::test_support::ScopedEnvVar::set(
+                            gwt_agent::GWT_SESSION_ID_ENV,
+                            session_id,
+                        )
+                    },
+                );
+                let command = t254_control_command(
+                    action,
+                    &repo,
+                    &format!("t254-auth-{action:?}-{label}"),
+                    &target,
+                );
+                t254_run_refused(
+                    &mut crate::cli::TestEnv::new(repo.clone()),
+                    command,
+                    "pm_authority",
+                );
+                assert_eq!(
+                    std::fs::read(&prefs_path).expect("prefs bytes"),
+                    before_prefs,
+                    "{action:?}/{label} must not mutate Issue Monitor prefs"
+                );
+                assert_eq!(
+                    t254_authority_bytes(&repo),
+                    before_authority,
+                    "{action:?}/{label} must not mutate execution authority"
+                );
+            }
+        }
+    }
+
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-TARGET-001: all six durable identity
+    /// fields are exact-match fences. A stale value is never a wildcard and
+    /// no refusal may append a receipt or advance either authority store.
+    #[test]
+    fn t254_stop_and_failover_refuse_each_stale_full_target_component_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        let prefs_path = t254_seed_control_fixture(&repo);
+        t254_register_replacement_pm(&repo);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "current-pm");
+        let exact = t254_exact_control_target();
+        let mismatches = [
+            (
+                "generation_mismatch",
+                T254ControlTarget {
+                    launch_generation: Some(6),
+                    ..exact.clone()
+                },
+            ),
+            (
+                "claim_mismatch",
+                T254ControlTarget {
+                    claim_id: Some("stale-claim".to_string()),
+                    ..exact.clone()
+                },
+            ),
+            (
+                "claim_owner_mismatch",
+                T254ControlTarget {
+                    claim_owner: Some("foreign/owner".to_string()),
+                    ..exact.clone()
+                },
+            ),
+            (
+                "delivery_mismatch",
+                T254ControlTarget {
+                    delivery_id: Some("stale-delivery".to_string()),
+                    ..exact.clone()
+                },
+            ),
+            (
+                "materializer_window_mismatch",
+                T254ControlTarget {
+                    materializer_window_id: Some("tab-pm::stale-materializer".to_string()),
+                    ..exact.clone()
+                },
+            ),
+            (
+                "window_mismatch",
+                T254ControlTarget {
+                    window_id: Some("tab-work::stale-agent".to_string()),
+                    ..exact
+                },
+            ),
+        ];
+
+        for action in [T254ControlAction::Stop, T254ControlAction::Failover] {
+            for (expected_mismatch, target) in &mismatches {
+                let before_prefs = std::fs::read(&prefs_path).expect("prefs bytes");
+                let before_authority = t254_authority_bytes(&repo);
+                let command = t254_control_command(
+                    action,
+                    &repo,
+                    &format!("t254-target-{action:?}-{expected_mismatch}"),
+                    target,
+                );
+                t254_run_refused(
+                    &mut crate::cli::TestEnv::new(repo.clone()),
+                    command,
+                    expected_mismatch,
+                );
+                assert_eq!(
+                    std::fs::read(&prefs_path).expect("prefs bytes"),
+                    before_prefs,
+                    "{action:?}/{expected_mismatch} must be zero-mutation"
+                );
+                assert_eq!(
+                    t254_authority_bytes(&repo),
+                    before_authority,
+                    "{action:?}/{expected_mismatch} must preserve execution authority"
+                );
+            }
+        }
+    }
+
+    /// SPEC-3431 FR-129 / AS-PM-CONTROL-REPLAY-001: operation replay is
+    /// receipt-based, not the historical Issue-number `already_stopped`
+    /// shortcut. Exact replay returns the committed receipt; conflicting reuse
+    /// is refused before any second transition.
+    #[test]
+    fn t254_operation_id_replay_returns_the_same_receipt_and_conflict_is_zero_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        let prefs_path = t254_seed_control_fixture(&repo);
+        t254_register_replacement_pm(&repo);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "current-pm");
+        let target = t254_exact_control_target();
+        let operation_id = "t254-stop-replay-42-generation-7";
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut first_out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                t254_control_command(T254ControlAction::Stop, &repo, operation_id, &target),
+                &mut first_out,
+            )
+            .expect("first control attempt"),
+            0
+        );
+        let first: serde_json::Value =
+            serde_json::from_str(first_out.trim()).expect("first receipt JSON");
+        let after_first_prefs = std::fs::read(&prefs_path).expect("prefs after first stop");
+        let after_first_authority = t254_authority_bytes(&repo);
+
+        let mut replay_out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                t254_control_command(T254ControlAction::Stop, &repo, operation_id, &target),
+                &mut replay_out,
+            )
+            .expect("exact replay"),
+            0
+        );
+        let replay: serde_json::Value =
+            serde_json::from_str(replay_out.trim()).expect("replay receipt JSON");
+        assert!(
+            first.get("receipt").is_some(),
+            "control result must expose its durable receipt: {first}"
+        );
+        assert_eq!(replay.get("receipt"), first.get("receipt"));
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs after replay"),
+            after_first_prefs,
+            "exact replay must not advance authority or append a second receipt"
+        );
+        assert_eq!(t254_authority_bytes(&repo), after_first_authority);
+
+        let conflicting = T254ControlTarget {
+            window_id: Some("tab-work::different-agent".to_string()),
+            ..target
+        };
+        t254_run_refused(
+            &mut env,
+            t254_control_command(T254ControlAction::Stop, &repo, operation_id, &conflicting),
+            "operation_id_conflict",
+        );
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs after conflict"),
+            after_first_prefs,
+            "same ID with a different target must be zero-mutation"
+        );
+        assert_eq!(t254_authority_bytes(&repo), after_first_authority);
+    }
+
     /// Issue #3645 AC-1 / #3628 AC-2: the recovery an operator reaches for when
     /// the row has no launch left. Reproduces the 2026-08-17 shape exactly — a
     /// persisted `agent_failed` hold with no `launched_issues` entry — because
