@@ -681,6 +681,10 @@ pub enum SuccessorPredecessorStatus {
 }
 
 pub const FRESH_LINKED_OWNER_LAUNCH_SOURCE: &str = "fresh-linked-owner-launch";
+/// Canonical source of an owner launch that leaves a `Completed` predecessor.
+/// The token is persisted in every ledger that recorded one, so it keeps the
+/// name it was minted under even though Issue #3472 extended the route beyond
+/// the manual Launch Agent to every fresh linked-owner launch.
 pub const MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE: &str = "manual-completed-owner-launch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,20 +843,30 @@ pub fn classify_exact_session_runtime(
     })
 }
 
-/// Issue #3457: identify the current generation's holder when no Host can be
-/// running it, so a fresh launch can supersede it instead of colliding with a
-/// Session that will never settle.
+/// Issue #3457 / Issue #3472: identify the current generation's holder when no
+/// Host can be running it, so a fresh launch can supersede it instead of
+/// colliding with a Session that will never settle.
 ///
-/// Deliberately conservative: only a holder whose runtime evidence is
-/// [`ExactSessionRuntimeDisposition::Absent`] qualifies. A reachable holder, an
-/// unreadable durable record, a holder that no longer owns the current binding,
-/// and merely ambiguous runtime evidence all return `None` so the caller keeps
-/// refusing rather than taking a generation away from a live Session.
+/// Deliberately conservative: a holder qualifies only with decisive evidence
+/// that no Host runs it — [`ExactSessionRuntimeDisposition::Absent`] (no
+/// sidecar in any namespace), [`ExactSessionRuntimeDisposition::Terminal`]
+/// whose durable Session also reads Stopped/Interrupted, or
+/// [`ExactSessionRuntimeDisposition::Defunct`] (dead runtime explained by its
+/// manual handoff fence). A reachable holder, an unreadable durable record, a
+/// holder that no longer owns the current binding, and merely ambiguous
+/// runtime evidence all return `None` so the caller keeps refusing rather
+/// than taking a generation away from a live Session. The returned evidence is
+/// re-proved under the owner/Session leases by the successor transaction.
 pub fn unreachable_current_generation_holder(
     sessions_dir: &Path,
     worktree: &Path,
     owner: ExecutionOwnerKey,
-) -> io::Result<Option<gwt_agent::SessionExecutionIdentity>> {
+) -> io::Result<
+    Option<(
+        gwt_agent::SessionExecutionIdentity,
+        gwt_agent::ManualLaunchRuntimeEvidence,
+    )>,
+> {
     let Some(record) = load(worktree)? else {
         return Ok(None);
     };
@@ -875,9 +889,29 @@ pub fn unreachable_current_generation_holder(
     else {
         return Ok(None);
     };
-    Ok((classify_exact_session_runtime(sessions_dir, &identity)?
-        == ExactSessionRuntimeDisposition::Absent)
-        .then_some(identity))
+    Ok(
+        match classify_exact_session_runtime(sessions_dir, &identity)? {
+            ExactSessionRuntimeDisposition::Absent => {
+                Some((identity, gwt_agent::ManualLaunchRuntimeEvidence::Absent))
+            }
+            // Issue #3472: an exact terminal exit record counts only once the
+            // durable Session agrees it stopped; a terminal sidecar under a
+            // non-stopped durable record is conflicting evidence.
+            ExactSessionRuntimeDisposition::Terminal(proof) => matches!(
+                holder.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            )
+            .then_some((
+                identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
+            )),
+            ExactSessionRuntimeDisposition::Defunct(proof) => Some((
+                identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
+            )),
+            ExactSessionRuntimeDisposition::Live | ExactSessionRuntimeDisposition::Unknown => None,
+        },
+    )
 }
 
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
@@ -12148,6 +12182,82 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// Issue #3472: an exact terminal runtime exit record releases the holder
+    /// to a fresh-launch supersede only once the durable Session agrees it
+    /// stopped. A terminal sidecar under a still-Running durable Session is
+    /// conflicting evidence and must keep refusing.
+    #[test]
+    fn unreachable_holder_requires_durably_stopped_session_for_terminal_proof() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-proof-holder";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let holder = gwt_agent::Session::load(&session_path).unwrap();
+        let holder_identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+            .unwrap()
+            .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &holder_identity,
+            1,
+            crate::process::host_process_start_time(std::process::id()).unwrap(),
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &holder_identity).unwrap(),
+            ExactSessionRuntimeDisposition::Terminal(gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: 1,
+            }),
+            "the fixture must produce an exact terminal exit record",
+        );
+
+        assert!(
+            unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+                .unwrap()
+                .is_none(),
+            "a terminal exit record under a non-stopped durable Session must not qualify",
+        );
+
+        let mut stopped = gwt_agent::Session::load(&session_path).unwrap();
+        stopped.update_status(gwt_agent::AgentStatus::Stopped);
+        stopped.save(&sessions_dir).unwrap();
+
+        let (identity, evidence) =
+            unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+                .unwrap()
+                .expect("a durably stopped holder with exact terminal proof must qualify");
+        assert_eq!(identity.session_id, session_id);
+        assert_eq!(
+            evidence,
+            gwt_agent::ManualLaunchRuntimeEvidence::Proof(gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: 1,
+            }),
+            "the qualifying holder must carry its exact runtime proof for revalidation",
+        );
     }
 
     #[test]
