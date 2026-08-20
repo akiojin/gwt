@@ -2245,6 +2245,304 @@ mod tests {
         ));
     }
 
+    /// SPEC-3431 Phase 24 T250 (FR-128/FR-129): stop/failover retain a
+    /// supplied replay identity and every exact launch target component.
+    ///
+    /// Debug assertions intentionally keep this RED test compilable before
+    /// the corresponding command fields exist. Each value is unique so an
+    /// accepted-but-dropped wire field cannot satisfy another assertion.
+    #[test]
+    fn t250_issue_monitor_parser_retains_operation_and_full_exact_target() {
+        let mut failures = Vec::new();
+
+        for (operation, suffix, launch_generation) in [
+            ("issue.monitor.stop", "stop", 930_017_u64),
+            ("issue.monitor.failover", "failover", 930_018_u64),
+        ] {
+            let operation_id = format!("{suffix}-operation-3712");
+            let claim_id = format!("{suffix}-claim-3712");
+            let claim_owner = format!("{suffix}-owner-3712");
+            let delivery_id = format!("{suffix}-delivery-3712");
+            let materializer_window_id = format!("{suffix}-materializer-window-3712");
+            let window_id = format!("{suffix}-agent-window-3712");
+            let command = ok(
+                operation,
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 3712,
+                    "operation_id": operation_id,
+                    "reason": "stalled control target",
+                    "launch_generation": launch_generation,
+                    "claim_id": claim_id,
+                    "claim_owner": claim_owner,
+                    "delivery_id": delivery_id,
+                    "materializer_window_id": materializer_window_id,
+                    "window_id": window_id,
+                }),
+            );
+            let parsed = format!("{command:?}");
+            let expected = [
+                format!(
+                    "Monitor{}",
+                    if suffix == "stop" { "Stop" } else { "Failover" }
+                ),
+                format!("operation_id: Some(\"{operation_id}\")"),
+                format!("launch_generation: Some({launch_generation})"),
+                format!("claim_id: Some(\"{claim_id}\")"),
+                format!("claim_owner: Some(\"{claim_owner}\")"),
+                format!("delivery_id: Some(\"{delivery_id}\")"),
+                format!("materializer_window_id: Some(\"{materializer_window_id}\")"),
+                format!("window_id: Some(\"{window_id}\")"),
+            ];
+            let missing = expected
+                .iter()
+                .filter(|value| !parsed.contains(value.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                failures.push(format!(
+                    "{operation} dropped exact target values {missing:?}; parsed command: {parsed}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "PM control parser did not retain the full exact target:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// SPEC-3431 Phase 24 T250 (FR-130/FR-131): recover retains the complete
+    /// source target and reconcile retains the pending receipt identity plus
+    /// its revoked generation. Debug assertions avoid naming command variants
+    /// or fields that do not exist until the GREEN implementation.
+    #[test]
+    fn t250_issue_monitor_parser_retains_recover_and_control_reconcile_identity() {
+        let cases = vec![
+            (
+                "issue.monitor.recover",
+                json!({
+                    "project_root": "/tmp/t250-recover-project",
+                    "number": 837_219,
+                    "operation_id": "recover-operation-3712",
+                    "reason": "recover stalled launch",
+                    "launch_generation": 930_019,
+                    "claim_id": "recover-claim-3712",
+                    "claim_owner": "recover-owner-3712",
+                    "delivery_id": "recover-delivery-3712",
+                    "materializer_window_id": "recover-materializer-window-3712",
+                    "window_id": "recover-agent-window-3712",
+                }),
+                vec![
+                    "MonitorRecover".to_string(),
+                    "project_root: Some(\"/tmp/t250-recover-project\")".to_string(),
+                    "number: 837219".to_string(),
+                    "operation_id: \"recover-operation-3712\"".to_string(),
+                    "launch_generation: 930019".to_string(),
+                    "claim_id: Some(\"recover-claim-3712\")".to_string(),
+                    "claim_owner: Some(\"recover-owner-3712\")".to_string(),
+                    "delivery_id: Some(\"recover-delivery-3712\")".to_string(),
+                    "materializer_window_id: Some(\"recover-materializer-window-3712\")"
+                        .to_string(),
+                    "window_id: Some(\"recover-agent-window-3712\")".to_string(),
+                ],
+            ),
+            (
+                "issue.monitor.control.reconcile",
+                json!({
+                    "project_root": "/tmp/t250-reconcile-project",
+                    "operation_id": "reconcile-operation-3712",
+                    "revoked_generation": 930_021,
+                }),
+                vec![
+                    "MonitorControlReconcile".to_string(),
+                    "project_root: Some(\"/tmp/t250-reconcile-project\")".to_string(),
+                    "operation_id: \"reconcile-operation-3712\"".to_string(),
+                    "revoked_generation: 930021".to_string(),
+                ],
+            ),
+        ];
+        let mut failures = Vec::new();
+
+        for (operation, params, expected) in cases {
+            match parse(&envelope(operation, params)) {
+                Ok(envelope) => {
+                    let parsed = format!("{:?}", envelope.command);
+                    let missing = expected
+                        .iter()
+                        .filter(|value| !parsed.contains(value.as_str()))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        failures.push(format!(
+                            "{operation} dropped identity values {missing:?}; parsed command: {parsed}"
+                        ));
+                    }
+                }
+                Err(error) => failures.push(format!("{operation}: {error}")),
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "required PM control identities were not retained:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Every supplied operation ID is an ASCII token of 1..=128 bytes.
+    /// Recover/reconcile require it, while legacy stop/failover callers remain
+    /// wire-compatible when the field is absent (not blank).
+    #[test]
+    fn t250_issue_monitor_parser_validates_control_operation_ids_and_recover_reason() {
+        fn params(
+            operation: &str,
+            operation_id: Option<String>,
+            reason: Option<&str>,
+        ) -> serde_json::Value {
+            let mut params = match operation {
+                "issue.monitor.control.reconcile" => json!({
+                    "project_root": "/tmp/project",
+                    "revoked_generation": 930_020,
+                }),
+                _ => json!({
+                    "project_root": "/tmp/project",
+                    "number": 3712,
+                    "launch_generation": 930_020,
+                    "claim_id": "boundary-claim-3712",
+                    "claim_owner": "boundary-owner-3712",
+                    "delivery_id": "boundary-delivery-3712",
+                    "materializer_window_id": "boundary-materializer-window-3712",
+                    "window_id": "boundary-agent-window-3712",
+                }),
+            };
+            let object = params.as_object_mut().expect("object params");
+            if let Some(operation_id) = operation_id {
+                object.insert("operation_id".to_string(), json!(operation_id));
+            }
+            if operation != "issue.monitor.control.reconcile" {
+                if let Some(reason) = reason {
+                    object.insert("reason".to_string(), json!(reason));
+                }
+            }
+            params
+        }
+
+        let operations = [
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            "issue.monitor.recover",
+            "issue.monitor.control.reconcile",
+        ];
+        let mut failures = Vec::new();
+
+        for operation in operations {
+            for (boundary, operation_id) in
+                [("one-byte", "x".to_string()), ("128-byte", "x".repeat(128))]
+            {
+                if let Err(error) = parse(&envelope(
+                    operation,
+                    params(
+                        operation,
+                        Some(operation_id),
+                        Some("bounded control request"),
+                    ),
+                )) {
+                    failures.push(format!(
+                        "{operation}:{boundary}: rejected valid ID: {error}"
+                    ));
+                }
+            }
+
+            match parse(&envelope(
+                operation,
+                params(
+                    operation,
+                    Some("operation-トoken".to_string()),
+                    Some("bounded control request"),
+                ),
+            )) {
+                Err(CliParseError::InvalidJson(_)) => {}
+                Ok(_) => failures.push(format!("{operation}:non-ASCII: unexpectedly accepted")),
+                Err(error) => failures.push(format!(
+                    "{operation}:non-ASCII: unstable error class {error}"
+                )),
+            }
+        }
+
+        for operation in ["issue.monitor.stop", "issue.monitor.failover"] {
+            if let Err(error) = parse(&envelope(
+                operation,
+                params(operation, None, Some("legacy control request")),
+            )) {
+                failures.push(format!(
+                    "legacy {operation} without operation_id was rejected: {error}"
+                ));
+            }
+        }
+
+        for operation in operations {
+            for (boundary, operation_id) in
+                [("empty", "   ".to_string()), ("oversized", "x".repeat(129))]
+            {
+                let result = parse(&envelope(
+                    operation,
+                    params(
+                        operation,
+                        Some(operation_id),
+                        Some("bounded control request"),
+                    ),
+                ));
+                match result {
+                    Err(CliParseError::InvalidJson(_)) => {}
+                    Ok(_) => {
+                        failures.push(format!("{operation}:{boundary}: unexpectedly accepted"))
+                    }
+                    Err(error) => failures.push(format!(
+                        "{operation}:{boundary}: unstable error class {error}"
+                    )),
+                }
+            }
+        }
+
+        for operation in ["issue.monitor.recover", "issue.monitor.control.reconcile"] {
+            match parse(&envelope(
+                operation,
+                params(operation, None, Some("bounded control request")),
+            )) {
+                Err(CliParseError::MissingFlag("operation_id")) => {}
+                Ok(_) => failures.push(format!("{operation}:missing ID: unexpectedly accepted")),
+                Err(error) => failures.push(format!(
+                    "{operation}:missing ID: unstable error class {error}"
+                )),
+            }
+        }
+
+        for (boundary, reason) in [("missing", None), ("blank", Some("   "))] {
+            match parse(&envelope(
+                "issue.monitor.recover",
+                params(
+                    "issue.monitor.recover",
+                    Some("recover-operation-3712".to_string()),
+                    reason,
+                ),
+            )) {
+                Err(CliParseError::MissingFlag("reason")) => {}
+                Ok(_) => failures.push(format!("recover:{boundary} reason: unexpectedly accepted")),
+                Err(error) => failures.push(format!(
+                    "recover:{boundary} reason: unstable error class {error}"
+                )),
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "control operation validation contract failed:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// Issue #3645 / #3628: the recovery takes no launch identity, because the
     /// row it recovers has no launch left to name — that is precisely why the
     /// stop and failover operations cannot reach it. A reason stays mandatory:

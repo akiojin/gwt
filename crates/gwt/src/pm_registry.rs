@@ -1212,6 +1212,17 @@ mod tests {
         }
     }
 
+    fn persisted_prefs(path: &Path) -> (Vec<u8>, serde_json::Value) {
+        let bytes = fs::read(path).expect("read persisted PM prefs");
+        let json = serde_json::from_slice(&bytes).expect("parse persisted PM prefs");
+        (bytes, json)
+    }
+
+    fn registration_generation(json: &serde_json::Value) -> Option<u64> {
+        json.get("registration_generation")
+            .and_then(serde_json::Value::as_u64)
+    }
+
     /// Issue #3607: reproduce the observed split — one repository whose
     /// `pm/worktree` linked worktrees live in two different project stores.
     ///
@@ -1432,6 +1443,26 @@ mod tests {
         assert!(prefs.settings.auto_start);
     }
 
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-COMPAT: prefs written before the
+    /// generation fence existed must deserialize with effective generation 0.
+    /// Observe the public JSON representation so this RED compiles before the
+    /// Rust field is introduced.
+    #[test]
+    fn registration_generation_legacy_missing_reads_as_effective_zero() {
+        let (_dir, path) = temp_prefs_path();
+        fs::create_dir_all(path.parent().expect("parent")).expect("create prefs parent");
+        fs::write(&path, br#"{"settings":{"auto_start":true}}"#).expect("write legacy prefs");
+
+        let prefs = load_pm_prefs(&path).expect("load legacy prefs");
+        let round_trip = serde_json::to_value(prefs).expect("serialize loaded legacy prefs");
+
+        assert_eq!(
+            registration_generation(&round_trip),
+            Some(0),
+            "missing legacy generation must read back as the effective zero fence"
+        );
+    }
+
     #[test]
     fn save_then_load_roundtrips_and_leaves_no_scratch() {
         let (_dir, path) = temp_prefs_path();
@@ -1492,6 +1523,23 @@ mod tests {
         );
     }
 
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-AUTH: a successful singleton claim
+    /// establishes generation 1 in the canonical pm.json bytes.
+    #[test]
+    fn registration_generation_first_successful_registration_persists_one() {
+        let (_dir, path) = temp_prefs_path();
+        let (_prefs, outcome) =
+            try_register_pm(&path, registration("session-a"), |_| true).expect("register");
+        assert_eq!(outcome, PmRegisterOutcome::Registered);
+
+        let (_bytes, json) = persisted_prefs(&path);
+        assert_eq!(
+            registration_generation(&json),
+            Some(1),
+            "the first committed PM registration must publish generation 1"
+        );
+    }
+
     #[test]
     fn register_rejects_when_existing_is_live() {
         let (_dir, path) = temp_prefs_path();
@@ -1516,6 +1564,36 @@ mod tests {
         );
     }
 
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-AUTH: refusing a competing live PM
+    /// is a strict zero-write outcome, including the generation fence.
+    #[test]
+    fn registration_generation_live_rejection_preserves_exact_bytes_and_value() {
+        let (_dir, path) = temp_prefs_path();
+        try_register_pm(&path, registration("session-a"), |_| true).expect("seed");
+        let (before_bytes, before_json) = persisted_prefs(&path);
+
+        let (_prefs, outcome) = try_register_pm(&path, registration("session-b"), |existing| {
+            assert_eq!(existing.session_id, "session-a");
+            true
+        })
+        .expect("reject live replacement");
+        assert!(matches!(outcome, PmRegisterOutcome::RejectedLive { .. }));
+        let (after_bytes, after_json) = persisted_prefs(&path);
+
+        assert_eq!(
+            after_bytes, before_bytes,
+            "live rejection must not rewrite even equivalent PM prefs bytes"
+        );
+        assert_eq!(
+            (
+                registration_generation(&before_json),
+                registration_generation(&after_json),
+            ),
+            (Some(1), Some(1)),
+            "live rejection must leave generation 1 unchanged"
+        );
+    }
+
     #[test]
     fn register_replaces_stale_registration() {
         let (_dir, path) = temp_prefs_path();
@@ -1531,6 +1609,61 @@ mod tests {
         assert_eq!(
             prefs.registration.map(|r| r.session_id),
             Some("session-b".to_string())
+        );
+    }
+
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-AUTH: replacing a stale singleton is
+    /// a new authority generation, not a reuse of the stale registration's
+    /// fence.
+    #[test]
+    fn registration_generation_stale_replacement_advances_to_two() {
+        let (_dir, path) = temp_prefs_path();
+        try_register_pm(&path, registration("session-a"), |_| true).expect("seed");
+        let (_first_bytes, first_json) = persisted_prefs(&path);
+
+        let (_prefs, outcome) =
+            try_register_pm(&path, registration("session-b"), |_| false).expect("takeover");
+        assert!(matches!(outcome, PmRegisterOutcome::ReplacedStale { .. }));
+        let (_second_bytes, second_json) = persisted_prefs(&path);
+
+        assert_eq!(
+            (
+                registration_generation(&first_json),
+                registration_generation(&second_json),
+            ),
+            (Some(1), Some(2)),
+            "stale replacement must advance the committed generation from 1 to 2"
+        );
+    }
+
+    /// A registration generation is a durable authority watermark, not the
+    /// ordinal of the currently populated registration slot. Consecutive
+    /// takeovers and a deregister/re-register cycle must therefore keep
+    /// increasing rather than reusing generation 1 or saturating at 2.
+    #[test]
+    fn registration_generation_remains_strictly_monotonic_across_all_replacements() {
+        let (_dir, path) = temp_prefs_path();
+        try_register_pm(&path, registration("session-a"), |_| true).expect("generation 1");
+        try_register_pm(&path, registration("session-b"), |_| false).expect("generation 2");
+        try_register_pm(&path, registration("session-c"), |_| false).expect("generation 3");
+        let (_, third_json) = persisted_prefs(&path);
+        assert_eq!(registration_generation(&third_json), Some(3));
+
+        let (_, removed) = deregister_pm(&path, "session-c").expect("deregister generation 3");
+        assert!(removed);
+        let (_, deregistered_json) = persisted_prefs(&path);
+        assert_eq!(
+            registration_generation(&deregistered_json),
+            Some(3),
+            "deregister must retain the authority watermark"
+        );
+
+        try_register_pm(&path, registration("session-d"), |_| true).expect("generation 4");
+        let (_, fourth_json) = persisted_prefs(&path);
+        assert_eq!(
+            registration_generation(&fourth_json),
+            Some(4),
+            "registration after an empty slot must not reuse an older authority"
         );
     }
 
