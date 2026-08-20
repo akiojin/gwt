@@ -10230,6 +10230,166 @@ mod tests {
         );
     }
 
+    /// SPEC-3431 FR-128 / AS-PM-CONTROL-STATUS-001: ACK is a delivery receipt,
+    /// not permission to erase the exact identity later PM controls require.
+    #[test]
+    fn agent_status_keeps_complete_control_target_after_launch_ack_and_prefs_roundtrip() {
+        let launch_profile = IssueMonitorLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            reasoning: Some("high".to_string()),
+            version: Some("0.121.0".to_string()),
+            session_mode: Default::default(),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+        };
+        let expected_profile_fingerprint = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(
+                serde_json::to_vec(&launch_profile).expect("serialize launch profile")
+            )
+        );
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(launch_profile),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-20T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-20T00:00:01Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+
+        let launching_status =
+            serde_json::to_value(monitor.agent_status()).expect("serialize launching status");
+        let launching_row = launching_status["inbox"]
+            .as_array()
+            .expect("serialized launching inbox")
+            .iter()
+            .find(|row| row["issue_number"] == serde_json::json!(42))
+            .expect("launching status row");
+        assert_eq!(
+            launching_row["state"],
+            serde_json::json!("launching"),
+            "pre-ACK row must still describe the in-flight launch"
+        );
+        assert_eq!(
+            launching_row["claim_id"],
+            serde_json::json!("claim-42"),
+            "pre-ACK status must expose the confirmed launch claim"
+        );
+        assert_eq!(
+            launching_row["delivery_id"],
+            serde_json::json!("launch:effect-42"),
+            "pre-ACK status must expose the durable launch delivery"
+        );
+
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+
+        let mut prefs = monitor.prefs();
+        prefs.launch_profile = Some(IssueMonitorLaunchProfile {
+            agent_id: "claude".to_string(),
+            model: Some("opus".to_string()),
+            reasoning: Some("low".to_string()),
+            version: Some("different-global-profile".to_string()),
+            session_mode: Default::default(),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+        });
+        let prefs: IssueMonitorPrefs = serde_json::from_value(
+            serde_json::to_value(prefs).expect("serialize prefs after launch ACK"),
+        )
+        .expect("deserialize prefs after launch ACK");
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-08-20T00:00:02Z");
+
+        let status = serde_json::to_value(restored.agent_status()).expect("serialize agent status");
+        let row = status["inbox"]
+            .as_array()
+            .expect("serialized inbox")
+            .iter()
+            .find(|row| row["issue_number"] == serde_json::json!(42))
+            .expect("launched status row");
+        assert_eq!(
+            row["state"],
+            serde_json::json!("launched"),
+            "post-ACK roundtrip must preserve the launched lifecycle row"
+        );
+        assert_eq!(
+            row["claim_id"],
+            serde_json::json!("claim-42"),
+            "post-ACK launched status lost the confirmed claim identity"
+        );
+        assert_eq!(
+            row["delivery_id"],
+            serde_json::json!("launch:effect-42"),
+            "post-ACK launched status lost the acknowledged delivery identity"
+        );
+        assert_eq!(
+            row["claim_owner"],
+            serde_json::json!("host/session"),
+            "post-ACK launched status lost the claim owner"
+        );
+        assert_eq!(
+            row["materializer_window_id"],
+            serde_json::json!("tab-1::agent-42"),
+            "post-ACK launched status lost the claimed materializer window"
+        );
+        assert_eq!(
+            row["launched_window_id"],
+            serde_json::json!("tab-1::agent-42"),
+            "post-ACK launched status lost the launched window"
+        );
+        assert_eq!(
+            row["launch_generation"],
+            serde_json::json!(1),
+            "post-ACK launched status lost the checked launch generation"
+        );
+        assert_eq!(
+            row["launch_profile_fingerprint"],
+            serde_json::json!(expected_profile_fingerprint),
+            "post-ACK launched status must fingerprint the original launch profile, not current global prefs"
+        );
+    }
+
     /// SPEC-3431 FR-033: no collateral. Stopping one issue leaves every other
     /// launch, slot, and window exactly as it was.
     #[test]
