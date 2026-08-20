@@ -678,6 +678,85 @@ pub struct LaunchFeedbackContext {
     pub(crate) issue_monitor_delivery_id: Option<String>,
     pub(crate) issue_monitor_project_root: Option<PathBuf>,
     pub(crate) issue_monitor_session_mode: Option<gwt_agent::SessionMode>,
+    /// Write-ahead answered handoff carried by a native Resume. Only the
+    /// provider's UserPromptSubmit receipt may mark it delivered.
+    pub(crate) issue_monitor_autonomous_handoff: Option<gwt::AutonomousHandoffDeliveryAttempt>,
+    /// Set immediately before the provider process spawn call. Failures while
+    /// false are definitely pre-submit and keep the bounded retry ladder;
+    /// failures while true have an ambiguous provider outcome.
+    pub(crate) issue_monitor_autonomous_submit_started: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IssueMonitorAnswerDelivery {
+    pub(crate) project_root: PathBuf,
+    pub(crate) issue_number: u64,
+    pub(crate) holder_window_id: String,
+    pub(crate) delivery_id: Option<String>,
+    pub(crate) local_delivery_key: String,
+    pub(crate) handoff_id: String,
+    pub(crate) session_id: String,
+    pub(crate) attempt: u32,
+    pub(crate) result: Result<(), String>,
+}
+
+fn autonomous_handoff_delivery_target_for_session(
+    session: &gwt_agent::Session,
+    issue_number: u64,
+    window_id: &str,
+    delivery_id: Option<&str>,
+    materializer_id: &str,
+) -> Result<gwt::autonomous_handoff::AutonomousHandoffDeliveryTarget, String> {
+    if session.linked_issue_number != Some(issue_number) {
+        return Err(format!(
+            "answered handoff target Session {} is not linked to Issue #{issue_number}",
+            session.id
+        ));
+    }
+    let native_session_id = session
+        .exact_resume_session_id()
+        .filter(|identity| !identity.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "answered handoff target Session {} has no exact native identity",
+                session.id
+            )
+        })?;
+    let repo_hash = session
+        .repo_hash
+        .clone()
+        .filter(|hash| !hash.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "answered handoff target Session {} has no repository identity",
+                session.id
+            )
+        })?;
+    let project_state_root = gwt::validated_project_state_root_for_session_recovery(session)
+        .map_err(|error| {
+            format!(
+                "answered handoff target Session {} has invalid Project State identity: {error}",
+                session.id
+            )
+        })?;
+    let materializer_pid = std::process::id();
+    let materializer_started_at = gwt::process::host_process_start_time(materializer_pid)
+        .ok_or_else(|| {
+            "answered handoff materializer process identity is unavailable".to_string()
+        })?;
+    Ok(gwt::autonomous_handoff::AutonomousHandoffDeliveryTarget {
+        gwt_session_id: session.id.clone(),
+        native_session_id: native_session_id.to_string(),
+        provider: session.agent_id.to_string(),
+        issue_number,
+        repo_hash,
+        project_state_root: project_state_root.to_string_lossy().into_owned(),
+        window_id: window_id.to_string(),
+        materializer_id: materializer_id.to_string(),
+        materializer_pid,
+        materializer_started_at,
+        delivery_id: delivery_id.map(str::to_string),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2984,6 +3063,105 @@ impl AppRuntime {
                 Some(issue_number),
             ),
         }
+    }
+
+    pub(crate) fn handle_issue_monitor_answer_delivery_complete(
+        &mut self,
+        delivery: IssueMonitorAnswerDelivery,
+    ) -> Vec<OutboundEvent> {
+        let IssueMonitorAnswerDelivery {
+            project_root,
+            issue_number,
+            holder_window_id,
+            delivery_id,
+            local_delivery_key,
+            handoff_id,
+            session_id,
+            attempt,
+            result,
+        } = delivery;
+        let owns_materialization = matches!(
+            self.issue_monitor_launch_deliveries.get(&local_delivery_key),
+            Some(IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+                if window_id == &holder_window_id
+        );
+        if !owns_materialization {
+            return Vec::new();
+        }
+        if let Err(error) = result {
+            self.issue_monitor_launch_deliveries
+                .remove(&local_delivery_key);
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let ambiguity = gwt::mark_autonomous_handoff_delivery_ambiguous_from_prefs(
+                &prefs_path,
+                &handoff_id,
+                &session_id,
+                attempt,
+                &error,
+                &now,
+            );
+            let suffix = match ambiguity {
+                Ok(true) => " The outcome is ambiguous, so the Issue was parked for human review."
+                    .to_string(),
+                Ok(false) => " The durable delivery attempt no longer matched.".to_string(),
+                Err(marker_error) => {
+                    format!(" The ambiguous durable state could not be recorded: {marker_error}")
+                }
+            };
+            return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                level: "error".to_string(),
+                message: format!(
+                    "Issue Monitor could not deliver the human answer to live window \
+                     {holder_window_id}: {error}.{suffix}"
+                ),
+                issue_number: Some(issue_number),
+            })];
+        }
+        let mut events = self.issue_monitor_launch_completed_delivery_events(
+            &project_root,
+            issue_number,
+            &holder_window_id,
+            delivery_id.as_deref(),
+        );
+        let semantic_receipt_already_settled = delivery_id.as_deref().is_some_and(|delivery_id| {
+            self.autonomous_answer_receipt_settled_delivery(&project_root, delivery_id, &handoff_id)
+        });
+        if delivery_id.is_none() || semantic_receipt_already_settled {
+            self.issue_monitor_launch_deliveries
+                .remove(&local_delivery_key);
+        }
+        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "info".to_string(),
+            message: "Issue Monitor submitted the human answer; waiting for the provider receipt"
+                .to_string(),
+            issue_number: Some(issue_number),
+        }));
+        events
+    }
+
+    pub(crate) fn autonomous_answer_receipt_settled_delivery(
+        &self,
+        project_root: &Path,
+        delivery_id: &str,
+        handoff_id: &str,
+    ) -> bool {
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+            .is_ok_and(|prefs| {
+                !prefs
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.delivery_id == delivery_id)
+                    && prefs.autonomous_handoffs.iter().any(|handoff| {
+                        handoff.handoff_id == handoff_id
+                            && matches!(
+                                handoff.delivery,
+                                gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Delivered {
+                                    ..
+                                }
+                            )
+                    })
+            })
     }
 
     pub(crate) fn issue_monitor_launch_failed_events(
