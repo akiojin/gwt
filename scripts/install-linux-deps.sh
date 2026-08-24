@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CI_APT="${SCRIPT_DIR}/ci-apt.sh"
+
 run_as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
@@ -18,7 +21,7 @@ if [[ "${NO_INSTALL_RECOMMENDS:-0}" == "1" ]]; then
 fi
 
 if [[ "${SKIP_APT_UPDATE:-0}" != "1" ]]; then
-  run_as_root apt-get update
+  run_as_root bash "${CI_APT}" update
 fi
 
 appindicator_pkg=""
@@ -38,9 +41,9 @@ packages=(
   patchelf
 )
 
-run_as_root apt-get install "${install_args[@]}" "${packages[@]}"
+run_as_root bash "${CI_APT}" install "${install_args[@]}" "${packages[@]}"
 
 if [[ "${CLEAN_APT_CACHE:-0}" == "1" ]]; then
-  run_as_root apt-get clean
+  run_as_root bash "${CI_APT}" clean
   run_as_root rm -rf /var/lib/apt/lists/*
 fi

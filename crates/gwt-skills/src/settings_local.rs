@@ -4,6 +4,7 @@ use std::{
     fs, io,
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde_json::{json, Map, Value};
@@ -43,6 +44,7 @@ const MANAGED_EVENT_ORDER: &[&str] = &[
     "Stop",
 ];
 const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
+static ATOMIC_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexHookDiscoveryMode {
@@ -270,15 +272,7 @@ fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
 }
 
 pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir)?;
-    let tmp_path = dir.join(format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("settings.local.json"),
-        std::process::id()
-    ));
+    let tmp_path = atomic_staging_path(path, "settings.local.json")?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|err| io::Error::other(format!("settings.local.json serialize failed: {err}")))?;
 
@@ -289,23 +283,12 @@ pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Resul
         tmp.sync_all()?;
     }
 
-    if cfg!(windows) && path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&tmp_path, path)?;
+    commit_staged_file(&tmp_path, path)?;
     Ok(())
 }
 
 pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir)?;
-    let tmp_path = dir.join(format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("gwt-managed"),
-        std::process::id()
-    ));
+    let tmp_path = atomic_staging_path(path, "gwt-managed")?;
 
     {
         let mut tmp = fs::File::create(&tmp_path)?;
@@ -316,11 +299,37 @@ pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()
         tmp.sync_all()?;
     }
 
-    if cfg!(windows) && path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&tmp_path, path)?;
+    commit_staged_file(&tmp_path, path)?;
     Ok(())
+}
+
+fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir)?;
+    let nonce = ATOMIC_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+    Ok(dir.join(format!(
+        ".{}.tmp-{}-{nonce}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(fallback_name),
+        std::process::id()
+    )))
+}
+
+fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    let _replace_guard = {
+        static WINDOWS_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = WINDOWS_REPLACE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+        guard
+    };
+
+    fs::rename(staging_path, destination)
 }
 
 pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
@@ -694,6 +703,8 @@ fn powershell_coordination_hook_command(event: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use gwt_core::process::hidden_command;
 
     use crate::provider_hooks::{
@@ -701,6 +712,55 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn concurrent_codex_hook_regeneration_uses_distinct_atomic_temp_files() {
+        const WRITERS: usize = 32;
+        const WRITES_PER_THREAD: usize = 4;
+
+        let dir = tempfile::tempdir().expect("worktree");
+        let worktree = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let writers = (0..WRITERS)
+            .map(|_| {
+                let worktree = Arc::clone(&worktree);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..WRITES_PER_THREAD {
+                        generate_codex_hooks_for_mode(
+                            &worktree,
+                            CodexHookDiscoveryMode::WorktreeLocal,
+                        )?;
+                    }
+                    Ok::<_, io::Error>(())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for writer in writers {
+            writer.join().expect("writer thread").expect("hook write");
+        }
+
+        let hooks_path = worktree.join(CODEX_HOOKS_PATH);
+        let rendered = fs::read_to_string(&hooks_path).expect("final hooks");
+        serde_json::from_str::<Value>(&rendered).expect("valid final hooks JSON");
+        let staging_files = fs::read_dir(hooks_path.parent().expect("hooks parent"))
+            .expect("hooks directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hooks.json.tmp-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(
+            staging_files.is_empty(),
+            "atomic staging files leaked: {staging_files:?}"
+        );
+    }
 
     #[test]
     fn managed_hook_config_has_user_content_distinguishes_generated_from_edited() {

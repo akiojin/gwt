@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page, TestInfo } from "@playwright/test";
@@ -28,7 +28,17 @@ async function removeStaleLiveBackendLock(path: string): Promise<boolean> {
       return false;
     }
   } catch {
-    return false;
+    // mkdir and owner.json cannot be created atomically. If the owner dies in
+    // that narrow window, fall back to the directory timestamp so later live
+    // tests can reclaim the orphan instead of waiting the full lock timeout.
+    try {
+      const metadata = await stat(path);
+      if (Date.now() - metadata.mtimeMs < LIVE_BACKEND_LOCK_STALE_MS) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
   }
   await rm(path, { recursive: true, force: true });
   return true;
@@ -43,14 +53,19 @@ export async function acquireLiveGwtBackendLock(
   while (Date.now() < deadline) {
     try {
       await mkdir(lockPath);
-      await writeFile(
-        join(lockPath, "owner.json"),
-        JSON.stringify({
-          createdAt: Date.now(),
-          titlePath: testInfo.titlePath,
-          workerIndex: testInfo.workerIndex,
-        }),
-      );
+      try {
+        await writeFile(
+          join(lockPath, "owner.json"),
+          JSON.stringify({
+            createdAt: Date.now(),
+            titlePath: testInfo.titlePath,
+            workerIndex: testInfo.workerIndex,
+          }),
+        );
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
       return async () => {
         await rm(lockPath, { recursive: true, force: true });
       };
@@ -91,6 +106,30 @@ export async function gotoLiveGwt(
     }
     if (enableTestBridge) {
       (window as any).__gwtPlaywrightTestBridge = true;
+      (window as any).__gwtPlaywrightMessages = [];
+      (window as any).__gwtPlaywrightMessageSequence = 0;
+      const NativeWebSocket = window.WebSocket;
+      window.WebSocket = new Proxy(NativeWebSocket, {
+        construct(Target, args) {
+          const socket = new Target(...args as ConstructorParameters<typeof WebSocket>);
+          socket.addEventListener("message", (event) => {
+            try {
+              const payload = JSON.parse(String(event.data));
+              const sequence = ((window as any).__gwtPlaywrightMessageSequence as number) + 1;
+              (window as any).__gwtPlaywrightMessageSequence = sequence;
+              const messages = (window as any).__gwtPlaywrightMessages as Array<{
+                sequence: number;
+                payload: unknown;
+              }>;
+              messages.push({ sequence, payload });
+              if (messages.length > 256) messages.splice(0, messages.length - 256);
+            } catch {
+              /* non-JSON backend frames are irrelevant to the test bridge */
+            }
+          });
+          return socket;
+        },
+      });
     }
     if (suppressUpdateApplyStart && !(window as any).__gwtSuppressUpdateApplyStart) {
       (window as any).__gwtSuppressUpdateApplyStart = true;
@@ -149,6 +188,70 @@ export async function sendLiveGwtEvent(page: Page, payload: unknown): Promise<vo
   await page.evaluate((detail) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
   }, payload);
+}
+
+export async function clearLiveLaunchWizard(page: Page): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    // DOM visibility is only page-local and may still reflect the startup
+    // default. FrontendReady always returns the backend-authoritative wizard
+    // snapshot, including a null tombstone, so use that frame as the fence.
+    const readyCursor = await liveMessageCursor(page);
+    await sendLiveGwtEvent(page, { kind: "frontend_ready" });
+    const authoritative = await waitForLaunchWizardState(page, readyCursor, null, 5_000)
+      .catch(() => null);
+    if (!authoritative) continue;
+    if (authoritative.hasWizard === false) {
+      await wizard.waitFor({ state: "hidden", timeout: 5_000 });
+      return;
+    }
+
+    const cancelCursor = await liveMessageCursor(page);
+    await sendLiveGwtEvent(page, {
+      kind: "launch_wizard_action",
+      action: { kind: "cancel" },
+      bounds: null,
+    });
+    const cancelled = await waitForLaunchWizardState(page, cancelCursor, false, 5_000)
+      .then(() => true)
+      .catch(() => false);
+    if (!cancelled) continue;
+    await wizard.waitFor({ state: "hidden", timeout: 5_000 });
+    return;
+  }
+  throw new Error("live Launch Wizard did not clear before the test");
+}
+
+async function liveMessageCursor(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    Number((window as any).__gwtPlaywrightMessageSequence) || 0
+  );
+}
+
+async function waitForLaunchWizardState(
+  page: Page,
+  cursor: number,
+  expectedHasWizard: boolean | null,
+  timeout: number,
+): Promise<{ hasWizard: boolean }> {
+  const handle = await page.waitForFunction(
+    ({ cursor, expectedHasWizard }) => {
+      const messages = (window as any).__gwtPlaywrightMessages;
+      if (!Array.isArray(messages)) return null;
+      const state = messages.find((entry: any) =>
+          entry?.sequence > cursor
+          && entry?.payload?.kind === "launch_wizard_state"
+          && (
+            expectedHasWizard === null
+            || (entry.payload.wizard !== null) === expectedHasWizard
+          )
+        );
+      return state ? { hasWizard: state.payload.wizard !== null } : null;
+    },
+    { cursor, expectedHasWizard },
+    { timeout },
+  );
+  return handle.jsonValue();
 }
 
 export async function suppressInitialFrontendReady(page: Page): Promise<void> {

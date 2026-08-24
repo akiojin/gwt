@@ -28,6 +28,109 @@ use super::{
     Read as _, RuntimeStopThreads, UserEvent, WindowProcessStatus,
 };
 
+/// SPEC-3431 FR-108c: how long the TUI is given to render the injected body
+/// before the submit byte arrives. Claude Code and Codex both fold a carriage
+/// return that lands in the same PTY write as the text into the text itself —
+/// the line is inserted on the prompt but never submitted — so the submit has
+/// to be a write of its own, after the TUI has settled.
+const PANE_SUBMIT_SETTLE: Duration = Duration::from_millis(400);
+
+/// Split one pane payload into the body and its submit terminator. Input that
+/// carries no terminator is not a submit and is returned whole, so raw
+/// keystroke forwarding stays byte-exact.
+fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
+    for terminator in ["\r\n", "\r", "\n"] {
+        if let Some(body) = text.strip_suffix(terminator) {
+            return (body, Some(terminator));
+        }
+    }
+    (text, None)
+}
+
+/// Result of a body-once, submit-until-verified delivery. Verification is a
+/// semantic target acknowledgement, never merely a successful PTY write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerifiedPaneSubmitOutcome {
+    Verified { submit_attempts: usize },
+    Unverified { submit_attempts: usize },
+}
+
+/// Write the prompt body once, then retry only its submit terminator until the
+/// injected semantic acknowledgement says the exact target turn started.
+pub(super) fn drive_verified_pane_submit(
+    text: &str,
+    max_submit_attempts: usize,
+    mut write: impl FnMut(&[u8]) -> Result<(), String>,
+    mut settle: impl FnMut(Duration),
+    mut is_verified: impl FnMut() -> Result<bool, String>,
+) -> Result<VerifiedPaneSubmitOutcome, String> {
+    let (body, submit) = split_pane_submit(text);
+    if !body.is_empty() {
+        write(body.as_bytes())?;
+    }
+    let Some(submit) = submit else {
+        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
+    };
+
+    // Give the TUI composer time to consume the body before the first submit.
+    settle(PANE_SUBMIT_SETTLE);
+    for submit_attempts in 1..=max_submit_attempts {
+        if submit_attempts > 1 && is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified {
+                submit_attempts: submit_attempts - 1,
+            });
+        }
+        write(submit.as_bytes())?;
+        // Every submit, including the final attempt, receives a full semantic
+        // ACK grace period before the operation can become Ambiguous.
+        settle(PANE_SUBMIT_SETTLE);
+        if is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts });
+        }
+    }
+    Ok(VerifiedPaneSubmitOutcome::Unverified {
+        submit_attempts: max_submit_attempts,
+    })
+}
+
+/// Write one pane payload as the TUIs expect it: the body first, then the
+/// submit byte on its own once the TUI has settled (SPEC-3431 FR-108c). The
+/// delay runs on a detached thread holding an `Arc` clone of the pane, so the
+/// event loop is never blocked and every other pane keeps streaming.
+pub(super) fn write_pane_input_then_submit(
+    pane: &Arc<Mutex<Pane>>,
+    text: &str,
+) -> Result<(), String> {
+    let (body, submit) = split_pane_submit(text);
+    let Some(submit) = submit else {
+        return if body.is_empty() {
+            Ok(())
+        } else {
+            pane.lock()
+                .map_err(|error| error.to_string())?
+                .write_input(body.as_bytes())
+                .map_err(|error| error.to_string())
+        };
+    };
+    let pty = pane.lock().map_err(|error| error.to_string())?.shared_pty();
+    let reservation = pty
+        .reserve_input_transaction()
+        .map_err(|error| error.to_string())?;
+    if !body.is_empty() {
+        reservation
+            .write_input(body.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    let submit = submit.to_string();
+    thread::spawn(move || {
+        thread::sleep(PANE_SUBMIT_SETTLE);
+        if let Err(error) = reservation.write_input(submit.as_bytes()) {
+            tracing::warn!(%error, "pane submit byte could not be written");
+        }
+    });
+    Ok(())
+}
+
 /// Complete the stop phase for every runtime before any join can block.
 fn stop_all_before_joining<I, T>(
     ids: I,
@@ -118,25 +221,23 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
-            Some(runtime) => runtime
-                .pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| {
-                    pane.write_input(text.as_bytes())
-                        .map_err(|error| error.to_string())
-                }),
+            Some(runtime) => write_pane_input_then_submit(&runtime.pane, text),
         };
 
         match write_result {
-            Ok(()) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::PaneSendResult {
-                    ok: true,
-                    window_id: Some(window_id.to_string()),
-                    error: None,
-                },
-            )],
+            Ok(()) => {
+                if gwt::window_state::is_approval_resolution_input(text) {
+                    self.begin_runtime_approval_resolution(window_id);
+                }
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneSendResult {
+                        ok: true,
+                        window_id: Some(window_id.to_string()),
+                        error: None,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneSendResult {
@@ -149,7 +250,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let write_result = {
+        let (incarnation, write_result) = {
             let Some(runtime) = self.runtimes.get(id) else {
                 tracing::debug!(
                     target: "gwt_input_trace",
@@ -165,7 +266,7 @@ impl AppRuntime {
             let lock_result = runtime.pane.lock().map_err(|error| error.to_string());
             let lock_wait_us = lock_started.elapsed().as_micros() as u64;
 
-            match lock_result {
+            let write_result = match lock_result {
                 Ok(pane) => {
                     let write_started = Instant::now();
                     let result = pane
@@ -193,14 +294,24 @@ impl AppRuntime {
                     );
                     Err(error)
                 }
-            }
+            };
+            (runtime.incarnation, write_result)
         };
 
         match write_result {
-            Ok(()) => Vec::new(),
-            Err(error) => {
-                self.handle_runtime_status(id.to_string(), WindowProcessStatus::Error, Some(error))
+            Ok(()) => {
+                if gwt::window_state::is_approval_resolution_input(data) {
+                    self.begin_runtime_approval_resolution(id);
+                }
+                Vec::new()
             }
+            Err(error) => self.handle_runtime_status_event(
+                id.to_string(),
+                incarnation,
+                WindowProcessStatus::Error,
+                Some(error),
+                false,
+            ),
         }
     }
 
@@ -218,7 +329,11 @@ impl AppRuntime {
         drop(pane_guard);
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                guard.insert(id.to_string(), pty);
+                let previous = guard.insert(id.to_string(), Arc::clone(&pty));
+                drop(guard);
+                if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
+                    previous.invalidate_input_generation();
+                }
             }
             Err(_error) => {
                 tracing::warn!(
@@ -235,7 +350,11 @@ impl AppRuntime {
     pub(crate) fn deregister_pty_writer(&self, id: &str) {
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                guard.remove(id);
+                let previous = guard.remove(id);
+                drop(guard);
+                if let Some(previous) = previous {
+                    previous.invalidate_input_generation();
+                }
             }
             Err(_error) => {
                 tracing::warn!(
@@ -250,11 +369,185 @@ impl AppRuntime {
     }
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
+        let exact_holder = self
+            .active_agent_sessions
+            .get(window_id)
+            .and_then(|active| {
+                let runtime_incarnation = self.runtimes.get(window_id)?.incarnation;
+                let session = gwt_agent::Session::load(
+                    &self
+                        .sessions_dir
+                        .join(format!("{}.toml", active.session_id)),
+                )
+                .ok()?;
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                    .ok()
+                    .flatten()?;
+                Some((identity, runtime_incarnation))
+            });
+        if let Some((identity, runtime_incarnation)) = exact_holder {
+            if self
+                .stop_exact_manual_holder_runtime(window_id, runtime_incarnation, &identity, false)
+                .is_ok()
+            {
+                return;
+            }
+            // Exact authority could not be fenced. Still stop the local
+            // process for the user's close request, but retain Running
+            // authority bytes so another Host cannot mistake the failure for
+            // terminal successor permission.
+            let threads = self.start_window_runtime_stop(window_id, false);
+            Self::join_runtime_stop_threads(threads);
+            self.mark_agent_session_stopped_with_persistence(window_id, false);
+            return;
+        }
         self.stop_window_runtime_inner(window_id, true);
     }
 
     pub(crate) fn stop_window_runtime_without_session_projection(&mut self, window_id: &str) {
         self.stop_window_runtime_inner(window_id, false);
+    }
+
+    /// Stop one exact locally-owned producing runtime. The runtime
+    /// incarnation and Session execution identity are rechecked before the
+    /// kill, and durable terminal evidence is written only after the child is
+    /// observed exited. Any failure leaves Session/sidecar authority bytes
+    /// untouched.
+    pub(crate) fn stop_exact_manual_holder_runtime(
+        &mut self,
+        window_id: &str,
+        expected_incarnation: u64,
+        expected_session: &gwt_agent::SessionExecutionIdentity,
+        retain_successor_handoff: bool,
+    ) -> Result<(), String> {
+        let active = self
+            .active_agent_sessions
+            .get(window_id)
+            .filter(|active| active.session_id == expected_session.session_id)
+            .cloned()
+            .ok_or_else(|| "The exact holder Session is no longer local".to_string())?;
+        let runtime = self
+            .runtimes
+            .get(window_id)
+            .filter(|runtime| runtime.incarnation == expected_incarnation)
+            .ok_or_else(|| "The exact holder runtime incarnation changed".to_string())?;
+        let pane = runtime.pane.clone();
+        let capability = self
+            .agent_capability_issuer
+            .clone()
+            .zip(self.agent_capability_tokens.get(window_id).cloned());
+        if retain_successor_handoff && capability.is_none() {
+            return Err("The exact holder capability is unavailable".to_string());
+        }
+        let sessions_dir = self.sessions_dir.clone();
+        let proof = gwt_agent::ManualLaunchRuntimeProof {
+            host_pid: std::process::id(),
+            runtime_incarnation: expected_incarnation,
+        };
+        let stopped = gwt::cli::execution_state::with_exact_active_manual_runtime_lease(
+            &sessions_dir,
+            expected_session,
+            proof,
+            retain_successor_handoff,
+            || {
+                let reservation = capability
+                    .as_ref()
+                    .map(|(issuer, token)| {
+                        issuer
+                            .begin_manual_execution_handoff(
+                                token,
+                                &expected_session.execution_binding,
+                            )
+                            .map(|reservation| (issuer, reservation))
+                    })
+                    .transpose()
+                    .map_err(std::io::Error::other)?;
+                let stop_result = (|| {
+                    pane.lock()
+                        .map_err(|error| std::io::Error::other(error.to_string()))?
+                        .kill()
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        if pane
+                            .lock()
+                            .map_err(|error| std::io::Error::other(error.to_string()))?
+                            .process_has_exited()
+                            .map_err(|error| std::io::Error::other(error.to_string()))?
+                        {
+                            break;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(std::io::Error::other(
+                                "The exact holder process did not exit after termination",
+                            ));
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    if !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
+                        &sessions_dir,
+                        expected_session,
+                        expected_incarnation,
+                        gwt_agent::AgentStatus::Stopped,
+                    )? {
+                        return Err(std::io::Error::other(
+                            "The holder Session changed before terminal proof persistence",
+                        ));
+                    }
+                    Ok(())
+                })();
+                match stop_result {
+                    Ok(()) => {
+                        if let Some((issuer, reservation)) = reservation.as_ref() {
+                            if !issuer.commit_manual_execution_handoff(reservation) {
+                                return Err(std::io::Error::other(
+                                    "The exact holder handoff reservation was lost",
+                                ));
+                            }
+                            if !retain_successor_handoff
+                                && !issuer.release_manual_execution_handoff(reservation)
+                            {
+                                return Err(std::io::Error::other(
+                                    "The completed holder capability fence could not be released",
+                                ));
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if let Some((issuer, reservation)) = reservation.as_ref() {
+                            if !issuer.rollback_manual_execution_handoff(reservation) {
+                                return Err(std::io::Error::other(format!(
+                                    "{error}; exact holder capability rollback failed"
+                                )));
+                            }
+                        }
+                        Err(error)
+                    }
+                }
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if stopped.is_none() {
+            return Err(
+                "The exact durable holder authority changed before termination".to_string(),
+            );
+        }
+        if self
+            .runtimes
+            .get(window_id)
+            .is_none_or(|runtime| runtime.incarnation != expected_incarnation)
+            || self
+                .active_agent_sessions
+                .get(window_id)
+                .is_none_or(|current| current.session_id != active.session_id)
+        {
+            return Err("The holder runtime changed while termination was confirmed".to_string());
+        }
+        let threads = self.start_window_runtime_stop(window_id, false);
+        Self::join_runtime_stop_threads(threads);
+        self.mark_agent_session_stopped_with_persistence(window_id, false);
+        Ok(())
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
@@ -267,21 +560,63 @@ impl AppRuntime {
         window_id: &str,
         mark_session_stopped: bool,
     ) -> RuntimeStopThreads {
-        if mark_session_stopped {
-            self.mark_agent_session_stopped(window_id);
-        }
+        let exact_terminal = if mark_session_stopped {
+            self.active_agent_sessions
+                .get(window_id)
+                .and_then(|active| {
+                    let runtime = self.runtimes.get(window_id)?;
+                    let session = gwt_agent::Session::load(
+                        &self
+                            .sessions_dir
+                            .join(format!("{}.toml", active.session_id)),
+                    )
+                    .ok()?;
+                    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                        .ok()
+                        .flatten()?;
+                    Some((identity, runtime.incarnation))
+                })
+        } else {
+            None
+        };
         self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
             output_thread: None,
             status_thread: None,
         };
+        let mut exact_terminal_persisted = false;
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
+                if let Some((identity, incarnation)) = exact_terminal.as_ref() {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let mut exited = false;
+                    while Instant::now() < deadline {
+                        if pane.process_has_exited().unwrap_or(false) {
+                            exited = true;
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    if exited {
+                        exact_terminal_persisted = gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
+                            &self.sessions_dir,
+                            identity,
+                            *incarnation,
+                            gwt_agent::AgentStatus::Stopped,
+                        ).unwrap_or(false);
+                    }
+                }
             }
             threads.output_thread = runtime.output_thread.take();
             threads.status_thread = runtime.status_thread.take();
+        }
+        if mark_session_stopped {
+            self.mark_agent_session_stopped_with_persistence(
+                window_id,
+                exact_terminal.is_none() && !exact_terminal_persisted,
+            );
         }
         self.window_details.remove(window_id);
         threads
@@ -331,6 +666,7 @@ impl AppRuntime {
     pub(crate) fn spawn_output_thread(
         &self,
         id: String,
+        incarnation: u64,
         pane: Arc<Mutex<Pane>>,
         _console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> JoinHandle<()> {
@@ -356,8 +692,10 @@ impl AppRuntime {
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
+                        incarnation,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
+                        exit_confirmed: false,
                     });
                     return;
                 }
@@ -394,14 +732,17 @@ impl AppRuntime {
                         }
                         proxy.send(UserEvent::RuntimeOutput {
                             id: id.clone(),
+                            incarnation,
                             data: chunk,
                         });
                     }
                     Err(error) => {
                         proxy.send(UserEvent::RuntimeStatus {
                             id: id.clone(),
+                            incarnation,
                             status: WindowProcessStatus::Error,
                             detail: Some(error.to_string()),
+                            exit_confirmed: false,
                         });
                         return;
                     }
@@ -420,20 +761,38 @@ impl AppRuntime {
             match status {
                 Ok(status) => {
                     let (status, detail) = Self::runtime_status_from_pane_status(&status);
-                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
+                    let exit_confirmed = pane
+                        .lock()
+                        .ok()
+                        .and_then(|pane| pane.process_has_exited().ok())
+                        .unwrap_or(false);
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id,
+                        incarnation,
+                        status,
+                        detail,
+                        exit_confirmed,
+                    });
                 }
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
+                        incarnation,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
+                        exit_confirmed: false,
                     });
                 }
             }
         })
     }
 
-    pub(crate) fn spawn_status_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
+    pub(crate) fn spawn_status_thread(
+        &self,
+        id: String,
+        incarnation: u64,
+        pane: Arc<Mutex<Pane>>,
+    ) -> JoinHandle<()> {
         let proxy = self.proxy.clone();
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(100));
@@ -455,14 +814,29 @@ impl AppRuntime {
                         }
                     }
                     let (status, detail) = Self::runtime_status_from_pane_status(&status);
-                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
-                    break;
+                    let exit_confirmed = pane
+                        .lock()
+                        .ok()
+                        .and_then(|pane| pane.process_has_exited().ok())
+                        .unwrap_or(false);
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id: id.clone(),
+                        incarnation,
+                        status,
+                        detail,
+                        exit_confirmed,
+                    });
+                    if exit_confirmed {
+                        break;
+                    }
                 }
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
+                        incarnation,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
+                        exit_confirmed: false,
                     });
                     break;
                 }
@@ -488,6 +862,133 @@ impl AppRuntime {
                 Some(message.clone()),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod submit_split_tests {
+    use super::{drive_verified_pane_submit, split_pane_submit, VerifiedPaneSubmitOutcome};
+
+    /// SPEC-3431 FR-108c: the body and the submit byte must be separable, so
+    /// the writer can put the carriage return in its own PTY write. A single
+    /// write of `body + CR` is what the TUIs mis-read as a literal newline.
+    #[test]
+    fn carriage_return_is_separated_from_the_body() {
+        assert_eq!(split_pane_submit("digest.\r"), ("digest.", Some("\r")));
+        assert_eq!(split_pane_submit("digest.\n"), ("digest.", Some("\n")));
+    }
+
+    /// A CRLF terminator is one submit, not a body that ends in CR: stripping
+    /// only the LF would leave a stray carriage return glued to the text.
+    #[test]
+    fn crlf_is_treated_as_a_single_submit_terminator() {
+        assert_eq!(split_pane_submit("digest.\r\n"), ("digest.", Some("\r\n")));
+    }
+
+    /// Input without a terminator is not a submit — `terminal_input` forwards
+    /// raw keystrokes through the same writer and must stay byte-exact.
+    #[test]
+    fn payload_without_a_terminator_is_written_whole() {
+        assert_eq!(split_pane_submit("partial"), ("partial", None));
+        assert_eq!(split_pane_submit(""), ("", None));
+    }
+
+    /// A bare terminator (the submit-only follow-up a caller may send) keeps an
+    /// empty body so the writer skips the first write entirely.
+    #[test]
+    fn bare_terminator_has_an_empty_body() {
+        assert_eq!(split_pane_submit("\r"), ("", Some("\r")));
+    }
+
+    #[test]
+    fn unverified_submit_retries_only_the_carriage_return() {
+        let writes = std::cell::RefCell::new(Vec::new());
+
+        let outcome = drive_verified_pane_submit(
+            "protected body\r",
+            2,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {},
+            || Ok(writes.borrow().len() == 3),
+        )
+        .expect("second submit is verified");
+
+        assert_eq!(*writes.borrow(), ["protected body", "\r", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 2 }
+        );
+    }
+
+    #[test]
+    fn delayed_ack_before_retry_suppresses_the_extra_carriage_return() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let acknowledged = std::cell::Cell::new(false);
+        let settles = std::cell::Cell::new(0_usize);
+
+        let outcome = drive_verified_pane_submit(
+            "protected body\r",
+            2,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {
+                let next = settles.get() + 1;
+                settles.set(next);
+                if next == 2 {
+                    acknowledged.set(true);
+                }
+            },
+            || Ok(acknowledged.get()),
+        )
+        .expect("delayed acknowledgement settles the original submit");
+
+        assert_eq!(*writes.borrow(), ["protected body", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+    }
+
+    #[test]
+    fn final_submit_gets_an_ack_grace_period() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let acknowledged = std::cell::Cell::new(false);
+        let settles = std::cell::Cell::new(0_usize);
+
+        let outcome = drive_verified_pane_submit(
+            "protected body\r",
+            1,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {
+                let next = settles.get() + 1;
+                settles.set(next);
+                if next == 2 {
+                    acknowledged.set(true);
+                }
+            },
+            || Ok(acknowledged.get()),
+        )
+        .expect("final submit acknowledgement is observed during its grace period");
+
+        assert_eq!(*writes.borrow(), ["protected body", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
     }
 }
 

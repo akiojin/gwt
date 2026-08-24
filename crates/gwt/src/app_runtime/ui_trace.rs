@@ -114,6 +114,7 @@ mod tests {
     #[test]
     fn save_ui_trace_to_log_dir_writes_jsonl_artifact() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let result = save_ui_trace_to_log_dir(
             temp.path(),
             serde_json::from_value::<UiTracePayload>(serde_json::json!({
@@ -157,6 +158,7 @@ mod tests {
     #[test]
     fn save_ui_trace_to_log_dir_rejects_missing_entries_at_runtime() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let error = save_ui_trace_to_log_dir(
             temp.path(),
             serde_json::from_value::<UiTracePayload>(serde_json::json!({

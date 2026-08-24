@@ -18,6 +18,8 @@ name = "gwtd"
 path = "src/bin/gwtd.rs"
 
 [dependencies]
+# Optional: only compiled for the test-only `test-gh-guard` feature below.
+ctor = { version = "1.0.13", optional = true }
 gwt-agent.workspace = true
 gwt-ai.workspace = true
 gwt-config.workspace = true
@@ -89,12 +91,22 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource.workspace = true
 
+[features]
+# Issue #3675 AC-2: arms the unsandboxed-gh spawn guard at process start (see
+# src/test_guard.rs). Enabled for every test target through the self
+# dev-dependency below so integration-test binaries are covered too; the
+# arming ctor additionally requires debug_assertions, so a release build can
+# never ship armed even under --all-features.
+test-gh-guard = ["dep:ctor"]
+
 [dev-dependencies]
 serde_yaml.workspace = true
 tracing-subscriber.workspace = true
 # SPEC-3016 FR-003: shared test helpers live in gwt-core::test_support; the
 # feature is test-only and never ships.
 gwt-core = { workspace = true, features = ["test-support"] }
+gwt = { path = ".", features = ["test-gh-guard"] }
+ctor = "1.0.13"
 
 [package.metadata.bundle]
 name = "GWT"

@@ -22,6 +22,7 @@
 //! duration / line counts) are persisted to the canonical file via the
 //! standard tracing pipeline.
 
+pub mod gh_guard;
 pub mod hub;
 pub mod kind;
 pub mod line;
@@ -29,6 +30,9 @@ pub mod redact;
 pub mod spawn;
 pub mod strip_ansi;
 
+pub use gh_guard::{
+    forbid_unsandboxed_gh_spawns_for_tests, unsandboxed_gh_denial, REAL_GH_BLOCKED_ERROR_CODE,
+};
 pub use hub::{global, set_global, ProcessConsoleHub, DEFAULT_RING_CAPACITY};
 pub use kind::{ParseProcessKindError, ProcessKind};
 pub use line::{ProcessLine, ProcessStream};

@@ -65,7 +65,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static GIT_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn next_git_spawn_id() -> u64 {
+    note_thread_git_spawn();
     GIT_SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    static THREAD_GIT_SPAWN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one git subprocess spawned by the current thread.
+///
+/// Issue #3629 AC-7: the per-thread counter is the regression seam for "this
+/// operation must not spawn git" assertions — unlike the global spawn-id
+/// counter it is immune to concurrently running tests.
+pub(crate) fn note_thread_git_spawn() {
+    THREAD_GIT_SPAWN_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+/// Number of git subprocesses the current thread has spawned through the
+/// logged wrappers ([`run_git_logged`], [`run_git_logged_with_stdin`], and the
+/// `process_console` git spawns driven from this thread).
+pub fn thread_git_spawn_count() -> u64 {
+    THREAD_GIT_SPAWN_COUNT.with(std::cell::Cell::get)
 }
 
 /// Spawn `git` with `args` in `current_dir`, capture stdout / stderr,

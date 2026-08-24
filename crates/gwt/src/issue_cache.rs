@@ -402,6 +402,13 @@ pub(crate) fn write_issue_labels_via_gh(
     if labels_to_add.is_empty() && labels_to_remove.is_empty() {
         return Ok(());
     }
+    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
+    // applies the unsandboxed-gh test guard itself.
+    if let Some(detail) =
+        gwt_core::process_console::unsandboxed_gh_denial(&format!("gh issue edit #{issue_number}"))
+    {
+        return Err(format!("gh issue edit #{issue_number}: {detail}"));
+    }
     let mut command = gwt_core::process::hidden_command(gh_executable());
     command.args(["issue", "edit", &issue_number.to_string()]);
     for label in labels_to_add {
@@ -423,9 +430,77 @@ pub(crate) fn write_issue_labels_via_gh(
     Ok(())
 }
 
-fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
+/// Run one `gh` read for the Issue cache under the shared GitHub quota gate.
+///
+/// This module spawns `gh` directly rather than through
+/// [`gwt_core::process_console::spawn_logged`], so it applies the gate itself
+/// (Issue #3604). Its two reads are gwt's largest GraphQL burst — a full issue
+/// enumeration plus one `issue view` per SPEC Issue — which is exactly the
+/// traffic that must stop while the budget is exhausted.
+fn run_gh_issue_command(repo_path: &Path, args: &[&str], label: &str) -> Result<String, String> {
+    run_gh_issue_command_with_gate(gwt_core::github_quota::global(), repo_path, args, label)
+}
+
+fn run_gh_issue_command_with_gate(
+    gate: &gwt_core::github_quota::QuotaGate,
+    repo_path: &Path,
+    args: &[&str],
+    label: &str,
+) -> Result<String, String> {
+    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
+    // applies the unsandboxed-gh test guard itself — before the quota gate,
+    // so a refusal never depends on (or pollutes) quota state.
+    if let Some(detail) = gwt_core::process_console::unsandboxed_gh_denial(label) {
+        return Err(format!("{label}: {detail}"));
+    }
+    let now = chrono::Utc::now();
+    if let Some(detail) = gwt_core::github_quota::suppressed_spawn_detail(gate, args, now) {
+        return Err(format!("{label}: {detail}"));
+    }
+
+    let cwd = gh_repo_cwd(repo_path);
     let output = gwt_core::process::hidden_command(gh_executable())
-        .args([
+        .args(args)
+        .current_dir(&cwd)
+        .output()
+        .map_err(|err| format!("{label}: {err}"))?;
+
+    if output.status.success() {
+        gate.record_success(gwt_core::github_quota::classify_gh_args(args));
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = gwt_core::github_quota::observe_failure(gate, args, &stderr, now, || {
+        probe_rate_limit_payload(&cwd)
+    })
+    .unwrap_or_else(|| stderr.trim().to_string());
+    Err(format!("{label}: {detail}"))
+}
+
+/// Ask GitHub for the authoritative reset window. `gh` never prints it, and the
+/// `rate_limit` endpoint itself spends no budget.
+fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
+    // Issue #3675 AC-2: the probe is a gh spawn too; skip it when the test
+    // guard forbids unsandboxed gh (the caller then records a short backoff).
+    if gwt_core::process_console::unsandboxed_gh_denial("gh api rate_limit").is_some() {
+        return None;
+    }
+    let output = gwt_core::process::hidden_command(gh_executable())
+        .args(gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
+    let stdout = run_gh_issue_command(
+        repo_path,
+        &[
             "issue",
             "list",
             "--state",
@@ -434,41 +509,27 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
             ISSUE_CACHE_REFRESH_LIMIT,
             "--json",
             "number,title,body,labels,state,url,updatedAt",
-        ])
-        .current_dir(gh_repo_cwd(repo_path))
-        .output()
-        .map_err(|err| format!("gh issue list: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "gh issue list: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+        ],
+        "gh issue list",
+    )?;
 
-    parse_issue_list_snapshots(&String::from_utf8_lossy(&output.stdout))
+    parse_issue_list_snapshots(&stdout)
 }
 
 fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSnapshot, String> {
-    let output = gwt_core::process::hidden_command(gh_executable())
-        .args([
+    let stdout = run_gh_issue_command(
+        repo_path,
+        &[
             "issue",
             "view",
             &number.0.to_string(),
             "--json",
             "number,title,body,labels,state,updatedAt,comments",
-        ])
-        .current_dir(gh_repo_cwd(repo_path))
-        .output()
-        .map_err(|err| format!("gh issue view #{number}: {err}", number = number.0))?;
-    if !output.status.success() {
-        return Err(format!(
-            "gh issue view #{number}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
-            number = number.0
-        ));
-    }
+        ],
+        &format!("gh issue view #{number}", number = number.0),
+    )?;
 
-    parse_issue_snapshot(&String::from_utf8_lossy(&output.stdout), number)
+    parse_issue_snapshot(&stdout, number)
 }
 
 fn parse_issue_state(value: Option<&str>) -> IssueState {
@@ -619,6 +680,63 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    fn clear_gh_sandbox_markers() -> Vec<gwt_core::test_support::ScopedEnvVar> {
+        [
+            "GWT_TEST_GH_SANDBOX",
+            "GWT_TEST_GH",
+            "GWT_FAKE_GH_MODE",
+            "GWT_ALLOW_REAL_GH",
+        ]
+        .into_iter()
+        .map(gwt_core::test_support::ScopedEnvVar::unset)
+        .collect()
+    }
+
+    // Issue #3675 AC-2: this module spawns `gh` directly (not through
+    // `spawn_logged`), so it must apply the unsandboxed-gh test guard itself —
+    // otherwise a test that forgets its fake silently reaches the real GitHub
+    // API and, once rate-limited, poisons the process-global quota gate for
+    // every other test in the binary.
+    #[test]
+    fn unsandboxed_gh_issue_command_is_refused_in_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _markers = clear_gh_sandbox_markers();
+        let temp = tempdir().expect("tempdir");
+
+        let error = run_gh_issue_command(temp.path(), &["issue", "list"], "gh issue list")
+            .expect_err("an unsandboxed gh read must be refused in test builds");
+
+        assert!(
+            error.contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE),
+            "refusal must carry the machine-readable code: {error}"
+        );
+    }
+
+    #[test]
+    fn unsandboxed_issue_label_write_is_refused_in_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _markers = clear_gh_sandbox_markers();
+        let temp = tempdir().expect("tempdir");
+
+        let error = write_issue_labels_via_gh(temp.path(), 42, &["bug".to_string()], &[])
+            .expect_err("an unsandboxed gh label write must be refused in test builds");
+
+        assert!(
+            error.contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE),
+            "refusal must carry the machine-readable code: {error}"
+        );
+    }
 
     #[test]
     fn repo_slug_root_uses_repo_hash_subdirectory() {
@@ -1234,5 +1352,123 @@ exit 1\n",
             after_state.fingerprint, initial.fingerprint,
             "indexed Issue state changes must invalidate the Issue search index",
         );
+    }
+
+    // ── Issue #3604: the GitHub quota gate reaches this module too ──
+    //
+    // `issue_cache` shells out to `gh` directly instead of through the process
+    // console, so it would otherwise keep firing gwt's largest GraphQL burst —
+    // a full issue enumeration plus one `issue view` per SPEC — against an
+    // already-exhausted budget.
+
+    fn exhausted_graphql_gate() -> gwt_core::github_quota::QuotaGate {
+        let gate = gwt_core::github_quota::QuotaGate::default();
+        gate.record_exhaustion(gwt_core::github_quota::RateLimitBlock {
+            resource: "graphql".to_string(),
+            limit: 5000,
+            remaining: 0,
+            reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+        });
+        gate
+    }
+
+    #[test]
+    fn issue_cache_gh_reads_are_refused_while_the_graphql_budget_is_exhausted() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The quota-gate refusal under test sits behind the unsandboxed-gh
+        // guard (Issue #3675); mark a sandbox so the gate stays reachable.
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let temp = tempdir().expect("tempdir");
+        let gate = exhausted_graphql_gate();
+
+        let error = run_gh_issue_command_with_gate(
+            &gate,
+            temp.path(),
+            &["issue", "list", "--state", "all"],
+            "gh issue list",
+        )
+        .expect_err("an exhausted GraphQL budget must refuse the read");
+
+        assert!(
+            error.contains(gwt_core::github_quota::RATE_LIMITED_ERROR_CODE),
+            "{error}"
+        );
+        assert!(error.contains("reset_at="), "{error}");
+        assert!(error.contains("retry_after_secs="), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_cache_identifies_a_rate_limited_gh_failure_and_records_its_reset_window() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo_path = temp.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+        let reset_at = chrono::Utc::now() + chrono::Duration::seconds(420);
+        let fake_gh = repo_path.join("gh");
+        fs::write(
+            &fake_gh,
+            format!(
+                r###"#!/bin/sh
+case "$*" in
+  "api rate_limit")
+    printf '%s\n' '{{"resources":{{"graphql":{{"limit":5000,"used":5000,"remaining":0,"reset":{reset}}}}}}}'
+    exit 0
+    ;;
+esac
+printf '%s\n' 'GraphQL: API rate limit already exceeded for user ID 965624.' >&2
+exit 1
+"###,
+                reset = reset_at.timestamp()
+            ),
+        )
+        .expect("write fake gh");
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+
+        let gate = gwt_core::github_quota::QuotaGate::default();
+        let error = run_gh_issue_command_with_gate(
+            &gate,
+            &repo_path,
+            &["issue", "list", "--state", "all"],
+            "gh issue list",
+        )
+        .expect_err("a rate-limited gh call must fail");
+
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+
+        // AC-1: identified as rate limiting, not as an opaque transport error.
+        assert!(
+            error.contains(gwt_core::github_quota::RATE_LIMITED_ERROR_CODE),
+            "{error}"
+        );
+        // AC-2: the probed reset window, not a guess.
+        assert!(
+            error.contains(&format!(
+                "reset_at={}",
+                reset_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )),
+            "{error}"
+        );
+        // The original GitHub wording survives for humans.
+        assert!(error.contains("API rate limit already exceeded"), "{error}");
+        // AC-3: the window is remembered, so the next call is suppressed.
+        assert!(gate
+            .active_block(
+                gwt_core::github_quota::GitHubQuota::GraphQl,
+                chrono::Utc::now()
+            )
+            .is_some());
     }
 }

@@ -128,14 +128,16 @@ fn probe_container_runtime_kind_with_timeout(
     let hub = gwt_core::process_console::global();
     let options = gwt_core::process_console::SpawnOptions::new("container runtime --version")
         .forward_output(false);
-    let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
-        &hub,
-        gwt_core::process_console::ProcessKind::Docker,
-        binary,
-        &["--version"],
-        options,
-        deadline,
-    )
+    let output = crate::retry_executable_file_busy(|| {
+        gwt_core::process_console::spawn_logged_blocking_with_deadline(
+            &hub,
+            gwt_core::process_console::ProcessKind::Docker,
+            binary,
+            &["--version"],
+            options.clone(),
+            deadline,
+        )
+    })
     .map_err(|error| {
         if error.kind() == std::io::ErrorKind::TimedOut {
             format!(
@@ -245,13 +247,15 @@ fn docker_probe_diagnostics_with_binary(
     let hub = gwt_core::process_console::global();
     let options =
         gwt_core::process_console::SpawnOptions::new(format!("docker {}", args.join(" ")));
-    let result = gwt_core::process_console::spawn_logged_blocking(
-        &hub,
-        gwt_core::process_console::ProcessKind::Docker,
-        binary,
-        args,
-        options,
-    );
+    let result = crate::retry_executable_file_busy(|| {
+        gwt_core::process_console::spawn_logged_blocking(
+            &hub,
+            gwt_core::process_console::ProcessKind::Docker,
+            binary,
+            args,
+            options.clone(),
+        )
+    });
     match result {
         Ok(output) => {
             if output.success() {

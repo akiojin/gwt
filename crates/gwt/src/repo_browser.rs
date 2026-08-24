@@ -261,6 +261,7 @@ mod tests {
     #[test]
     fn branch_resume_availability_marks_only_resumable_branch_sessions() {
         let repo = tempdir().expect("repo");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(repo.path());
         let mut session = gwt_agent::Session::new(
             repo.path(),
             "feature/resumable",
@@ -286,6 +287,7 @@ mod tests {
         // the in-memory cache was built is still marked resumable on the next
         // branch load (no process restart needed).
         let repo = tempfile::tempdir().expect("repo");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(repo.path());
         let sessions_dir = tempfile::tempdir().expect("sessions");
         let mut session = gwt_agent::Session::new(
             repo.path(),

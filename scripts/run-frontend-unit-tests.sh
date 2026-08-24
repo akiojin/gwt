@@ -14,6 +14,8 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
+  crates/gwt/web/__tests__/pm-launcher.test.mjs \
+  crates/gwt/web/__tests__/pm-settings-panel.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
   crates/gwt/web/__tests__/improvement-inbox-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \
@@ -23,11 +25,11 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/kanban-dnd.test.mjs \
   crates/gwt/web/__tests__/kanban-drawer.test.mjs \
   crates/gwt/web/__tests__/knowledge-kanban-load-recovery.test.mjs \
+  crates/gwt/web/__tests__/knowledge-issue-monitor.test.mjs \
   crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
   crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \
-  crates/gwt/web/__tests__/issue-monitor-surface.test.mjs \
   crates/gwt/web/__tests__/connection-overlay.test.mjs \
   crates/gwt/web/__tests__/update-button.test.mjs \
   crates/gwt/web/__tests__/window-docking.test.mjs \
@@ -39,7 +41,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/terminal-viewport-reflow.test.mjs \
   crates/gwt/web/__tests__/window-geometry-sync.test.mjs \
   crates/gwt/web/__tests__/window-drag-geometry-wiring.test.mjs \
-  crates/gwt/web/__tests__/window-lane-identity.test.mjs \
+  crates/gwt/web/__tests__/window-worktree-form.test.mjs \
   crates/gwt/web/__tests__/fleet-minimap.test.mjs \
   crates/gwt/web/__tests__/custom-agent-env-editor.test.mjs \
   crates/gwt/web/__tests__/settings-system-tab.test.mjs \

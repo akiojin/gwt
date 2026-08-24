@@ -1,7 +1,29 @@
 use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
+// Issue #3675: unit tests must never reach the real GitHub API. Armed before
+// any test runs; unsandboxed ProcessKind::Gh spawns then fail explicitly.
+// SAFETY(pre-main): only stores a relaxed AtomicBool.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn forbid_real_gh_in_tests() {
+    gwt_core::process_console::forbid_unsandboxed_gh_spawns_for_tests();
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    // Issue #3631: bound launches host their PTY start gate here rather than in
+    // the GUI front door, because only a console subsystem image is attached to
+    // the pane's pseudoconsole. Handle it before anything else touches stdio.
+    if argv.get(1).map(String::as_str) == Some(gwt::pty_start_gate::PTY_START_GATE_ARG) {
+        let exit_code = match gwt_terminal::pty::run_start_gate_from_env() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("PTY start gate failed: {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code.clamp(0, 255));
+    }
     match argv.get(1).map(String::as_str) {
         Some("-V" | "--version" | "version") => {
             println!("gwtd {}", env!("CARGO_PKG_VERSION"));
@@ -64,6 +86,7 @@ fn print_help() {
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
+    println!("  pm          PM agent diagnostics (SPEC-3431)");
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
@@ -89,6 +112,7 @@ fn family_help(family: &str) -> Option<String> {
         "verify" => Some(format_verify_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
+        "pm" => Some(format_pm_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
@@ -135,6 +159,8 @@ fn format_daemon_help() -> String {
         "",
         "Key params:",
         "  channels                                Required for daemon.subscribe",
+        "  timeout_seconds                         Optional for daemon.subscribe; ends the",
+        "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
@@ -165,6 +191,9 @@ fn format_issue_help() -> String {
         "  issue.spec.repair | issue.spec.rename",
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
+        "  issue.monitor.launch_now | issue.monitor.stop",
+        "  issue.monitor.failover | issue.monitor.requeue",
+        "  issue.monitor.questions | issue.monitor.question.answer",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -173,9 +202,13 @@ fn format_issue_help() -> String {
         "  all, numbers                           Controls issue.spec.pull",
         "  project_root                          Optional Issue Monitor project scope",
         "  number, position                      Move one priority (head or numeric index)",
+        "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
+        "  number, reason                        issue.monitor.requeue releases a dead",
+        "                                        agent_failed / launch_failed hold",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
+        "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
     ]
@@ -238,12 +271,18 @@ fn format_board_help() -> String {
         "",
         "Key params:",
         "  kind, body, title, topics, owners, targets, mentions, parent, broadcast",
+        "  resolves                                 Blocked entry id(s) this post closes",
         "  workspace, all                           board.show filters",
         "",
         "Note: board.post does not accept purpose/title_summary; update Agent title",
         "      through workspace.update params.purpose.",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
+        "",
+        "A `blocked` post is an unblock request to the PM and must state 事象 / 原因 /",
+        "依頼 / 再開条件 (or Symptom / Cause / Request / Resume), one per line. It is",
+        "mirrored onto the owning Issue and lands that Issue in issue.monitor.status",
+        "needs_human until a later post names its entry id in params.resolves.",
         "",
     ]
     .join("\n")
@@ -426,11 +465,13 @@ fn format_verify_help() -> String {
         "",
         "Usage:",
         "  gwtd <<'JSON'",
-        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt -- --check\",\"cargo test -p gwt --lib\"]}}",
+        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
         "  JSON",
         "",
         "Operations:",
         "  verify.plan | verify.run",
+        "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
+        "  verify.lease.status",
         "",
         "Notes:",
         "  Register the derived matrix with verify.plan first; a run must cover it.",
@@ -438,6 +479,14 @@ fn format_verify_help() -> String {
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
         "  evidence. execution.complete and Ready PR handoffs require a fresh,",
         "  all-passing record.",
+        "",
+        "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
+        "  take the lease before cargo test --all-features / cargo llvm-cov /",
+        "  headed Playwright, then release it. acquire answers immediately —",
+        "  granted, or unavailable with the current holder and its remaining",
+        "  TTL, so no agent polls another agent's process. Default TTL is 45",
+        "  minutes (params.ttl_minutes); the holder self-releases when it",
+        "  lapses, and a killed holder releases at once.",
         "",
     ]
     .join("
@@ -459,6 +508,36 @@ fn format_register_help() -> String {
         "Key params:",
         "  spec, label, reason",
         "",
+    ]
+    .join("\n")
+}
+
+fn format_pm_help() -> String {
+    [
+        "pm.* — PM agent diagnostics and control via JSON envelope (SPEC-3431).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  pm.status    Report the per-project PM registration, auto-start setting,",
+        "               a stale hint from the durable session store, and every PM",
+        "               registration in this repository including other project",
+        "               stores (read-only, ownerless-safe).",
+        "  pm.stop      Clear a PM registration in this repository and mark its",
+        "               Session unrestorable. Only a registered PM of the same",
+        "               repository may call it; `session_id` defaults to the",
+        "               caller's own registration (Issue #3607).",
+        "",
+        "Key params:",
+        "  project_root (optional; defaults to the current repository path)",
+        "  session_id   (pm.stop; defaults to the calling PM's own Session)",
+        "",
+        "Notes:",
+        "  - pm.stop ends PM authority and the resident loop; it does not close",
+        "    the pane. Take the session_id from pm.status repository_registrations.",
     ]
     .join("\n")
 }
@@ -859,6 +938,26 @@ mod tests {
         }
     }
 
+    /// Issue #3655: the escalation contract has to be discoverable from the
+    /// tool itself, not only from a skill body an agent may never load.
+    #[test]
+    fn format_board_help_documents_the_blocked_escalation_contract() {
+        let help = format_board_help();
+        for expected in [
+            "resolves",
+            "事象",
+            "原因",
+            "依頼",
+            "再開条件",
+            "needs_human",
+        ] {
+            assert!(
+                help.contains(expected),
+                "board help must document {expected}. help:\n{help}",
+            );
+        }
+    }
+
     #[test]
     fn format_issue_help_documents_issue_monitor_queue_operations() {
         let help = format_issue_help();
@@ -867,6 +966,13 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            "issue.monitor.launch_now",
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            // Issue #3645 / #3628: the only recovery for a row with no live
+            // launch. If it is not discoverable here, the operator falls back
+            // to hand-editing the state file, which is the bug.
+            "issue.monitor.requeue",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",

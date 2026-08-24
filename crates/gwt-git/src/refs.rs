@@ -7,9 +7,21 @@
 //! `CreateProcess` + Defender real-time-scan cost of several hundred
 //! milliseconds (SPEC-2014 FR-PERF-001 / FR-PERF-002).
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use gwt_core::{GwtError, Result};
+
+/// Issue #3629 AC-4: the bulk snapshot helpers are handed a *project root*,
+/// which for the workspace-home layout is not a git work tree. Resolve the
+/// directory the ref enumeration should actually run in — without spawning
+/// git for the nested-bare layout — so the snapshot works instead of pushing
+/// every consumer into per-branch probe fallbacks.
+fn effective_refs_root(repo_path: &Path) -> PathBuf {
+    crate::worktree::effective_repo_root(repo_path)
+}
 
 /// Return the subset of `candidates` that resolve to existing refs in
 /// `repo_path`.
@@ -56,13 +68,14 @@ pub fn list_existing_refs(repo_path: &Path, candidates: &[&str]) -> Result<HashS
 /// skipped. The pair feeds `blob::events_blob_oids_batch` so the intake can
 /// read `events.jsonl` from fetched branches without checking anything out.
 pub fn list_origin_refs_with_commit(repo_path: &Path) -> Result<Vec<(String, String)>> {
+    let repo_path = effective_refs_root(repo_path);
     let output = gwt_core::process::run_git_logged(
         &[
             "for-each-ref",
             "--format=%(refname)\t%(objectname)",
             "refs/remotes/origin/",
         ],
-        Some(repo_path),
+        Some(&repo_path),
     )
     .map_err(|error| GwtError::Git(format!("for-each-ref origin: {error}")))?;
     if !output.status.success() {
@@ -91,6 +104,7 @@ pub fn list_origin_refs_with_commit(repo_path: &Path) -> Result<Vec<(String, Str
 pub fn branch_tip_committer_times(
     repo_path: &Path,
 ) -> Result<std::collections::HashMap<String, i64>> {
+    let repo_path = effective_refs_root(repo_path);
     let output = gwt_core::process::run_git_logged(
         &[
             "for-each-ref",
@@ -98,7 +112,7 @@ pub fn branch_tip_committer_times(
             "refs/heads/",
             "refs/remotes/origin/",
         ],
-        Some(repo_path),
+        Some(&repo_path),
     )
     .map_err(|error| GwtError::Git(format!("for-each-ref tip times: {error}")))?;
     if !output.status.success() {
@@ -126,6 +140,7 @@ pub fn branch_tip_committer_times(
 /// [`branch_tip_committer_times`] (Issue #2725 keeps git out of the projection
 /// build). Branches with an empty subject are skipped.
 pub fn branch_tip_subjects(repo_path: &Path) -> Result<std::collections::HashMap<String, String>> {
+    let repo_path = effective_refs_root(repo_path);
     let output = gwt_core::process::run_git_logged(
         &[
             "for-each-ref",
@@ -133,7 +148,7 @@ pub fn branch_tip_subjects(repo_path: &Path) -> Result<std::collections::HashMap
             "refs/heads/",
             "refs/remotes/origin/",
         ],
-        Some(repo_path),
+        Some(&repo_path),
     )
     .map_err(|error| GwtError::Git(format!("for-each-ref tip subjects: {error}")))?;
     if !output.status.success() {
@@ -203,6 +218,30 @@ mod tests {
         run(gwt_core::process::hidden_command("git")
             .args(["update-ref", refname, "HEAD"])
             .current_dir(repo));
+    }
+
+    /// Issue #3629 AC-4: a workspace-home layout root is not a git work tree.
+    /// The snapshot helpers must resolve the nested bare repository instead of
+    /// failing — a failed snapshot forced every consumer into per-branch probe
+    /// fallbacks or fail-closed dirty verdicts.
+    #[test]
+    fn branch_tip_committer_times_resolves_from_nested_bare_layout_root() {
+        let seed = init_repo();
+        create_branch(seed.path(), "work/x");
+        let layout = TempDir::new().unwrap();
+        let bare = layout.path().join("repo.git");
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "clone",
+                "--bare",
+                seed.path().to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
+            .current_dir(layout.path()));
+
+        let times = branch_tip_committer_times(layout.path()).expect("tip times from layout root");
+        assert!(times.contains_key("main"));
+        assert!(times.contains_key("work/x"));
     }
 
     #[test]

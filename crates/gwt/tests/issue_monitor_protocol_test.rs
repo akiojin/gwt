@@ -90,6 +90,17 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     ));
 
     let event: FrontendEvent = serde_json::from_str(
+        r#"{"kind":"agent_issue_monitor_scan_now","expected_project_scope":"scope-123"}"#,
+    )
+    .expect("authenticated agent scan-now event");
+    assert!(matches!(
+        event,
+        FrontendEvent::AgentIssueMonitorScanNow {
+            expected_project_scope,
+        } if expected_project_scope == "scope-123"
+    ));
+
+    let event: FrontendEvent = serde_json::from_str(
         r#"{"kind":"quick_register_issue","title":"Investigate Intake registration","launch":true}"#,
     )
     .expect("quick issue event");
@@ -98,6 +109,39 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         FrontendEvent::QuickRegisterIssue { title, launch: true }
             if title == "Investigate Intake registration"
     ));
+}
+
+#[test]
+fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
+    let accepted = serde_json::to_value(BackendEvent::IssueMonitorScanRequestResult {
+        accepted: true,
+        reason: None,
+    })
+    .expect("accepted result");
+    assert_eq!(
+        accepted,
+        serde_json::json!({
+            "kind": "issue_monitor_scan_request_result",
+            "accepted": true,
+            "reason": null,
+        })
+    );
+
+    let unavailable = serde_json::to_value(BackendEvent::IssueMonitorScanRequestResult {
+        accepted: false,
+        reason: Some("scan_already_in_flight".to_string()),
+    })
+    .expect("unavailable result");
+    assert_eq!(unavailable["accepted"], false);
+    assert_eq!(unavailable["reason"], "scan_already_in_flight");
+
+    let policy = BackendEvent::IssueMonitorScanRequestResult {
+        accepted: true,
+        reason: None,
+    }
+    .delivery_policy();
+    assert_eq!(policy.kind, "issue_monitor_scan_request_result");
+    assert_eq!(format!("{:?}", policy.backpressure), "ClientScopedSnapshot");
 }
 
 #[test]
@@ -147,6 +191,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
             body: Some("Issue body".to_string()),
             url: Some("https://github.com/example/repo/issues/42".to_string()),
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         },
         state: MonitorInboxState::Queued,
         claim_id: Some("claim-a".to_string()),
@@ -213,6 +258,7 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
                 body: None,
                 url: None,
                 readiness: gwt::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             state,
             claim_id: None,

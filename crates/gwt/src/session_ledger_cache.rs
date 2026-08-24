@@ -93,6 +93,7 @@ mod tests {
     #[test]
     fn second_load_with_unchanged_files_does_not_reparse() {
         let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         write_session(tmp.path(), "work/a");
         write_session(tmp.path(), "work/b");
 
@@ -109,6 +110,7 @@ mod tests {
     #[test]
     fn changed_file_is_reparsed_and_reflects_new_content() {
         let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let mut session = write_session(tmp.path(), "work/a");
 
         let mut cache = SessionLedgerCache::new();
@@ -132,6 +134,7 @@ mod tests {
     #[test]
     fn removed_and_added_files_update_the_result_set() {
         let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let first = write_session(tmp.path(), "work/a");
 
         let mut cache = SessionLedgerCache::new();
@@ -157,6 +160,7 @@ mod tests {
     #[test]
     fn missing_directory_yields_empty_and_clears_cache() {
         let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         write_session(tmp.path(), "work/a");
 
         let mut cache = SessionLedgerCache::new();

@@ -1023,6 +1023,7 @@ mod tests {
     fn disabled_automatic_bootstrap_starts_no_background_work() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let (proxy, events) = AppEventProxy::stub();
         let bootstrap_calls = Arc::new(AtomicUsize::new(0));
         let status_calls = Arc::new(AtomicUsize::new(0));
@@ -1104,6 +1105,7 @@ mod tests {
     fn duplicate_background_bootstrap_requests_for_same_project_are_coalesced() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1163,6 +1165,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1231,6 +1234,7 @@ mod tests {
     fn full_status_refresh_retries_after_startup_bootstrap_coalesces() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1304,6 +1308,7 @@ mod tests {
     fn duplicate_full_status_refresh_requests_collapse_without_queued_second_probe() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1376,6 +1381,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1442,6 +1448,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1488,6 +1495,7 @@ mod tests {
     fn failed_background_bootstrap_reports_error_and_releases_in_flight_slot() {
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let expected_project_root = dunce::canonicalize(temp.path())
             .unwrap_or_else(|_| temp.path().to_path_buf())
             .display()
@@ -1545,6 +1553,7 @@ mod tests {
         // frontend `setIndexStatus` consumes from WebSocket.
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project_root = temp.path().to_path_buf();
         // spawn_per_cell_rebuild_with canonicalises the project root so
         // proxy events share a key with the bootstrap path.
@@ -1627,6 +1636,7 @@ mod tests {
         // shows on auto-rebuild failure.
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project_root = temp.path().to_path_buf();
         // spawn_per_cell_rebuild_with canonicalises the project root so
         // proxy events share a key with the bootstrap path.
@@ -1682,6 +1692,7 @@ mod tests {
 
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let project_root = temp.path().to_path_buf();
         let (block_files_tx, block_files_rx) = mpsc::channel();
         let (block_specs_tx, block_specs_rx) = mpsc::channel();

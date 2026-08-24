@@ -308,6 +308,11 @@ impl AppRuntime {
             }
             let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
         }
+        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
+        // pane once the canvas reports bounds (same deferral rule as startup
+        // auto-resume — agent panes never spawn before the canvas is ready).
+        // Projects opened later get it from `open_project_path_events`.
+        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
         let _ = self.persist();
     }
 
@@ -423,7 +428,7 @@ impl AppRuntime {
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if self.pending_startup_auto_resume_sessions.is_empty() {
-            return Vec::new();
+            return self.startup_pm_ensure_ready_events();
         }
 
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
@@ -440,6 +445,27 @@ impl AppRuntime {
             );
             events.append(&mut spawned);
         }
+        events.extend(self.startup_pm_ensure_ready_events());
+        events
+    }
+
+    /// SPEC-3431 FR-002: drain the bootstrap-queued PM ensure once the canvas
+    /// is ready. Runs after the auto-resume drain so a resumable PM session
+    /// (which the resume queue may already have restarted) is seen as live by
+    /// the singleton gate instead of being spawned twice.
+    fn startup_pm_ensure_ready_events(&mut self) -> Vec<OutboundEvent> {
+        if self.pending_startup_pm_tabs.is_empty() {
+            return Vec::new();
+        }
+        let tabs = std::mem::take(&mut self.pending_startup_pm_tabs);
+        tracing::info!(tabs = tabs.len(), "PM ensure: canvas ready, draining queue");
+        let mut events = Vec::new();
+        for tab_id in tabs {
+            events.extend(self.ensure_pm_agent_for_tab(
+                &tab_id,
+                crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+            ));
+        }
         events
     }
 
@@ -449,13 +475,16 @@ impl AppRuntime {
     /// "restore everything the user did not explicitly close" rule. Records the
     /// source session in `pending_auto_resume_sources` so the lifecycle handler
     /// retires the old session once the resumed window reports its own id.
-    fn spawn_restored_agent_session(
+    pub(super) fn spawn_restored_agent_session(
         &mut self,
         tab_id: &str,
         session: gwt_agent::Session,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         fallback_geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
+            return Vec::new();
+        }
         let config = launch_config_from_persisted_session(&session);
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id)
@@ -496,6 +525,42 @@ impl AppRuntime {
                 Vec::new()
             }
         }
+    }
+
+    /// Issue #3607 AC-3: refuse to restore a Session rooted in *another*
+    /// project store's `pm/worktree`.
+    ///
+    /// The stopped store in the incident was not open in the app at all, yet
+    /// its PM came back: the current store's `workspace.json` still held a
+    /// window whose Session pointed at that store's PM worktree, and restore
+    /// resolves a window purely by its recorded session id. Nothing on the path
+    /// compared the two stores, and `auto_start` cannot close it because
+    /// restore never consults a registration.
+    ///
+    /// Guarding the shared spawn primitive covers every restore entry point at
+    /// once (startup auto-resume, Open Project restore, in-place restart) while
+    /// leaving a store's own PM resume — which goes through the same primitive
+    /// — untouched.
+    fn restore_would_resurrect_a_foreign_pm(
+        &self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+    ) -> bool {
+        let Some(tab) = self.tab(tab_id) else {
+            return false;
+        };
+        let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root);
+        if !gwt::pm_registry::is_foreign_pm_worktree(&session.worktree_path, &own_project_dir) {
+            return false;
+        }
+        tracing::warn!(
+            tab_id,
+            session_id = %session.id,
+            worktree_path = %session.worktree_path.display(),
+            own_project_dir = %own_project_dir.display(),
+            "restore refused: the session belongs to another project store's PM worktree"
+        );
+        true
     }
 
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a stopped/errored `Agent`

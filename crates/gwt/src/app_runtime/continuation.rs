@@ -3,6 +3,8 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use fs2::FileExt;
+
 #[cfg(test)]
 type DurableLaunchRecoveryDirectorySyncHook = Box<dyn Fn(&Path) -> std::io::Result<()> + 'static>;
 
@@ -117,14 +119,16 @@ use super::workspace::{
     apply_workspace_launch_transition, WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
 };
 use super::{
-    launch_config_from_persisted_session, non_empty_workspace_text, AppRuntime, BackendEvent,
-    CachedContinueWorkOutcome, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
-    PendingFreshExecutionLaunch, WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
+    continue_work_readiness_decision, launch_config_from_persisted_session,
+    non_empty_workspace_text, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
+    PendingFreshExecutionLaunch, ReadinessDeadlineDecision, WindowGeometry, WindowProcessStatus,
+    WorkspaceResumeContext,
 };
 use regex::Regex;
 
 #[derive(Debug)]
-struct ContinueWorkFailure {
+pub(super) struct ContinueWorkFailure {
     outcome: gwt::ContinueWorkOutcomeKind,
     message: String,
     code: &'static str,
@@ -405,99 +409,6 @@ impl DurableContinueWorkAttempt {
 pub(super) enum ActiveOwnerLiveness {
     Stale(&'static str),
     Unknown,
-}
-
-/// Canonical staleness predicate for the Session that holds an Active
-/// execution generation.
-///
-/// `Stale` means no Host runtime owns the Session any more, so another
-/// coordinator may fence the generation; every ambiguous or unreadable
-/// observation degrades to `Unknown` and the caller must fail closed. Both the
-/// Continue work takeover path and the fresh-launch defunct-generation reap
-/// (Issue #3473) resolve staleness here so they can never disagree about who
-/// still owns a generation.
-pub(super) fn classify_active_owner_liveness(
-    sessions_dir: &Path,
-    session_id: &str,
-) -> ActiveOwnerLiveness {
-    let durable_path = sessions_dir.join(format!("{session_id}.toml"));
-    let durable = match gwt_agent::inspect_session_path(&durable_path) {
-        gwt_agent::SessionPathState::Present(session) => Some(session),
-        gwt_agent::SessionPathState::Missing => None,
-        gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
-    };
-    let durable_is_stopped = |session: &gwt_agent::Session| {
-        matches!(
-            session.status,
-            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-        )
-    };
-    let runtime_root = sessions_dir.join("runtime");
-    let entries = match std::fs::read_dir(&runtime_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if durable.is_none() {
-                return ActiveOwnerLiveness::Stale("durable Session is missing");
-            }
-            return if durable
-                .as_ref()
-                .is_some_and(|session| durable_is_stopped(session))
-            {
-                ActiveOwnerLiveness::Stale("durable Session is stopped")
-            } else {
-                ActiveOwnerLiveness::Unknown
-            };
-        }
-        Err(_) => return ActiveOwnerLiveness::Unknown,
-    };
-    let mut saw_dead_runtime = false;
-    let mut saw_stopped_runtime = false;
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return ActiveOwnerLiveness::Unknown;
-        };
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let sidecar = entry.path().join(format!("{session_id}.json"));
-        match sidecar.try_exists() {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(_) => return ActiveOwnerLiveness::Unknown,
-        }
-        if gwt::process::is_process_alive(pid) {
-            match gwt_agent::SessionRuntimeState::load(&sidecar) {
-                Ok(state)
-                    if matches!(
-                        state.status,
-                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                    ) =>
-                {
-                    saw_stopped_runtime = true;
-                    continue;
-                }
-                Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
-            }
-        }
-        saw_dead_runtime = true;
-    }
-    if saw_stopped_runtime {
-        return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
-    }
-    if saw_dead_runtime {
-        return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
-    }
-    let Some(durable) = durable else {
-        return ActiveOwnerLiveness::Stale("durable Session is missing");
-    };
-    if durable_is_stopped(&durable) {
-        return ActiveOwnerLiveness::Stale("durable Session is stopped");
-    }
-    ActiveOwnerLiveness::Unknown
 }
 
 fn canonical_public_id(value: &str, max_len: usize) -> bool {
@@ -881,12 +792,12 @@ fn canonical_continue_work_branch(worktree_path: &Path) -> Result<String, Contin
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProjectionOwnerRef {
+pub(super) struct ProjectionOwnerRef {
     declared_kind: Option<gwt::cli::execution_state::ExecutionOwnerKind>,
     number: u64,
 }
 
-fn strict_projection_owner(raw_owner: &str) -> Option<ProjectionOwnerRef> {
+pub(super) fn strict_projection_owner(raw_owner: &str) -> Option<ProjectionOwnerRef> {
     let owner = raw_owner.trim();
     if owner.is_empty() {
         return None;
@@ -953,17 +864,18 @@ fn projection_only_continue_owner(
     })
 }
 
-fn canonical_continue_work_owner(
+pub(super) fn canonical_continue_work_owner(
     project_root: &Path,
     worktree_path: &Path,
     projected: ProjectionOwnerRef,
 ) -> Result<gwt::cli::execution_state::ExecutionOwnerKey, ContinueWorkFailure> {
+    // #3426: a same-number kind-only disagreement self-heals toward the
+    // trusted authority (generation ledger, ECR hint, or cache label
+    // evidence); the corrected owner is committed back to the Work
+    // projection by the continuation transaction. Number mismatches stay
+    // fail-closed.
     let validate = |owner: gwt::cli::execution_state::ExecutionOwnerKey| {
-        if owner.number != projected.number
-            || projected
-                .declared_kind
-                .is_some_and(|kind| kind != owner.kind)
-        {
+        if owner.number != projected.number {
             Err(ContinueWorkFailure::failed(
                 "execution_owner_ambiguous",
                 "The Work owner does not match its current execution authority.",
@@ -978,13 +890,21 @@ fn canonical_continue_work_owner(
         Ok(None) => {
             match gwt::cli::execution_state::recovery_projection_owner_hint(worktree_path) {
                 Ok(Some(owner)) => validate(owner),
-                Ok(None) => validate(gwt::cli::execution_state::ExecutionOwnerKey {
-                    kind: gwt::cli::execution_state::detect_owner_kind(
+                Ok(None) => {
+                    // No trusted execution authority exists yet. Prefer cache
+                    // label evidence; absent evidence, retain the declared
+                    // kind rather than silently downgrading to Issue.
+                    let kind = gwt::cli::execution_state::detect_owner_kind_evidence(
                         project_root,
                         projected.number,
-                    ),
-                    number: projected.number,
-                }),
+                    )
+                    .or(projected.declared_kind)
+                    .unwrap_or(gwt::cli::execution_state::ExecutionOwnerKind::Issue);
+                    validate(gwt::cli::execution_state::ExecutionOwnerKey {
+                        kind,
+                        number: projected.number,
+                    })
+                }
                 Err(_) => Err(ContinueWorkFailure::conflict(
                     "The Work execution authority could not be read safely.",
                 )),
@@ -1169,6 +1089,15 @@ fn work_agent_ref_authenticates_session(
     agent.session_id == session.id && work_agent_ref_authenticates_agent(agent, &session.agent_id)
 }
 
+/// `require_exact_owner_kind` must be `false` for a pre-transition read and
+/// `true` for a post-commit readback (#3426). `canonical_continue_work_owner`
+/// deliberately heals a same-number kind-only disagreement toward the trusted
+/// authority, but the correction is only written *inside* the activation
+/// transaction. Demanding the exact kind of the pre-transition snapshot would
+/// therefore re-reject precisely the set the heal exists to admit, and the
+/// corrected owner could never land. The readbacks still see the healed label
+/// and keep enforcing the strict check.
+#[allow(clippy::too_many_arguments)]
 fn projection_continue_authority_matches(
     item: &gwt_core::workspace_projection::WorkItem,
     project_root: &Path,
@@ -1177,14 +1106,16 @@ fn projection_continue_authority_matches(
     branch: &str,
     agent_id: &gwt_agent::AgentId,
     agent_session_id: Option<&str>,
+    require_exact_owner_kind: bool,
 ) -> bool {
     let Ok(projected_owner) = projection_only_continue_owner(item) else {
         return false;
     };
     if projected_owner.number != owner.number
-        || projected_owner
-            .declared_kind
-            .is_some_and(|kind| kind != owner.kind)
+        || (require_exact_owner_kind
+            && projected_owner
+                .declared_kind
+                .is_some_and(|kind| kind != owner.kind))
     {
         return false;
     }
@@ -1374,6 +1305,14 @@ fn durable_launch_recovery_path(sessions_dir: &Path, session_id: &str) -> Result
     Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
 }
 
+fn durable_launch_recovery_lock_path(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    gwt_agent::validate_session_id_path_component(session_id)?;
+    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.lock")))
+}
+
 #[cfg(test)]
 // Only the `#[cfg(unix)]` directory-sync tests install this hook.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -1528,6 +1467,54 @@ pub(super) fn persist_durable_launch_recovery_with_identity(
         .parent()
         .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     create_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())?;
+    let lock_path = durable_launch_recovery_lock_path(sessions_dir, session_id)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<DurableLaunchRecoveryRecord>(&bytes).map_err(|error| {
+                format!("existing launch recovery receipt is malformed: {error}")
+            })?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Some(existing) = existing.as_ref() {
+        existing.owner()?;
+        let same_operation = existing.kind == record.kind
+            && existing.session_id == record.session_id
+            && existing.project_root == record.project_root
+            && existing.worktree_path == record.worktree_path
+            && existing.repo_hash == record.repo_hash
+            && existing.owner_kind == record.owner_kind
+            && existing.owner_number == record.owner_number;
+        let monotonic = existing == &record
+            || (same_operation
+                && existing.expected_binding.is_none()
+                && record.expected_binding.is_some());
+        if same_operation
+            && existing.expected_binding.is_some()
+            && record.expected_binding.is_none()
+        {
+            // A retry begins from the base receipt even when a previous
+            // response-loss attempt already advanced this same operation to
+            // an exact bound receipt. Keep the stronger evidence byte-for-byte
+            // and let the coordinator replay its Prepared attempt.
+            return Ok(());
+        }
+        if !monotonic {
+            return Err("launch recovery receipt cannot be downgraded or retargeted".to_string());
+        }
+        if existing == &record {
+            return Ok(());
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
     gwt_github::cache::write_atomic(&path, &bytes).map_err(|error| error.to_string())?;
     sync_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())
@@ -1538,14 +1525,25 @@ pub(super) fn clear_durable_launch_recovery(
     session_id: &str,
 ) -> Result<(), String> {
     let path = durable_launch_recovery_path(sessions_dir, session_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
+    if !parent.exists() {
+        return Ok(());
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(durable_launch_recovery_lock_path(sessions_dir, session_id)?)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     let durability_barrier = if parent.exists() {
         Some(parent)
     } else {
@@ -1574,6 +1572,43 @@ pub(super) fn durable_launch_recovery_session_identity(
         return Err("launch recovery Session id changed".to_string());
     }
     Ok(record.expected_session_identity)
+}
+
+pub(super) fn bind_durable_launch_recovery_session_identity(
+    sessions_dir: &Path,
+    session: &gwt_agent::Session,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let path = durable_launch_recovery_path(sessions_dir, &session.id)?;
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    let record: DurableLaunchRecoveryRecord =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let owner = record.owner()?;
+    if record.session_id != session.id
+        || record.worktree_path != session.worktree_path
+        || session.project_state_root.as_deref() != Some(record.project_root.as_path())
+        || session.repo_hash.as_deref() != Some(record.repo_hash.as_str())
+        || session.linked_issue_number != Some(owner.number)
+        || binding.owner_kind != owner.kind.as_str()
+        || binding.owner_number != owner.number
+    {
+        return Err(
+            "launch recovery candidate does not match its durable base receipt".to_string(),
+        );
+    }
+    let identity = gwt_agent::SessionExecutionIdentity::for_binding(session, binding)?;
+    persist_durable_launch_recovery_with_identity(
+        sessions_dir,
+        record.kind,
+        &record.session_id,
+        &record.project_root,
+        &record.worktree_path,
+        owner,
+        Some(binding),
+        Some(&session.agent_id),
+        Some(&identity),
+    )?;
+    Ok(identity)
 }
 
 pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
@@ -2314,6 +2349,7 @@ fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool 
                     &pending.work_branch,
                     &pending.work_agent_id,
                     Some(&pending.binding.session_id),
+                    true,
                 )
         })
 }
@@ -2347,6 +2383,7 @@ fn transact_pending_continue_work_with_activation(
                 &pending.work_branch,
                 &pending.work_agent_id,
                 pending.work_agent_session_id.as_deref(),
+                false,
             ) {
                 return Err(gwt_core::error::GwtError::Other(
                     "Continue work authority changed before activation".to_string(),
@@ -2359,6 +2396,7 @@ fn transact_pending_continue_work_with_activation(
                     work_id: Some(pending.work_id.clone()),
                     base_branch: None,
                     linked_issue_number: Some(pending.owner.number),
+                    canonical_owner: Some(pending.owner),
                     resume_context: Some(&pending.resume_context),
                     kind: WorkspaceLaunchProjectionKind::Resume {
                         created_by_start_work: active_session.branch_name.starts_with("work/"),
@@ -2389,17 +2427,6 @@ fn fresh_execution_commit_readback_matches(
         .ok()
         .flatten()
         == Some(session.execution_binding.identity.clone())
-}
-
-fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
 }
 
 fn resolve_activated_fresh_execution_commit(
@@ -2971,10 +2998,7 @@ impl AppRuntime {
             }
             return;
         };
-        if attempt.predecessor_status
-            != gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked
-            || attempt.request.source != gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE
-            || attempt.request.work_id.is_some()
+        if !gwt::cli::execution_state::is_owner_launch_successor_attempt(&attempt)
             || attempt.request.initial_session_id != receipt.session_id
             || attempt.request.operation_id != operation_id
         {
@@ -3750,9 +3774,98 @@ impl AppRuntime {
         &self,
         session_id: &str,
     ) -> ActiveOwnerLiveness {
-        classify_active_owner_liveness(&self.sessions_dir, session_id)
+        classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
     }
+}
 
+pub(super) fn classify_nonlocal_active_owner_liveness_at(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> ActiveOwnerLiveness {
+    {
+        let durable_path = sessions_dir.join(format!("{session_id}.toml"));
+        let durable = match gwt_agent::inspect_session_path(&durable_path) {
+            gwt_agent::SessionPathState::Present(session) => Some(session),
+            gwt_agent::SessionPathState::Missing => None,
+            gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
+        };
+        let runtime_root = sessions_dir.join("runtime");
+        let entries = match std::fs::read_dir(&runtime_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if durable.is_none() {
+                    return ActiveOwnerLiveness::Stale("durable Session is missing");
+                }
+                return if durable.as_ref().is_some_and(|session| {
+                    matches!(
+                        session.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    )
+                }) {
+                    ActiveOwnerLiveness::Stale("durable Session is stopped")
+                } else {
+                    ActiveOwnerLiveness::Unknown
+                };
+            }
+            Err(_) => return ActiveOwnerLiveness::Unknown,
+        };
+        let mut saw_dead_runtime = false;
+        let mut saw_stopped_runtime = false;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return ActiveOwnerLiveness::Unknown;
+            };
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let sidecar = entry.path().join(format!("{session_id}.json"));
+            match sidecar.try_exists() {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(_) => return ActiveOwnerLiveness::Unknown,
+            }
+            if gwt::process::is_host_process_alive(pid) {
+                match gwt_agent::SessionRuntimeState::load(&sidecar) {
+                    Ok(state)
+                        if matches!(
+                            state.status,
+                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                        ) =>
+                    {
+                        saw_stopped_runtime = true;
+                        continue;
+                    }
+                    Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
+                }
+            }
+            saw_dead_runtime = true;
+        }
+        if saw_stopped_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
+        }
+        if saw_dead_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
+        }
+        if durable.is_none() {
+            return ActiveOwnerLiveness::Stale("durable Session is missing");
+        }
+        if durable.as_ref().is_some_and(|session| {
+            matches!(
+                session.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            )
+        }) {
+            return ActiveOwnerLiveness::Stale("durable Session is stopped");
+        }
+        ActiveOwnerLiveness::Unknown
+    }
+}
+
+impl AppRuntime {
     pub(crate) fn stop_pending_continue_work_session_without_projection(
         &mut self,
         window_id: &str,
@@ -4878,6 +4991,7 @@ impl AppRuntime {
                                 &exact_candidate.branch,
                                 &exact_candidate.agent_id,
                                 Some(&candidate_session_id),
+                                true,
                             )
                     });
                     if !projection_matches || !work_matches {
@@ -6030,39 +6144,59 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #3475: a fired readiness deadline is a checkpoint, not an expiry.
+    /// It aborts the prepared successor only once the pane stops showing that
+    /// the agent is still coming up, and always within a bounded number of
+    /// extensions. The `operation_id` correlation is unchanged, so a timer that
+    /// fires after its launch already succeeded (or was superseded) is still a
+    /// no-op.
     pub(crate) fn handle_continue_work_ready_timeout(
         &mut self,
         window_id: &str,
-        operation_id: &str,
+        watch: &ContinueWorkReadinessWatch,
     ) -> Vec<OutboundEvent> {
-        if self
+        let operation_id = watch.operation_id.as_str();
+        let is_pending_continue_work = self
             .pending_continue_work
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id)
-        {
-            return self.continue_work_launch_failed_events(
-                window_id,
-                "authenticated SessionStart readiness timed out",
-            );
-        }
-        let feedback = self
+            .is_some_and(|pending| pending.operation_id == operation_id);
+        let is_pending_fresh_execution = self
             .pending_fresh_execution_launches
             .get(window_id)
-            .filter(|pending| pending.operation_id == operation_id)
-            .and_then(|pending| pending.launch_feedback_context.clone());
-        if feedback.is_some()
-            || self
-                .pending_fresh_execution_launches
-                .get(window_id)
-                .is_some_and(|pending| pending.operation_id == operation_id)
-        {
-            return self.launch_error_events_with_continue_work(
-                window_id.to_string(),
-                "authenticated SessionStart readiness timed out".to_string(),
-                feedback,
-            );
+            .is_some_and(|pending| pending.operation_id == operation_id);
+        if !is_pending_continue_work && !is_pending_fresh_execution {
+            return Vec::new();
         }
-        Vec::new()
+        let pane_alive = self.readiness_pane_is_alive(window_id);
+        let output_bytes = self.observed_window_output_bytes(window_id);
+        match continue_work_readiness_decision(watch, pane_alive, output_bytes) {
+            ReadinessDeadlineDecision::Extend(next) => {
+                tracing::info!(
+                    window_id = %window_id,
+                    operation_id = %operation_id,
+                    extensions = next.extensions,
+                    silent_extensions = next.silent_extensions,
+                    "extended authenticated SessionStart readiness deadline"
+                );
+                self.rearm_continue_work_readiness_deadline(window_id, next);
+                Vec::new()
+            }
+            ReadinessDeadlineDecision::Abort { detail } => {
+                if is_pending_continue_work {
+                    self.continue_work_launch_failed_events(window_id, &detail)
+                } else {
+                    let feedback = self
+                        .pending_fresh_execution_launches
+                        .get(window_id)
+                        .and_then(|pending| pending.launch_feedback_context.clone());
+                    self.launch_error_events_with_continue_work(
+                        window_id.to_string(),
+                        detail,
+                        feedback,
+                    )
+                }
+            }
+        }
     }
 
     pub(crate) fn finalize_fresh_execution_launch_session_start(
@@ -6168,12 +6302,6 @@ impl AppRuntime {
                         &pending.operation_id,
                         |projection, _work_items, _| {
                             let now = chrono::Utc::now();
-                            let owner_context = WorkspaceResumeContext {
-                                title: None,
-                                owner: Some(workspace_owner_label(pending.owner)),
-                                summary: None,
-                                next_action: None,
-                            };
                             let event = apply_workspace_launch_transition(
                                 projection,
                                 &active_session,
@@ -6185,10 +6313,8 @@ impl AppRuntime {
                                     ),
                                     base_branch: pending.base_branch.as_deref(),
                                     linked_issue_number: pending.linked_issue_number,
-                                    resume_context: pending
-                                        .resume_context
-                                        .as_ref()
-                                        .or(Some(&owner_context)),
+                                    canonical_owner: Some(pending.owner),
+                                    resume_context: pending.resume_context.as_ref(),
                                     kind: if pending.base_branch.is_some() {
                                         WorkspaceLaunchProjectionKind::StartWork
                                     } else {

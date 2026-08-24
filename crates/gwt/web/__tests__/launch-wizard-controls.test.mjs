@@ -475,6 +475,39 @@ const wizardSource = readFileSync(
   "utf8",
 );
 
+test("Grok Build は固定 catalog ではなく config-default 付き free-text Model を表示する", () => {
+  const grokGate = wizardSource.search(
+    /launchWizard\.(?:show_grok_options|show_grok_model|show_freetext_model|show_free_text_model)|selected_agent_id\s*===\s*["']grok["']/,
+  );
+  assert.notEqual(grokGate, -1, "Grok 固有の launch profile 表示 gate が必要");
+
+  const grokProfileSurface = wizardSource.slice(grokGate, grokGate + 1800);
+  const grokBranchEnd = grokProfileSurface.indexOf("} else if");
+  assert.notEqual(grokBranchEnd, -1, "Grok Model branch を他 agent の picker と分離する");
+  const grokModelBranch = grokProfileSurface.slice(
+    0,
+    grokBranchEnd,
+  );
+  assert.match(
+    grokModelBranch,
+    /appendTextField\([\s\S]*?["']Model["'][\s\S]*?launchWizard\.selected_model[\s\S]*?blank\s*=\s*config[\s\S]*?kind:\s*["']set_model["']/i,
+    "Grok Model は selected_model を編集する free-text field で、空欄は config default と説明する",
+  );
+  assert.doesNotMatch(
+    grokModelBranch,
+    /appendSelectField\([\s\S]{0,160}?["']Model["']/,
+    "account/custom model を固定 dropdown にしない",
+  );
+});
+
+test("Launch Wizard の共通 reasoning control は Effort として set_reasoning を送る", () => {
+  assert.match(
+    wizardSource,
+    /if\s*\(launchWizard\.show_reasoning\)\s*\{[\s\S]{0,240}?selected_agent_id\s*===\s*["']grok["']\s*\?\s*["']Effort["']\s*:\s*["']Reasoning["'][\s\S]{0,500}?appendReasoningField\(\s*grid,[\s\S]{0,120}?reasoningLabel[\s\S]{0,300}?launchWizard\.reasoning_options[\s\S]{0,180}?launchWizard\.selected_reasoning[\s\S]{0,300}?kind:\s*["']set_reasoning["']/,
+    "Grok は Effort、既存 agent は Reasoning のまま共通 set_reasoning action を使う",
+  );
+});
+
 test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
   assert.match(
     wizardSource,

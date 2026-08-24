@@ -7,6 +7,7 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
+pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
 pub mod settings_local;
@@ -44,8 +45,8 @@ pub use provider_hooks::{
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
-    generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
-    managed_hook_config_has_user_content, CodexHookDiscoveryMode,
+    codex_hooks_paths_for_codex_discovery, generate_codex_hooks, generate_codex_hooks_for_mode,
+    generate_settings_local, managed_hook_config_has_user_content, CodexHookDiscoveryMode,
 };
 
 #[cfg(test)]
@@ -1432,6 +1433,33 @@ mod tests {
             assert!(
                 !inspect_issue_script.contains("Fetch issue metadata via gh issue view."),
                 "unexpected direct gh issue view docstring in {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let claude =
+            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
+                .expect("read Claude gwt-execute skill");
+        let codex =
+            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-execute/SKILL.md"))
+                .expect("read Codex gwt-execute skill");
+
+        assert_eq!(
+            claude, codex,
+            "Claude and Codex gwt-execute guidance must stay byte-identical"
+        );
+        for (relative, guidance) in [
+            (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
+            (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
+        ] {
+            assert!(
+                guidance.contains(
+                    "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
+                ),
+                "{relative} must require scoped abort-before-blocked order"
             );
         }
     }

@@ -113,6 +113,44 @@
              symbols; hover flyouts carry the label + real shortcut. -->
         <aside class="op-rail" id="op-rail" aria-label="Command rail">
           <div class="op-rail__group" role="group" aria-label="Navigate">
+            <!-- SPEC-3431 FR-018/FR-019/FR-021: the PM is the user's single
+                 conversational window, so its launcher leads the Navigate
+                 group. One click always lands on the PM — an existing pane is
+                 framed in the viewport, a missing one is started first. The
+                 state dot reports running / stopped / not started. -->
+            <!-- SPEC-3431 FR-026: the settings gear is a SIBLING of the PM
+                 button, never a child. Nested, its click would bubble into the
+                 launcher and start/frame the PM every time the user only
+                 wanted to configure it. It stays hidden until the shell is
+                 hovered or focused so the rail keeps one icon per row. -->
+            <div class="pm-launcher-shell">
+              <button
+                class="op-rail__item op-rail__item--pm"
+                type="button"
+                id="op-pm-entry"
+                data-pm-state="absent"
+                aria-label="Project Manager"
+                title="Project Manager"
+              >
+                <span class="op-rail__icon" aria-hidden="true">◎</span>
+                <span class="op-rail__pm-dot" aria-hidden="true"></span>
+                <span class="op-rail__flyout" aria-hidden="true">
+                  <span class="op-rail__flyout-label">PM</span>
+                </span>
+              </button>
+              <button
+                class="pm-launcher-gear"
+                type="button"
+                id="op-pm-settings-button"
+                aria-label="Project Manager settings"
+                aria-expanded="false"
+                aria-controls="pm-settings-panel"
+                title="Project Manager settings"
+              >
+                <span aria-hidden="true">⚙</span>
+              </button>
+              <div class="pm-settings-panel" id="pm-settings-panel" hidden></div>
+            </div>
             <!-- SPEC-3245 Phase 3/4: the primary "start new work" rail action is the
                  Curate lane, labeled "Intake" (the "session" suffix is dropped to
                  avoid colliding with the Session domain term) — a branchless,
@@ -229,6 +267,20 @@
                Lives in canvas-area, OUTSIDE #canvas-stage, so the camera
                transform never scales it. Cells + camera frame are built by
                fleet-minimap.js. -->
+          <!-- SPEC-3431 FR-018: shown only while the PM pane is absent from the
+               canvas or scrolled out of view, so it never competes with a
+               visible PM. Bottom-LEFT because the fleet minimap owns the
+               bottom-right corner. -->
+          <button
+            class="canvas-pm-launcher"
+            type="button"
+            id="canvas-pm-launcher"
+            hidden
+            aria-label="Open Project Manager"
+          >
+            <span class="canvas-pm-launcher__icon" aria-hidden="true">◎</span>
+            <span class="canvas-pm-launcher__label">PM</span>
+          </button>
           <div class="fleet-minimap" id="fleet-minimap" data-empty="true" aria-label="Fleet minimap"></div>
           <div class="project-picker" id="project-picker">
             <div class="project-picker-card">
@@ -536,13 +588,6 @@
                 <span class="preset-button__text">
                   <strong>Workspace</strong>
                   <span>Open the Workspace overview</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="issue_monitor" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">◈</span>
-                <span class="preset-button__text">
-                  <strong>Issue Monitor</strong>
-                  <span>Watch Issues and launch agents</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="improvement" data-category="surface">

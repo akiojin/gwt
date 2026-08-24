@@ -50,6 +50,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "knowledge_bridge_state",
     "system_status",
     "issue_monitor_status",
+    "pm_status",
   ]),
 );
 

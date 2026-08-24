@@ -29,6 +29,7 @@ fn issue(number: u64, labels: &[&str]) -> IssueMonitorIssue {
         readiness: IssueMonitorReadiness::NotApplicable,
         body: Some(format!("Body {number}")),
         url: Some(format!("https://github.com/example/repo/issues/{number}")),
+        updated_at: Some("2026-08-01T00:00:00Z".to_string()),
     }
 }
 
@@ -963,7 +964,16 @@ fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
         "a scan-time opt-out must not cancel a bound agent window"
     );
 
+    candidate.labels.retain(|label| label != "hold");
+    candidate.readiness = IssueMonitorReadiness::ReadyWithCompletedTasks;
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:01:45Z",
+    );
     monitor.record_merged(42);
+    candidate.labels.push("hold".to_string());
+    candidate.readiness = IssueMonitorReadiness::NotReady;
     scan_issue_monitor_candidates(
         &mut monitor,
         std::slice::from_ref(&candidate),
@@ -1514,6 +1524,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         attempts: 6,
         acceptance_snapshot: None,
         retry_not_before: None,
+        retry_hold_reason: None,
         last_heartbeat: Some("2026-07-20T00:00:00Z".to_string()),
         pr_number: None,
         reviewed_sha: None,
@@ -1555,7 +1566,10 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
     assert_eq!(after.max_active_agents, 4);
     assert_eq!(after.priority_order, vec![99, 45, 44, 43, 42]);
     assert_eq!(after.launching_issues[0].issue_number, 99);
-    assert_eq!(after.merged_issues, vec![88]);
+    assert!(
+        after.merged_issues.is_empty(),
+        "an absent legacy completion is tombstoned by a complete Live snapshot"
+    );
     assert!(after.autonomous_mode);
     assert_eq!(after.autonomous_tuning.max_attempts, 9);
     assert_eq!(after.autonomous_records[0].attempts, 6);
@@ -1969,4 +1983,127 @@ fn prefs_newer_disk_failure_adoption_preserves_real_launch_and_reconciles_unboun
         .failed_issues
         .iter()
         .all(|failed| failed.issue_number != 42));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #3633 AC-5: a monitor that is not scanning must be observable.
+//
+// The failure this Issue re-registered was not that the queue stopped — it was
+// that the queue stopped while `issue.monitor.status` looked completely
+// healthy. `status_view_at` already projected staleness, but the agent-facing
+// snapshot never used it, the projection bailed out when no scan had *ever*
+// happened, and the persisted preferences carried no scan timestamp at all, so
+// a reader outside the running driver had nothing to compare against.
+// ---------------------------------------------------------------------------
+
+/// A scan timestamp that lives only in the driver's memory cannot answer
+/// "is anything scanning this project?" — which is exactly the question a
+/// PM or an operator asks when the queue stops moving.
+#[test]
+fn the_last_scan_time_survives_a_prefs_roundtrip() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-07-27T10:00:00Z");
+
+    let prefs = monitor.prefs();
+    assert_eq!(prefs.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
+
+    let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    assert_eq!(
+        restored.status_view().last_scan_at.as_deref(),
+        Some("2026-07-27T10:00:00Z"),
+        "a reader that only has the persisted prefs must still see the last scan"
+    );
+}
+
+/// The #3633 state itself: the monitor is enabled with a full queue and no
+/// driver has ever scanned. Before this, every field said "healthy".
+#[test]
+fn agent_status_at_flags_a_monitor_that_has_never_scanned() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_priority_order(vec![42]);
+
+    let status = monitor.agent_status_at("2026-07-27T10:00:00Z");
+
+    assert!(
+        status
+            .scan_stall
+            .as_deref()
+            .is_some_and(|reason| reason.contains("never")),
+        "a monitor that has never scanned must say so: {:?}",
+        status.scan_stall
+    );
+}
+
+#[test]
+fn agent_status_at_flags_a_scan_that_stopped_advancing() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-07-27T10:00:00Z");
+
+    let current = monitor.agent_status_at("2026-07-27T10:00:29Z");
+    assert_eq!(
+        current.scan_stall, None,
+        "a monitor inside its poll window is not stalled"
+    );
+
+    let stalled = monitor.agent_status_at("2026-07-27T10:00:30Z");
+    assert!(
+        stalled
+            .scan_stall
+            .as_deref()
+            .is_some_and(|reason| reason.contains("2026-07-27T10:00:00Z")),
+        "a stalled scan must name the last scan it managed: {:?}",
+        stalled.scan_stall
+    );
+}
+
+/// A disabled monitor is stopped on purpose; reporting it as stalled would
+/// train readers to ignore the field.
+#[test]
+fn agent_status_at_stays_quiet_for_a_disabled_monitor() {
+    let monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: false,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+
+    assert_eq!(
+        monitor.agent_status_at("2026-07-27T10:00:00Z").scan_stall,
+        None
+    );
+}
+
+/// The stall must not be maskable by an unrelated per-issue error. In
+/// production `last_error` was already occupied by a launch failure, so a
+/// projection that only wrote to `last_error` would have stayed invisible.
+#[test]
+fn a_recorded_error_does_not_hide_the_scan_stall() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.record_scan_error("2026-07-27T10:00:00Z", "issue #2338: generation exists");
+
+    let status = monitor.agent_status_at("2026-07-27T10:00:30Z");
+
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("issue #2338: generation exists"),
+        "the recorded error keeps its own surface"
+    );
+    assert!(
+        status.scan_stall.is_some(),
+        "the stall must have a field an existing error cannot occupy"
+    );
 }

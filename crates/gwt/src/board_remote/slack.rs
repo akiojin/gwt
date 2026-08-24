@@ -767,18 +767,15 @@ mod tests {
     /// A unique throwaway repo root per call so the SPEC-2963 root-mapping
     /// JSONL (`.gwt/work/board-remote-roots.jsonl`) and `.gitattributes` are
     /// written under an isolated temp dir, never the real working tree. Multi-
-    /// post tests bind one root and reuse it.
+    /// post tests bind one root and reuse it. `tempfile` supplies the random
+    /// suffix because Windows can reuse process IDs while roots from an older
+    /// test process still exist.
     fn root() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "gwt-board-roots-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::create_dir_all(&path);
-        path
+        tempfile::Builder::new()
+            .prefix("gwt-board-roots-test-")
+            .tempdir()
+            .expect("board remote test root")
+            .keep()
     }
 
     /// Recording mock that captures every post (url + params) and returns an

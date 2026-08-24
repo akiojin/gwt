@@ -14,8 +14,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 ## Why gwt
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
-  `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`, and custom
-  agents from a shared canvas.
+  `Grok Build`, `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`,
+  and custom agents from a shared canvas.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
   and `question` posts.
@@ -103,10 +103,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 
   Gemini CLI remains available in gwt as a legacy option for eligible
   Standard/Enterprise or API-key workflows.
+
+  Grok Build is provided by xAI's official `grok` command. Install it with
+  `npm install -g @xai-official/grok`, then authenticate on first launch or set
+  `XAI_API_KEY` for API-key workflows.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+  - `XAI_API_KEY`
 - Python 3.9+ when gwt needs to bootstrap or repair the shared project index runtime
 
 Linux desktop builds also require WebKitGTK-related system packages. See
@@ -292,14 +297,19 @@ On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
-## Issue Monitor
+## Issue surface and Issue Monitor
 
-The Issue Monitor watches the project's open GitHub Issues and turns them into
-agent work. In the default (human-gated) mode it scans candidates into an
-inbox, and you press `Launch` per issue: gwt then creates the
-`work/issue-N` branch/worktree at launch time and starts the agent with
-`gwt-execute #N`. Failed launches stay visible in the inbox with the error, and
-`Launch now` retries explicitly.
+Open `Issue` from Add Window to browse cached GitHub Issues and manage the Issue
+Monitor in one surface. Each row shows its execution state, queue position, and
+any exclusion reason; the toolbar controls queue concurrency, monitor state,
+Autonomous mode, and Quick issue registration. The legacy `issue_monitor`
+preset also opens this canonical Issue surface.
+
+The monitor watches the project's open GitHub Issues and turns them into agent
+work. In the default (human-gated) mode it scans candidates into the Issue
+queue, and `Launch now` on a row creates the `work/issue-N` branch/worktree at
+launch time and starts the agent with `gwt-execute #N`. Failed launches remain
+visible on their Issue rows with the execution state.
 
 Agents and automation can inspect and reprioritize the project queue through
 the `gwtd` JSON operations `issue.monitor.status`,
@@ -318,7 +328,7 @@ Autonomous mode runs the whole loop unattended: eligible issue → auto-launch �
 implementation → independent review → strong automated gate → auto-merge. It
 is **off by default** and requires a **two-stage opt-in**:
 
-1. Enable the `Autonomous` toggle in the Issue Monitor toolbar (per project).
+1. Enable the `Autonomous` toggle in the Issue surface toolbar (per project).
 2. Label each issue you want handled autonomously with `auto-merge`.
 
 An issue additionally qualifies only when it has machine-checkable acceptance
@@ -340,6 +350,36 @@ scrollable notification stack so nothing is lost while you are away.
 Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
 persist per project. The human-gated baseline is SPEC
 [#3165](https://github.com/akiojin/gwt/issues/3165).
+
+## PM agent
+
+Each project also runs one resident **PM agent** pane. It is the single
+conversational window: you describe what you want in natural language, and the
+PM decomposes it into Issues, registers them, plans the design-required ones,
+decides the semantic execution order, and tells the Issue Monitor which Issue
+to take next. It reports progress and brings `NeedsHuman` escalations back to
+you in the same conversation.
+
+The PM never launches implementation agents itself — it moves an Issue to the
+front of the queue and asks for a scan, and the Issue Monitor's existing
+claim/slot path does the launching, so the duplicate-launch protections are
+unchanged.
+
+- It starts automatically when you open a project, and there is a per-project
+  opt-out.
+- Closing the PM pane stops it; it will not restart itself. A crash does
+  auto-resume, with a backoff so a crash loop cannot spin.
+- Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
+  from the CLI; every other agent session must use the GUI. Merges are
+  unaffected — the strong automated gate above still decides every merge.
+- There is one PM per **repository**, not per project store, so a repository
+  whose state resolved into two stores still gets exactly one. JSON operation
+  `pm.status` lists every registration in the repository, and `pm.stop` retires
+  one from the CLI — a registered PM can retire an orphan or stand down itself
+  without a GUI click.
+
+The design lives in SPEC
+[#3431](https://github.com/akiojin/gwt/issues/3431).
 
 ## Knowledge, Search, and Managed Skills
 
@@ -374,6 +414,23 @@ entrypoints are:
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
+
+### Hook file ownership
+
+- gwt regenerates `.claude/settings.local.json` as a local machine file and
+  manages its Git exclusion.
+- gwt creates or merges `.codex/hooks.json`, but does not add it to `.gitignore`
+  or `info/exclude`.
+- Whether `.codex/hooks.json` is version-controlled is a repository decision.
+  When the file already exists, gwt replaces only gwt-managed hook entries and
+  keeps user hooks plus unrelated top-level settings.
+- A version-controlled `.codex/hooks.json` should keep the portable `gwtd`
+  fallback so a machine-local absolute path is never committed. Regenerate it
+  with
+  `GWT_HOOK_BIN=gwtd cargo run -p gwt-skills --example regenerate_hook_settings -- worktree-local`.
+- Outside a launch, gwt owns both Codex hook discovery locations — the
+  worktree-local `.codex/hooks.json` and the workspace-home copy at the repo
+  root — so hook health reporting and self-heal always target the same files.
 
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
@@ -734,6 +791,44 @@ cargo bundle -p gwt --format osx
 ```bash
 cargo test -p gwt-core -p gwt --all-features
 ```
+
+### Serializing heavy verification
+
+Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
+Playwright, `verify.run`) contends for host CPU. Running two of them at once
+on the same machine makes wall-clock fixtures fail for no reason and pollutes
+coverage numbers, so gwt serializes them behind a host-wide lease — one
+holder per machine, across every repository and worktree.
+
+Take the lease before the heavy command and release it afterwards:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
+JSON
+```
+
+The answer is immediate. `verification lease: granted` returns a `lease_id`
+to release with; `verification lease: unavailable` returns the current holder
+and its remaining TTL, so nothing has to watch another process:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.status","params":{}}
+JSON
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
+JSON
+```
+
+Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
+TTL. The default TTL is 45 minutes; a lease that lapses is released
+automatically, and a holder that is killed releases immediately. Lease
+transitions are recorded in
+`~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
 ### Releasing
 
