@@ -2423,6 +2423,121 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    type TestDaemonStatusServer = (
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<Result<bool, String>>,
+    );
+
+    #[cfg(unix)]
+    fn start_test_daemon_status_server(
+        repo: &std::path::Path,
+        socket_path: &std::path::Path,
+        status: crate::IssueMonitorAgentStatus,
+    ) -> TestDaemonStatusServer {
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            repo,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .expect("runtime scope");
+        let listener = UnixListener::bind(socket_path).expect("bind status daemon");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking status daemon");
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.to_string_lossy().to_string(),
+            "test-status-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .expect("persist status daemon endpoint");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while !server_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                let (stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => return Err(format!("accept status client: {error}")),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("blocking status client stream: {error}"))?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .map_err(|error| format!("set status read timeout: {error}"))?;
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .map_err(|error| format!("set status write timeout: {error}"))?;
+                let mut reader = std::io::BufReader::new(
+                    stream
+                        .try_clone()
+                        .map_err(|error| format!("clone status client stream: {error}"))?,
+                );
+                let mut writer = stream;
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .map_err(|error| format!("read status handshake: {error}"))?;
+                let request: gwt_core::daemon::IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end())
+                        .map_err(|error| format!("parse status handshake: {error}"))?;
+                if request.scope != scope {
+                    return Err("status handshake scope mismatch".to_string());
+                }
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                        protocol_version: gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                        daemon_version: "test-daemon".to_string(),
+                        accepted: true,
+                        rejection_reason: None,
+                    })
+                    .map_err(|error| format!("serialize status handshake: {error}"))?
+                )
+                .map_err(|error| format!("write status handshake: {error}"))?;
+
+                line.clear();
+                reader
+                    .read_line(&mut line)
+                    .map_err(|error| format!("read status request: {error}"))?;
+                let frame = serde_json::from_str::<gwt_core::daemon::ClientFrame>(line.trim_end())
+                    .map_err(|error| format!("parse status request: {error}"))?;
+                if !matches!(frame, gwt_core::daemon::ClientFrame::Status) {
+                    return Err("status server received a non-status frame".to_string());
+                }
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::json!({
+                        "type": "status",
+                        "protocol_version": gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                        "daemon_version": "test-daemon",
+                        "uptime_seconds": 1,
+                        "broadcast_channels": 1,
+                        "connections": 1,
+                        "issue_monitor": status,
+                    })
+                )
+                .map_err(|error| format!("write daemon status: {error}"))?;
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        (stop, server)
+    }
+
     fn s(value: &str) -> String {
         value.to_string()
     }
@@ -3211,95 +3326,10 @@ mod tests {
             })
             .expect("write stale cache candidate");
 
-        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
-            &repo,
-            gwt_core::daemon::RuntimeTarget::Host,
-        )
-        .expect("runtime scope");
         let socket_path = tmp.path().join("live-status.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind live daemon");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking live daemon");
-        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
-            scope.clone(),
-            std::process::id(),
-            socket_path.to_string_lossy().to_string(),
-            "live-status-token".to_string(),
-            "test-daemon".to_string(),
-        );
-        gwt_core::daemon::persist_endpoint(
-            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
-            &endpoint,
-        )
-        .expect("persist live daemon endpoint");
-        let stop = Arc::new(AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(1);
-            while !server_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-                let (stream, _) = match listener.accept() {
-                    Ok(accepted) => accepted,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(error) => panic!("accept status client: {error}"),
-                };
-                stream
-                    .set_nonblocking(false)
-                    .expect("blocking status client stream");
-                let mut reader =
-                    std::io::BufReader::new(stream.try_clone().expect("clone status stream"));
-                let mut writer = stream;
-                let mut line = String::new();
-                reader.read_line(&mut line).expect("read status handshake");
-                let request: gwt_core::daemon::IpcHandshakeRequest =
-                    serde_json::from_str(line.trim_end()).expect("parse status handshake");
-                assert_eq!(request.scope, scope);
-                writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
-                        protocol_version: gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
-                        daemon_version: "test-daemon".to_string(),
-                        accepted: true,
-                        rejection_reason: None,
-                    })
-                    .expect("serialize status handshake")
-                )
-                .expect("write status handshake");
-                line.clear();
-                reader.read_line(&mut line).expect("read status request");
-                assert!(matches!(
-                    serde_json::from_str::<gwt_core::daemon::ClientFrame>(line.trim_end())
-                        .expect("parse status request"),
-                    gwt_core::daemon::ClientFrame::Status
-                ));
-                writeln!(
-                    writer,
-                    "{}",
-                    serde_json::json!({
-                        "type": "status",
-                        "protocol_version": gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
-                        "daemon_version": "test-daemon",
-                        "uptime_seconds": 1,
-                        "broadcast_channels": 1,
-                        "connections": 1,
-                        "issue_monitor": {
-                            "queue": [],
-                            "active_launches": [],
-                            "max_active": 1,
-                            "enabled": false,
-                            "autonomous_mode": false,
-                            "has_launch_profile": false
-                        }
-                    })
-                )
-                .expect("write live status");
-                return;
-            }
-        });
+        let live_status =
+            crate::IssueMonitorState::new(crate::IssueMonitorConfig::default()).agent_status();
+        let (stop, server) = start_test_daemon_status_server(&repo, &socket_path, live_status);
 
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -3309,8 +3339,12 @@ mod tests {
             &mut out,
         );
         stop.store(true, Ordering::Release);
-        server.join().expect("live daemon joins");
-        result.expect("status");
+        let handled = server
+            .join()
+            .expect("live daemon joins")
+            .expect("live daemon status result");
+        assert!(handled, "live daemon must handle the status request");
+        assert_eq!(result.expect("status"), 0);
 
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(out.trim())
@@ -3791,6 +3825,22 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn t254_target_from_status_row(row: &serde_json::Value) -> T254ControlTarget {
+        let optional_string =
+            |field: &str| row[field].as_str().map(std::string::ToString::to_string);
+        T254ControlTarget {
+            issue_number: row["issue_number"].as_u64().expect("status issue number"),
+            reason: "terminal Work requires a fresh launch".to_string(),
+            launch_generation: row["launch_generation"].as_u64(),
+            claim_id: optional_string("claim_id"),
+            claim_owner: optional_string("claim_owner"),
+            delivery_id: optional_string("delivery_id"),
+            materializer_window_id: optional_string("materializer_window_id"),
+            window_id: optional_string("launched_window_id"),
+        }
+    }
+
     #[derive(serde::Serialize)]
     struct T254CanonicalReceiptFingerprint<'a> {
         version: &'static str,
@@ -3930,7 +3980,12 @@ mod tests {
         t254_seed_control_fixture_with_origin(repo, None)
     }
 
-    fn t254_seed_control_fixture_with_origin(
+    #[cfg(unix)]
+    fn t254_seed_control_authority_fixture(repo: &std::path::Path) -> std::path::PathBuf {
+        t254_seed_control_authority_fixture_with_origin(repo, None)
+    }
+
+    fn t254_seed_control_authority_fixture_with_origin(
         repo: &std::path::Path,
         origin: Option<&str>,
     ) -> std::path::PathBuf {
@@ -4001,6 +4056,14 @@ mod tests {
             .save(&sessions_dir)
             .expect("persist source Session without a runtime sidecar");
 
+        crate::issue_monitor_prefs_path_for_repo_path(repo)
+    }
+
+    fn t254_seed_control_fixture_with_origin(
+        repo: &std::path::Path,
+        origin: Option<&str>,
+    ) -> std::path::PathBuf {
+        let prefs_path = t254_seed_control_authority_fixture_with_origin(repo, origin);
         let launch_profile = t254_source_launch_profile();
         let profile_fingerprint = t254_launch_profile_digest(&launch_profile);
         assert_eq!(
@@ -4008,7 +4071,6 @@ mod tests {
             "the pinned source profile fixture must remain byte stable"
         );
         assert!(t254_is_canonical_sha256(&profile_fingerprint));
-        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
@@ -4658,6 +4720,327 @@ mod tests {
             status.inbox[0].control_ready.recover,
             crate::IssueMonitorControlActionReadiness::ready(),
             "the one status response becomes actionable only after the same proof Recover consumes"
+        );
+    }
+
+    /// Issue #3732 AC-5 / #3712 regression: the PM reads one fresh daemon
+    /// snapshot after a terminal Work escalation and feeds that exact identity
+    /// back into failover. The daemon inbox deliberately retains an older
+    /// launch claim, reproducing the production split-brain: status must prefer
+    /// the durable acknowledged identity that the control operation resolves.
+    #[test]
+    #[cfg(unix)]
+    fn t254_terminal_work_escalation_fresh_status_exact_failover_releases_the_launch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _pane_url = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+        let repo = tmp.path().join("repo");
+        let prefs_path = t254_seed_control_authority_fixture(&repo);
+        t254_register_replacement_pm(&repo);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "current-pm");
+
+        let issue = crate::IssueMonitorIssue {
+            number: 42,
+            title: "Terminal Work launch".to_string(),
+            labels: Vec::new(),
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-20T10:00:00Z".to_string()),
+        };
+        let launch_profile = t254_source_launch_profile();
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(launch_profile),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        crate::scan_issue_monitor_candidates(
+            &mut daemon,
+            std::slice::from_ref(&issue),
+            "2026-08-20T10:00:01Z",
+        );
+        assert!(daemon.apply_confirmed_claim(
+            42,
+            "claim-42-generation-1",
+            "source-agent-session",
+            "effect-42-generation-1",
+            "2026-08-20T10:00:02Z",
+        ));
+        let delivery_id = "launch:effect-42-generation-1";
+        let launched_window_id = "tab-work::agent-1";
+        assert!(daemon.claim_launch_delivery(
+            42,
+            delivery_id,
+            "t254-materializer",
+            254,
+            launched_window_id,
+            |_| false,
+        ));
+        assert!(daemon.mark_launch_delivery_materialized(
+            42,
+            delivery_id,
+            "t254-materializer",
+            launched_window_id,
+        ));
+        assert!(daemon.mark_launch_delivery_workspace_durable(
+            42,
+            delivery_id,
+            "t254-materializer",
+            launched_window_id,
+        ));
+        assert!(daemon.complete_active_launch_delivery(42, launched_window_id, Some(delivery_id)));
+        crate::save_issue_monitor_prefs(&prefs_path, &daemon.prefs())
+            .expect("save lifecycle-produced post-ACK prefs");
+        let roundtripped =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("roundtrip post-ACK prefs");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            roundtripped,
+        );
+        crate::scan_issue_monitor_candidates(
+            &mut daemon,
+            std::slice::from_ref(&issue),
+            "2026-08-20T10:00:03Z",
+        );
+        daemon.record_claimed(issue.clone(), "stale-inbox-claim");
+        assert_eq!(
+            daemon
+                .inbox_item(42)
+                .and_then(|item| item.claim_id.as_deref()),
+            Some("stale-inbox-claim"),
+            "the regression fixture must contain the stale daemon-side claim"
+        );
+        set_issue_monitor_control_runtime_inventory(
+            &repo,
+            crate::IssueMonitorRuntimeInventory::Available {
+                project_scope: gwt_core::paths::project_scope_hash(&repo)
+                    .as_str()
+                    .to_string(),
+                runtime_instance_id: "t254-runtime".to_string(),
+                revision: 1,
+                observed_at: "2026-08-20T10:00:04Z".to_string(),
+                windows: vec![crate::IssueMonitorRuntimeWindow {
+                    window_id: launched_window_id.to_string(),
+                    pane_state: crate::IssueMonitorPaneState::Stopped,
+                    wait_signal: None,
+                }],
+            },
+        );
+
+        let escalation = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Codex",
+            gwt_core::coordination::BoardEntryKind::Blocked,
+            "事象: workspace.ensure が terminal Work を拒否した\n原因: canonical Work は terminal\n依頼: fresh failover\n再開条件: 新しい launch",
+            None,
+            None,
+            vec![],
+            vec!["42".to_string()],
+        );
+        gwt_core::coordination::post_entry(&repo, escalation)
+            .expect("post terminal Work escalation");
+
+        let status_socket = repo.join("t254-status.sock");
+        let (status_stop, status_server) =
+            start_test_daemon_status_server(&repo, &status_socket, daemon.agent_status());
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut status_out = String::new();
+        let status_result = run(
+            &mut env,
+            IssueCommand::MonitorStatus {
+                project_root: Some(repo.clone()),
+            },
+            &mut status_out,
+        );
+        status_stop.store(true, Ordering::Release);
+        let status_handled = status_server
+            .join()
+            .expect("status daemon joins")
+            .expect("status daemon result");
+        assert!(
+            status_handled,
+            "fresh status must be served by the bounded daemon fixture"
+        );
+        assert_eq!(
+            status_result.expect("fresh issue.monitor.status"),
+            0,
+            "fresh status succeeds: {status_out}"
+        );
+        let status: serde_json::Value =
+            serde_json::from_str(status_out.trim()).expect("fresh status JSON");
+        assert_eq!(status["needs_human"], serde_json::json!([42]));
+        let row = status["inbox"]
+            .as_array()
+            .expect("status inbox")
+            .iter()
+            .find(|row| row["issue_number"] == serde_json::json!(42))
+            .expect("launched issue row");
+        assert_eq!(row["state"], serde_json::json!("launched"));
+        assert_eq!(row["control_ready"]["failover"]["ready"], true);
+        let exact = t254_target_from_status_row(row);
+
+        let stale = T254ControlTarget {
+            claim_id: Some("stale-inbox-claim".to_string()),
+            ..exact.clone()
+        };
+        let before_refusal = std::fs::read(&prefs_path).expect("prefs before stale failover");
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let before_pm_refusal =
+            std::fs::read(&pm_prefs_path).expect("PM prefs before stale failover");
+        let before_authority_refusal = t254_authority_bytes(&repo);
+        t254_run_refused(
+            &mut env,
+            t254_control_command(
+                T254ControlAction::Failover,
+                &repo,
+                "t254-terminal-work-stale-failover",
+                &stale,
+            ),
+            "t254-terminal-work-stale-failover",
+            "mismatch",
+            "claim_mismatch",
+        );
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs after stale failover"),
+            before_refusal,
+            "a stale status identity must remain a zero-mutation refusal"
+        );
+        assert_eq!(
+            std::fs::read(&pm_prefs_path).expect("PM prefs after stale failover"),
+            before_pm_refusal,
+            "a stale status identity must not rewrite PM authority"
+        );
+        assert_eq!(
+            t254_authority_bytes(&repo),
+            before_authority_refusal,
+            "a stale status identity must not mutate execution authority"
+        );
+
+        let mut failover_out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                t254_control_command(
+                    T254ControlAction::Failover,
+                    &repo,
+                    "t254-terminal-work-exact-failover",
+                    &exact,
+                ),
+                &mut failover_out,
+            )
+            .expect("exact failover"),
+            0,
+            "the fresh status identity must authorize failover: {failover_out}"
+        );
+        let failover: serde_json::Value =
+            serde_json::from_str(failover_out.trim()).expect("failover response JSON");
+        assert_eq!(failover["status"], serde_json::json!("failover_pending"));
+        assert_eq!(
+            exact.claim_id.as_deref(),
+            Some("claim-42-generation-1"),
+            "successful status-driven failover must have used the durable claim"
+        );
+
+        let released =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("load released launch prefs");
+        assert!(
+            released.launched_issues.is_empty(),
+            "active slot/window released"
+        );
+        assert!(
+            released.launched_control_identities.is_empty(),
+            "active claim/delivery/window identity released"
+        );
+        assert!(
+            released.pending_launch_deliveries.is_empty(),
+            "no launch delivery survives revocation"
+        );
+        assert_eq!(
+            released.revoked_through_generation.get(&42),
+            Some(&1),
+            "the released generation remains fenced against stale resurrection"
+        );
+        let pending = released
+            .pending_controls
+            .iter()
+            .find(|pending| pending.operation_id == "t254-terminal-work-exact-failover")
+            .expect("failover owns teardown after active release");
+        assert_eq!(
+            pending.source_identity.issue_number, exact.issue_number,
+            "pending control owns the status issue"
+        );
+        assert_eq!(
+            Some(pending.source_identity.launch_generation),
+            exact.launch_generation,
+            "pending control owns the status generation"
+        );
+        assert_eq!(
+            Some(pending.source_identity.claim_id.as_str()),
+            exact.claim_id.as_deref(),
+            "pending control owns the status claim"
+        );
+        assert_eq!(
+            Some(pending.source_identity.claim_owner.as_str()),
+            exact.claim_owner.as_deref(),
+            "pending control owns the status claim owner"
+        );
+        assert_eq!(
+            Some(pending.source_identity.delivery_id.as_str()),
+            exact.delivery_id.as_deref(),
+            "pending control owns the status delivery"
+        );
+        assert_eq!(
+            pending.source_identity.materializer_window_id.as_deref(),
+            exact.materializer_window_id.as_deref(),
+            "pending control owns the status materializer window"
+        );
+        assert_eq!(
+            pending.source_identity.window_id.as_deref(),
+            exact.window_id.as_deref(),
+            "pending control owns the status launched window"
+        );
+
+        let mut released_state =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), released);
+        crate::scan_issue_monitor_candidates(
+            &mut released_state,
+            std::slice::from_ref(&issue),
+            "2026-08-20T10:00:05Z",
+        );
+        assert!(
+            !released_state.active_issue_numbers().contains(&42),
+            "the terminal launch must not retain its slot"
+        );
+        assert_eq!(released_state.live_claim_id(42), None);
+        assert_eq!(released_state.pending_launch_delivery_id(42), None);
+        assert_eq!(released_state.launched_window_id(42), None);
+        let mut released_projection = released_state.agent_status();
+        merge_board_escalations_into_needs_human(&repo, &mut released_projection);
+        let released_row = released_projection
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .expect("post-failover status row");
+        assert!(
+            !released_projection.active_launches.contains(&42),
+            "post-failover status must not project an active launch"
+        );
+        assert!(
+            released_projection.needs_human.contains(&42),
+            "the open terminal Work escalation must remain visible"
+        );
+        assert_ne!(
+            released_row.state,
+            crate::MonitorInboxState::Launched,
+            "failover must remove the launched projection"
         );
     }
 
