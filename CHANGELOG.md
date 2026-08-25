@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.83.4] - 2026-08-25
+
+### Bug Fixes
+
+- Reset autonomous attempts when requeueing failures
+- 起動時に stale generation を安全に回収する
+
 ## [9.83.3] - 2026-08-25
 
 ### Bug Fixes
