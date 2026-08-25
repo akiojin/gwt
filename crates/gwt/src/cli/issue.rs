@@ -739,8 +739,12 @@ fn run_monitor_requeue<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
 
-    let stale_window_id = match outcome {
-        crate::IssueMonitorRequeueOutcome::Requeued { stale_window_id } => stale_window_id,
+    let (stale_window_id, attempts_before, attempts_after) = match outcome {
+        crate::IssueMonitorRequeueOutcome::Requeued {
+            stale_window_id,
+            attempts_before,
+            attempts_after,
+        } => (stale_window_id, attempts_before, attempts_after),
         // Fail closed and name the reason, so the caller can tell "I aimed at a
         // running agent" apart from "there was nothing to recover" instead of
         // retrying blindly.
@@ -782,6 +786,8 @@ fn run_monitor_requeue<E: CliEnv>(
             "stale_window_id": stale_window_id,
             "released_at": now,
             "failure_release_version": prefs.failure_release_version,
+            "attempts_before": attempts_before,
+            "attempts_after": attempts_after,
             "scan_requested": delivery.scan_requested,
             "scan_delivery": delivery.scan_delivery,
             "scan_error": delivery.scan_error,
@@ -2846,6 +2852,11 @@ mod tests {
                     message: "an execution generation already exists for issue #42".to_string(),
                     window_id: Some("tab-1::agent-dead".to_string()),
                 }],
+                autonomous_records: vec![{
+                    let mut record = crate::AutonomousIssueRecord::new(42);
+                    record.attempts = 3;
+                    record
+                }],
                 ..crate::IssueMonitorPrefs::default()
             },
         )
@@ -2889,6 +2900,10 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("\"status\":\"requeued\""), "{out}");
         assert!(out.contains("tab-1::agent-dead"), "{out}");
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("requeue response is JSON");
+        assert_eq!(response["attempts_before"], 3);
+        assert_eq!(response["attempts_after"], 0);
 
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         assert!(
@@ -2904,6 +2919,11 @@ mod tests {
             vec![42],
             "the release must be published so other processes converge on it"
         );
+        assert_eq!(prefs.autonomous_records[0].attempts, 0);
+        assert_eq!(prefs.requeue_audit.len(), 1);
+        assert_eq!(prefs.requeue_audit[0].reason, "operator recovery");
+        assert_eq!(prefs.requeue_audit[0].attempts_before, 3);
+        assert_eq!(prefs.requeue_audit[0].attempts_after, 0);
         assert_eq!(
             prefs.launched_issues.len(),
             1,
