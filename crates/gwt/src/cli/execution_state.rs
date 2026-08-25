@@ -681,6 +681,10 @@ pub enum SuccessorPredecessorStatus {
 }
 
 pub const FRESH_LINKED_OWNER_LAUNCH_SOURCE: &str = "fresh-linked-owner-launch";
+/// Canonical source of an owner launch that leaves a `Completed` predecessor.
+/// The token is persisted in every ledger that recorded one, so it keeps the
+/// name it was minted under even though Issue #3472 extended the route beyond
+/// the manual Launch Agent to every fresh linked-owner launch.
 pub const MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE: &str = "manual-completed-owner-launch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,20 +843,30 @@ pub fn classify_exact_session_runtime(
     })
 }
 
-/// Issue #3457: identify the current generation's holder when no Host can be
-/// running it, so a fresh launch can supersede it instead of colliding with a
-/// Session that will never settle.
+/// Issue #3457 / Issue #3472: identify the current generation's holder when no
+/// Host can be running it, so a fresh launch can supersede it instead of
+/// colliding with a Session that will never settle.
 ///
-/// Deliberately conservative: only a holder whose runtime evidence is
-/// [`ExactSessionRuntimeDisposition::Absent`] qualifies. A reachable holder, an
-/// unreadable durable record, a holder that no longer owns the current binding,
-/// and merely ambiguous runtime evidence all return `None` so the caller keeps
-/// refusing rather than taking a generation away from a live Session.
+/// Deliberately conservative: a holder qualifies only with decisive evidence
+/// that no Host runs it — [`ExactSessionRuntimeDisposition::Absent`] (no
+/// sidecar in any namespace), [`ExactSessionRuntimeDisposition::Terminal`]
+/// whose durable Session also reads Stopped/Interrupted, or
+/// [`ExactSessionRuntimeDisposition::Defunct`] (dead runtime explained by its
+/// manual handoff fence). A reachable holder, an unreadable durable record, a
+/// holder that no longer owns the current binding, and merely ambiguous
+/// runtime evidence all return `None` so the caller keeps refusing rather
+/// than taking a generation away from a live Session. The returned evidence is
+/// re-proved under the owner/Session leases by the successor transaction.
 pub fn unreachable_current_generation_holder(
     sessions_dir: &Path,
     worktree: &Path,
     owner: ExecutionOwnerKey,
-) -> io::Result<Option<gwt_agent::SessionExecutionIdentity>> {
+) -> io::Result<
+    Option<(
+        gwt_agent::SessionExecutionIdentity,
+        gwt_agent::ManualLaunchRuntimeEvidence,
+    )>,
+> {
     let Some(record) = load(worktree)? else {
         return Ok(None);
     };
@@ -875,9 +889,29 @@ pub fn unreachable_current_generation_holder(
     else {
         return Ok(None);
     };
-    Ok((classify_exact_session_runtime(sessions_dir, &identity)?
-        == ExactSessionRuntimeDisposition::Absent)
-        .then_some(identity))
+    Ok(
+        match classify_exact_session_runtime(sessions_dir, &identity)? {
+            ExactSessionRuntimeDisposition::Absent => {
+                Some((identity, gwt_agent::ManualLaunchRuntimeEvidence::Absent))
+            }
+            // Issue #3472: an exact terminal exit record counts only once the
+            // durable Session agrees it stopped; a terminal sidecar under a
+            // non-stopped durable record is conflicting evidence.
+            ExactSessionRuntimeDisposition::Terminal(proof) => matches!(
+                holder.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            )
+            .then_some((
+                identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
+            )),
+            ExactSessionRuntimeDisposition::Defunct(proof) => Some((
+                identity,
+                gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
+            )),
+            ExactSessionRuntimeDisposition::Live | ExactSessionRuntimeDisposition::Unknown => None,
+        },
+    )
 }
 
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
@@ -7962,35 +7996,34 @@ fn materialize_at_launch_locked(
         },
     )
 }
-
 /// Best-effort owner-kind detection from the local issue cache: a
 /// `gwt-spec`-labeled owner is a SPEC owner; uncached or unreadable owners
 /// default to plain Issue (the gate mechanics do not depend on the kind).
 #[must_use]
 pub fn detect_owner_kind(repo_path: &Path, number: u64) -> ExecutionOwnerKind {
-    let Some(cache_root) = crate::issue_cache::issue_cache_root_for_repo_path(repo_path) else {
-        return ExecutionOwnerKind::Issue;
-    };
+    detect_owner_kind_evidence(repo_path, number).unwrap_or(ExecutionOwnerKind::Issue)
+}
+
+/// Owner-kind evidence from the local issue cache. Returns `None` when the
+/// cache entry is missing or unreadable so callers holding an already trusted
+/// owner kind can retain it instead of silently downgrading to Issue (#3426).
+#[must_use]
+pub fn detect_owner_kind_evidence(repo_path: &Path, number: u64) -> Option<ExecutionOwnerKind> {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)?;
     let meta_path = cache_root.join(number.to_string()).join("meta.json");
-    let Ok(contents) = fs::read_to_string(&meta_path) else {
-        return ExecutionOwnerKind::Issue;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return ExecutionOwnerKind::Issue;
-    };
-    let is_spec = value
-        .get("labels")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|labels| {
-            labels
-                .iter()
-                .any(|label| label.as_str() == Some("gwt-spec"))
-        });
-    if is_spec {
+    let contents = fs::read_to_string(&meta_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    let labels = value.get("labels").and_then(serde_json::Value::as_array)?;
+    let is_spec = labels.iter().any(|label| {
+        label
+            .as_str()
+            .is_some_and(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    });
+    Some(if is_spec {
         ExecutionOwnerKind::Spec
     } else {
         ExecutionOwnerKind::Issue
-    }
+    })
 }
 
 /// Derive the launch entrypoint for the record: the `$gwt-*` skill token from
@@ -12149,6 +12182,82 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// Issue #3472: an exact terminal runtime exit record releases the holder
+    /// to a fresh-launch supersede only once the durable Session agrees it
+    /// stopped. A terminal sidecar under a still-Running durable Session is
+    /// conflicting evidence and must keep refusing.
+    #[test]
+    fn unreachable_holder_requires_durably_stopped_session_for_terminal_proof() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-terminal-proof-holder";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let holder = gwt_agent::Session::load(&session_path).unwrap();
+        let holder_identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+            .unwrap()
+            .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &holder_identity,
+            1,
+            crate::process::host_process_start_time(std::process::id()).unwrap(),
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &holder_identity).unwrap(),
+            ExactSessionRuntimeDisposition::Terminal(gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: 1,
+            }),
+            "the fixture must produce an exact terminal exit record",
+        );
+
+        assert!(
+            unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+                .unwrap()
+                .is_none(),
+            "a terminal exit record under a non-stopped durable Session must not qualify",
+        );
+
+        let mut stopped = gwt_agent::Session::load(&session_path).unwrap();
+        stopped.update_status(gwt_agent::AgentStatus::Stopped);
+        stopped.save(&sessions_dir).unwrap();
+
+        let (identity, evidence) =
+            unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+                .unwrap()
+                .expect("a durably stopped holder with exact terminal proof must qualify");
+        assert_eq!(identity.session_id, session_id);
+        assert_eq!(
+            evidence,
+            gwt_agent::ManualLaunchRuntimeEvidence::Proof(gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: 1,
+            }),
+            "the qualifying holder must carry its exact runtime proof for revalidation",
+        );
     }
 
     #[test]
@@ -17067,6 +17176,79 @@ mod tests {
         );
     }
 
+    fn write_issue_cache_meta(repo_path: &Path, number: u64, labels: serde_json::Value) {
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(repo_path).expect("cache root");
+        let entry = cache_root.join(number.to_string());
+        fs::create_dir_all(&entry).expect("create cache entry");
+        fs::write(
+            entry.join("meta.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "number": number,
+                "title": format!("Issue #{number}"),
+                "labels": labels,
+                "state": "open",
+            }))
+            .expect("serialize meta"),
+        )
+        .expect("write meta");
+    }
+
+    // #3426: positive SPEC detection from a cached `gwt-spec` label.
+    #[test]
+    fn detect_owner_kind_reads_spec_label_from_cache() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write_issue_cache_meta(dir.path(), 1921, serde_json::json!(["gwt-spec", "phase/x"]));
+        assert_eq!(
+            detect_owner_kind(dir.path(), 1921),
+            ExecutionOwnerKind::Spec
+        );
+    }
+
+    // #3426: label matching must not depend on the label's letter case.
+    #[test]
+    fn detect_owner_kind_matches_gwt_spec_label_case_insensitively() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write_issue_cache_meta(dir.path(), 1921, serde_json::json!(["GWT-Spec"]));
+        assert_eq!(
+            detect_owner_kind(dir.path(), 1921),
+            ExecutionOwnerKind::Spec
+        );
+    }
+
+    // #3426: absent/unreadable cache evidence must be distinguishable from a
+    // genuinely plain Issue so trusted owners are never silently downgraded.
+    #[test]
+    fn detect_owner_kind_evidence_distinguishes_missing_cache_from_plain_issue() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        assert_eq!(detect_owner_kind_evidence(dir.path(), 77), None);
+
+        write_issue_cache_meta(dir.path(), 77, serde_json::json!(["bug"]));
+        assert_eq!(
+            detect_owner_kind_evidence(dir.path(), 77),
+            Some(ExecutionOwnerKind::Issue)
+        );
+
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(dir.path())
+            .expect("cache root")
+            .join("78");
+        fs::create_dir_all(&cache_root).expect("create cache entry");
+        fs::write(cache_root.join("meta.json"), b"{ not json").expect("write malformed meta");
+        assert_eq!(detect_owner_kind_evidence(dir.path(), 78), None);
+    }
+
     // ------------------------------------------------------------------
     // execution.complete / execution.blocked command behavior
     // ------------------------------------------------------------------
@@ -17120,13 +17302,31 @@ mod tests {
                 .collect()
         }
 
+        /// Compare authority paths the way the trusted store keys them.
+        /// Canonicalize the parent (the file itself may already have been
+        /// quarantined) so a Windows 8.3 short name such as `AKIOJI~1` and its
+        /// long form resolve to the same string, then unify separators and
+        /// case-fold where the filesystem does. macOS `/private` stays
+        /// stripped for the same reason it always was.
         fn normalized_test_path(path: &Path) -> String {
-            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            let rendered = canonical.to_string_lossy();
-            rendered
+            // Canonicalize the parent and re-join the file name: the file
+            // itself may already have been quarantined (moved away), and a
+            // failed whole-path canonicalize would fall back to the raw 8.3
+            // spelling and re-fork the comparison this helper exists to fix.
+            let resolved = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => dunce::canonicalize(parent)
+                    .map(|parent| parent.join(name))
+                    .unwrap_or_else(|_| path.to_path_buf()),
+                _ => path.to_path_buf(),
+            };
+            let rendered = resolved.to_string_lossy().replace('\\', "/");
+            let rendered = rendered
                 .strip_prefix("/private")
                 .unwrap_or(&rendered)
-                .to_string()
+                .to_string();
+            #[cfg(windows)]
+            let rendered = rendered.to_lowercase();
+            rendered
         }
 
         fn mirror_pointer_partial_authority(

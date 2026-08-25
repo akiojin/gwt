@@ -197,6 +197,32 @@ pub enum ProjectScopeSource {
     AmbiguousNestedBareRepositories(Vec<RepoIdentityCandidate>),
 }
 
+impl ProjectScopeSource {
+    /// The stable wire name for this source.
+    ///
+    /// Single point of truth so the CLI, the daemon, and any future reporter
+    /// cannot drift into three spellings of the same condition.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Repository(RepoIdentitySource::Origin) => "origin",
+            Self::Repository(RepoIdentitySource::NestedBareRepository(_)) => {
+                "nested_bare_repository"
+            }
+            Self::PathFallback => "path_fallback",
+            Self::AmbiguousNestedBareRepositories(_) => "ambiguous_nested_bare_repositories",
+        }
+    }
+
+    /// Whether the hash came from a repository identity rather than a path.
+    ///
+    /// `false` means the store is isolated to the path it was opened at: no
+    /// other view of the same repository — and no running gwt that opened it
+    /// by a different path — shares it.
+    pub fn identity_resolved(&self) -> bool {
+        matches!(self, Self::Repository(_))
+    }
+}
+
 /// The project store scope for a path: its hash plus how the hash was derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectScope {
@@ -320,6 +346,61 @@ pub fn project_scope_hash(repo_path: &Path) -> RepoHash {
 pub fn gwt_project_dir_for_repo_path(repo_path: &Path) -> PathBuf {
     let repo_hash = project_scope_hash(repo_path);
     gwt_project_dir(&repo_hash)
+}
+
+/// The project store an operation acts on, recorded so its caller can prove
+/// where the operation landed.
+///
+/// Issue #3606: `issue.monitor.*` answered `ok: true` — with a successful
+/// readback — after writing into a path-fallback store that no running gwt
+/// reads. Success proved the operation ran; it never proved *which* store it
+/// ran against, and the only way to tell them apart was comparing mtimes under
+/// `~/.gwt/projects/`. Naming the store alongside the result makes the landing
+/// checkable by the caller instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationProjectStore {
+    /// The project root as resolved, not as typed.
+    pub project_root: PathBuf,
+    pub scope: ProjectScope,
+    /// `~/.gwt/projects/<hash>` — the directory the caller can inspect.
+    pub store_path: PathBuf,
+}
+
+static OPERATION_PROJECT_STORE: OnceLock<Mutex<Option<OperationProjectStore>>> = OnceLock::new();
+
+fn operation_project_store_cell() -> &'static Mutex<Option<OperationProjectStore>> {
+    OPERATION_PROJECT_STORE.get_or_init(|| Mutex::new(None))
+}
+
+/// Resolve `project_root`'s store scope and record it as the store this
+/// operation acts on.
+///
+/// The first recording wins. A `gwtd` process runs exactly one operation, and
+/// the choke point that resolves the operation's own `project_root` param runs
+/// before any incidental resolution further down, so first-wins keeps the
+/// reported store the one the caller asked about.
+pub fn record_operation_project_store(project_root: &Path) {
+    let scope = resolve_project_scope(project_root);
+    let record = OperationProjectStore {
+        project_root: dunce::canonicalize(project_root)
+            .unwrap_or_else(|_| project_root.to_path_buf()),
+        store_path: gwt_project_dir(&scope.hash),
+        scope,
+    };
+    let mut cell = operation_project_store_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cell.is_none() {
+        *cell = Some(record);
+    }
+}
+
+/// The project store recorded for this operation, if one was recorded.
+pub fn operation_project_store() -> Option<OperationProjectStore> {
+    operation_project_store_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Return the Project State current projection path for a repository hash.

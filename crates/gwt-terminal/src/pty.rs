@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -128,11 +129,28 @@ impl SpawnedChildGuard {
     }
 
     fn terminate(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-        }
         if let Some(group) = self.process_group.as_mut() {
             group.terminate();
+        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            reap_child_in_background(Arc::new(Mutex::new(child)));
         }
     }
 
@@ -427,7 +445,10 @@ impl PtyHandle {
         })
     }
 
-    #[cfg(test)]
+    // Only the unix reaping tests inject a spawn failure; gating on `test`
+    // alone left this dead on Windows, where `-D warnings` then failed a lint
+    // CI never runs (its clippy job is Linux-only).
+    #[cfg(all(test, unix))]
     fn spawn_with_test_failure(
         config: SpawnConfig,
         failure: SpawnTestFailure,
@@ -645,15 +666,12 @@ impl PtyHandle {
     /// open the master reader does not observe EOF, which would otherwise
     /// strand the reader thread (and its `Arc<Mutex<Pane>>`) and prevent the
     /// Drop chain from running.
+    ///
+    /// This must not wait for the child to reap. `portable-pty`'s Unix
+    /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
+    /// run on the GUI event loop and freeze every `pane.*` operation during
+    /// consecutive live-PTY closes (Issue #3705).
     pub fn kill(&self) -> Result<(), TerminalError> {
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        let kill_result = child.kill();
-        drop(child);
-
-        // Always sweep descendants, even if the direct kill failed: the group
-        // terminate is idempotent and uses an independent kernel path.
         let mut group = match self.process_group.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -661,9 +679,42 @@ impl PtyHandle {
         group.terminate();
         drop(group);
 
-        kill_result.map_err(|e| TerminalError::PtyIoError {
-            details: e.to_string(),
-        })
+        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
+            details: format!("lock poisoned: {e}"),
+        })?;
+        if child
+            .try_wait()
+            .map_err(|e| TerminalError::PtyIoError {
+                details: e.to_string(),
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        let reaped = child.try_wait().ok().flatten().is_some();
+        drop(child);
+        if !reaped {
+            // Reap off the caller thread. Immediate try_wait after SIGKILL
+            // often misses the exit, and a zombie still looks alive to
+            // `kill(pid, 0)` (Issue #3705 / pty lifecycle tests).
+            reap_child_in_background(Arc::clone(&self.child));
+        }
+        Ok(())
     }
 
     /// Returns the OS process id of the spawned child, if available.
@@ -696,6 +747,23 @@ impl PtyHandle {
             details: e.to_string(),
         })
     }
+}
+
+fn reap_child_in_background(child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match child.lock() {
+                Ok(mut guard) => {
+                    if guard.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
 }
 
 fn pending_spawn_error(handle: PtyHandle, reason: String) -> TerminalError {
@@ -1050,29 +1118,11 @@ fn is_executable_file(path: &Path) -> bool {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         // Best-effort termination: must never panic from Drop and must not
-        // block the caller for long. Tolerate poisoned mutexes.
-        let mut guard = match self.child.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let _ = guard.kill();
-
-        // Short reap loop so subsequent try_wait callers observe the exit.
-        // Capped at ~500ms so Drop never stalls the UI thread.
-        for _ in 0..20 {
-            match guard.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            }
-        }
-        drop(guard);
-
-        // Belt-and-suspenders: explicitly terminate the group in case `kill`
-        // was never called (e.g. the handle was dropped without going through
-        // stop_window_runtime). ProcessGroup::terminate is idempotent.
-        if let Ok(mut group) = self.process_group.lock() {
-            group.terminate();
-        }
+        // block the caller. Issue #3705: the previous reap loop slept up to
+        // 500ms on the GUI event loop when a live PTY was dropped during
+        // pane.close. Reuse `kill` so a child whose pgid is not its pid still
+        // receives a direct SIGKILL.
+        let _ = self.kill();
     }
 }
 
@@ -1080,7 +1130,7 @@ impl Drop for PtyHandle {
 mod tests {
     use std::{
         sync::{Arc, Mutex},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -1440,6 +1490,48 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(exited, "Process should have exited after kill");
+    }
+
+    /// Issue #3705 AC-2: `portable-pty` waits up to ~200ms after SIGHUP before
+    /// SIGKILL. A TUI that installs a SIGHUP handler (Codex at a usage-limit
+    /// prompt) made that wait land on the GUI event loop and freeze pane.*.
+    #[cfg(unix)]
+    #[test]
+    fn kill_of_sighup_resistant_child_returns_without_blocking() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "trap '' HUP; exec /bin/sleep 60".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn failed");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        handle.kill().expect("kill should succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "PtyHandle::kill blocked for {elapsed:?}; live PTY close must not wait for SIGHUP reap"
+        );
+        let mut exited = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            exited,
+            "SIGHUP-resistant child must still be reaped after non-blocking kill"
+        );
     }
 
     #[test]
