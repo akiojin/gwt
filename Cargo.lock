@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "chrono",
  "dunce",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "reqwest",
  "serde",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1439,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "chrono",
  "gwt-core",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "chrono",
  "fs2",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.83.1"
+version = "9.83.3"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -3751,7 +3751,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4306,9 +4306,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
