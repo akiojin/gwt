@@ -46,7 +46,8 @@ use super::continuation::set_durable_launch_recovery_directory_sync_test_hook;
 use super::continuation::{
     clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
     durable_launch_recovery_exists, durable_launch_recovery_session_identity,
-    persist_durable_launch_recovery, resolve_split_workspace_state_external_commit,
+    nonlocal_runtime_index_scan_metrics, persist_durable_launch_recovery,
+    reset_nonlocal_runtime_index_scan_metrics, resolve_split_workspace_state_external_commit,
     set_fresh_execution_pre_work_commit_hook_for_test, set_missing_session_cleanup_hook_for_test,
     ActiveOwnerLiveness, DurableLaunchRecoveryKind,
 };
@@ -14830,6 +14831,57 @@ fn continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners() 
 }
 
 #[test]
+fn startup_nonlocal_liveness_indexes_runtime_namespaces_once_for_128_sessions() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let runtime_root = runtime.sessions_dir.join("runtime");
+    for pid in 1_000_000..1_000_064_u32 {
+        fs::create_dir_all(runtime_root.join(pid.to_string())).expect("create runtime namespace");
+    }
+    let session_ids = (0..128)
+        .map(|index| format!("startup-index-session-{index}"))
+        .collect::<Vec<_>>();
+
+    reset_nonlocal_runtime_index_scan_metrics();
+    let liveness = runtime
+        .classify_nonlocal_active_owner_liveness_batch(session_ids.iter().map(String::as_str));
+    let metrics = nonlocal_runtime_index_scan_metrics();
+
+    assert_eq!(liveness.len(), 128);
+    assert!(liveness.values().all(|value| matches!(
+        value,
+        ActiveOwnerLiveness::Stale("durable Session is missing")
+    )));
+    assert_eq!(metrics.runtime_root_enumerations, 1);
+    assert_eq!(metrics.runtime_namespace_enumerations, 64);
+    assert_eq!(metrics.host_process_probes, 0);
+
+    for session_id in session_ids.iter().take(2) {
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &runtime.sessions_dir,
+                1_000_000,
+                session_id,
+            ))
+            .expect("save relevant dead-Host sidecar");
+    }
+    reset_nonlocal_runtime_index_scan_metrics();
+    let indexed = runtime
+        .classify_nonlocal_active_owner_liveness_batch(session_ids.iter().map(String::as_str));
+    let metrics = nonlocal_runtime_index_scan_metrics();
+    assert!(session_ids.iter().take(2).all(|session_id| matches!(
+        indexed.get(session_id),
+        Some(ActiveOwnerLiveness::Stale(
+            "all owning Host runtimes are dead"
+        ))
+    )));
+    assert_eq!(metrics.runtime_root_enumerations, 1);
+    assert_eq!(metrics.runtime_namespace_enumerations, 64);
+    assert_eq!(metrics.host_process_probes, 1);
+}
+
+#[test]
 fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
     let _env_guard = env_test_lock()
         .lock()
@@ -20127,10 +20179,17 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
 
     restarted.bootstrap();
 
-    assert_eq!(
+    let restart_binding =
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
-            .expect("read restart-repaired current binding"),
-        Some(fixture.binding.identity.clone()),
+            .expect("read restart-repaired current binding")
+            .expect("restart-repaired current binding");
+    assert_eq!(
+        restart_binding.generation_id,
+        fixture.binding.identity.generation_id
+    );
+    assert_eq!(
+        restart_binding.binding_id,
+        fixture.binding.identity.binding_id
     );
     assert_eq!(
         gwt_core::workspace_projection::resolve_workspace_state_external_commit(
@@ -20141,14 +20200,19 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
         .expect("read restart-committed Workspace transaction"),
         gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
     );
-    assert_eq!(
+    let restart_ledger =
         gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner)
             .expect("read restart-repaired ledger")
-            .expect("restart-repaired ledger")
-            .generations
-            .len(),
+            .expect("restart-repaired ledger");
+    assert_eq!(
+        restart_ledger.generations.len(),
         2,
         "restart repair must not append a duplicate generation",
+    );
+    assert_eq!(
+        restart_ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the W-37 reaper must terminalize the deliberately stopped recovered holder",
     );
     assert!(!durable_launch_recovery_exists(
         &restarted.sessions_dir,
@@ -29499,6 +29563,253 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         .count();
     assert_eq!(agent_windows, 1);
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+}
+
+/// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
+/// generation reaper. The selected exact holder remains Active while another
+/// stale owner in the same repository is audited Blocked in the same batch.
+#[test]
+fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let protected_worktree = temp.path().join("worktrees").join("protected-restore");
+    let protected_unknown_worktree = temp
+        .path()
+        .join("worktrees")
+        .join("protected-unknown-restore");
+    let stale_worktree = temp.path().join("worktrees").join("stale-owner");
+    let second_stale_worktree = temp.path().join("worktrees").join("second-stale-owner");
+    for (branch, worktree) in [
+        ("work/protected-restore", &protected_worktree),
+        (
+            "work/protected-unknown-restore",
+            &protected_unknown_worktree,
+        ),
+        ("work/stale-owner", &stale_worktree),
+        ("work/second-stale-owner", &second_stale_worktree),
+    ] {
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+    }
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let protected_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3735,
+    };
+    let stale_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3736,
+    };
+    let protected_unknown_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3737,
+    };
+    let second_stale_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3738,
+    };
+
+    for (owner, session_id, worktree, branch, selected_for_restore, exact_binding) in [
+        (
+            protected_owner,
+            "startup-protected-holder",
+            protected_worktree.as_path(),
+            "work/protected-restore",
+            true,
+            true,
+        ),
+        (
+            protected_unknown_owner,
+            "startup-protected-unknown-holder",
+            protected_unknown_worktree.as_path(),
+            "work/protected-unknown-restore",
+            true,
+            false,
+        ),
+        (
+            stale_owner,
+            "startup-stale-holder",
+            stale_worktree.as_path(),
+            "work/stale-owner",
+            false,
+            true,
+        ),
+        (
+            second_stale_owner,
+            "startup-second-stale-holder",
+            second_stale_worktree.as_path(),
+            "work/second-stale-owner",
+            false,
+            true,
+        ),
+    ] {
+        gwt::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize Active execution");
+        gwt::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("ensure generation ledger");
+        let binding = gwt::cli::execution_state::current_execution_binding(worktree, owner)
+            .expect("load current binding")
+            .expect("current binding");
+        let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(format!("native-{session_id}"));
+        session.linked_issue_number = Some(owner.number);
+        session.restore_window_on_startup = selected_for_restore;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session.update_status(if selected_for_restore {
+            gwt_agent::AgentStatus::Interrupted
+        } else {
+            gwt_agent::AgentStatus::Stopped
+        });
+        if exact_binding {
+            session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().expect("repo hash"),
+                owner_kind: "issue".to_string(),
+                owner_number: owner.number,
+                identity: binding,
+                capability_generation: 1,
+            });
+        }
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save startup holder Session");
+    }
+
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 2);
+    let startup_worktrees = gwt::worktree_inventory::enumerate_worktrees(&repo, None)
+        .expect("startup worktree inventory")
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    let trusted_worktree_dir =
+        gwt::cli::trusted_store::trusted_dir_for_worktree(&protected_worktree)
+            .expect("trusted worktree directory");
+    let corrupt_owner_dir = trusted_worktree_dir
+        .parent()
+        .expect("repository trusted root")
+        .join("execution-owners")
+        .join("owner-999999");
+    fs::create_dir_all(&corrupt_owner_dir).expect("create corrupt owner directory");
+    fs::write(
+        corrupt_owner_dir.join("generation-ledger.json"),
+        b"{malformed owner ledger",
+    )
+    .expect("write corrupt owner ledger");
+
+    let mut summary = None;
+    let logs = capture_tracing_events(|| {
+        summary = Some(runtime.reap_startup_defunct_active_generations(&startup_worktrees));
+    });
+    let summary = summary.expect("startup reaper summary");
+
+    assert_eq!(summary.reaped, 2);
+    assert_eq!(summary.protected, 2);
+    assert_eq!(summary.failures, 1);
+    assert!(logs.iter().any(|event| {
+        event.level == Level::INFO
+            && event.fields.get("message").map(String::as_str)
+                == Some("startup Active generation reaper completed")
+            && event.fields.contains_key("duration_ms")
+    }));
+    assert!(logs.iter().any(|event| {
+        event.level == Level::WARN
+            && event.fields.get("message").map(String::as_str)
+                == Some("startup Active generation owner inspection failed closed")
+    }));
+    assert_eq!(
+        gwt::cli::execution_state::load(&protected_worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Active
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load(&stale_worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Blocked
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load(&protected_unknown_worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Active
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load(&second_stale_worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Blocked
+    );
+}
+
+#[test]
+fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() {
+    let source = include_str!("startup.rs");
+    let bootstrap = source
+        .split_once("pub(crate) fn bootstrap")
+        .expect("bootstrap implementation")
+        .1
+        .split_once("pub(super) fn queue_startup_auto_resume_sessions")
+        .expect("bootstrap boundary")
+        .0;
+    let durable_recovery = bootstrap
+        .find("self.reconcile_durable_fresh_execution_launches()")
+        .expect("durable recovery");
+    let restore_selection = bootstrap
+        .find("self.queue_startup_auto_resume_sessions")
+        .expect("restore selection");
+    let generation_reaper = bootstrap
+        .find("self.reap_startup_defunct_active_generations")
+        .expect("generation reaper");
+    let pm_queue = bootstrap
+        .find("self.pending_startup_pm_tabs")
+        .expect("PM queue");
+    assert!(durable_recovery < restore_selection);
+    assert!(restore_selection < generation_reaper);
+    assert!(generation_reaper < pm_queue);
+
+    let reaper = source
+        .split_once("pub(super) fn reap_startup_defunct_active_generations")
+        .expect("startup generation reaper")
+        .1
+        .split_once("pub(super) fn startup_auto_resume_ready_events")
+        .expect("startup generation reaper boundary")
+        .0;
+    assert!(reaper.contains("classify_nonlocal_active_owner_liveness"));
 }
 
 #[test]
