@@ -658,6 +658,40 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
     )
 }
 
+/// Issue #3684 AC-2: physically detach this session's claim-provenance refs
+/// from same-container duplicates of its canonical Work, under the split-root
+/// state lock. Pure projection repair — no events are appended. A later full
+/// rebuild folds the same healed shape because the duplicate claim is now
+/// rejected at fold time (`would_reject_session_attach`). Returns the healed
+/// Work ids.
+pub fn heal_same_container_duplicate_claim_attachments_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    canonical_id: &str,
+) -> Result<Vec<String>> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        |_| {
+            let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)?
+            else {
+                return Ok(Vec::new());
+            };
+            let healed =
+                work_items.detach_same_container_duplicate_claims(session_id, canonical_id);
+            if !healed.is_empty() {
+                save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
+            }
+            Ok(healed)
+        },
+    )
+}
+
 /// Recover an interrupted Workspace state transaction without synthesizing or
 /// mutating Workspace state when no transaction is pending.
 pub fn recover_pending_workspace_state_transaction(repo_path: &Path) -> Result<()> {
