@@ -6314,6 +6314,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
         .agent_capability_tokens
         .insert(holder_window_id.clone(), capability.token.clone());
     runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    settle_test_pane_child(&runtime, &holder_window_id);
     runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
     let decision = runtime
         .launch_wizard
@@ -6617,6 +6618,7 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
         .join(format!("{}.toml", holder.session_id));
     let session_before = fs::read(&session_path).expect("Session bytes before losing Stop");
 
+    settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
@@ -6777,6 +6779,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
+    settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
@@ -6969,6 +6972,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
+    settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
@@ -7151,6 +7155,7 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
             .launch_target,
         gwt::LaunchTargetKind::Agent
     );
+    settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
