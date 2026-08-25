@@ -720,6 +720,9 @@ fn committed_self_improvement_stop_commands() -> Vec<String> {
     commands
 }
 
+// Only the `#[cfg(unix)]` degradation test drives a POSIX shell, so gate the
+// fixture the same way or `-D warnings` trips dead_code on Windows.
+#[cfg(unix)]
 fn posix_shell_fixture(path: &Path) -> (&'static str, String) {
     let normalized = path.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]
