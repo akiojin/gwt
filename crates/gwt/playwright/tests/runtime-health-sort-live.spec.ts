@@ -7,7 +7,7 @@ test.describe("Runtime health sort controls", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
   test.beforeEach(async ({ page }) => {
-    await gotoLiveGwt(page, BASE);
+    await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
     await page.waitForFunction(() => Boolean((window as any).__operatorShell?.applyRuntimeHealth));
   });
 

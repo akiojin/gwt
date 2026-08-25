@@ -25,7 +25,10 @@ test.describe.serial("Launch Wizard reconnect recovery (live backend)", () => {
       "live Launch Wizard reconnect E2E runs once against the shared backend",
     );
     await suppressInitialFrontendReady(page);
-    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressProjectSurfaces: true,
+    });
     await keepLaunchWizardModalVisibilityDeterministic(page);
     await clearBackendLaunchWizard(page);
   });

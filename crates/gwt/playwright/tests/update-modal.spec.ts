@@ -18,6 +18,7 @@ test.describe("Update modal", () => {
   test("CTA -> downloading -> ready -> Later morphs CTA to ready", async ({ page }) => {
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
+      suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
 
@@ -80,6 +81,7 @@ test.describe("Update modal", () => {
   test("update_apply_error renders failed state with stage / reason / log", async ({ page }) => {
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
+      suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
 
