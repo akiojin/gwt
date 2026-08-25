@@ -3463,6 +3463,45 @@ fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
         .expect("save durable test Session");
 }
 
+/// Issue #3705 made pane teardown asynchronous: `PtyHandle::kill` no longer
+/// waits for the reap, so `process_has_exited()` can still be false when the
+/// stop action runs. In that case the terminal proof is finished on a
+/// background thread instead of under the caller's lease, which makes any
+/// test that reads the proof synchronously racy under CI parallelism.
+///
+/// These tests assert the synchronous proof, so settle the child first and
+/// keep them deterministic on the already-exited path they were written for.
+/// Coverage for the still-running path belongs to Issue #3744, which restores
+/// a bounded guarantee instead of dropping the proof.
+fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
+    let pane = runtime
+        .runtimes
+        .get(window_id)
+        .expect("window runtime for settle")
+        .pane
+        .clone();
+    pane.lock()
+        .expect("test pane")
+        .kill()
+        .expect("kill test child");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if pane
+            .lock()
+            .expect("test pane")
+            .process_has_exited()
+            .expect("test child exit probe")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "test child for {window_id} did not exit before the deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
     let incarnation = super::next_window_runtime_incarnation();
     let pane = Arc::new(Mutex::new(long_running_test_pane(window_id)));
@@ -5976,6 +6015,7 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
         .holder_decision
         .expect("local holder decision");
 
+    settle_test_pane_child(&runtime, &holder_window_id);
     let events = runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
@@ -6110,6 +6150,7 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
+    settle_test_pane_child(&runtime, &holder_window_id);
     runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
@@ -6644,6 +6685,7 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
+    settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
