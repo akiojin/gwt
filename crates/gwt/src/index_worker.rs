@@ -2500,6 +2500,13 @@ detached
 
     #[test]
     fn deadline_aware_git_context_matches_public_resolver_path_semantics() {
+        // Sibling tests change process cwd under env_test_lock. Without the
+        // same lock, parallel `cargo test` can make the public resolver and
+        // the deadline-aware probe observe different worktree/standalone
+        // classifications for the same temp path.
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let (bare, linked_worktree) = make_bare_workspace_with_origin(temp.path());
         let standalone = temp.path().join("standalone");

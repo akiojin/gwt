@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -3779,93 +3779,256 @@ impl AppRuntime {
     ) -> ActiveOwnerLiveness {
         classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
     }
+
+    pub(super) fn classify_nonlocal_active_owner_liveness_batch<'a>(
+        &self,
+        session_ids: impl IntoIterator<Item = &'a str>,
+    ) -> HashMap<String, ActiveOwnerLiveness> {
+        classify_nonlocal_active_owner_liveness_batch_at(&self.sessions_dir, session_ids)
+    }
+}
+
+#[derive(Debug)]
+struct NonlocalActiveOwnerLivenessState {
+    durable_status: Option<gwt_agent::AgentStatus>,
+    durable_unknown: bool,
+    saw_dead_runtime: bool,
+    saw_stopped_runtime: bool,
+    saw_unknown_runtime: bool,
+}
+
+impl NonlocalActiveOwnerLivenessState {
+    fn finish(self) -> ActiveOwnerLiveness {
+        if self.durable_unknown || self.saw_unknown_runtime {
+            return ActiveOwnerLiveness::Unknown;
+        }
+        if self.saw_stopped_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
+        }
+        if self.saw_dead_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
+        }
+        match self.durable_status {
+            None => ActiveOwnerLiveness::Stale("durable Session is missing"),
+            Some(gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted) => {
+                ActiveOwnerLiveness::Stale("durable Session is stopped")
+            }
+            Some(_) => ActiveOwnerLiveness::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NonlocalRuntimeIndexScanMetrics {
+    pub runtime_root_enumerations: usize,
+    pub runtime_namespace_enumerations: usize,
+    pub host_process_probes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NONLOCAL_RUNTIME_INDEX_SCAN_METRICS:
+        std::cell::Cell<NonlocalRuntimeIndexScanMetrics> =
+        const { std::cell::Cell::new(NonlocalRuntimeIndexScanMetrics {
+            runtime_root_enumerations: 0,
+            runtime_namespace_enumerations: 0,
+            host_process_probes: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn record_nonlocal_runtime_root_enumeration() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        current.runtime_root_enumerations += 1;
+        metrics.set(current);
+    });
+}
+
+#[cfg(not(test))]
+fn record_nonlocal_runtime_root_enumeration() {}
+
+#[cfg(test)]
+fn record_nonlocal_runtime_namespace_enumeration() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        current.runtime_namespace_enumerations += 1;
+        metrics.set(current);
+    });
+}
+
+#[cfg(not(test))]
+fn record_nonlocal_runtime_namespace_enumeration() {}
+
+#[cfg(test)]
+fn record_nonlocal_host_process_probe() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        current.host_process_probes += 1;
+        metrics.set(current);
+    });
+}
+
+#[cfg(not(test))]
+fn record_nonlocal_host_process_probe() {}
+
+#[cfg(test)]
+pub(super) fn reset_nonlocal_runtime_index_scan_metrics() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        metrics.set(NonlocalRuntimeIndexScanMetrics::default());
+    });
+}
+
+#[cfg(test)]
+pub(super) fn nonlocal_runtime_index_scan_metrics() -> NonlocalRuntimeIndexScanMetrics {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(std::cell::Cell::get)
+}
+
+pub(super) fn classify_nonlocal_active_owner_liveness_batch_at<'a>(
+    sessions_dir: &Path,
+    session_ids: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, ActiveOwnerLiveness> {
+    let mut states = session_ids
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|session_id| {
+            let durable_path = sessions_dir.join(format!("{session_id}.toml"));
+            let (durable_status, durable_unknown) =
+                match gwt_agent::inspect_session_path(&durable_path) {
+                    gwt_agent::SessionPathState::Present(session) => (Some(session.status), false),
+                    gwt_agent::SessionPathState::Missing => (None, false),
+                    gwt_agent::SessionPathState::Error(_) => (None, true),
+                };
+            (
+                session_id,
+                NonlocalActiveOwnerLivenessState {
+                    durable_status,
+                    durable_unknown,
+                    saw_dead_runtime: false,
+                    saw_stopped_runtime: false,
+                    saw_unknown_runtime: false,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if states.is_empty() {
+        return HashMap::new();
+    }
+
+    let sidecar_owners = states
+        .keys()
+        .map(|session_id| (format!("{session_id}.json"), session_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let runtime_root = sessions_dir.join("runtime");
+    record_nonlocal_runtime_root_enumeration();
+    let namespaces = match std::fs::read_dir(&runtime_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return states
+                .into_iter()
+                .map(|(session_id, state)| (session_id, state.finish()))
+                .collect();
+        }
+        Err(_) => {
+            for state in states.values_mut() {
+                state.saw_unknown_runtime = true;
+            }
+            return states
+                .into_iter()
+                .map(|(session_id, state)| (session_id, state.finish()))
+                .collect();
+        }
+    };
+
+    let mut global_runtime_error = false;
+    for namespace in namespaces {
+        let namespace = match namespace {
+            Ok(namespace) => namespace,
+            Err(_) => {
+                global_runtime_error = true;
+                break;
+            }
+        };
+        let Some(host_pid) = namespace
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        record_nonlocal_runtime_namespace_enumeration();
+        let sidecars = match std::fs::read_dir(namespace.path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                global_runtime_error = true;
+                break;
+            }
+        };
+        let mut host_is_alive = None;
+        for sidecar in sidecars {
+            let sidecar = match sidecar {
+                Ok(sidecar) => sidecar,
+                Err(_) => {
+                    global_runtime_error = true;
+                    break;
+                }
+            };
+            let Some(session_id) = sidecar
+                .file_name()
+                .to_str()
+                .and_then(|filename| sidecar_owners.get(filename))
+            else {
+                continue;
+            };
+            let Some(state) = states.get_mut(session_id) else {
+                continue;
+            };
+            let host_is_alive = *host_is_alive.get_or_insert_with(|| {
+                record_nonlocal_host_process_probe();
+                gwt::process::is_host_process_alive(host_pid)
+            });
+            if !host_is_alive {
+                state.saw_dead_runtime = true;
+                continue;
+            }
+            match gwt_agent::SessionRuntimeState::load(&sidecar.path()) {
+                Ok(runtime)
+                    if matches!(
+                        runtime.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    ) =>
+                {
+                    state.saw_stopped_runtime = true;
+                }
+                Ok(_) | Err(_) => state.saw_unknown_runtime = true,
+            }
+        }
+        if global_runtime_error {
+            break;
+        }
+    }
+    if global_runtime_error {
+        for state in states.values_mut() {
+            state.saw_unknown_runtime = true;
+        }
+    }
+    states
+        .into_iter()
+        .map(|(session_id, state)| (session_id, state.finish()))
+        .collect()
 }
 
 pub(super) fn classify_nonlocal_active_owner_liveness_at(
     sessions_dir: &Path,
     session_id: &str,
 ) -> ActiveOwnerLiveness {
-    {
-        let durable_path = sessions_dir.join(format!("{session_id}.toml"));
-        let durable = match gwt_agent::inspect_session_path(&durable_path) {
-            gwt_agent::SessionPathState::Present(session) => Some(session),
-            gwt_agent::SessionPathState::Missing => None,
-            gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
-        };
-        let runtime_root = sessions_dir.join("runtime");
-        let entries = match std::fs::read_dir(&runtime_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if durable.is_none() {
-                    return ActiveOwnerLiveness::Stale("durable Session is missing");
-                }
-                return if durable.as_ref().is_some_and(|session| {
-                    matches!(
-                        session.status,
-                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                    )
-                }) {
-                    ActiveOwnerLiveness::Stale("durable Session is stopped")
-                } else {
-                    ActiveOwnerLiveness::Unknown
-                };
-            }
-            Err(_) => return ActiveOwnerLiveness::Unknown,
-        };
-        let mut saw_dead_runtime = false;
-        let mut saw_stopped_runtime = false;
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return ActiveOwnerLiveness::Unknown;
-            };
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|value| value.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let sidecar = entry.path().join(format!("{session_id}.json"));
-            match sidecar.try_exists() {
-                Ok(false) => continue,
-                Ok(true) => {}
-                Err(_) => return ActiveOwnerLiveness::Unknown,
-            }
-            if gwt::process::is_host_process_alive(pid) {
-                match gwt_agent::SessionRuntimeState::load(&sidecar) {
-                    Ok(state)
-                        if matches!(
-                            state.status,
-                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                        ) =>
-                    {
-                        saw_stopped_runtime = true;
-                        continue;
-                    }
-                    Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
-                }
-            }
-            saw_dead_runtime = true;
-        }
-        if saw_stopped_runtime {
-            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
-        }
-        if saw_dead_runtime {
-            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
-        }
-        if durable.is_none() {
-            return ActiveOwnerLiveness::Stale("durable Session is missing");
-        }
-        if durable.as_ref().is_some_and(|session| {
-            matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            )
-        }) {
-            return ActiveOwnerLiveness::Stale("durable Session is stopped");
-        }
-        ActiveOwnerLiveness::Unknown
-    }
+    classify_nonlocal_active_owner_liveness_batch_at(sessions_dir, [session_id])
+        .remove(session_id)
+        .unwrap_or(ActiveOwnerLiveness::Unknown)
 }
 
 impl AppRuntime {
