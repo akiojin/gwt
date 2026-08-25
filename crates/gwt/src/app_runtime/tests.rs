@@ -17318,6 +17318,219 @@ fn production_host_launch_persists_and_dispatches_checked_latest_runner_fallback
     assert_eq!(persisted.launch_args, completion.0.args);
 }
 
+#[test]
+fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let repo = temp.path().join("repo-auto-resume-successor");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "feature/demo"]);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-successor",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let (mut runtime, _runtime_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    fs::create_dir_all(&runtime.sessions_dir).expect("create canonical sessions dir");
+    let predecessor_session_id = "auto-resume-successor-predecessor";
+    let predecessor_identity = install_manual_launch_holder(
+        &mut runtime,
+        &repo,
+        predecessor_session_id,
+        gwt_agent::AgentStatus::Interrupted,
+        None,
+    );
+    let predecessor_path = runtime
+        .sessions_dir
+        .join(format!("{predecessor_session_id}.toml"));
+    let mut predecessor =
+        gwt_agent::Session::load(&predecessor_path).expect("load predecessor Session");
+    predecessor.agent_session_id = Some("native-auto-resume-successor".to_string());
+    predecessor.restore_window_on_startup = true;
+    predecessor
+        .save(&runtime.sessions_dir)
+        .expect("persist resumable predecessor Session");
+
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            predecessor_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor generation"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    // Issue #3625 explicitly excludes stale sidecar fencing, which has its
+    // own startup-recovery owner. Keep this fixture focused on the activated
+    // SuccessorCreated binding while retaining the durable predecessor Session.
+    fs::remove_file(gwt_agent::runtime_state_path(
+        &runtime.sessions_dir,
+        predecessor_session_id,
+    ))
+    .expect("remove out-of-scope stale predecessor runtime proof");
+    let continuation_diagnosis =
+        gwt::cli::execution_state::diagnose(&repo, Some(predecessor_session_id));
+    assert!(
+        continuation_diagnosis
+            .available_recoveries
+            .iter()
+            .any(|operation| operation == "execution.continue"),
+        "terminal predecessor must be eligible for successor continuation: {continuation_diagnosis:#?}"
+    );
+
+    let mut config = super::launch_config_from_persisted_session(&predecessor);
+    // The authenticated continuation result is the authority source of truth.
+    // A stale launch projection may omit the owner, but must be repaired before
+    // the exact binding is installed on the durable Session.
+    config.linked_issue_number = None;
+    config.command = fake_codex.display().to_string();
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let window_id = combined_window_id("tab-1", "agent-successor");
+    let (proxy, launch_events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        runtime.sessions_dir.clone(),
+        repo.display().to_string(),
+        window_id.clone(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        Some(issuer.clone()),
+    );
+
+    wait_for_recorded_event(
+        "SuccessorCreated launch completion",
+        &launch_events,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchComplete {
+                        window_id: event_window_id,
+                        ..
+                    } if event_window_id == &window_id
+                )
+            })
+        },
+    );
+    let recorded = launch_events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let completion = recorded
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete {
+                window_id: event_window_id,
+                result,
+            } if event_window_id == &window_id => Some(result.as_ref().clone()),
+            _ => None,
+        })
+        .expect("SuccessorCreated LaunchComplete event")
+        .unwrap_or_else(|error| {
+            panic!("SuccessorCreated auto-resume must reach PTY handoff: {error}")
+        });
+
+    assert!(
+        !completion.10,
+        "an already-Activated successor must not be classified as Prepared"
+    );
+    assert!(
+        runtime.runtimes.is_empty(),
+        "the launch worker must install authority before PTY spawn"
+    );
+    let successor =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
+            .expect("load activated successor Session");
+    let successor_identity = gwt_agent::SessionExecutionIdentity::from_session(&successor)
+        .expect("validate successor Session identity")
+        .expect("activated successor identity");
+    assert_eq!(
+        successor.linked_issue_number,
+        Some(42),
+        "the authenticated continuation owner must be installed before the binding"
+    );
+    assert_ne!(
+        successor_identity.execution_binding.identity.generation_id,
+        predecessor_identity
+            .execution_binding
+            .identity
+            .generation_id,
+        "SuccessorCreated must advance the execution generation"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(
+            &repo,
+            gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 42,
+            },
+        )
+        .expect("read current successor binding"),
+        Some(successor_identity.execution_binding.identity.clone()),
+    );
+    assert_eq!(
+        completion.11.expected_execution_identity.as_ref(),
+        Some(&successor_identity),
+        "the PTY handoff must carry the exact activated successor identity"
+    );
+    assert!(
+        completion.11.active_launch_handshake.is_some(),
+        "an in-place Active relaunch must be fenced before capability issuance"
+    );
+    let token = completion
+        .0
+        .env
+        .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+        .expect("activated successor capability token");
+    assert!(issuer.active_token_is_current(token, &successor_identity.execution_binding,));
+    assert!(!issuer.prepared_token_is_current(token, &successor_identity.execution_binding,));
+    let grant = issuer
+        .grant_for_test(token)
+        .expect("authenticate activated successor capability");
+    assert!(grant.principal().authorizes_producing_mutation());
+
+    let events = runtime.handle_launch_complete(window_id.clone(), Ok(completion));
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    let running = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+        &runtime.sessions_dir,
+        predecessor_session_id,
+    ))
+    .expect("load running successor runtime proof");
+    assert_eq!(running.status, gwt_agent::AgentStatus::Running);
+    assert_eq!(
+        running.execution_identity.as_ref(),
+        Some(&successor_identity)
+    );
+    assert!(running.child_pid.is_some_and(|pid| pid > 0));
+    assert!(running
+        .child_started_at
+        .is_some_and(|started_at| started_at > 0));
+}
+
 #[cfg(unix)]
 #[test]
 fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
