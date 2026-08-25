@@ -234,9 +234,10 @@ re-derives the failure from the persisted hold, so the row does not move.
 - `issue.monitor.requeue` is the operation for that state. Pass
   `params.number` and a `params.reason`; it takes no launch identity,
   because there is no launch. It drops the persisted hold, returns the
-  issue to the queue in its existing priority position, spends no retry
-  attempt, and requires the next launch to start a fresh session rather
-  than resume the conversation that stranded it.
+  issue to the queue in its existing priority position, spends no new
+  retry attempt, resets the persisted autonomous attempt counter to zero,
+  and starts a fresh bounded retry cycle. The next launch must also start
+  a fresh session rather than resume the conversation that stranded it.
 - It fails closed in both directions. `refusal: "launch_live"` means a
   launch still owns the issue — use the stop or the failover, which
   verify the exact identity. `refusal: "not_held"` means nothing was
@@ -543,6 +544,8 @@ mod tests {
             // prohibition below has to name the operation that replaces it.
             "`issue.monitor.requeue`",
             "there is no launch",
+            "resets the persisted autonomous attempt counter to zero",
+            "starts a fresh bounded retry cycle",
             "launch_live",
             "not_held",
             "Never repair Issue Monitor state by editing `issue-monitor.json`",

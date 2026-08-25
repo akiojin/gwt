@@ -6145,17 +6145,25 @@ exit 0
         monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
         assert_eq!(monitor.record_attempt(42), 1, "seed the budget cap");
 
+        // The reset instant has to stay ahead of real wall-clock time: the hold
+        // is only recorded while `resets_at` is still in the future. A literal
+        // date silently expires and turns this into a permanent CI failure that
+        // blocks every unrelated PR, so derive it from `now` instead.
+        let resets_at = (chrono::Utc::now() + chrono::Duration::days(6))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let quota_message = format!("Codex usage limit reached — resumes after {resets_at}");
+
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
                 "agent_failed": {
                     "issue_number": 42,
                     "window_id": "tab-1::agent-42",
-                    "message": "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
+                    "message": quota_message,
                     "failure": {
                         "kind": "provider_usage_limit",
                         "provider": "codex",
-                        "resets_at": "2026-08-22T03:46:00Z",
+                        "resets_at": resets_at,
                     },
                 }
             }),
@@ -6176,13 +6184,10 @@ exit 0
             crate::AutonomousPhase::NeedsHuman,
             "the account ran out; the work did not fail"
         );
-        assert_eq!(
-            record.retry_not_before.as_deref(),
-            Some("2026-08-22T03:46:00Z")
-        );
+        assert_eq!(record.retry_not_before.as_deref(), Some(resets_at.as_str()));
         assert_eq!(
             record.retry_hold_reason.as_deref(),
-            Some("Codex usage limit reached — resumes after 2026-08-22T03:46:00Z")
+            Some(quota_message.as_str())
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),

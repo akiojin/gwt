@@ -5,7 +5,7 @@
 //!   terminates the child and every descendant it spawned.
 //! - Unix: `portable_pty` already places the child in its own session
 //!   (setsid), so the child's pid is also its process group id. On drop we
-//!   send `SIGTERM` then `SIGKILL` to the group via `killpg`.
+//!   send `SIGKILL` to the group via `killpg` without waiting (Issue #3705).
 
 #[cfg(windows)]
 mod imp {
@@ -40,8 +40,6 @@ mod imp {
 
 #[cfg(unix)]
 mod imp {
-    use std::{thread, time::Duration};
-
     use nix::{
         errno::Errno,
         sys::signal::{killpg, Signal},
@@ -62,19 +60,16 @@ mod imp {
             })
         }
 
-        /// Synchronously signal every process in the group.
+        /// Signal every process in the group without waiting for reap.
         ///
         /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
+        /// Issue #3705: SIGKILL is sent immediately. A SIGTERM-then-sleep-then-
+        /// SIGKILL sequence blocked the GUI event loop for 100ms per live PTY
+        /// close and serialized `pane.*` behind it.
         pub fn terminate(&mut self) {
             let Some(pgid) = self.pgid.take() else {
                 return;
             };
-            // SIGTERM first for clean shutdown, then SIGKILL as the safety net.
-            match killpg(pgid, Signal::SIGTERM) {
-                Ok(()) | Err(Errno::ESRCH) => {}
-                Err(error) => tracing::debug!(?pgid, %error, "killpg SIGTERM failed"),
-            }
-            thread::sleep(Duration::from_millis(100));
             match killpg(pgid, Signal::SIGKILL) {
                 Ok(()) | Err(Errno::ESRCH) => {}
                 Err(error) => tracing::debug!(?pgid, %error, "killpg SIGKILL failed"),

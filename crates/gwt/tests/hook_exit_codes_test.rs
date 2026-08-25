@@ -430,6 +430,9 @@ fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _autonomous_execution =
+        ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+    let _autonomous_issue = ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let _home = ScopedEnvVar::set("HOME", tmp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());

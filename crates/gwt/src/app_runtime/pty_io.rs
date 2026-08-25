@@ -165,6 +165,12 @@ pub(super) fn write_pane_input_and_submit_blocking(
         .map_err(|error| error.to_string())
 }
 
+/// Issue #3705 AC-3: name the pane whose teardown stalled so a hung
+/// `pane.*` channel can be diagnosed from `~/.gwt/logs/` without guessing.
+pub(crate) fn pane_teardown_stall_message(window_id: &str, stage: &str, elapsed_ms: u64) -> String {
+    format!("PTY teardown stalled: window_id={window_id} stage={stage} elapsed_ms={elapsed_ms}")
+}
+
 /// Complete the stop phase for every runtime before any join can block.
 fn stop_all_before_joining<I, T>(
     ids: I,
@@ -431,7 +437,7 @@ impl AppRuntime {
             // authority bytes so another Host cannot mistake the failure for
             // terminal successor permission.
             let threads = self.start_window_runtime_stop(window_id, false);
-            Self::join_runtime_stop_threads(threads);
+            Self::detach_runtime_stop_threads(window_id, threads);
             self.mark_agent_session_stopped_with_persistence(window_id, false);
             return;
         }
@@ -501,29 +507,23 @@ impl AppRuntime {
                         .map_err(|error| std::io::Error::other(error.to_string()))?
                         .kill()
                         .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    loop {
-                        if pane
-                            .lock()
-                            .map_err(|error| std::io::Error::other(error.to_string()))?
-                            .process_has_exited()
-                            .map_err(|error| std::io::Error::other(error.to_string()))?
-                        {
-                            break;
-                        }
-                        if Instant::now() >= deadline {
-                            return Err(std::io::Error::other(
-                                "The exact holder process did not exit after termination",
-                            ));
-                        }
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    if !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
-                        &sessions_dir,
-                        expected_session,
-                        expected_incarnation,
-                        gwt_agent::AgentStatus::Stopped,
-                    )? {
+                    // Issue #3705: never sleep on the GUI event loop waiting
+                    // for reap. Persist under lease only when the child is
+                    // already gone; otherwise `start_window_runtime_stop`
+                    // finishes the proof on a background thread.
+                    let exited = pane
+                        .lock()
+                        .map_err(|error| std::io::Error::other(error.to_string()))?
+                        .process_has_exited()
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    if exited
+                        && !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
+                            &sessions_dir,
+                            expected_session,
+                            expected_incarnation,
+                            gwt_agent::AgentStatus::Stopped,
+                        )?
+                    {
                         return Err(std::io::Error::other(
                             "The holder Session changed before terminal proof persistence",
                         ));
@@ -579,14 +579,14 @@ impl AppRuntime {
             return Err("The holder runtime changed while termination was confirmed".to_string());
         }
         let threads = self.start_window_runtime_stop(window_id, false);
-        Self::join_runtime_stop_threads(threads);
+        Self::detach_runtime_stop_threads(window_id, threads);
         self.mark_agent_session_stopped_with_persistence(window_id, false);
         Ok(())
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
         let threads = self.start_window_runtime_stop(window_id, mark_session_stopped);
-        Self::join_runtime_stop_threads(threads);
+        Self::detach_runtime_stop_threads(window_id, threads);
     }
 
     fn start_window_runtime_stop(
@@ -594,25 +594,27 @@ impl AppRuntime {
         window_id: &str,
         mark_session_stopped: bool,
     ) -> RuntimeStopThreads {
-        let exact_terminal = if mark_session_stopped {
-            self.active_agent_sessions
-                .get(window_id)
-                .and_then(|active| {
-                    let runtime = self.runtimes.get(window_id)?;
-                    let session = gwt_agent::Session::load(
-                        &self
-                            .sessions_dir
-                            .join(format!("{}.toml", active.session_id)),
-                    )
-                    .ok()?;
-                    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
-                        .ok()
-                        .flatten()?;
-                    Some((identity, runtime.incarnation))
-                })
-        } else {
-            None
-        };
+        tracing::info!(
+            target: "gwt.pane.teardown",
+            window_id,
+            "starting PTY teardown"
+        );
+        let exact_terminal = self
+            .active_agent_sessions
+            .get(window_id)
+            .and_then(|active| {
+                let runtime = self.runtimes.get(window_id)?;
+                let session = gwt_agent::Session::load(
+                    &self
+                        .sessions_dir
+                        .join(format!("{}.toml", active.session_id)),
+                )
+                .ok()?;
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                    .ok()
+                    .flatten()?;
+                Some((identity, runtime.incarnation))
+            });
         self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
@@ -621,26 +623,70 @@ impl AppRuntime {
         };
         let mut exact_terminal_persisted = false;
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
-            if let Ok(pane) = runtime.pane.lock() {
-                let _ = pane.kill();
-                if let Some((identity, incarnation)) = exact_terminal.as_ref() {
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    let mut exited = false;
-                    while Instant::now() < deadline {
-                        if pane.process_has_exited().unwrap_or(false) {
-                            exited = true;
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    if exited {
-                        exact_terminal_persisted = gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
+            let pane = runtime.pane.clone();
+            if let Ok(guard) = pane.lock() {
+                let _ = guard.kill();
+            } else {
+                tracing::warn!(
+                    target: "gwt.pane.teardown",
+                    window_id,
+                    "{}",
+                    pane_teardown_stall_message(window_id, "pane_lock", 0)
+                );
+            }
+            if let Some((identity, incarnation)) = exact_terminal.clone() {
+                let exited = pane
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.process_has_exited().ok())
+                    .unwrap_or(false);
+                if exited {
+                    exact_terminal_persisted =
+                        gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
                             &self.sessions_dir,
-                            identity,
-                            *incarnation,
+                            &identity,
+                            incarnation,
                             gwt_agent::AgentStatus::Stopped,
-                        ).unwrap_or(false);
-                    }
+                        )
+                        .unwrap_or(false);
+                } else {
+                    let sessions_dir = self.sessions_dir.clone();
+                    let window_id = window_id.to_string();
+                    thread::spawn(move || {
+                        let started = Instant::now();
+                        let deadline = Instant::now() + Duration::from_secs(2);
+                        let mut exited = false;
+                        while Instant::now() < deadline {
+                            if pane
+                                .lock()
+                                .ok()
+                                .and_then(|guard| guard.process_has_exited().ok())
+                                .unwrap_or(false)
+                            {
+                                exited = true;
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        let elapsed_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        if exited {
+                            let _ = gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
+                                &sessions_dir,
+                                &identity,
+                                incarnation,
+                                gwt_agent::AgentStatus::Stopped,
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "gwt.pane.teardown",
+                                window_id = %window_id,
+                                elapsed_ms,
+                                "{}",
+                                pane_teardown_stall_message(&window_id, "process_exit", elapsed_ms)
+                            );
+                        }
+                    });
                 }
             }
             threads.output_thread = runtime.output_thread.take();
@@ -656,15 +702,38 @@ impl AppRuntime {
         threads
     }
 
-    fn join_runtime_stop_threads(mut threads: RuntimeStopThreads) {
+    fn detach_runtime_stop_threads(window_id: &str, mut threads: RuntimeStopThreads) {
+        if threads.output_thread.is_none() && threads.status_thread.is_none() {
+            return;
+        }
+        let window_id = window_id.to_string();
+        thread::spawn(move || {
+            let started = Instant::now();
+            if let Some(handle) = threads.output_thread.take() {
+                let _ = handle.join();
+            }
+            if let Some(handle) = threads.status_thread.take() {
+                let _ = handle.join();
+            }
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            if elapsed_ms >= 500 {
+                tracing::warn!(
+                    target: "gwt.pane.teardown",
+                    window_id = %window_id,
+                    elapsed_ms,
+                    "{}",
+                    pane_teardown_stall_message(&window_id, "join", elapsed_ms)
+                );
+            }
+        });
+    }
+
+    fn join_runtime_stop_threads_blocking(mut threads: RuntimeStopThreads) {
         if let Some(handle) = threads.output_thread.take() {
-            // PTY and its process group were already terminated by
-            // `pane.kill()`, so the reader should see EOF quickly. Cap
-            // the wait anyway so shutdown never stalls the event loop
-            // if a stuck syscall keeps the reader in `read`. If the
-            // timeout elapses the reader thread is detached; its Arc
-            // clone of the Pane will still be released when the thread
-            // does finally observe EOF.
+            // Shutdown is allowed to wait briefly so reader threads release
+            // their Pane Arcs before process exit. Cap the wait so a stuck
+            // `read` cannot hang quit. Issue #3705: pane.close must not use
+            // this path — it detaches instead.
             let (tx, rx) = std_mpsc::channel();
             thread::spawn(move || {
                 let _ = handle.join();
@@ -693,7 +762,7 @@ impl AppRuntime {
         stop_all_before_joining(
             ids,
             |id| self.start_window_runtime_stop(&id, false),
-            Self::join_runtime_stop_threads,
+            Self::join_runtime_stop_threads_blocking,
         );
     }
 
@@ -910,6 +979,22 @@ mod submit_split_tests {
     fn carriage_return_is_separated_from_the_body() {
         assert_eq!(split_pane_submit("digest.\r"), ("digest.", Some("\r")));
         assert_eq!(split_pane_submit("digest.\n"), ("digest.", Some("\n")));
+    }
+
+    /// Issue #3705 AC-3: a stalled teardown must name the pane, not just say
+    /// that "something" blocked, so logs can pinpoint which close froze pane.*.
+    #[test]
+    fn pane_teardown_stall_message_names_the_window() {
+        let message = super::pane_teardown_stall_message("tab-1::agent-4", "join", 1500);
+        assert!(
+            message.contains("tab-1::agent-4"),
+            "stall log must name the pane, got: {message}"
+        );
+        assert!(message.contains("join"), "stall log must name the stage");
+        assert!(
+            message.contains("1500"),
+            "stall log must include elapsed_ms"
+        );
     }
 
     /// A CRLF terminator is one submit, not a body that ends in CR: stripping
