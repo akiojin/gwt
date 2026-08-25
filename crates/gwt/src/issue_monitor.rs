@@ -554,6 +554,13 @@ pub struct IssueMonitorPrefs {
     /// published fact rather than the absence of one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub released_failures: Vec<IssueMonitorReleasedFailure>,
+    /// Issue #3734: bounded durable history of explicit operator requeues.
+    ///
+    /// `released_failures` is active convergence state and disappears when an
+    /// issue fails again. This separate history keeps the reset evidence while
+    /// remaining bounded for long-running repositories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requeue_audit: Vec<IssueMonitorReleasedFailure>,
     /// Monotonic counter for the releases above. A process adopts only releases
     /// issued after the snapshot it already observed, so a release cannot erase
     /// a failure that was recorded later.
@@ -629,6 +636,7 @@ impl Default for IssueMonitorPrefs {
             queued_launch_session_strategies: BTreeMap::new(),
             failed_issues: Vec::new(),
             released_failures: Vec::new(),
+            requeue_audit: Vec::new(),
             failure_release_version: 0,
             merged_issues: Vec::new(),
             issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
@@ -890,7 +898,18 @@ pub struct IssueMonitorReleasedFailure {
     pub release_version: u64,
     pub released_at: String,
     pub reason: String,
+    /// Persisted autonomous attempt count observed before the release.
+    #[serde(default)]
+    pub attempts_before: u32,
+    /// Persisted autonomous attempt count after the release. New releases set
+    /// this to zero; the default keeps pre-Issue-3734 preferences readable.
+    #[serde(default)]
+    pub attempts_after: u32,
 }
+
+/// Issue #3734 FR-113: operator reset evidence is durable but cannot grow
+/// without bound while the Monitor runs unattended.
+const REQUEUE_AUDIT_CAP: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorLaunchProfile {
@@ -1203,7 +1222,11 @@ pub enum IssueMonitorRequeueOutcome {
     /// The hold was released and the issue is queued again. `stale_window_id`
     /// is the error window the failure retained, if any, so the caller can reap
     /// it — the release already unbound it from the issue.
-    Requeued { stale_window_id: Option<String> },
+    Requeued {
+        stale_window_id: Option<String>,
+        attempts_before: u32,
+        attempts_after: u32,
+    },
     /// A launch still owns this issue. Recovering it here would mint a second
     /// claim for one issue, so the exact-identity operations `stop_only` and
     /// `failover_restart` own that case instead.
@@ -1590,6 +1613,10 @@ pub struct IssueMonitorState {
     /// always supersedes the release that preceded it.
     #[serde(default)]
     released_failures: BTreeMap<u64, IssueMonitorReleasedFailure>,
+    /// Issue #3734: durable operator-reset evidence, ordered by release
+    /// version and capped by [`REQUEUE_AUDIT_CAP`].
+    #[serde(default)]
+    requeue_audit: Vec<IssueMonitorReleasedFailure>,
     /// Highest release version this process has issued or observed.
     #[serde(default)]
     failure_release_version: u64,
@@ -2417,16 +2444,20 @@ pub fn mutate_issue_monitor_prefs<T>(
 
 /// Fail-closed prefs transaction whose mutation may reject before any save.
 /// The stable sibling lock is held across latest-load, validation, and the
-/// durable atomic writer. Returning `Err` from `mutation` leaves the canonical
-/// bytes untouched and creates no scratch write.
+/// durable atomic writer. Returning `Err` from `mutation`, or returning the
+/// same typed preferences unchanged, leaves the canonical bytes untouched and
+/// creates no scratch write.
 pub fn try_mutate_issue_monitor_prefs<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
     with_issue_monitor_prefs_lock(path, || {
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let before = prefs.clone();
         let result = mutation(&mut prefs)?;
-        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        if prefs != before {
+            save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        }
         Ok((prefs, result))
     })
 }
@@ -2628,6 +2659,7 @@ impl IssueMonitorState {
             failed_issues: BTreeMap::new(),
             failed_windows: BTreeMap::new(),
             released_failures: BTreeMap::new(),
+            requeue_audit: Vec::new(),
             failure_release_version: 0,
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
@@ -2762,6 +2794,7 @@ impl IssueMonitorState {
                 .released_failures
                 .insert(release.issue_number, release);
         }
+        state.merge_requeue_audit(prefs.requeue_audit);
         state.issue_completion_migration_version = prefs.issue_completion_migration_version;
         for record in prefs.completion_records {
             state.merge_completion_record(record);
@@ -2827,6 +2860,7 @@ impl IssueMonitorState {
                 })
                 .collect(),
             released_failures: self.released_failures.values().cloned().collect(),
+            requeue_audit: self.requeue_audit.clone(),
             failure_release_version: self.failure_release_version,
             merged_issues: self.merged_issues.iter().copied().collect(),
             issue_completion_migration_version: self.issue_completion_migration_version,
@@ -3806,6 +3840,7 @@ impl IssueMonitorState {
         // restore the very hold the operator released — leaving this process
         // convinced the issue is still broken and writing that view back over
         // the recovery on its next commit.
+        self.merge_requeue_audit(disk.requeue_audit.iter().cloned());
         self.adopt_failure_releases_from_prefs(disk);
         self.drop_releases_for_failed_issues();
         self.refresh_disk_owned_prefs(disk);
@@ -6655,8 +6690,9 @@ impl IssueMonitorState {
     /// one call sometimes kill a running agent and sometimes resurrect a dead
     /// row — the exact ambiguity the exact-identity match exists to prevent.
     ///
-    /// It consumes no retry attempt: nothing about the work failed, an operator
-    /// decided the hold was wrong.
+    /// It consumes no new retry attempt: nothing about the work failed, an
+    /// operator decided the hold was wrong. Instead it resets the persisted
+    /// count so an exhausted row starts one fresh bounded retry cycle.
     pub fn requeue_failed_issue(
         &mut self,
         issue_number: u64,
@@ -6681,21 +6717,29 @@ impl IssueMonitorState {
         }
 
         let stale_window_id = self.failed_windows.get(&issue_number).cloned();
+        let attempts_before = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let release = IssueMonitorReleasedFailure {
             issue_number,
             release_version: self.failure_release_version,
             released_at: now.to_string(),
             reason: reason.to_string(),
+            attempts_before,
+            attempts_after: 0,
         };
-        self.released_failures.insert(issue_number, release);
+        self.released_failures.insert(issue_number, release.clone());
+        self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number);
         self.push_autonomous_notice(
             "info",
             issue_number,
             format!("Issue #{issue_number} requeued by operator: {reason}"),
         );
-        IssueMonitorRequeueOutcome::Requeued { stale_window_id }
+        IssueMonitorRequeueOutcome::Requeued {
+            stale_window_id,
+            attempts_before,
+            attempts_after: self.attempt_count(issue_number),
+        }
     }
 
     /// Issue #3683 (AC-3): release a `BlockedByClaim` hold an operator decided
@@ -6764,11 +6808,11 @@ impl IssueMonitorState {
         // would reproduce the failure the recovery is undoing.
         self.require_fresh_launch_session(issue_number);
         if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.attempts = 0;
             record.retry_not_before = None;
+            record.retry_hold_reason = None;
             record.active_launch_id = None;
-            if record.phase == AutonomousPhase::NeedsHuman {
-                record.phase = AutonomousPhase::Idle;
-            }
+            record.phase = AutonomousPhase::Idle;
         }
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if !self.queue.contains(&issue_number) {
@@ -6802,9 +6846,30 @@ impl IssueMonitorState {
             }
             self.released_failures
                 .insert(release.issue_number, release.clone());
+            self.merge_requeue_audit(std::iter::once(release.clone()));
             self.apply_failure_release(release.issue_number);
         }
         self.failure_release_version = observed.max(disk.failure_release_version);
+    }
+
+    /// Merge operator reset evidence by release sequence and retain only the
+    /// newest bounded window. Disk entries win a same-version conflict; the
+    /// release counter is serialized under the prefs transaction lock, so such
+    /// a conflict can only come from corrupted or legacy input.
+    fn merge_requeue_audit(
+        &mut self,
+        incoming: impl IntoIterator<Item = IssueMonitorReleasedFailure>,
+    ) {
+        let mut by_version = self
+            .requeue_audit
+            .drain(..)
+            .map(|entry| (entry.release_version, entry))
+            .collect::<BTreeMap<_, _>>();
+        for entry in incoming {
+            by_version.insert(entry.release_version, entry);
+        }
+        let drop_count = by_version.len().saturating_sub(REQUEUE_AUDIT_CAP);
+        self.requeue_audit = by_version.into_values().skip(drop_count).collect();
     }
 
     /// Restore the invariant that one issue is never both failed and released.
@@ -9991,12 +10056,26 @@ mod tests {
     #[test]
     fn requeue_failed_issue_returns_an_agent_failed_row_to_the_queue() {
         let mut monitor = agent_failed_monitor(42, "an execution generation already exists");
+        for _ in 0..3 {
+            monitor.record_attempt(42);
+        }
+        {
+            let record = monitor.autonomous_record_mut(42);
+            record.phase = AutonomousPhase::Reviewing;
+            record.pr_number = Some(3734);
+            record.reviewed_sha = Some("reviewed-sha".to_string());
+            record.review_passed = Some(true);
+            record.retry_not_before = Some("2026-08-18T00:00:00Z".to_string());
+            record.retry_hold_reason = Some("provider_usage_limit:codex".to_string());
+        }
         let attempts_before = monitor.attempt_count(42);
 
         assert_eq!(
             monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
             IssueMonitorRequeueOutcome::Requeued {
                 stale_window_id: Some("tab-1::agent-1".to_string()),
+                attempts_before: 3,
+                attempts_after: 0,
             }
         );
 
@@ -10019,13 +10098,152 @@ mod tests {
         );
         assert_eq!(
             monitor.attempt_count(42),
-            attempts_before,
-            "an operator recovery is not a retry, so it spends no attempt"
+            0,
+            "an explicit operator recovery starts a fresh bounded attempt cycle"
+        );
+        assert_eq!(attempts_before, 3);
+        let autonomous = monitor.autonomous_record(42).expect("record retained");
+        assert_eq!(autonomous.phase, AutonomousPhase::Idle);
+        assert_eq!(autonomous.pr_number, Some(3734));
+        assert_eq!(autonomous.reviewed_sha.as_deref(), Some("reviewed-sha"));
+        assert_eq!(autonomous.review_passed, Some(true));
+        assert_eq!(autonomous.retry_not_before, None);
+        assert_eq!(autonomous.retry_hold_reason, None);
+        assert_eq!(
+            monitor.prefs().requeue_audit,
+            vec![IssueMonitorReleasedFailure {
+                issue_number: 42,
+                release_version: 1,
+                released_at: "2026-08-17T16:00:00Z".to_string(),
+                reason: "operator recovery".to_string(),
+                attempts_before: 3,
+                attempts_after: 0,
+            }],
+            "the reset delta and operator reason must survive in durable audit history"
         );
         assert_eq!(
             monitor.prefs().queued_launch_session_strategies.get(&42),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired),
             "the abandoned session must not be resumed by the recovered launch"
+        );
+    }
+
+    #[test]
+    fn requeue_failed_issue_resets_launch_failed_attempts() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_attempt(42);
+        monitor.record_attempt(42);
+        monitor.record_launch_failed(42, "saved profile binary missing");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed)
+        );
+
+        assert_eq!(
+            monitor.requeue_failed_issue(42, "profile repaired", "2026-08-17T16:01:00Z"),
+            IssueMonitorRequeueOutcome::Requeued {
+                stale_window_id: Some("tab-1::agent-1".to_string()),
+                attempts_before: 2,
+                attempts_after: 0,
+            }
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+    }
+
+    #[test]
+    fn requeue_failed_issue_resets_exhausted_needs_human_before_next_scan() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.autonomous_tuning.max_attempts = 2;
+        assert_eq!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "first failure",
+                "2026-08-17T15:00:00Z",
+            ),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+        assert!(matches!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "second failure",
+                "2026-08-17T15:30:00Z",
+            ),
+            AutonomousFailureOutcome::Escalated(_)
+        ));
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+
+        assert_eq!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
+            IssueMonitorRequeueOutcome::Requeued {
+                stale_window_id: None,
+                attempts_before: 2,
+                attempts_after: 0,
+            }
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
+        assert_eq!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::Idle)
+        );
+
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(
+                &auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: retry\n"),
+                &protection,
+                "2026-08-17T16:00:01Z",
+            ),
+            EligibilityDecision::Eligible,
+            "the next scan must not re-derive NeedsHuman from the exhausted pre-reset count"
+        );
+        monitor.set_gui_connected(true);
+        let launch = monitor
+            .next_launch_request("2026-08-17T16:00:02Z")
+            .expect("the reset issue is launchable on the next request pass");
+        assert_eq!(launch.issue_number, 42);
+        assert_eq!(
+            launch.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+
+        assert_eq!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "new-cycle failure 1",
+                "2026-08-17T16:01:00Z",
+            ),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-3");
+        assert!(matches!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "new-cycle failure 2",
+                "2026-08-17T16:30:00Z",
+            ),
+            AutonomousFailureOutcome::Escalated(_)
+        ));
+        assert_eq!(monitor.attempt_count(42), 2);
+        assert_eq!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "the reset starts one new bounded cycle; it does not remove the attempt cap"
         );
     }
 
@@ -10072,6 +10290,8 @@ mod tests {
     #[test]
     fn requeue_failed_issue_release_survives_a_cross_process_rebase() {
         let mut recovering = agent_failed_monitor(42, "an execution generation already exists");
+        recovering.record_attempt(42);
+        recovering.record_attempt(42);
         assert!(matches!(
             recovering.requeue_failed_issue(42, "operator recovery", "2026-08-17T16:00:00Z"),
             IssueMonitorRequeueOutcome::Requeued { .. }
@@ -10084,6 +10304,9 @@ mod tests {
             IssueMonitorState::rebase_daemon_driver_prefs,
         ] {
             let mut observer = agent_failed_monitor(42, "an execution generation already exists");
+            observer.record_attempt(42);
+            observer.record_attempt(42);
+            assert_eq!(observer.attempt_count(42), 2, "observer starts stale");
             rebase(&mut observer, &disk);
             assert!(
                 !observer
@@ -10101,6 +10324,18 @@ mod tests {
                 observer.inbox_item(42).map(|item| item.state),
                 Some(MonitorInboxState::Queued)
             );
+            assert_eq!(observer.attempt_count(42), 0);
+            assert_eq!(
+                observer.prefs().requeue_audit.len(),
+                1,
+                "the release and reset audit must converge together"
+            );
+            rebase(&mut observer, &disk);
+            assert_eq!(
+                observer.prefs().requeue_audit.len(),
+                1,
+                "replaying the same release version must not duplicate audit history"
+            );
             // And the converged state must itself publish the release, or the
             // next process to rebase on it would re-stamp the failure again.
             let mut third = agent_failed_monitor(42, "an execution generation already exists");
@@ -10116,6 +10351,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn requeue_audit_is_bounded_to_the_latest_hundred_releases() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        for issue_number in 1..=101 {
+            monitor.record_candidate(issue(issue_number));
+            monitor.record_attempt(issue_number);
+            monitor.record_launch_failed(issue_number, "recoverable launch failure");
+            assert!(matches!(
+                monitor.requeue_failed_issue(
+                    issue_number,
+                    "operator recovery",
+                    "2026-08-17T16:00:00Z",
+                ),
+                IssueMonitorRequeueOutcome::Requeued { .. }
+            ));
+        }
+
+        let audit = monitor.prefs().requeue_audit;
+        assert_eq!(audit.len(), 100);
+        assert_eq!(audit.first().map(|entry| entry.release_version), Some(2));
+        assert_eq!(audit.last().map(|entry| entry.release_version), Some(101));
+        assert!(audit.iter().all(|entry| entry.attempts_before == 1));
+        assert!(audit.iter().all(|entry| entry.attempts_after == 0));
+    }
+
+    #[test]
+    fn cross_process_requeue_audit_merges_dedupes_and_caps_distinct_histories() {
+        let audit_entry = |release_version| IssueMonitorReleasedFailure {
+            issue_number: release_version,
+            release_version,
+            released_at: format!("2026-08-17T16:{:02}:00Z", release_version % 60),
+            reason: format!("operator recovery {release_version}"),
+            attempts_before: 1,
+            attempts_after: 0,
+        };
+        let mut observer = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                failure_release_version: 100,
+                requeue_audit: (1..=100).map(&audit_entry).collect(),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let disk = IssueMonitorPrefs {
+            failure_release_version: 150,
+            requeue_audit: (51..=150).map(audit_entry).collect(),
+            ..IssueMonitorPrefs::default()
+        };
+
+        observer.rebase_gui_observer_prefs(&disk);
+
+        let audit = observer.prefs().requeue_audit;
+        assert_eq!(audit.len(), 100);
+        assert_eq!(audit.first().map(|entry| entry.release_version), Some(51));
+        assert_eq!(audit.last().map(|entry| entry.release_version), Some(150));
+        assert_eq!(
+            audit
+                .iter()
+                .map(|entry| entry.release_version)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            100,
+            "overlapping disk and memory histories must be deduplicated before the cap"
+        );
+    }
+
     /// A release is not permanent immunity. Work that fails again after being
     /// recovered must hold exactly like any other failure.
     #[test]
@@ -10126,6 +10427,7 @@ mod tests {
             IssueMonitorRequeueOutcome::Requeued { .. }
         ));
         let released = monitor.prefs();
+        assert_eq!(released.requeue_audit.len(), 1);
 
         monitor.complete_active_launch(42, "tab-1::agent-2");
         monitor.record_agent_issue_failed(42, "second failure");
@@ -10137,6 +10439,11 @@ mod tests {
                 .iter()
                 .any(|failed| failed.issue_number == 42),
             "the newer failure is persisted"
+        );
+        assert!(refailed.released_failures.is_empty());
+        assert_eq!(
+            refailed.requeue_audit, released.requeue_audit,
+            "a later failure supersedes active convergence state but not audit history"
         );
 
         // A process still carrying the older release snapshot must not undo it.
@@ -10921,7 +11228,30 @@ mod tests {
         assert_eq!(prefs.autonomous_tuning, AutonomousTuning::default());
         assert_eq!(prefs.autonomous_tuning.max_attempts, 3);
         assert_eq!(prefs.merged_issues, vec![42], "existing fields preserved");
+        assert!(prefs.requeue_audit.is_empty());
         assert!(!IssueMonitorPrefs::default().autonomous_mode);
+    }
+
+    #[test]
+    fn pre_attempt_delta_release_defaults_to_zero_and_audit_defaults_empty() {
+        let legacy = r#"{
+            "enabled": true,
+            "max_active_agents": 1,
+            "priority_order": [],
+            "failure_release_version": 1,
+            "released_failures": [{
+                "issue_number": 42,
+                "release_version": 1,
+                "released_at": "2026-08-17T16:00:00Z",
+                "reason": "operator recovery"
+            }]
+        }"#;
+
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(legacy).expect("pre-attempt-delta prefs deserialize");
+        assert!(prefs.requeue_audit.is_empty());
+        assert_eq!(prefs.released_failures[0].attempts_before, 0);
+        assert_eq!(prefs.released_failures[0].attempts_after, 0);
     }
 
     #[test]
@@ -12637,6 +12967,29 @@ mod tests {
 
         super::sync_parent_directory(&missing_parent)
             .expect("non-Unix durable writers do not open directory handles");
+    }
+
+    #[test]
+    fn try_mutate_noop_preserves_noncanonical_prefs_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let original = br#"{
+  "enabled": false,
+  "max_active_agents": 1,
+  "priority_order": [],
+  "legacy_extension": { "must_survive_refusal": true }
+}
+"#;
+        fs::write(&path, original).expect("seed noncanonical prefs");
+
+        let (_, ()) = try_mutate_issue_monitor_prefs(&path, |_prefs| Ok(()))
+            .expect("no-op transaction succeeds");
+
+        assert_eq!(
+            fs::read(&path).expect("read unchanged prefs"),
+            original,
+            "a refused/no-op transaction must not rewrite or drop unknown fields"
+        );
     }
 
     #[test]

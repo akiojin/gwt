@@ -20,7 +20,7 @@
 #   GWT_PLAYWRIGHT_SYSTEM_DEPS      auto | always | never (default: auto)
 #   GWT_PLAYWRIGHT_INSTALL_TIMEOUT  seconds allowed per attempt (default: 300)
 #   GWT_PLAYWRIGHT_INSTALL_RETRIES  attempts per phase (default: 3)
-#   GWT_PLAYWRIGHT_RETRY_DELAY      seconds between attempts (default: 10)
+#   GWT_PLAYWRIGHT_RETRY_DELAY      seconds between attempts (default: 30)
 #   GWT_PLAYWRIGHT_APT_CONF_DIR     apt drop-in directory (default: /etc/apt/apt.conf.d)
 
 set -euo pipefail
@@ -44,7 +44,7 @@ SYSTEM_DEPS_MODE="${GWT_PLAYWRIGHT_SYSTEM_DEPS:-auto}"
 # guaranteed first-attempt timeouts.
 TIMEOUT_SECONDS="${GWT_PLAYWRIGHT_INSTALL_TIMEOUT:-300}"
 RETRIES="${GWT_PLAYWRIGHT_INSTALL_RETRIES:-3}"
-RETRY_DELAY="${GWT_PLAYWRIGHT_RETRY_DELAY:-10}"
+RETRY_DELAY="${GWT_PLAYWRIGHT_RETRY_DELAY:-30}"
 APT_CONF_DIR="${GWT_PLAYWRIGHT_APT_CONF_DIR:-/etc/apt/apt.conf.d}"
 
 # `playwright install-deps` shells out to apt-get and, on Ubuntu 24.04,
@@ -133,18 +133,23 @@ run_phase() {
   shift
   local attempt=1
   local status
+  local attempt_log
 
   while [[ "${attempt}" -le "${RETRIES}" ]]; do
+    attempt_log="${WORK_DIR}/${phase}-attempt-${attempt}.log"
     log "phase=${phase} attempt=${attempt}/${RETRIES} timeout=${TIMEOUT_SECONDS}s cmd=$*"
     status=0
-    run_with_timeout "${TIMEOUT_SECONDS}" "$@" || status=$?
+    run_with_timeout "${TIMEOUT_SECONDS}" "$@" >"${attempt_log}" 2>&1 || status=$?
+    cat "${attempt_log}" || true
 
     if [[ "${status}" -eq 0 ]]; then
       log "phase=${phase} attempt=${attempt}/${RETRIES} status=ok"
       return 0
     fi
 
-    if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then
+    if grep -Eqi 'Could not get lock|lock-frontend|Unable to acquire the dpkg frontend lock|Waiting for cache lock' "${attempt_log}"; then
+      log "phase=${phase} attempt=${attempt}/${RETRIES} status=failed reason=dpkg lock contention exit=${status}"
+    elif [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then
       log "phase=${phase} attempt=${attempt}/${RETRIES} status=failed reason=timed out after ${TIMEOUT_SECONDS}s"
     else
       log "phase=${phase} attempt=${attempt}/${RETRIES} status=failed exit=${status}"
@@ -225,6 +230,10 @@ install_system_deps() {
     return 0
   fi
   harden_apt
+  if ! bash "${ROOT}/scripts/ci-apt.sh" wait; then
+    log "phase=system-deps status=failed reason=dpkg lock contention"
+    return 1
+  fi
   run_phase system-deps "${PLAYWRIGHT_CLI[@]}" install-deps chromium
 }
 

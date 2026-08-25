@@ -2,6 +2,80 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.83.4] - 2026-08-25
+
+### Bug Fixes
+
+- Reset autonomous attempts when requeueing failures
+- 起動時に stale generation を安全に回収する
+
+## [9.83.3] - 2026-08-25
+
+### Bug Fixes
+
+- **pane:** Keep pane operations answering after live PTY closes
+- **gwtd:** Issue.monitor.* の応答に着地した project store を明示する
+- **launch:** 滞留 Active generation の自己回復と owner-kind 正準化で脱出不能動線を解消する
+- **launch:** Owner-kind heal を activation まで通し、自己回復の権限安全性を強化する
+- **test:** Windows で unix 限定 import が -D warnings を落とす問題を修正
+- **test:** Trusted-store のパス比較を Windows 短縮名に対応させる
+- **execution:** Terminal Work の PR ゲート拒否に到達可能な脱出路を示す
+- **test:** Unix 限定 fixture の無条件定義が Windows の -D warnings を落とす問題を修正
+- **ci:** Wait out dpkg lock on Ubuntu apt steps
+- **launch:** 死んだ session が保持する generation を fresh launch が supersede できるようにする
+- **launch:** Completed generation を持つ owner の fresh launch を successor 経路へ通す
+- **lint:** Scrollback の clear を fill(None) に置き換える
+- **test:** Quota-hold テストの reset 時刻を実時刻からの相対値にする
+
+### Miscellaneous Tasks
+
+- **lint:** Windows でだけ落ちる clippy 指摘 4 件を解消する
+- **work:** Record #3426 work events
+- **work:** Record #3426 PR handoff work event
+- **work:** Record #3426 work events
+- **work:** Record #3426 work events
+- **work:** Issue #3472 の no-action 終端を記録
+- **work:** Issue #3472 の Work イベントを記録する
+- **work:** Issue #3472 の terminal Work update を記録する
+- **work:** Issue #3472 の Work イベント shard を記録
+- **work:** Issue #3472 の Work イベント shard を記録する
+- **work:** Issue #3472 の完了 Work イベント shard を記録する
+
+### Testing
+
+- **daemon:** Tolerate tight local readiness retry budgets
+- **daemon:** Readiness deadline の試行回数 assert を負荷耐性にする
+- **index:** Git context 比較テストを env_test_lock で直列化する
+- **launch:** Completed predecessor が Ready 前も current のまま残ることを pin する
+
+## [9.83.2] - 2026-08-19
+
+### Bug Fixes
+
+- **windows:** PTY start gate を console subsystem の gwtd で実行する
+- **test:** Gh 依存テストの実 GitHub API 到達を遮断する unsandboxed-gh guard を導入
+- **pane:** PM セッションから残置 agent pane を close / stop できるようにする
+- **test:** 新規 pane close テストに gwt home の所有を強制する
+
+### Miscellaneous Tasks
+
+- **lint:** Windows 専用テストの result_large_err を許可する
+- **work:** Issue #3631 の start event を記録する
+- **work:** Work event shard を追記 (#3675 done 終端)
+- **work:** Work event shard を追跡へ追加
+- **work:** Work event shard を追跡へ追加
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+
+### Testing
+
+- **windows:** Agent launch E2E の marker 待ちを飽和耐性の予算と診断に変更 (#3656)
+- **launch:** PTY start gate の sibling 解決テストを POSIX host でも成立させる
+- **pane:** #3503 / #3552 の受け入れ条件を回帰ロックとして固定する
+
+
 ## [9.83.1] - 2026-08-18
 
 ### Bug Fixes

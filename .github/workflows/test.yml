@@ -11,21 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install tray + GTK dependencies (Linux)
-        # apt has no acquire timeout by default, so a stalled mirror used to
-        # hang this step (and the whole job) until the 360-minute job limit.
-        # Bound each fetch, force IPv4, and cap the step so a bad apt day
-        # fails fast instead of wedging the run (same hardening as #3659).
-        timeout-minutes: 10
         run: |
-          sudo tee /etc/apt/apt.conf.d/99-gwt-ci-acquire >/dev/null <<'CONF'
-          Acquire::Retries "3";
-          Acquire::http::Timeout "30";
-          Acquire::https::Timeout "30";
-          Acquire::ForceIPv4 "true";
-          DPkg::Lock::Timeout "180";
-          CONF
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+          sudo bash scripts/ci-apt.sh update
+          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
@@ -117,6 +106,16 @@ jobs:
         timeout-minutes: 15
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
+        timeout-minutes: 15
+      # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
+      # pane's pseudoconsole, so the released agent renders in an external
+      # Windows Terminal window. Both guards are Windows-only and would be
+      # skipped by the Linux workspace run.
+      - name: Run Windows PTY start-gate console contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --test windows_binary_subsystem_test -- --test-threads=1
+          cargo test -p gwt --test pty_start_gate_console_test -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
