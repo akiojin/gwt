@@ -4699,6 +4699,18 @@ exit 0
         let prefs_path = temp.path().join("issue-monitor.json");
         let initial = crate::IssueMonitorPrefs {
             max_active_agents: 1,
+            recent_events: vec![crate::IssueMonitorEvent {
+                event_id: "event-before-control".to_string(),
+                occurred_at: "2026-08-25T00:00:00Z".to_string(),
+                issue_number: 3747,
+                kind: crate::IssueMonitorEventKind::AttemptFailed,
+                level: "warn".to_string(),
+                message: "Issue #3747 attempt 1/3 failed".to_string(),
+                attempt: Some(1),
+                max_attempts: Some(3),
+                retry_scheduled: true,
+                slot_released: true,
+            }],
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
@@ -4762,6 +4774,10 @@ exit 0
 
         assert_eq!(projected, monitor.agent_status());
         assert_eq!(projected.max_active, 3);
+        assert_eq!(projected.recent_events.len(), 1);
+        assert_eq!(projected.recent_events[0].event_id, "event-before-control");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(persisted.recent_events, projected.recent_events);
     }
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {

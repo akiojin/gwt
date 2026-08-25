@@ -2207,6 +2207,55 @@ mod tests {
         );
     }
 
+    /// SPEC #3165 FR-125 / Issue #3747 AC-1: the offline status branch must
+    /// expose the same durable event ledger as the daemon projection and must
+    /// remain a read-only operation.
+    #[test]
+    fn issue_monitor_status_exposes_persisted_recent_events_offline() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                recent_events: vec![crate::IssueMonitorEvent {
+                    event_id: "event-3747".to_string(),
+                    occurred_at: "2026-08-25T00:00:03Z".to_string(),
+                    issue_number: 3747,
+                    kind: crate::IssueMonitorEventKind::NeedsHuman,
+                    level: "error".to_string(),
+                    message: "Issue #3747 needs human: exhausted".to_string(),
+                    attempt: Some(3),
+                    max_attempts: Some(3),
+                    retry_scheduled: false,
+                    slot_released: true,
+                }],
+                recent_events_truncated: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(status["recent_events"][0]["event_id"], "event-3747");
+        assert_eq!(status["recent_events"][0]["kind"], "needs_human");
+        assert_eq!(status["recent_events_truncated"], true);
+    }
+
     /// Issue #3633 AC-5: the offline branch must report the durable cadence,
     /// not the age of its own cache rebuild.
     #[test]
