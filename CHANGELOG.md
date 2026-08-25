@@ -1,6 +1,46 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.83.3] - 2026-08-25
+
+### Bug Fixes
+
+- **pane:** Keep pane operations answering after live PTY closes
+- **gwtd:** Issue.monitor.* の応答に着地した project store を明示する
+- **launch:** 滞留 Active generation の自己回復と owner-kind 正準化で脱出不能動線を解消する
+- **launch:** Owner-kind heal を activation まで通し、自己回復の権限安全性を強化する
+- **test:** Windows で unix 限定 import が -D warnings を落とす問題を修正
+- **test:** Trusted-store のパス比較を Windows 短縮名に対応させる
+- **execution:** Terminal Work の PR ゲート拒否に到達可能な脱出路を示す
+- **test:** Unix 限定 fixture の無条件定義が Windows の -D warnings を落とす問題を修正
+- **ci:** Wait out dpkg lock on Ubuntu apt steps
+- **launch:** 死んだ session が保持する generation を fresh launch が supersede できるようにする
+- **launch:** Completed generation を持つ owner の fresh launch を successor 経路へ通す
+- **lint:** Scrollback の clear を fill(None) に置き換える
+- **test:** Quota-hold テストの reset 時刻を実時刻からの相対値にする
+
+### Miscellaneous Tasks
+
+- **lint:** Windows でだけ落ちる clippy 指摘 4 件を解消する
+- **work:** Record #3426 work events
+- **work:** Record #3426 PR handoff work event
+- **work:** Record #3426 work events
+- **work:** Record #3426 work events
+- **work:** Issue #3472 の no-action 終端を記録
+- **work:** Issue #3472 の Work イベントを記録する
+- **work:** Issue #3472 の terminal Work update を記録する
+- **work:** Issue #3472 の Work イベント shard を記録
+- **work:** Issue #3472 の Work イベント shard を記録する
+- **work:** Issue #3472 の完了 Work イベント shard を記録する
+
+### Testing
+
+- **daemon:** Tolerate tight local readiness retry budgets
+- **daemon:** Readiness deadline の試行回数 assert を負荷耐性にする
+- **index:** Git context 比較テストを env_test_lock で直列化する
+- **launch:** Completed predecessor が Ready 前も current のまま残ることを pin する
+
 ## [9.83.2] - 2026-08-19
 
 ### Bug Fixes
