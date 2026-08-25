@@ -52,14 +52,6 @@
                 aria-controls="project-switcher-panel"
                 title="Switch projects"
               >Projects</button>
-              <div
-                class="project-switcher-panel"
-                id="project-switcher-panel"
-                role="listbox"
-                aria-label="Projects"
-                aria-hidden="true"
-                hidden
-              ></div>
             </div>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
@@ -422,6 +414,17 @@
           </div>
         </footer>
       </div>
+      <!-- Issue #3753: the fixed Projects popover is an #app-level layer.
+           Keeping it inside .project-bar would trap it in that grid item's
+           stacking context, below project picker/onboarding overlays. -->
+      <div
+        class="project-switcher-panel"
+        id="project-switcher-panel"
+        role="listbox"
+        aria-label="Projects"
+        aria-hidden="true"
+        hidden
+      ></div>
       <div
         class="op-briefing"
         id="op-briefing"

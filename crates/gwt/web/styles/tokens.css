@@ -8,6 +8,16 @@
 
 :root {
   color-scheme: light dark;
+
+  /* Shared interaction layers inside the #app stacking context. Popovers
+     that launch dialogs must remain reachable above project overlays,
+     aria-modal command surfaces must own popovers, and shared dialogs must
+     own every ordinary interaction layer. System safety layers
+     (connection/update/notice surfaces) intentionally use separate tiers. */
+  --z-project-overlay: 1200;
+  --z-popover: 1300;
+  --z-overlay: 1800;
+  --z-modal: 2000;
 }
 
 :root[data-theme="dark"] {

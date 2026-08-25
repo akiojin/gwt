@@ -1498,7 +1498,7 @@ button.op-runtime-health-detail__process {
   position: fixed;
   inset: 0;
   background: var(--color-scrim);
-  z-index: 1200;
+  z-index: var(--z-overlay);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--motion-curve);

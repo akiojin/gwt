@@ -184,7 +184,14 @@ body {
   border-radius: var(--radius-md);
   background: var(--color-surface);
   box-shadow: var(--shadow-2);
-  z-index: 70;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-stretch: 75%;
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-mono);
+  text-transform: none;
+  font-weight: 500;
+  z-index: var(--z-popover);
 }
 
 .project-switcher-panel.open {
@@ -5409,7 +5416,7 @@ body {
   align-items: center;
   justify-content: center;
   background: var(--color-overlay);
-  z-index: 1000;
+  z-index: var(--z-modal);
 }
 
 .modal-backdrop.open {
@@ -5436,7 +5443,6 @@ body {
   padding: var(--space-5);
   gap: var(--space-3);
   overflow: hidden;
-  z-index: 2000;
   box-shadow: var(--shadow-2);
 }
 
@@ -6678,7 +6684,7 @@ body {
   justify-content: center;
   padding: 24px;
   background: var(--color-overlay);
-  z-index: 1200;
+  z-index: var(--z-project-overlay);
 }
 
 .project-picker.visible,

@@ -2196,6 +2196,89 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("shared overlays use semantic z-index tokens in interaction order", () => {
+  const projectSwitcherPanel = document.getElementById("project-switcher-panel");
+  assert.ok(projectSwitcherPanel, "expected project switcher popover");
+  assert.equal(
+    projectSwitcherPanel.parentElement?.id,
+    "app",
+    "fixed project popover must escape the project-bar stacking context",
+  );
+
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const baseTokens = tokensCss.match(/:root\s*\{([^}]*)\}/)?.[1];
+  assert.ok(baseTokens, "expected unthemed :root tokens");
+
+  const zIndexToken = (name) => {
+    const match = baseTokens.match(new RegExp(`${name}:\\s*(\\d+)\\s*;`));
+    assert.ok(match, `expected integer ${name} in the base token set`);
+    return Number(match[1]);
+  };
+
+  const popover = zIndexToken("--z-popover");
+  const projectOverlay = zIndexToken("--z-project-overlay");
+  const overlay = zIndexToken("--z-overlay");
+  const modal = zIndexToken("--z-modal");
+  assert.ok(
+    projectOverlay < popover,
+    "project popovers must stay above blocking project overlays",
+  );
+  assert.ok(
+    popover < overlay,
+    "the command palette must preserve aria-modal ownership above popovers",
+  );
+  assert.ok(
+    overlay < modal,
+    "shared dialogs must stay above command palette overlays",
+  );
+
+  const tokenizedRules = [
+    {
+      name: "project switcher popover",
+      rule: inlineStyle.match(/\.project-switcher-panel\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "shared modal backdrop",
+      rule: inlineStyle.match(/\.modal-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "project picker and onboarding overlay",
+      rule: inlineStyle.match(/\.project-picker,\s*\.project-onboarding\s*\{[^}]*\}/)?.[0],
+      token: "--z-project-overlay",
+    },
+    {
+      name: "command palette overlay",
+      rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-overlay",
+    },
+  ];
+
+  for (const { name, rule, token } of tokenizedRules) {
+    assert.ok(rule, `expected ${name} CSS rule`);
+    assert.match(rule, new RegExp(`z-index:\\s*var\\(${token}\\)`));
+    assert.doesNotMatch(rule, /z-index:\s*-?\d+/, `${name} must not use a raw z-index`);
+  }
+
+  const panelRule = tokenizedRules[0].rule;
+  for (const declaration of [
+    "font-family: var(--font-mono)",
+    "font-size: var(--type-xs)",
+    "font-stretch: 75%",
+    "color: var(--color-text-muted)",
+    "letter-spacing: var(--tracking-mono)",
+    "text-transform: none",
+    "font-weight: 500",
+  ]) {
+    assert.match(
+      panelRule,
+      new RegExp(declaration.replace(/[()]/g, "\\$&")),
+      `reparented project switcher must preserve ${declaration}`,
+    );
+  }
+});
+
 test("WebView modal text uses native selection and terminal overlays use explicit copy", () => {
   const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[\s\S]*?\}/);
   assert.ok(modalShellRule, "expected shared modal shell CSS rule");
