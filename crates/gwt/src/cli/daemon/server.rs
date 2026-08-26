@@ -25,7 +25,7 @@
 #![cfg(unix)]
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -431,6 +431,8 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
     // server can accept a publisher connection. Starting publishers wait on
     // the watch state until this load either installs the sole Ready receiver
     // or publishes the stable RecoveryBlocked terminal state.
+    let project_store =
+        crate::runtime_daemon_events::ProjectStoreIdentity::from_runtime_scope(&scope);
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
     let loaded = load_issue_monitor_state_for_daemon(&prefs_path, config.clone());
     tokio::spawn(async move {
@@ -493,7 +495,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
             })
             .collect::<Vec<_>>();
         if recovery_blocked {
-            publish_issue_monitor_read_only_payloads(&hub, &monitor);
+            publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
             // The unreadable bytes may describe an Attempting remote mutation.
             // No scan, control, recovery write, or shutdown rewrite is safe
             // until an operator resolves the journal explicitly. Keep the
@@ -506,7 +508,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                     biased;
                     _ = shutdown.notified() => break,
                     _ = recovery_status_tick.tick() => {
-                        publish_issue_monitor_read_only_payloads(&hub, &monitor);
+                        publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                     }
                 }
             }
@@ -529,7 +531,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                 "issue monitor: deferring review resume until durable effects reconcile"
             );
         }
-        publish_issue_monitor_payloads(&hub, &mut monitor);
+        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
         let Some(mut control_rx) = control_rx else {
             tracing::error!("issue monitor control receiver already claimed; stopping worker");
             hub.close_issue_monitor_controls();
@@ -675,7 +677,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                                     );
                                     control_open = false;
                                 }
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
                                 // Preserve committed scan intent while the
@@ -793,7 +795,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                             control_open = false;
                         }
                     }
-                    publish_issue_monitor_payloads(&hub, &mut monitor);
+                    publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                 }
                 _ = wait_for_issue_monitor_deadline(scan_watchdog_deadline) => {
                     if expire_issue_monitor_scan_at_watchdog(
@@ -807,7 +809,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                             break;
                         };
                         revision = next_revision;
-                        publish_issue_monitor_payloads(&hub, &mut monitor);
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         // Coalesce one retry, but preserve the in-flight handle:
                         // started spawn_blocking work is not abortable and must
                         // remain the sole lane owner until it really joins.
@@ -827,7 +829,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                                 captured_authority_epoch,
                                 captured_deadline,
                             ) {
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
                             } else if captured_revision == revision
@@ -844,7 +846,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                                 };
                                 revision = next_revision;
                                 persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 scan_requested = true;
                             } else {
                                 // A direct prefs writer (for example launch-
@@ -855,7 +857,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                                 // journal before the coalesced retry.
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 scan_requested = true;
                                 tokio::task::yield_now().await;
                             }
@@ -873,7 +875,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                             };
                             revision = next_revision;
                             persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
-                            publish_issue_monitor_payloads(&hub, &mut monitor);
+                            publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         }
                         Err(error) => {
                             monitor = scan_join_failure_fallback(
@@ -888,7 +890,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                             };
                             revision = next_revision;
                             persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
-                            publish_issue_monitor_payloads(&hub, &mut monitor);
+                            publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         }
                     }
                 }
@@ -915,7 +917,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                                     break;
                                 };
                                 revision = next_revision;
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 if settled {
                                     effect_execution_requested =
                                         !monitor.pending_effects().is_empty();
@@ -941,7 +943,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                             break;
                         };
                         revision = next_revision;
-                        publish_issue_monitor_payloads(&hub, &mut monitor);
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         // As above, the retry remains queued behind the exact
                         // still-running Attempting tuple; never overlap effects.
                         effect_execution_requested = true;
@@ -959,7 +961,7 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                         // Re-project the canonical state while the scan is
                         // blocked so current-time stalled status remains
                         // observable without spawning a second scan.
-                        publish_issue_monitor_payloads(&hub, &mut monitor);
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                     }
                 }
             }
@@ -3542,23 +3544,30 @@ fn scan_issue_monitor_once_blocking(
     Ok(monitor)
 }
 
-fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
+fn publish_issue_monitor_payloads(
+    hub: &BroadcastHub,
+    monitor: &mut crate::IssueMonitorState,
+    project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
+) {
     refresh_issue_monitor_agent_status(hub, monitor);
     let gui_connected = issue_monitor_gui_connected(hub);
     publish_issue_monitor_daemon_payloads(
         hub,
         crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, gui_connected),
+        project_store,
     );
 }
 
 fn publish_issue_monitor_read_only_payloads(
     hub: &BroadcastHub,
     monitor: &crate::IssueMonitorState,
+    project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
 ) {
     refresh_issue_monitor_agent_status(hub, monitor);
     publish_issue_monitor_daemon_payloads(
         hub,
         crate::issue_monitor_worker::issue_monitor_read_only_daemon_payloads(monitor),
+        project_store,
     );
 }
 
@@ -3585,12 +3594,14 @@ fn commit_issue_monitor_control_completion(
 fn publish_issue_monitor_daemon_payloads(
     hub: &BroadcastHub,
     payloads: Vec<crate::issue_monitor_worker::IssueMonitorDaemonPayload>,
+    project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
 ) {
     for payload in payloads {
-        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        let payload = crate::runtime_daemon_events::issue_monitor_payload_with_project_store(
             &payload.event,
             payload.payload,
             std::process::id(),
+            project_store,
         );
         let _ = hub.publish(
             crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
@@ -3603,7 +3614,7 @@ fn publish_issue_monitor_daemon_payloads(
 }
 
 fn issue_monitor_gui_connected(hub: &BroadcastHub) -> bool {
-    hub.receiver_count(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL) > 0
+    hub.issue_monitor_materializer_connected()
 }
 
 async fn handle_connection(
@@ -3655,6 +3666,8 @@ async fn handle_connection(
     });
 
     let mut line = String::new();
+    let mut materializer_lease = None;
+    let mut subscribed_channels = HashSet::new();
     loop {
         line.clear();
         let n = match reader.read_line(&mut line).await {
@@ -3688,8 +3701,33 @@ async fn handle_connection(
                     break;
                 }
             }
-            Ok(ClientFrame::Subscribe { channels }) => {
+            Ok(frame @ ClientFrame::Subscribe { .. })
+            | Ok(frame @ ClientFrame::SubscribeMaterializer { .. }) => {
+                let (channels, materializer) = match frame {
+                    ClientFrame::Subscribe { channels } => (channels, false),
+                    ClientFrame::SubscribeMaterializer { channels } => (channels, true),
+                    _ => unreachable!("subscribe variants matched above"),
+                };
+                if materializer
+                    && !channels.iter().any(|channel| {
+                        channel == crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL
+                    })
+                {
+                    if out_tx
+                        .send(DaemonFrame::Error {
+                            message: "materializer subscription requires issue_monitor channel"
+                                .to_string(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 for channel in channels {
+                    if !subscribed_channels.insert(channel.clone()) {
+                        continue;
+                    }
                     let mut rx = hub.subscribe(&channel);
                     let out_tx = out_tx.clone();
                     let channel_for_log = channel.clone();
@@ -3751,6 +3789,13 @@ async fn handle_connection(
                             }
                         }
                     });
+                }
+                // Presence becomes visible only after every receiver exists.
+                // Otherwise the worker could drain a lossy notice/review
+                // outbox into the gap between lease acquisition and channel
+                // subscription.
+                if materializer && materializer_lease.is_none() {
+                    materializer_lease = Some(hub.acquire_issue_monitor_materializer());
                 }
                 if out_tx.send(DaemonFrame::Ack).is_err() {
                     break;
@@ -3835,6 +3880,7 @@ async fn handle_connection(
     // senders are dropped the writer task's `out_rx.recv()` returns
     // `None` and the task ends, allowing this connection task (and
     // its `ConnectionGuard`) to be released.
+    drop(materializer_lease.take());
     forwarder_cancel.store(true, Ordering::SeqCst);
     forwarder_notify.notify_waiters();
     drop(out_tx);
@@ -3945,7 +3991,7 @@ mod tests {
         fs::{self, OpenOptions},
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc, Arc,
         },
         thread,
@@ -3961,16 +4007,17 @@ mod tests {
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::UnixStream,
+        net::{UnixListener, UnixStream},
+        task::JoinSet,
     };
 
     use super::{
         apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
-        issue_monitor_control_is_authorizing, run_server,
+        handle_connection, issue_monitor_control_is_authorizing, run_server,
         run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
         spawn_issue_monitor_worker_with_config_and_scan_probe,
-        spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, DaemonShutdown,
-        IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
+        spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, ConnectionGuard,
+        DaemonShutdown, IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
     };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
@@ -4594,6 +4641,382 @@ exit 0
         .await
         .ok()
         .flatten()
+    }
+
+    /// Issue #3596: every Issue Monitor frame names the actual worker store,
+    /// and its status projection stays semantically aligned with the fresh
+    /// agent-facing snapshot for that same store.
+    #[test]
+    fn issue_monitor_publish_attaches_actual_project_store_and_matches_agent_status() {
+        let project = TempDir::new().expect("project tempdir");
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
+            .expect("worker scope");
+        let project_store =
+            crate::runtime_daemon_events::ProjectStoreIdentity::from_runtime_scope(&scope);
+        let expected_project_store =
+            serde_json::to_value(&project_store).expect("serialize expected project store");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                max_active: 3,
+                ..crate::IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        let hub = BroadcastHub::new();
+        let _control_receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("ready Issue Monitor projection");
+        let mut receiver = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+
+        let mut status = None;
+        let mut frame_count = 0;
+        let mut saw_inbox = false;
+        while let Ok(frame) = receiver.try_recv() {
+            let DaemonFrame::Event { channel, payload } = frame else {
+                panic!("Issue Monitor publisher emitted a non-event frame");
+            };
+            assert_eq!(channel, crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+            assert_eq!(
+                payload.get("project_store"),
+                Some(&expected_project_store),
+                "every published event must name the actual worker store"
+            );
+            if payload.get("event").and_then(serde_json::Value::as_str) == Some("status") {
+                status = payload
+                    .get("payload")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
+            } else if payload.get("event").and_then(serde_json::Value::as_str) == Some("inbox") {
+                saw_inbox = true;
+            }
+            frame_count += 1;
+        }
+
+        assert!(frame_count >= 2, "status and inbox snapshots must publish");
+        assert!(saw_inbox, "inbox snapshot must publish");
+        let status: crate::IssueMonitorStatusView = status.expect("status event");
+        let fresh_status: crate::IssueMonitorAgentStatus = serde_json::from_value(
+            hub.issue_monitor_status()
+                .expect("fresh hub Issue Monitor status"),
+        )
+        .expect("deserialize fresh hub status");
+        assert_eq!(status.enabled, fresh_status.enabled);
+        assert_eq!(status.autonomous_mode, fresh_status.autonomous_mode);
+        assert_eq!(status.max_active_agents, fresh_status.max_active);
+        assert_eq!(status.queue_len, fresh_status.queue.len());
+        assert_eq!(status.active_count, fresh_status.active_launches.len());
+    }
+
+    /// SPEC #3431 FR-144 / AS-PM-SUBSCRIBE-OBSERVER-001: channel receivers are
+    /// observations, not materializer authority. Neither one observer asking
+    /// for both channels nor split observer connections may drain deliveries.
+    #[test]
+    fn observer_channel_combinations_do_not_impersonate_gui_materializer() {
+        let hub = BroadcastHub::new();
+        let mut issue_monitor = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let project = TempDir::new().expect("project tempdir");
+        let project_store =
+            crate::runtime_daemon_events::ProjectStoreIdentity::from_project_root(project.path());
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "claim-effect-42",
+            "2026-08-26T00:00:00Z",
+        ));
+        let delivery_id = monitor
+            .pending_launch_delivery_id(42)
+            .expect("durable launch delivery");
+        monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 420,
+            reviewed_sha: "reviewed-sha".to_string(),
+            required_criteria: vec!["AS-PM-SUBSCRIBE-OBSERVER-001".to_string()],
+            diff: "review diff".to_string(),
+            linked_issue_kind: crate::LinkedIssueKind::Issue,
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.escalate_to_needs_human(43, "human decision required");
+
+        assert!(!super::issue_monitor_gui_connected(&hub));
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+        let observer_events = std::iter::from_fn(|| issue_monitor.try_recv().ok())
+            .filter_map(|frame| match frame {
+                DaemonFrame::Event { payload, .. } => payload
+                    .get("event")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!observer_events
+            .iter()
+            .any(|event| event == "launch_request"));
+        assert_eq!(
+            monitor.pending_launch_delivery_id(42).as_deref(),
+            Some(delivery_id.as_str()),
+            "observer must not drain the durable launch delivery"
+        );
+
+        let same_connection_overlay =
+            hub.subscribe(crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL);
+        assert!(
+            !super::issue_monitor_gui_connected(&hub),
+            "an observer requesting both channels is still not a materializer"
+        );
+        let split_issue_monitor =
+            hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let split_approval_overlay =
+            hub.subscribe(crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL);
+        assert!(
+            !super::issue_monitor_gui_connected(&hub),
+            "receivers split across observer connections are not a materializer"
+        );
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+        let observer_events = std::iter::from_fn(|| issue_monitor.try_recv().ok())
+            .filter_map(|frame| match frame {
+                DaemonFrame::Event { payload, .. } => payload
+                    .get("event")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!observer_events
+            .iter()
+            .any(|event| event == "launch_request"));
+        assert_eq!(
+            monitor.take_pending_review_dispatches().len(),
+            1,
+            "observer must not drain review dispatches"
+        );
+        assert_eq!(
+            monitor.take_autonomous_notices().len(),
+            1,
+            "observer must not drain NeedsHuman notices"
+        );
+        let mut claim_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        claim_monitor.record_candidate(sample_issue_monitor_issue(44));
+        super::publish_issue_monitor_payloads(&hub, &mut claim_monitor, &project_store);
+        assert_eq!(
+            claim_monitor
+                .try_prepare_claim_effects_with_probe(
+                    "host/session",
+                    "2026-08-26T00:00:01Z",
+                    1,
+                    |_| Ok::<bool, std::convert::Infallible>(false),
+                )
+                .expect("observer claim preparation remains a no-op"),
+            0,
+            "observer receivers must not authorize claim preparation"
+        );
+
+        let materializer = hub.acquire_issue_monitor_materializer();
+        assert!(super::issue_monitor_gui_connected(&hub));
+        super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+        let gui_events = std::iter::from_fn(|| issue_monitor.try_recv().ok())
+            .filter_map(|frame| match frame {
+                DaemonFrame::Event { payload, .. } => payload
+                    .get("event")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(gui_events.iter().any(|event| event == "launch_request"));
+        drop(materializer);
+
+        drop(split_approval_overlay);
+        drop(split_issue_monitor);
+        drop(same_connection_overlay);
+        assert!(!super::issue_monitor_gui_connected(&hub));
+        drop(issue_monitor);
+    }
+
+    #[tokio::test]
+    async fn materializer_presence_is_acquired_once_per_connection_and_released_on_eof() {
+        use crate::cli::daemon::client::DaemonClient;
+
+        let temp = TempDir::new().expect("tempdir");
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
+        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let hub = BroadcastHub::new();
+        let server_hub = hub.clone();
+        let server_endpoint = Arc::new(endpoint.clone());
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            let mut handlers = JoinSet::new();
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().await.expect("accept client");
+                let endpoint = Arc::clone(&server_endpoint);
+                let hub = server_hub.clone();
+                let connections = Arc::clone(&connections);
+                handlers.spawn(async move {
+                    let guard = ConnectionGuard::new(connections);
+                    handle_connection(stream, endpoint, hub, Instant::now(), &guard).await
+                });
+            }
+            while let Some(result) = handlers.join_next().await {
+                result.expect("connection task").expect("handle connection");
+            }
+        });
+
+        let mut same_connection_observer = DaemonClient::connect(&endpoint)
+            .await
+            .expect("observer connects");
+        same_connection_observer
+            .send_frame(&ClientFrame::Subscribe {
+                channels: vec![
+                    crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
+                    crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
+                ],
+            })
+            .await
+            .expect("observer subscribes to both channels");
+        assert_eq!(
+            same_connection_observer
+                .read_frame::<DaemonFrame>()
+                .await
+                .expect("observer ack"),
+            DaemonFrame::Ack
+        );
+
+        let mut split_issue_observer = DaemonClient::connect(&endpoint)
+            .await
+            .expect("issue observer connects");
+        split_issue_observer
+            .send_frame(&ClientFrame::Subscribe {
+                channels: vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+            })
+            .await
+            .expect("issue observer subscribes");
+        assert_eq!(
+            split_issue_observer
+                .read_frame::<DaemonFrame>()
+                .await
+                .expect("issue observer ack"),
+            DaemonFrame::Ack
+        );
+        let mut split_overlay_observer = DaemonClient::connect(&endpoint)
+            .await
+            .expect("overlay observer connects");
+        split_overlay_observer
+            .send_frame(&ClientFrame::Subscribe {
+                channels: vec![
+                    crate::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL.to_string(),
+                ],
+            })
+            .await
+            .expect("overlay observer subscribes");
+        assert_eq!(
+            split_overlay_observer
+                .read_frame::<DaemonFrame>()
+                .await
+                .expect("overlay observer ack"),
+            DaemonFrame::Ack
+        );
+        assert!(!hub.issue_monitor_materializer_connected());
+
+        let mut materializer = DaemonClient::connect(&endpoint)
+            .await
+            .expect("materializer connects");
+        materializer
+            .send_frame(&ClientFrame::SubscribeMaterializer {
+                channels: vec!["board".to_string()],
+            })
+            .await
+            .expect("invalid materializer frame reaches daemon");
+        assert!(matches!(
+            materializer
+                .read_frame::<DaemonFrame>()
+                .await
+                .expect("invalid materializer response"),
+            DaemonFrame::Error { message }
+                if message.contains("requires issue_monitor channel")
+        ));
+        assert!(
+            !hub.issue_monitor_materializer_connected(),
+            "invalid materializer frame must fail closed"
+        );
+        let materializer_frame = ClientFrame::SubscribeMaterializer {
+            channels: vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+        };
+        materializer
+            .send_frame(&materializer_frame)
+            .await
+            .expect("materializer subscribes");
+        assert_eq!(
+            materializer
+                .read_frame::<DaemonFrame>()
+                .await
+                .expect("materializer ack"),
+            DaemonFrame::Ack
+        );
+        assert_eq!(hub.issue_monitor_materializer_count(), 1);
+
+        materializer
+            .send_frame(&materializer_frame)
+            .await
+            .expect("duplicate materializer subscribe");
+        assert_eq!(
+            materializer
+                .read_frame::<DaemonFrame>()
+                .await
+                .expect("duplicate materializer ack"),
+            DaemonFrame::Ack
+        );
+        assert_eq!(
+            hub.issue_monitor_materializer_count(),
+            1,
+            "one connection owns at most one presence lease"
+        );
+        assert_eq!(
+            hub.publish(
+                crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+                DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
+                    payload: serde_json::json!({"event": "dedup-probe"}),
+                },
+            ),
+            3,
+            "duplicate materializer subscribe must not add a second forwarder"
+        );
+
+        drop(materializer);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while hub.issue_monitor_materializer_connected() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("materializer lease released after EOF");
+        assert!(
+            !hub.issue_monitor_materializer_connected(),
+            "observer connections must not keep the materializer lease alive"
+        );
+
+        drop(split_overlay_observer);
+        drop(split_issue_observer);
+        drop(same_connection_observer);
+        server.await.expect("accept loop");
     }
 
     fn legacy_git_failure(project_root: &Path) -> String {

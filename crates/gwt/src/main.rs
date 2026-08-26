@@ -974,7 +974,7 @@ fn spawn_board_daemon_subscriber(
     let proxy_for_callback = proxy;
     let project_root_for_callback = project_root;
     Some(
-        gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+        gwt::daemon_subscriber::DaemonSubscriber::spawn_materializer_with_resolver(
             resolver,
             daemon_subscriber_channels(),
             move |channel, payload| {
@@ -1700,6 +1700,9 @@ mod tests {
 
         assert!(channels.iter().any(|channel| channel == "board"));
         assert!(channels.iter().any(|channel| channel == "workspace"));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL));
         assert!(channels
             .iter()
             .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL));
