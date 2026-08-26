@@ -113,6 +113,17 @@ drive them.
   why, because a live agent waiting on an approval prompt, blocked by a
   provider rate limit, or genuinely hung all look identical from here.
   Read its pane to find out which, then say so when you report it.
+- `retry_hold_reason` and `retry_not_before` on an inbox row say the
+  issue is deliberately held out of the queue, and until when. A
+  provider quota block sets both: the launch is already released, no
+  retry attempt was spent, and the next scan after `retry_not_before`
+  picks the work up again. Report the reset instant; do not treat the
+  row as a stall to chase.
+- A quota-blocked pane reads as `waiting`, not `idle` or `stopped`, and
+  its window detail names the account and the reset. The two providers
+  fail differently — one exits, one keeps its process alive and stops
+  responding — so the pane state is the reliable signal, not whether the
+  process is gone.
 - A stall is not automatically resolved for you. Decide: wait, demote it
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without
@@ -152,6 +163,13 @@ drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
+- A `pm.message.send` that reports the delivery as **unverified** is not a
+  message that failed to arrive. The line was written into the pane and
+  submitted; only the target's acknowledgement did not land inside the
+  operation's window, which is ordinary when that pane is mid-turn. Do not
+  resend it, do not look for another way to reach the pane, and do not tell
+  the user the instruction was not delivered. Observe the pane instead. Only
+  a **failed** result means the input never reached it.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -193,9 +211,53 @@ things:
   that to the issue's budget would eventually hand healthy work to a
   human over someone else's billing cycle.
 
+- `issue.monitor.launch_now` says **run this next**. It moves the issue
+  to the head of `priority_order` and also drops any `retry_hold_reason`
+  hold, reporting `hold_cleared`. That second half matters after a quota
+  block: a reset can be days out, so without it the instruction would be
+  accepted and then ignored until the provider recovers. Use it after
+  changing the launch profile when the work should not wait for someone
+  else's billing cycle.
+
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
+
+## Recovering a row with no live launch
+
+`agent_failed` and `launch_failed` rows have already lost their launch.
+That is why `issue.monitor.stop` and `issue.monitor.failover` refuse
+them: both resolve an exact live launch first, and there is none left to
+name. `issue.monitor.launch_now` only reorders priority, and the scan
+re-derives the failure from the persisted hold, so the row does not move.
+
+- `issue.monitor.requeue` is the operation for that state. Pass
+  `params.number` and a `params.reason`; it takes no launch identity,
+  because there is no launch. It drops the persisted hold, returns the
+  issue to the queue in its existing priority position, spends no new
+  retry attempt, resets the persisted autonomous attempt counter to zero,
+  and starts a fresh bounded retry cycle. The next launch must also start
+  a fresh session rather than resume the conversation that stranded it.
+- It fails closed in both directions. `refusal: "launch_live"` means a
+  launch still owns the issue — use the stop or the failover, which
+  verify the exact identity. `refusal: "not_held"` means nothing was
+  holding it, so nothing changed.
+- The reply returns `stale_window_id` when the failure retained an error
+  window. Close it with `pane.close`; the release already unbound it, so
+  the close cannot requeue the issue again.
+- Recovering a row does not fix why it failed. If the launch is refused
+  for a durable reason (a stranded execution generation, a repository
+  lock), the requeued issue fails the same way on its next scan. Read the
+  `error_message` first and resolve the cause, then requeue.
+
+Never repair Issue Monitor state by editing `issue-monitor.json`. A hand
+edit is invisible to every process that already holds the same state in
+memory: they re-stamp what you removed on their next commit, so the
+repair silently un-happens and the row comes back. `issue.monitor.requeue`
+publishes the release so every process converges on it, which is the part
+a file edit cannot do. If a hand edit already happened, run the requeue
+for each affected issue afterwards to bring the state back into
+agreement.
 
 ## A repository has exactly one PM
 
@@ -263,6 +325,48 @@ Hard limits, no exceptions:
   (requeue via priority operations, hold via labels, or propose
   closing).
 
+## Blocked escalations from agents
+
+An agent that concludes it cannot proceed posts `kind:"blocked"` to the
+Board, and gwt files one automatically when an operation refuses an
+agent on permission, immutability, or authority grounds. Both land the
+owning Issue in `needs_human` and both carry a four-part body: 事象,
+原因, 依頼, 再開条件.
+
+- Do not read panes to find these. The escalation body reaches you in
+  the wake prompt and in the Board entry itself; `pane.read` fails under
+  GUI event-loop saturation, which is precisely when agents are stuck.
+- The routine "ready for the next instruction" notice is withheld while
+  an escalation is open, so an owner that has gone silent on the Board
+  and is listed in `needs_human` is blocked, not finished.
+- Each escalation asks for one of three things: a fresh launch (the
+  agent's record is terminal and it cannot resume in that window), a
+  ruling only the owner can make, or a tool fix. Decide which, then act.
+- Nothing closes an escalation implicitly. When you have acted, post the
+  resolution yourself with `params.resolves` naming the blocked entry
+  id, which every escalation surface repeats back to you. Until you do,
+  the Issue stays in `needs_human` and the agent's Board lifecycle stays
+  suppressed.
+- A repeated refusal of the same operation is not restated on the Board.
+  Do not read one escalation as one occurrence.
+
+## Issue proposals from agents
+
+Agents do not call `issue.create`; they post `kind:"decision"`
+proposals to the Board mentioning you, because two registering parties
+made duplicates detectable only after both Issues existed. A proposal
+carries 事象 with primary evidence, why an existing Issue cannot hold it
+(including the agent's duplicate search), proposed acceptance criteria,
+and urgency.
+
+- Search before registering, exactly as for your own Issues. Redirect
+  the agent to an existing Issue when one already owns the scope.
+- Reply on the Board with the registered Issue number, with
+  `params.parent` set to the proposal's entry id, so the proposal and
+  its outcome stay linked. An unanswered proposal is an agent waiting.
+- `issue.comment` is never restricted for agents; only registration
+  routes through you.
+
 ## Reporting cadence
 
 - Report on your own initiative only at milestones: an Issue registered,
@@ -278,6 +382,15 @@ Hard limits, no exceptions:
   suppressed; only a leave-then-re-enter transition rearms reporting.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
+- A cycle that produced no milestone and no escalation ends with no
+  user-facing output at all. Do not post a "no change" line, do not
+  restate the queue or the running launches, and do not emit a keepalive
+  to prove you are still looping: the resident loop's liveness is
+  observable in the GUI's PM residency indicator and in
+  `pm-loop.json`'s `last_wake_at`, never in the conversation.
+- The cycle itself is never skipped — silence is about the report, not
+  about the cycle. An injected `[gwt]` wake prompt starts a full
+  reconcile even when that reconcile ends without a word to the user.
 
 ## Auxiliary agents
 
@@ -376,6 +489,10 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
+            // Issue #3608: an unverified delivery is not an undelivered one.
+            "reports the delivery as **unverified**",
+            "message that failed to arrive",
+            "resend it, do not look for another way to reach the pane",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
@@ -414,6 +531,19 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // Issue #3645 / #3628: the recovery for a row with no live launch.
+            // Without it in the contract the PM's only remaining move is the
+            // hand edit that produced #3645 in the first place, so the
+            // prohibition below has to name the operation that replaces it.
+            "`issue.monitor.requeue`",
+            "there is no launch",
+            "resets the persisted autonomous attempt counter to zero",
+            "starts a fresh bounded retry cycle",
+            "launch_live",
+            "not_held",
+            "Never repair Issue Monitor state by editing `issue-monitor.json`",
+            "they re-stamp what you removed on their next commit",
+            "Recovering a row does not fix why it failed",
             // Issue #3607: the PM singleton is per repository, and an orphan
             // PM has a CLI route out. Without these the contract leaves the
             // PM believing GUI clicks are the only way to stop one.
@@ -444,6 +574,12 @@ mod tests {
             // FR-017: milestone-only digest, escalations never batched.
             "one digest",
             "never held for a digest",
+            // Issue #3632: the quiet case is stated out loud — a cycle with
+            // nothing to report ends silently, and liveness is proven outside
+            // the conversation.
+            "ends with no user-facing output at all",
+            "`pm-loop.json`'s `last_wake_at`",
+            "silence is about the report, not about the cycle",
             // FR-007: auxiliary agents never touch production.
             "must not modify production code",
             // FR-013: stopping story.
@@ -471,6 +607,40 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
+    /// nothing to report ends without saying anything. The cadence already
+    /// described milestone-only reporting, but never stated the quiet case, so
+    /// "report every cycle" stayed a defensible reading — and the runtime's
+    /// wake prompts took it. Both halves are pinned: silence on no change, and
+    /// liveness proven outside the conversation so the PM is not tempted to
+    /// emit a keepalive.
+    #[test]
+    fn contract_ends_a_no_change_cycle_with_no_user_facing_output() {
+        let body = body();
+        assert!(
+            body.contains(
+                "A cycle that produced no milestone and no escalation ends with no user-facing \
+                 output at all"
+            ),
+            "no-change 周回は無出力で終える規定が要る"
+        );
+        assert!(
+            body.contains("Do not post a \"no change\" line"),
+            "「変化なし」の明示的な禁止が要る"
+        );
+        assert!(
+            body.contains(
+                "the resident loop's liveness is observable in the GUI's PM residency indicator \
+                 and in `pm-loop.json`'s `last_wake_at`, never in the conversation"
+            ),
+            "沈黙と死んだループの区別は会話の外で示す"
+        );
+        assert!(
+            body.contains("silence is about the report, not about the cycle"),
+            "省略してよいのは出力であって周回ではない（FR-3）"
+        );
+    }
+
     #[test]
     fn contract_routes_waiting_panes_to_bounded_human_resolution_without_monitor_escalation() {
         let body = body();
@@ -481,6 +651,37 @@ mod tests {
             "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
         ));
         assert!(!body.contains("the PM may resolve a `waiting` pane"));
+    }
+
+    /// Issue #3655 AC-5 / AC-10 / AC-11: the PM half of the escalation and
+    /// Issue-proposal contracts. Without these the agent side is a message
+    /// nobody is told to answer.
+    #[test]
+    fn contract_tells_the_pm_how_to_read_and_close_a_blocked_escalation() {
+        let body = body();
+        for phrase in [
+            "## Blocked escalations from agents",
+            "Do not read panes to find these",
+            "ready for the next instruction",
+            "params.resolves",
+            "Nothing closes an escalation implicitly",
+        ] {
+            assert!(body.contains(phrase), "PM contract is missing: {phrase}");
+        }
+    }
+
+    #[test]
+    fn contract_tells_the_pm_to_register_agent_issue_proposals_and_answer_them() {
+        let body = body();
+        for phrase in [
+            "## Issue proposals from agents",
+            "Agents do not call `issue.create`",
+            "params.parent",
+            "An unanswered proposal is an agent waiting",
+            "`issue.comment` is never restricted for agents",
+        ] {
+            assert!(body.contains(phrase), "PM contract is missing: {phrase}");
+        }
     }
 
     /// Rules the contract must NOT carry. Each one shipped at some point and

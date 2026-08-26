@@ -12,8 +12,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install tray + GTK dependencies (Linux)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+          sudo bash scripts/ci-apt.sh update
+          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
@@ -106,6 +107,16 @@ jobs:
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
+      # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
+      # pane's pseudoconsole, so the released agent renders in an external
+      # Windows Terminal window. Both guards are Windows-only and would be
+      # skipped by the Linux workspace run.
+      - name: Run Windows PTY start-gate console contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --test windows_binary_subsystem_test -- --test-threads=1
+          cargo test -p gwt --test pty_start_gate_console_test -- --test-threads=1
+        timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
         run: |
@@ -181,11 +192,26 @@ jobs:
       - name: Run frontend smoke tests
         run: bash scripts/run-frontend-smoke-tests.sh
         timeout-minutes: 10
-      # Browsers must match run-visual-tests.sh's pinned Playwright version
-      # (GWT_PLAYWRIGHT_VERSION default). The shared ~/.cache/ms-playwright is
-      # reused by the script's temp-dir Playwright install of the same version.
-      - name: Install Playwright chromium + system deps
-        run: npx --yes playwright@1.49.1 install --with-deps chromium
+      # Browser bootstrap is split three ways on purpose (#3659). A single
+      # `playwright install --with-deps` hid an unbounded apt transaction
+      # behind a browser download, so a stalled mirror surfaced only as an
+      # opaque 10-minute step timeout. scripts/playwright-version.txt is the
+      # one pin shared with run-visual-tests.sh, so the cache key cannot drift
+      # from the revision the specs resolve, and the shared
+      # ~/.cache/ms-playwright is reused by the script's temp-dir install.
+      - name: Resolve pinned Playwright version
+        id: playwright
+        run: echo "version=$(cat scripts/playwright-version.txt)" >>"$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install Playwright system dependencies (apt)
+        run: bash scripts/install-playwright-browsers.sh system-deps
+        timeout-minutes: 10
+      - name: Install Playwright chromium browser
+        run: bash scripts/install-playwright-browsers.sh browsers
         timeout-minutes: 10
       # Embedded-frontend specs stub WebSocket + serve crates/gwt/web via
       # page.route, so they run without a live gwt. live-gwt specs self-skip

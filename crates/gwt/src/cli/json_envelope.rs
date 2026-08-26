@@ -1,4 +1,6 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
+use gwt_core::paths::ProjectScopeSource;
+use gwt_core::repo_hash::RepoIdentitySource;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::str::FromStr;
@@ -29,6 +31,17 @@ fn default_schema_version() -> u64 {
 struct ParsedEnvelope {
     operation: String,
     command: CliCommand,
+    /// Issue #3655 AC-1: the reason an agent gave when it declared itself
+    /// unable to proceed, carried past parsing so the escalation can be raised
+    /// from the same call rather than from a Board post the agent also has to
+    /// remember to write.
+    declared_block: Option<DeclaredBlock>,
+}
+
+/// An agent's own `execution.blocked` declaration, as escalation material.
+pub(crate) struct DeclaredBlock {
+    pub reason: String,
+    pub missing_verification: Option<String>,
 }
 
 pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
@@ -47,22 +60,108 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         }
     };
     let operation = parsed.operation.clone();
+    let declared_block = parsed.declared_block;
     match super::run_collect(env, parsed.command) {
         Ok((code, output)) => {
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "ok": code == 0,
                 "operation": operation,
                 "exit_code": code,
                 "output": output,
             });
+            attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{}", payload);
+            match (code, declared_block) {
+                (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
+                (0, None) => {}
+                _ => super::board::auto_file_operation_refusal(env, &operation, &output),
+            }
             code
         }
+        // Issue #3510: a failure still answers on the JSON-only operation
+        // surface. Without this, stdout stayed empty and a machine caller
+        // could not distinguish "the operation failed at stage X" from "the
+        // process never answered". The stderr line stays for humans.
         Err(err) => {
-            let _ = writeln!(env.stderr(), "{prog} {operation}: {err}");
+            let message = err.to_string();
+            let mut payload = serde_json::json!({
+                "ok": false,
+                "operation": operation,
+                "exit_code": 1,
+                "error": message,
+            });
+            attach_project_store(&mut payload);
+            let _ = writeln!(env.stdout(), "{payload}");
+            let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
+            // Issue #3655 AC-2: a governance refusal reaches the PM without
+            // depending on the agent noticing it is stuck. Answering the caller
+            // comes first — the escalation must never delay or replace the
+            // operation's own reply.
+            super::board::auto_file_operation_refusal(env, &operation, &message);
             1
         }
     }
+}
+
+/// Issue #3606: name the project store the operation acted on.
+///
+/// A `project_root` that resolves no repository identity still produces a
+/// perfectly working store — just an isolated one, keyed by path, that no
+/// running gwt opened under a different path will ever read. The PM lost half a
+/// day to exactly that: `issue.monitor.priority.move` answered `ok: true` and
+/// read the new order straight back, from a store nothing else was using. The
+/// envelope now carries the store's hash, its directory, and whether the hash
+/// came from a repository identity, so the caller can assert on the landing
+/// instead of comparing mtimes under `~/.gwt/projects/`.
+///
+/// Absent when the operation never resolved a project store — including when it
+/// failed before doing so. Absence therefore means "no store was touched", not
+/// "the store is fine".
+fn attach_project_store(payload: &mut Value) {
+    let Some(store) = gwt_core::paths::operation_project_store() else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    // Windows canonicalization yields `\\?\` verbatim paths. Reporting those
+    // would hand the caller a path it cannot paste back into a shell.
+    let readable = |path: &std::path::Path| {
+        gwt_core::paths::normalize_windows_child_process_path_text(&path.display().to_string())
+    };
+    let mut reported = serde_json::json!({
+        "project_root": readable(&store.project_root),
+        "hash": store.scope.hash.as_str(),
+        "source": store.scope.source.as_str(),
+        "identity_resolved": store.scope.source.identity_resolved(),
+        "store_path": readable(&store.store_path),
+    });
+    match &store.scope.source {
+        // The bare repository that lent the layout root its identity. Without
+        // it, "nested_bare_repository" names the mechanism but not the repo.
+        ProjectScopeSource::Repository(RepoIdentitySource::NestedBareRepository(path)) => {
+            reported["repository_path"] = Value::from(readable(path));
+        }
+        // Every rejected candidate, so a human can see *why* no identity was
+        // chosen rather than only that none was.
+        ProjectScopeSource::AmbiguousNestedBareRepositories(candidates) => {
+            reported["candidates"] = Value::Array(
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        serde_json::json!({
+                            "path": readable(&candidate.path),
+                            "normalized_origin": candidate.normalized_origin,
+                            "hash": candidate.hash.as_str(),
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        ProjectScopeSource::Repository(RepoIdentitySource::Origin)
+        | ProjectScopeSource::PathFallback => {}
+    }
+    object.insert("project_store".to_string(), reported);
 }
 
 fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
@@ -105,6 +204,24 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
+            })
+        }
+        "workspace.store_consolidate" | "workspace.store-consolidate" => {
+            // Issue #3524 (folded into #3606): this operation moves durable
+            // state, so a parameter it does not understand is a refusal rather
+            // than something to ignore. A silently-dropped `project_root` used
+            // to leave the apply targeting whatever cwd it happened to run in.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "manifest_hash"],
+                "workspace.store_consolidate",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::StoreConsolidate {
+                project_root: optional_path(params, "project_root")?,
+                // Consolidation moves durable state, so it dry-runs unless the
+                // caller explicitly opts out (#3466 AC-8).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                manifest_hash: optional_string(params, "manifest_hash")?,
             })
         }
         "board.show" => board_show(params)?,
@@ -223,6 +340,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             claim_id: optional_string(params, "claim_id")?,
             delivery_id: optional_string(params, "delivery_id")?,
             window_id: optional_string(params, "window_id")?,
+        }),
+        "issue.monitor.requeue" => CliCommand::Issue(IssueCommand::MonitorRequeue {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            // An unexplained release of a recorded failure is not auditable.
+            reason: required_string(params, "reason")?,
         }),
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
@@ -523,9 +646,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
     };
+    let declared_block = match (
+        envelope.operation.as_str(),
+        optional_string(params, "reason"),
+    ) {
+        ("execution.blocked", Ok(Some(reason))) => Some(DeclaredBlock {
+            reason,
+            missing_verification: optional_string(params, "missing_verification")
+                .ok()
+                .flatten(),
+        }),
+        _ => None,
+    };
     Ok(ParsedEnvelope {
         operation: envelope.operation,
         command,
+        declared_block,
     })
 }
 
@@ -634,6 +770,10 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
             owners: optional_string_vec(params, "owners")?,
             targets: optional_string_vec(params, "targets")?,
             mentions: optional_string_vec(params, "mentions")?,
+            // Issue #3655: accepts a single id or a list, because the common
+            // case is closing exactly one escalation and quoting it as an
+            // array is the kind of ceremony agents get wrong.
+            resolves: optional_string_or_string_vec(params, "resolves")?,
             broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
         },
     ))))
@@ -1162,6 +1302,27 @@ fn optional_path(
     Ok(optional_string(params, key)?.map(std::path::PathBuf::from))
 }
 
+/// Refuse a parameter this operation does not understand.
+///
+/// Only for operations where ignoring an unrecognised key would change what
+/// the caller believes it authorized — a mistyped `project_root` that silently
+/// falls back to the process cwd is exactly the failure #3524 recorded.
+fn reject_unknown_params(
+    params: &Map<String, Value>,
+    allowed: &[&str],
+    operation: &str,
+) -> Result<(), CliParseError> {
+    for key in params.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(CliParseError::InvalidJson(format!(
+                "{operation} does not accept the parameter {key}; accepted: {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
     optional_u64(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
@@ -1332,6 +1493,21 @@ fn optional_string_vec(
     }
 }
 
+/// Like [`optional_string_vec`], but a bare string is accepted as a one-element
+/// list. Used where the single-item case dominates (Issue #3655 `resolves`).
+fn optional_string_or_string_vec(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<Vec<String>, CliParseError> {
+    match params.get(key) {
+        Some(Value::String(text)) if !text.trim().is_empty() => Ok(vec![text.clone()]),
+        Some(Value::String(_)) => Err(CliParseError::InvalidJson(format!(
+            "{key} must not be an empty string"
+        ))),
+        _ => optional_string_vec(params, key),
+    }
+}
+
 fn optional_json_array(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1357,6 +1533,7 @@ mod tests {
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
+    use crate::cli::TestEnv;
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -1384,6 +1561,38 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    /// Issue #3510: a failed operation used to leave stdout empty and report
+    /// only a bare stderr line, so a machine caller could not tell an
+    /// operation failure apart from a crashed process — let alone which stage
+    /// failed. The JSON-only operation surface answers with an `ok:false`
+    /// envelope carrying the same stage-qualified message.
+    #[test]
+    fn operation_failures_answer_with_an_ok_false_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = envelope("issue.view", json!({ "number": 4242 }));
+
+        let code = super::dispatch(&mut env, "gwtd");
+
+        assert_eq!(code, 1);
+        let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+        let payload: Value = serde_json::from_str(stdout.trim()).expect("error envelope JSON");
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["operation"], json!("issue.view"));
+        assert_eq!(payload["exit_code"], json!(1));
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error| !error.trim().is_empty()),
+            "error envelope must carry the failure reason: {payload}"
+        );
+        let stderr = String::from_utf8(env.stderr.clone()).expect("stderr utf8");
+        assert!(
+            stderr.contains("gwtd issue.view:"),
+            "the human-readable stderr line must stay: {stderr}"
+        );
     }
 
     #[test]
@@ -2032,6 +2241,36 @@ mod tests {
         ));
         assert!(matches!(
             err("issue.monitor.failover", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// Issue #3645 / #3628: the recovery takes no launch identity, because the
+    /// row it recovers has no launch left to name — that is precisely why the
+    /// stop and failover operations cannot reach it. A reason stays mandatory:
+    /// releasing a hold that something recorded for a cause is auditable work.
+    #[test]
+    fn issue_monitor_requeue_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.requeue",
+                json!({
+                    "number": 3624,
+                    "reason": "manual recovery after the launch-fence outage",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorRequeue {
+                project_root: None,
+                number: 3624,
+                reason: "manual recovery after the launch-fence outage".to_string(),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.requeue", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.requeue", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
         ));
     }
@@ -2928,10 +3167,19 @@ mod tests {
             ok("pane.close", json!({"id": "p1"})),
             CliCommand::Pane(PaneCommand::Close { .. })
         ));
-        assert!(matches!(
+        // Issue #3552 AC-2: `pane.stop` is not a second implementation to keep
+        // in step — it resolves to the very same command, so whatever AC-1
+        // fixes for `pane.close` it inherits by construction.
+        match (
+            ok("pane.close", json!({"id": "p1"})),
             ok("pane.stop", json!({"id": "p1"})),
-            CliCommand::Pane(PaneCommand::Close { .. })
-        ));
+        ) {
+            (
+                CliCommand::Pane(PaneCommand::Close { id: closed }),
+                CliCommand::Pane(PaneCommand::Close { id: stopped }),
+            ) => assert_eq!(closed, stopped),
+            other => panic!("unexpected commands: {other:?}"),
+        }
         assert!(matches!(
             ok("pane.send", json!({"text": "hi"})),
             CliCommand::Pane(PaneCommand::Send { .. })

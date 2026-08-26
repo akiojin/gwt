@@ -144,6 +144,12 @@ pub struct WindowRuntime {
     status_thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorktreeFormProjection {
+    Resolve,
+    Persisted,
+}
+
 struct RuntimeStopThreads {
     output_thread: Option<JoinHandle<()>>,
     status_thread: Option<JoinHandle<()>>,
@@ -589,7 +595,7 @@ pub(crate) struct ManualLaunchHolderIntent {
     pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
     pub(crate) local_window_id: Option<String>,
     pub(crate) local_runtime_incarnation: Option<u64>,
-    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) runtime_proof: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub(crate) operation_id: String,
 }
 
@@ -618,7 +624,7 @@ pub(crate) struct ManualLaunchPreparation {
     pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
     pub(crate) expected_binding: gwt_agent::ExecutionBindingIdentity,
     pub(crate) expected_session: Option<gwt_agent::SessionExecutionIdentity>,
-    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeProof>,
+    pub(crate) expected_runtime: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
     pub(crate) predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
     pub(crate) operation_id: String,
 }
@@ -843,6 +849,15 @@ pub(crate) struct ApprovalPromptLatch {
     pub(crate) pending_settle_token: Option<u64>,
 }
 
+/// Issue #3616: a quota notice seen on a live pane, awaiting confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderQuotaCandidate {
+    /// When this uninterrupted run of the notice began. Reset whenever the
+    /// notice leaves the screen or the agent shows activity, so the settle
+    /// window always measures continuous silence.
+    pub(crate) first_seen: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
@@ -873,10 +888,21 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_materializer_id: String,
+    /// Issue #3676 AC-2: credential preflight consulted before any Issue
+    /// Monitor launch spawns a terminal. Injected at construction so tests
+    /// control ambient credential facts without mutating process state; only
+    /// a definitive `Unauthenticated` verdict refuses a launch.
+    pub(crate) issue_monitor_provider_auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
     /// Issue #3505: prefs-path scoped scheduled scans currently running in a
     /// blocking worker. Duplicate ticks are coalesced by dropping them while
     /// the same canonical project scope is in flight.
     pub(crate) issue_monitor_scheduled_scans_in_flight: HashSet<PathBuf>,
+    /// Issue #3633: the runtime daemons this GUI started. Nothing in
+    /// production used to start one, so the daemon-only control lane
+    /// (`scan_now`, `daemon.subscribe`) was permanently unavailable. The
+    /// supervisor is driven from the scheduled tick, which makes the restart
+    /// of a crashed daemon fall out of the same idempotent call.
+    pub(crate) daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor,
     /// Prepared producing continuations keyed by their pending/active window.
     /// The entry remains until an authenticated SessionStart finalizes the
     /// generation + Work transaction and promotes the same bearer.
@@ -1013,6 +1039,28 @@ pub struct AppRuntime {
     pub(crate) window_approval_waiting: HashMap<String, ApprovalPromptLatch>,
     pub(crate) approval_settle_epoch: u64,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
+    /// Issue #3616: agent windows whose provider ran out of quota, with the
+    /// typed failure that was classified from the provider's own notice.
+    ///
+    /// Runtime-only. Holding the classified value rather than re-deriving it
+    /// from the window detail keeps the decision made once, at the one moment
+    /// the provider's wording is on screen.
+    pub(crate) provider_quota_holds: HashMap<String, gwt::IssueMonitorFailure>,
+    /// Issue #3616: quota notices seen on a *live* pane's screen, not yet
+    /// confirmed as a block.
+    ///
+    /// Claude does not exit when its quota runs out — the pane stays alive
+    /// showing the notice and stops responding — so the exit path cannot see
+    /// that shape at all. A candidate is only promoted once it has survived
+    /// [`PROVIDER_QUOTA_SETTLE_SECS`] with no agent activity, or once the usage
+    /// poller independently reports the same account exhausted. That gate is
+    /// what keeps an agent whose own output *contains* the sentence from being
+    /// released out from under itself.
+    pub(crate) provider_quota_candidates: HashMap<String, ProviderQuotaCandidate>,
+    /// Issue #3616: the newest account-level usage snapshot, used only to
+    /// corroborate a screen notice. Never a trigger on its own: the poller is
+    /// silent while no client is connected and Claude's account read is opt-in.
+    pub(crate) provider_usage_accounts: Vec<gwt_core::usage::ProviderUsage>,
     /// SPEC-3431 FR-068: when each agent window last showed activity, so the
     /// heartbeat published to the Issue Monitor can be throttled instead of
     /// firing a daemon control on every hook. Keyed by combined window id.
@@ -1833,6 +1881,8 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                         gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                             &mut monitor,
                             project_root,
+                            &owner,
+                            &repo,
                         )
                         .err()
                         .map(|error| {
@@ -2065,7 +2115,9 @@ impl AppRuntime {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
+            issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
+            daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
@@ -2098,6 +2150,9 @@ impl AppRuntime {
             window_approval_waiting: HashMap::new(),
             approval_settle_epoch: 0,
             recoverable_agent_error_windows: HashSet::new(),
+            provider_quota_holds: HashMap::new(),
+            provider_quota_candidates: HashMap::new(),
+            provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
@@ -2291,6 +2346,11 @@ impl AppRuntime {
                 return;
             }
             let live_process_branches = work_branches_with_live_processes(&targets);
+            // Issue #3629 AC-4: a workspace-home project root is not a git
+            // work tree — run the per-branch merge/readiness git work in the
+            // resolved repository so it does not fail (or spawn doomed
+            // processes) for the nested-bare layout.
+            let git_root = gwt_git::worktree::effective_repo_root(&project_root);
             let tip_times = match tip_times {
                 Ok(tip_times) => tip_times,
                 Err(error) => {
@@ -2321,7 +2381,7 @@ impl AppRuntime {
             for target in &targets {
                 let branch = target.branch.clone();
                 let readiness = gwt_git::branch::cleanup_readiness_base_target_with_known_refs(
-                    &project_root,
+                    &git_root,
                     &branch,
                     &known_refs,
                 )
@@ -3067,6 +3127,10 @@ impl AppRuntime {
                     // at the control completion boundary, so no unrelated
                     // FreshRequired state can be mistaken for this result.
                     Some(gwt::IssueMonitorFailure::ResumeWriterConflict { .. }) => true,
+                    // Issue #3616: the launch path never produces one (the
+                    // agent must be running to be refused), and the daemon
+                    // rejects it, so nothing committed.
+                    Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
                             self.issue_monitor_launch_failure_committed(
@@ -3100,6 +3164,11 @@ impl AppRuntime {
                                 ),
                                 issue_number,
                             )
+                        }
+                        // Issue #3616: unreachable from the launch path — the
+                        // agent must be running to receive a provider refusal.
+                        Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
+                            IssueMonitorFailureCommit::Rejected
                         }
                         None => {
                             if monitor.record_launch_failed_delivery(
@@ -3411,6 +3480,13 @@ impl AppRuntime {
         message: &str,
         session_mode: gwt_agent::SessionMode,
     ) -> Option<gwt::IssueMonitorFailure> {
+        // Issue #3616: the quota classification was made while the provider's
+        // notice was still on screen. The window detail derived from it is
+        // written for a human and is not itself a provider notice, so
+        // re-classifying the message would lose the reset instant.
+        if let Some(failure) = self.provider_quota_holds.get(window_id) {
+            return Some(failure.clone());
+        }
         let failure = runtime_events::classify_issue_monitor_failure(message, session_mode)?;
         let gwt::IssueMonitorFailure::ResumeWriterConflict {
             holder_window_id: None,
@@ -3576,6 +3652,33 @@ impl AppRuntime {
                                     ),
                                     issue_number,
                                 )
+                            }
+                            // Issue #3616: same hold the daemon applies, so a
+                            // quota block is not silently downgraded to a
+                            // terminal agent failure when the daemon is down.
+                            Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
+                                resets_at,
+                                ..
+                            }) => {
+                                let issue_number = issue_number_hint
+                                    .or_else(|| monitor.launched_window_issue(window_id));
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                match monitor.try_hold_provider_usage_limit(
+                                    issue_number,
+                                    window_id,
+                                    message.to_string(),
+                                    resets_at.as_deref(),
+                                    &now,
+                                ) {
+                                    gwt::IssueMonitorProviderUsageLimitOutcome::Held => {
+                                        IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                    }
+                                    gwt::IssueMonitorProviderUsageLimitOutcome::Rejected => {
+                                        IssueMonitorFailureCommit::Rejected
+                                    }
+                                }
                             }
                             None => {
                                 let issue_number = if let Some(issue_number) = issue_number_hint {
@@ -3779,6 +3882,80 @@ impl AppRuntime {
         if monitor_windows.is_empty() {
             return Vec::new();
         }
+        self.issue_monitor_release_closed_windows(project_root, monitor_windows)
+    }
+
+    /// Issue #3627: release launches whose agent window no longer exists.
+    ///
+    /// Slot release was driven exclusively by PTY exit events, so a window that
+    /// disappeared without one — an app restart, a crash, an error pane reaped
+    /// outside `close_window_events` — kept its `max_active` slot forever.
+    /// Nothing else reclaimed it either: `expire_stale_unbound_launches` only
+    /// covers claims that were never bound to a window, and
+    /// `recover_stuck_autonomous` returns early unless autonomous mode is on.
+    /// A human-gated deployment therefore sat with every slot held by an agent
+    /// that had been gone for over a day, and the queue behind it never moved.
+    ///
+    /// The tab's canvas is the store that issues these window ids, so its
+    /// contents are the authority on whether a window still exists. Consulting
+    /// it costs nothing, needs no new protocol, and — unlike a pid probe —
+    /// cannot be fooled by pid reuse. The release itself reuses the existing
+    /// `window_closed` control, which is the same accounting a manual close
+    /// performs: the Issue returns to `Queued` under the usual attempt budget
+    /// and backoff, never a fabricated completion.
+    pub(crate) fn issue_monitor_vanished_window_release_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        // Every tab open on this project is asked about its own windows. The
+        // scheduled tick visits a project once, through whichever tab it saw
+        // first, but a second tab on the same project shares these prefs and
+        // its launches would otherwise never be judged by anyone.
+        let live_windows_per_tab = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.project_root == project_root)
+            .map(|tab| {
+                (
+                    tab.id.clone(),
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .map(|window| window.id.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if live_windows_per_tab.is_empty() {
+            return Vec::new();
+        }
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        let vanished = live_windows_per_tab
+            .iter()
+            .flat_map(|(tab_id, live_window_ids)| {
+                monitor.vanished_launched_windows(tab_id, live_window_ids)
+            })
+            .collect::<Vec<_>>();
+        if vanished.is_empty() {
+            return Vec::new();
+        }
+        tracing::info!(
+            windows = ?vanished,
+            "releasing issue monitor launches whose agent window no longer exists"
+        );
+        self.issue_monitor_release_closed_windows(project_root, vanished)
+    }
+
+    fn issue_monitor_release_closed_windows(
+        &mut self,
+        project_root: &Path,
+        monitor_windows: Vec<String>,
+    ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         for window_id in monitor_windows {
             let publication = self.publish_issue_monitor_control(
@@ -4365,6 +4542,8 @@ impl AppRuntime {
                             gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                                 &mut monitor,
                                 &project_root,
+                                &owner,
+                                &repo,
                             )
                             .err()
                             .map(|error| {
@@ -4553,6 +4732,12 @@ impl AppRuntime {
             if !enabled_or_cleanup {
                 continue;
             }
+            // Issue #3627: reclaim slots held by windows that no longer exist
+            // before deciding what to launch. This runs on the periodic tick
+            // rather than the launch path because the launch path stops being
+            // reached at all once every slot is held — that is exactly the
+            // wedge, and a check gated behind free capacity could never open it.
+            events.extend(self.issue_monitor_vanished_window_release_events(&project_root));
             match self.enqueue_issue_monitor_scan_worker(
                 &project_root,
                 &prefs_path,
@@ -4570,6 +4755,62 @@ impl AppRuntime {
             }
         }
         events
+    }
+
+    /// Issue #3633 AC-1/AC-2: keep a runtime daemon alive for every project
+    /// whose Issue Monitor is enabled.
+    ///
+    /// The daemon is the single driver for the Issue Monitor control lane
+    /// (`scan_now`, `daemon.subscribe`), and nothing in the production
+    /// topology used to start one. Because the check is idempotent, "start it"
+    /// and "restart the one that died" are the same call; the caller only has
+    /// to keep calling.
+    pub(crate) fn ensure_runtime_daemons_for_enabled_projects(&mut self) {
+        let mut seen_prefs_paths = HashSet::new();
+        let project_roots: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .filter_map(|tab| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root);
+                seen_prefs_paths
+                    .insert(prefs_path.clone())
+                    .then(|| (tab.project_root.clone(), prefs_path))
+            })
+            .filter(|(_, prefs_path)| {
+                gwt::load_issue_monitor_prefs(prefs_path)
+                    .map(|prefs| prefs.enabled)
+                    .unwrap_or(false)
+            })
+            .map(|(project_root, _)| project_root)
+            .collect();
+        for project_root in project_roots {
+            self.ensure_runtime_daemon_for(&project_root);
+        }
+    }
+
+    /// Make sure a runtime daemon serves `project_root`.
+    ///
+    /// A failure here is logged rather than surfaced as a toast: the GUI
+    /// fallback still scans, so a daemon that cannot start degrades the
+    /// control lane instead of stopping the monitor. AC-5's staleness
+    /// projection is what makes the degraded state visible to a reader.
+    pub(crate) fn ensure_runtime_daemon_for(&self, project_root: &Path) {
+        match self.daemon_supervisor.ensure_running(project_root) {
+            Ok(gwt::daemon_supervisor::DaemonEnsureOutcome::Spawned { pid }) => {
+                tracing::info!(
+                    pid,
+                    project_root = %project_root.display(),
+                    "started the runtime daemon for the Issue Monitor"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                project_root = %project_root.display(),
+                "could not start the runtime daemon; the Issue Monitor stays on the local fallback"
+            ),
+        }
     }
 
     fn enqueue_issue_monitor_scan_worker(
@@ -5814,17 +6055,32 @@ impl AppRuntime {
                 self.accept_agent_self_close(grant, id, request_id, responder),
             ),
             AgentFrontendRequest::CloseWindow {
+                id,
                 request_id: Some(_),
                 ..
             }
             | AgentFrontendRequest::CloseWindow {
-                responder: Some(_), ..
+                id,
+                responder: Some(_),
+                ..
             } => {
                 tracing::warn!(
                     target: "gwt_security",
                     "correlated agent self-close rejected without an origin response channel"
                 );
-                AgentFrontendDispatchOutcome::Dispatched(Vec::new())
+                // Issue #3629 AC-12: even this should-never-happen refusal
+                // answers explicitly instead of silently producing no events.
+                AgentFrontendDispatchOutcome::Dispatched(vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneCloseResult {
+                        ok: false,
+                        window_id: id,
+                        reason: Some(
+                            "a correlated self-close was not routed with its response channel"
+                                .to_string(),
+                        ),
+                    },
+                )])
             }
             AgentFrontendRequest::PmSendInput {
                 operation_id,
@@ -5863,24 +6119,46 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         match request {
             AgentFrontendRequest::Ready => self.agent_frontend_sync_events(&client_id, &principal),
+            AgentFrontendRequest::ListWindows => {
+                vec![self.agent_workspace_state_reply(
+                    &client_id,
+                    &principal,
+                    WorktreeFormProjection::Persisted,
+                )]
+            }
             AgentFrontendRequest::CloseWindow {
                 id,
                 request_id,
                 responder,
             } => {
+                // Issue #3629 AC-10/AC-12: every close outcome answers the
+                // requesting client explicitly; a silent empty event list is
+                // indistinguishable from success on the wire.
+                let refusal = |reason: &str| {
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::PaneCloseResult {
+                            ok: false,
+                            window_id: id.clone(),
+                            reason: Some(reason.to_string()),
+                        },
+                    )]
+                };
                 if request_id.is_some() || responder.is_some() {
                     tracing::warn!(
                         target: "gwt_security",
                         "correlated agent self-close bypassed generation-aware dispatch"
                     );
-                    return Vec::new();
+                    return refusal(
+                        "a correlated self-close was not routed with its response channel",
+                    );
                 }
                 if !self.agent_principal_authorizes_window(&principal, &id) {
                     tracing::warn!(
                         target: "gwt_security",
                         "cross-project pane lifecycle request denied"
                     );
-                    return Vec::new();
+                    return refusal("window is outside the authenticated project scope");
                 }
                 let closes_own_session = self
                     .window_lookup
@@ -5894,9 +6172,23 @@ impl AppRuntime {
                         target: "gwt_security",
                         "uncorrelated agent self-close rejected"
                     );
-                    return Vec::new();
+                    return refusal(
+                        "closing the calling session requires a correlated acceptance (request_id)",
+                    );
                 }
-                self.close_window_events(&id)
+                let outcome = self.close_window_outcome(&id);
+                let reason = (!outcome.closed)
+                    .then(|| "the backend did not remove the window record".to_string());
+                let mut events = vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneCloseResult {
+                        ok: outcome.closed,
+                        window_id: id,
+                        reason,
+                    },
+                )];
+                events.extend(outcome.events);
+                events
             }
             AgentFrontendRequest::SendInput { text } => {
                 let window_id = match self.agent_principal_session_window(&principal) {
@@ -6055,10 +6347,22 @@ impl AppRuntime {
         principal: &AgentSessionPrincipal,
         window_id: &str,
     ) -> bool {
-        self.window_lookup
-            .get(window_id)
-            .and_then(|address| self.tab(&address.tab_id))
-            .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root))
+        if let Some(address) = self.window_lookup.get(window_id) {
+            return self
+                .tab(&address.tab_id)
+                .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root));
+        }
+        // Issue #3629 AC-9: a husk window (workspace record without a lookup
+        // entry, left behind by an app restart) resolves through the combined
+        // `{tab_id}::{raw_id}` form so it can still be closed.
+        self.tabs.iter().any(|tab| {
+            window_id
+                .strip_prefix(&format!("{}::", tab.id))
+                .is_some_and(|raw_id| {
+                    tab.workspace.window(raw_id).is_some()
+                        && principal.authorizes_project_root(&tab.project_root)
+                })
+        })
     }
 
     /// Resolve the authenticated Session only inside its capability project.
@@ -6094,18 +6398,8 @@ impl AppRuntime {
         client_id: &str,
         principal: &AgentSessionPrincipal,
     ) -> Vec<OutboundEvent> {
-        let mut workspace = self.app_state_view();
-        workspace
-            .tabs
-            .retain(|tab| principal.authorizes_project_root(Path::new(&tab.project_root)));
-        workspace.active_tab_id = workspace
-            .active_tab_id
-            .filter(|active| workspace.tabs.iter().any(|tab| &tab.id == active))
-            .or_else(|| workspace.tabs.first().map(|tab| tab.id.clone()));
-        // Recent-project history is process-global and is not required by
-        // pane.list/read. Never expose it on the agent capability route.
-        workspace.recent_projects.clear();
-
+        let workspace_state =
+            self.agent_workspace_state_reply(client_id, principal, WorktreeFormProjection::Resolve);
         let allowed_window_ids = self
             .window_lookup
             .iter()
@@ -6141,10 +6435,7 @@ impl AppRuntime {
             }
         }
 
-        let mut events = vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::WindowCanvasState { workspace },
-        )];
+        let mut events = vec![workspace_state];
         events.extend(terminal_snapshots.into_iter().map(|(id, snapshot)| {
             OutboundEvent::reply(
                 client_id,
@@ -6155,6 +6446,35 @@ impl AppRuntime {
             )
         }));
         events
+    }
+
+    fn agent_workspace_state_reply(
+        &self,
+        client_id: &str,
+        principal: &AgentSessionPrincipal,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> OutboundEvent {
+        let tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .map(|tab| self.project_tab_view(tab, worktree_form_projection))
+            .collect::<Vec<_>>();
+        let active_tab_id = self
+            .active_tab_id
+            .as_ref()
+            .filter(|active| tabs.iter().any(|tab| &tab.id == *active))
+            .cloned()
+            .or_else(|| tabs.first().map(|tab| tab.id.clone()));
+        let workspace = gwt::AppStateView {
+            app_version: crate::runtime_support::current_app_version().to_string(),
+            tabs,
+            active_tab_id,
+            // Recent-project history is process-global and is not required by
+            // pane.list/read. Never expose it on the agent capability route.
+            recent_projects: Vec::new(),
+        };
+        OutboundEvent::reply(client_id, BackendEvent::WindowCanvasState { workspace })
     }
 
     pub(crate) fn frontend_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
@@ -6230,20 +6550,7 @@ impl AppRuntime {
             tabs: self
                 .tabs
                 .iter()
-                .map(|tab| {
-                    let workspace = self.workspace_view_for_tab(tab);
-                    let running_agents =
-                        crate::runtime_support::collect_running_agents(&workspace.windows);
-                    gwt::ProjectTabView {
-                        id: tab.id.clone(),
-                        title: tab.title.clone(),
-                        project_root: tab.project_root.display().to_string(),
-                        kind: tab.kind,
-                        workspace,
-                        running_agent_count: running_agents.len() as u32,
-                        running_agents,
-                    }
-                })
+                .map(|tab| self.project_tab_view(tab, WorktreeFormProjection::Resolve))
                 .collect(),
             active_tab_id: self.active_tab_id.clone(),
             recent_projects: self
@@ -6258,7 +6565,33 @@ impl AppRuntime {
         }
     }
 
+    fn project_tab_view(
+        &self,
+        tab: &ProjectTabRuntime,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> gwt::ProjectTabView {
+        let workspace = self.workspace_view_for_tab_with(tab, worktree_form_projection);
+        let running_agents = crate::runtime_support::collect_running_agents(&workspace.windows);
+        gwt::ProjectTabView {
+            id: tab.id.clone(),
+            title: tab.title.clone(),
+            project_root: tab.project_root.display().to_string(),
+            kind: tab.kind,
+            workspace,
+            running_agent_count: running_agents.len() as u32,
+            running_agents,
+        }
+    }
+
     fn workspace_view_for_tab(&self, tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+        self.workspace_view_for_tab_with(tab, WorktreeFormProjection::Resolve)
+    }
+
+    fn workspace_view_for_tab_with(
+        &self,
+        tab: &ProjectTabRuntime,
+        worktree_form_projection: WorktreeFormProjection,
+    ) -> gwt::WorkspaceView {
         gwt::WorkspaceView {
             viewport: tab.workspace.persisted().viewport.clone(),
             windows: tab
@@ -6279,17 +6612,19 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
-                    window.worktree_form = self
-                        .active_agent_sessions
-                        .get(&window.id)
-                        .map(|session| {
-                            if self.session_uses_ephemeral_worktree(session) {
-                                gwt::WindowWorktreeForm::Ephemeral
-                            } else {
-                                gwt::WindowWorktreeForm::BranchBacked
-                            }
-                        })
-                        .unwrap_or(gwt::WindowWorktreeForm::Unknown);
+                    if worktree_form_projection == WorktreeFormProjection::Resolve {
+                        window.worktree_form = self
+                            .active_agent_sessions
+                            .get(&window.id)
+                            .map(|session| {
+                                if self.session_uses_ephemeral_worktree(session) {
+                                    gwt::WindowWorktreeForm::Ephemeral
+                                } else {
+                                    gwt::WindowWorktreeForm::BranchBacked
+                                }
+                            })
+                            .unwrap_or(gwt::WindowWorktreeForm::Unknown);
+                    }
                     if let gwt::WindowPlacement::AgentKanban {
                         board_id,
                         lane_id,
@@ -6590,11 +6925,17 @@ impl AppRuntime {
                 })?
         };
         let hook_state = self.window_hook_states.get(window_id).copied();
-        Some(gwt::window_state::compose_window_state_with_active_session(
+        let composed = gwt::window_state::compose_window_state_with_active_session(
             pty_state,
             preset,
             hook_state,
             self.active_agent_sessions.contains_key(window_id),
+        );
+        // Issue #3616: applied on the shared base so every reader of a window's
+        // status agrees with the state `recompute_window_state` persisted.
+        Some(gwt::window_state::apply_provider_quota_block(
+            composed,
+            self.provider_quota_holds.contains_key(window_id),
         ))
     }
 
@@ -6718,6 +7059,7 @@ impl AppRuntime {
         self.window_hook_states.clear();
         self.window_approval_waiting.clear();
         self.recoverable_agent_error_windows.clear();
+        self.provider_quota_holds.clear();
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
@@ -6763,6 +7105,10 @@ impl AppRuntime {
             self.active_agent_sessions.contains_key(window_id),
             self.window_approval_waiting.contains_key(window_id),
         );
+        let composed = gwt::window_state::apply_provider_quota_block(
+            composed,
+            self.provider_quota_holds.contains_key(window_id),
+        );
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -6776,7 +7122,33 @@ impl AppRuntime {
         self.window_hook_states.remove(window_id);
         self.clear_runtime_approval_latch_without_status(window_id, true);
         self.recoverable_agent_error_windows.remove(window_id);
+        self.provider_quota_holds.remove(window_id);
+        self.provider_quota_candidates.remove(window_id);
         self.board_all_view_windows.remove(window_id);
+    }
+
+    /// Issue #3616: record the newest account-level usage snapshot and act on
+    /// any candidate it now corroborates.
+    ///
+    /// The snapshot is corroboration only. `limit_reached` is read from local
+    /// rollout files (Codex) or an opt-in account endpoint (Claude), so it can
+    /// be absent exactly when a block is real; the screen notice remains the
+    /// trigger.
+    pub(crate) fn handle_provider_usage_snapshot(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        self.provider_usage_accounts = accounts;
+        self.sweep_provider_quota_candidates(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_provider_usage_accounts(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+    ) {
+        self.provider_usage_accounts = accounts;
     }
 
     fn tracked_window_exists(&self, window_id: &str) -> bool {
