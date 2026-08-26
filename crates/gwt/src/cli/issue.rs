@@ -266,6 +266,8 @@ fn issue_monitor_project_root<E: CliEnv>(
 }
 
 /// Issue #3655 AC-4 / AC-9: fold Board escalations into `needs_human`.
+/// Issue #3602: first remove cache-proven closed Issues from every
+/// current-action status collection, including an older daemon projection.
 ///
 /// The autonomous lifecycle only knows about the issues *it* parked, so an
 /// agent that stopped because an operation refused it was invisible in the one
@@ -285,10 +287,77 @@ fn merge_board_escalations_into_needs_human(
                 %error,
                 "could not read the Board escalation index for issue.monitor.status"
             );
-            return;
+            Vec::new()
         }
     };
+    let cache =
+        Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root));
+    let projected_issue_numbers = status
+        .queue
+        .iter()
+        .chain(&status.active_launches)
+        .chain(&status.needs_human)
+        .copied()
+        .chain(status.inbox.iter().map(|item| item.issue_number))
+        .chain(escalated.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    let closed_issue_numbers = projected_issue_numbers
+        .into_iter()
+        .filter(|issue_number| {
+            let Some(entry) = cache.load_entry(IssueNumber(*issue_number)) else {
+                return false;
+            };
+            if entry.snapshot.state != IssueState::Closed {
+                return false;
+            }
+            let cached_closed_at =
+                chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0).ok();
+            let newer_live_open = status.inbox.iter().any(|item| {
+                if item.issue_number != *issue_number
+                    || item.github_state != crate::IssueMonitorIssueState::Open
+                {
+                    return false;
+                }
+                let Some(cached_closed_at) = cached_closed_at else {
+                    // A malformed cached revision cannot suppress a positive
+                    // live Open row from the daemon projection.
+                    return true;
+                };
+                item.issue_updated_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .is_some_and(|live_open_at| live_open_at > cached_closed_at)
+            });
+            !newer_live_open
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    status
+        .queue
+        .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
+    status
+        .active_launches
+        .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
+    status
+        .needs_human
+        .retain(|issue_number| !closed_issue_numbers.contains(issue_number));
+    status
+        .inbox
+        .retain(|item| !closed_issue_numbers.contains(&item.issue_number));
+    if status.last_error.as_ref().is_some_and(|error| {
+        closed_issue_numbers
+            .iter()
+            .any(|issue_number| error.starts_with(&format!("issue #{issue_number}:")))
+    }) {
+        status.last_error = None;
+    }
     for issue_number in escalated {
+        // Issue #3602: Board is immutable coordination history, while
+        // `needs_human` is a current-action projection. Suppress only when the
+        // canonical cache positively proves Closed; missing/corrupt cache data
+        // deliberately fails open so an unverified escalation is never hidden.
+        if closed_issue_numbers.contains(&issue_number) {
+            continue;
+        }
         if !status.needs_human.contains(&issue_number) {
             status.needs_human.push(issue_number);
         }
@@ -2069,6 +2138,160 @@ mod tests {
             serde_json::json!([2338]),
             "an agent blocked on #2338 must be findable without reading its pane: {out}"
         );
+    }
+
+    #[test]
+    fn issue_monitor_status_excludes_only_cache_proven_closed_board_owners() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        for issue_number in [2338, 2339] {
+            let escalation = gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Claude Code",
+                gwt_core::coordination::BoardEntryKind::Blocked,
+                "事象: 拒否\n原因: immutable\n依頼: fresh launch\n再開条件: 新 pane",
+                None,
+                None,
+                vec![],
+                vec![issue_number.to_string()],
+            );
+            gwt_core::coordination::post_entry(&repo, escalation).expect("post escalation");
+        }
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(2338),
+                title: "Closed owner".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Closed,
+                updated_at: UpdatedAt::new("2026-08-26T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write closed cache entry");
+
+        let mut published = crate::IssueMonitorAgentStatus {
+            queue: vec![2338],
+            active_launches: vec![2338],
+            max_active: 1,
+            enabled: true,
+            autonomous_mode: true,
+            has_launch_profile: true,
+            needs_human: vec![2338],
+            inbox: Vec::new(),
+            last_error: Some("issue #2338: stale failure".to_string()),
+            last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
+            scan_stall: None,
+        };
+        merge_board_escalations_into_needs_human(&repo, &mut published);
+        assert!(published.queue.is_empty());
+        assert!(published.active_launches.is_empty());
+        assert_eq!(published.needs_human, vec![2339]);
+        assert_eq!(published.last_error, None);
+
+        let mut live_open = crate::IssueMonitorAgentStatus {
+            queue: vec![2338],
+            active_launches: Vec::new(),
+            max_active: 1,
+            enabled: true,
+            autonomous_mode: true,
+            has_launch_profile: true,
+            needs_human: vec![2338],
+            inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                issue_number: 2338,
+                state: crate::MonitorInboxState::Queued,
+                github_state: crate::IssueMonitorIssueState::Open,
+                issue_updated_at: Some("2026-08-27T00:00:00Z".to_string()),
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
+                recoverable_merged: false,
+                completion_reason: None,
+                blocked_by_owner: None,
+                launched_window_id: None,
+                error_message: None,
+                last_activity_at: None,
+                retry_not_before: None,
+                retry_hold_reason: None,
+                claim_id: None,
+                delivery_id: None,
+            }],
+            last_error: Some("issue #2338: live failure".to_string()),
+            last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
+            scan_stall: None,
+        };
+        merge_board_escalations_into_needs_human(&repo, &mut live_open);
+        assert_eq!(live_open.queue, vec![2338]);
+        assert_eq!(live_open.needs_human, vec![2338, 2339]);
+        assert_eq!(live_open.inbox.len(), 1);
+        assert_eq!(
+            live_open.last_error.as_deref(),
+            Some("issue #2338: live failure")
+        );
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert_eq!(
+            status["needs_human"],
+            serde_json::json!([2339]),
+            "cache-proven closed owners are not actionable; missing cache fails open: {out}"
+        );
+        assert_eq!(
+            gwt_core::coordination::load_escalation_store(&repo)
+                .expect("escalation store")
+                .open_owner_issue_numbers(),
+            vec![2338, 2339],
+            "status filtering must not rewrite Board history"
+        );
+    }
+
+    #[test]
+    fn closed_cache_reconciliation_does_not_depend_on_the_board_index() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(2338),
+                title: "Closed owner".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Closed,
+                updated_at: UpdatedAt::new("2026-08-26T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write closed cache entry");
+        let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
+        std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
+        let mut published = crate::IssueMonitorAgentStatus {
+            queue: vec![2338],
+            active_launches: Vec::new(),
+            max_active: 1,
+            enabled: true,
+            autonomous_mode: true,
+            has_launch_profile: true,
+            needs_human: vec![2338],
+            inbox: Vec::new(),
+            last_error: Some("issue #2338: stale failure".to_string()),
+            last_scan_at: None,
+            scan_stall: None,
+        };
+
+        merge_board_escalations_into_needs_human(&repo, &mut published);
+
+        assert!(published.queue.is_empty());
+        assert!(published.needs_human.is_empty());
+        assert_eq!(published.last_error, None);
     }
 
     /// ...and disappear again the moment somebody resolves it.
