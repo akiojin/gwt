@@ -18811,10 +18811,11 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
     );
 
     let mut config = super::launch_config_from_persisted_session(&predecessor);
-    // The authenticated continuation result is the authority source of truth.
-    // A stale launch projection may omit the owner, but must be repaired before
-    // the exact binding is installed on the durable Session.
-    config.linked_issue_number = None;
+    assert_eq!(
+        config.linked_issue_number,
+        Some(42),
+        "the Issue #3625 regression fixture must reach Prepared validation before failing"
+    );
     config.command = fake_codex.display().to_string();
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:45155/internal/hook-live",
