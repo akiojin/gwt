@@ -10817,6 +10817,77 @@ exit 1
         );
     }
 
+    /// Issue #3757 / SPEC #3165 FR-134: a claim already Attempting when the
+    /// operator requeues is an old-cycle mutation. Its late remote success is
+    /// compensated, but cannot consume the recovery fence or publish a launch.
+    #[test]
+    fn acquired_claim_started_before_requeue_cannot_publish_a_launch() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        let key = monitor
+            .prepare_pending_effect(
+                "claim-before-release",
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    claim_id: "old-claim".to_string(),
+                    owner: "host/session".to_string(),
+                    heartbeat_at: "2026-08-26T00:00:00Z".to_string(),
+                    expires_at: "2026-08-26T00:30:00Z".to_string(),
+                    launched_work_id: Some("work/issue-42".to_string()),
+                },
+            )
+            .expect("prepare old claim");
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let attempting = monitor.pending_effects()[0].clone();
+        monitor.record_launch_failed(42, "attempts exhausted");
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-26T00:10:00Z"),
+            crate::IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist requeue");
+
+        assert!(super::commit_issue_monitor_effect_result(
+            &prefs_path,
+            &mut monitor,
+            super::CompletedIssueMonitorEffect {
+                effect: attempting,
+                outcome: super::IssueMonitorEffectOutcome::Claim(Ok(
+                    gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                        gwt_github::issue_auto_claim::ClaimComment {
+                            comment_id: Some(gwt_github::CommentId(99)),
+                            claim_id: "old-claim".to_string(),
+                            owner: "host/session".to_string(),
+                            issue_number: 42,
+                            status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                            heartbeat_at: "2026-08-26T00:00:00Z".to_string(),
+                            expires_at: "2026-08-26T00:30:00Z".to_string(),
+                            launched_work_id: Some("work/issue-42".to_string()),
+                        },
+                    ),
+                )),
+                completed_at: "2026-08-26T00:11:00Z".to_string(),
+            },
+        ));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(persisted.released_failures.len(), 1);
+        assert!(persisted.launching_issues.is_empty());
+        assert!(persisted.pending_launch_deliveries.is_empty());
+        assert!(persisted.pending_effects.iter().any(|effect| matches!(
+            &effect.payload,
+            crate::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id,
+                owner,
+            } if claim_id == "old-claim" && owner == "host/session"
+        )));
+    }
+
     #[test]
     fn acquired_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
         let temp = TempDir::new().expect("tempdir");
@@ -11593,6 +11664,68 @@ exit 1
                 .all(|launched| launched.issue_number != 42),
             "the merged issue must not persist as both launched and merged"
         );
+    }
+
+    /// Issue #3757 / SPEC #3165 Scenarios 102-103: `gwtd requeue` updates the
+    /// shared preferences while the daemon can still hold the abandoned launch
+    /// in memory. Persisting that stale daemon and then restarting must not
+    /// reconstruct a stuck Idle launch or spend attempt 1 of the reset budget.
+    #[test]
+    fn requeue_then_stale_daemon_persist_and_restart_does_not_rederive_stuck_attempt() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor-prefs.json");
+
+        let mut recovery = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        recovery.record_candidate(sample_issue_monitor_issue(42));
+        for _ in 0..3 {
+            recovery.record_attempt(42);
+        }
+        recovery.record_launch_failed(42, "attempts exhausted");
+        assert!(matches!(
+            recovery.requeue_failed_issue(42, "operator recovery", "2026-08-26T00:10:00Z"),
+            crate::IssueMonitorRequeueOutcome::Requeued {
+                attempts_before: 3,
+                attempts_after: 0,
+                ..
+            }
+        ));
+        crate::save_issue_monitor_prefs(&prefs_path, &recovery.prefs())
+            .expect("persist successful requeue");
+
+        let mut stale_daemon = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        stale_daemon.record_candidate(sample_issue_monitor_issue(42));
+        stale_daemon.set_autonomous_mode(true);
+        stale_daemon.complete_active_launch(42, "tab-1::stale-agent");
+        for _ in 0..3 {
+            stale_daemon.record_attempt(42);
+        }
+        stale_daemon.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        stale_daemon.record_autonomous_heartbeat(42, "2026-08-25T20:00:00Z");
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut stale_daemon);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        let mut restarted =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+
+        assert!(
+            restarted
+                .recover_stuck_autonomous("2026-08-26T00:20:00Z")
+                .is_empty(),
+            "pre-requeue liveness must not be classified as a new stuck attempt"
+        );
+        assert_eq!(restarted.attempt_count(42), 0);
+        assert_eq!(restarted.active_count(), 0);
+        assert!(restarted.queued_issue_numbers().contains(&42));
+        let prefs = restarted.prefs();
+        assert!(prefs.failed_issues.is_empty());
+        assert!(prefs.launched_issues.is_empty());
+        assert!(prefs.launching_issues.is_empty());
     }
 
     #[test]
