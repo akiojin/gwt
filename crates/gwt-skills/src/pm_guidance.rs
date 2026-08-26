@@ -317,6 +317,49 @@ Hard limits, no exceptions:
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
+## Terminal pane triage and disposition
+
+During residency, inventory terminal pane candidates every cycle with a
+fresh `pane.list`. Candidates are
+`stopped` and `error` panes, plus an `idle` pane only when fresh Work
+evidence says its delivery settlement is terminal and clear; idle alone
+never makes a pane terminal. Runtime state starts an investigation; it
+never authorizes cleanup by itself.
+
+For each candidate, use this order:
+
+1. First, identify the owning Work and Issue from the exact pane, Session,
+   Monitor launch, and Work identities. An unknown owner is a reason to
+   keep the pane, not to infer one.
+2. Reconcile fresh delivery evidence from the current Issue and ECR plus
+   authoritative merge and release state. Cached `linked_prs`, a Board
+   post, or scrollback is never delivery proof by itself.
+3. Next, recover or requeue undelivered work through its canonical Issue or
+   Monitor operation before considering cleanup.
+4. Read any failure details and record the diagnosis and disposition
+   durably in the canonical Issue Monitor, Issue, or Board record.
+5. Immediately before cleanup, reread the owner's latest Board body and
+   verify the fresh exact Monitor target and liveness. If a successful
+   lifecycle operation returned an inert pane ID, match that receipt to
+   fresh inventory and do not re-resolve a replacement target. Then close
+   only the exact inert pane after confirming that it is unbound and has
+   no remaining diagnostic value. Report failure or timeout as failure;
+   do not claim that a close landed without its receipt.
+
+Fail closed. Keep the pane for an unread or unfiled error, an unsettled
+or open delivery, evidence still needed for `needs_human`, an unknown
+owner, or any other unresolved obligation. A recorded error alone is
+not sufficient: recovery and disposition must also be durable. Never
+bulk-close every stopped, error, or idle pane by state.
+
+End the cycle with a disposition digest for candidates that required an
+action or report. Use the columns `pane / owner / delivery and
+diagnostic state / disposition / receipt`, and state why each pane was
+kept, recovered, or closed. Project-wide mandatory behavior belongs in
+the managed skill, hook, or runtime that can deliver it to every
+session; memory may preserve a learning or rationale but is not an
+execution contract.
+
 ## NeedsHuman
 
 - When `issue.monitor.status` lists an issue under `needs_human`,
@@ -565,6 +608,16 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // FR-137〜140: terminal cleanup is a fail-closed delivery and
+            // diagnostic reconciliation, never a blanket status sweep.
+            "## Terminal pane triage and disposition",
+            "inventory terminal pane candidates every cycle",
+            "idle alone never makes a pane terminal",
+            "recover or requeue undelivered work",
+            "verify the fresh exact Monitor target and liveness",
+            "do not re-resolve a replacement target",
+            "close only the exact inert pane",
+            "pane / owner / delivery and diagnostic state / disposition / receipt",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
             // FR-015: the PM must be able to account for its own ordering.
@@ -605,6 +658,71 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// SPEC-3431 FR-137〜140: cleanup is a reconciliation workflow, not a
+    /// blanket state-based close. The order matters because a pane may be the
+    /// last remaining evidence for work that was never delivered.
+    #[test]
+    fn contract_triages_terminal_panes_before_cleanup_and_reports_disposition() {
+        let body = body();
+        let heading = body
+            .find("## Terminal pane triage and disposition")
+            .expect("terminal pane triage section");
+        let inventory = body[heading..]
+            .find("inventory terminal pane candidates every cycle")
+            .expect("every-cycle inventory");
+        let identity = body[heading..]
+            .find("identify the owning Work and Issue")
+            .expect("owner identity reconciliation");
+        let delivery = body[heading..]
+            .find("fresh delivery evidence")
+            .expect("fresh delivery reconciliation");
+        let recovery = body[heading..]
+            .find("recover or requeue undelivered work")
+            .expect("recovery before cleanup");
+        let durable = body[heading..]
+            .find("record the diagnosis and disposition durably")
+            .expect("durable diagnostics");
+        let close = body[heading..]
+            .find("close only the exact inert pane")
+            .expect("exact inert close");
+        let digest = body[heading..]
+            .find("pane / owner / delivery and diagnostic state / disposition / receipt")
+            .expect("disposition digest");
+
+        assert!(inventory < identity);
+        assert!(identity < delivery);
+        assert!(delivery < recovery);
+        assert!(recovery < durable);
+        assert!(durable < close);
+        assert!(close < digest);
+    }
+
+    /// SPEC-3431 FR-138: terminal-looking runtime state is only a reason to
+    /// inspect. Unsettled work and human/diagnostic evidence stay fail-closed.
+    #[test]
+    fn contract_retains_terminal_panes_until_diagnostics_are_durable() {
+        let body = body();
+        let heading = body
+            .find("## Terminal pane triage and disposition")
+            .expect("terminal pane triage section");
+        let section_end = body[heading..]
+            .find("## NeedsHuman")
+            .map_or(body.len(), |offset| heading + offset);
+        let section = &body[heading..section_end];
+        for phrase in [
+            "idle alone never makes a pane terminal",
+            "unread or unfiled error",
+            "evidence still needed for `needs_human`",
+            "unknown owner",
+            "keep the pane",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "terminal pane triage contract is missing: {phrase}"
+            );
+        }
     }
 
     /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found

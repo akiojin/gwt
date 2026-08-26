@@ -537,6 +537,8 @@ impl AppRuntime {
             self.stop_window_runtime(window_id);
             self.remove_window_state_tracking(window_id);
             self.window_lookup.remove(window_id);
+            self.window_incarnations.remove(window_id);
+            self.launch_error_terminal_details.remove(window_id);
             self.profile_selections.remove(window_id);
         }
 

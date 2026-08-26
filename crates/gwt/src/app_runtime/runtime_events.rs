@@ -826,6 +826,8 @@ impl AppRuntime {
             ) {
                 return cleanup_events;
             }
+            self.window_incarnations.remove(&id);
+            self.launch_error_terminal_details.remove(&id);
             let _ = self.persist();
             let mut events = cleanup_events;
             // SPEC-3431 FR-067: auto-close reaps the window itself instead of
@@ -1350,6 +1352,8 @@ impl AppRuntime {
                 &mut self.window_details,
                 &window_id,
             ) {
+                self.window_incarnations.remove(&window_id);
+                self.launch_error_terminal_details.remove(&window_id);
                 let _ = self.persist();
                 self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             }

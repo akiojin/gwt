@@ -338,6 +338,7 @@ impl AppRuntime {
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
+            let failed_window = self.issue_monitor_failed_window_identity(&window_id);
             self.launch_error_terminal_details
                 .insert(window_id.clone(), user_detail.clone());
             let mut events = self.handle_runtime_status(
@@ -353,6 +354,7 @@ impl AppRuntime {
                     &detail,
                     issue_monitor_delivery_id.as_deref(),
                     issue_monitor_session_mode,
+                    failed_window.as_ref(),
                 ));
             }
             return events;
@@ -379,6 +381,7 @@ impl AppRuntime {
                 &detail,
                 issue_monitor_delivery_id.as_deref(),
                 issue_monitor_session_mode,
+                None,
             ));
         }
         events

@@ -3571,6 +3571,7 @@ fn sample_runtime_with_events(
         window_details: HashMap::new(),
         launch_error_terminal_details: HashMap::new(),
         window_lookup: HashMap::new(),
+        window_incarnations: HashMap::new(),
         board_all_view_windows: std::collections::HashSet::new(),
         session_state_path: temp_root.join("session-state.json"),
         log_dir,
@@ -22214,7 +22215,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
     let window_id = combined_window_id("tab-1", "agent-1");
 
     let events = runtime.launch_error_events(
-        window_id,
+        window_id.clone(),
         "binary missing".to_string(),
         Some(LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
@@ -22245,6 +22246,248 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             } if level == "error" && message == "binary missing" && *issue_number == Some(42)
         )
     }));
+    let committed_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorLaunchFailed { issue_number, .. }
+                    if *issue_number == 42
+            )
+        })
+        .expect("durable Issue Monitor failure acknowledgement");
+    let close_index = events
+        .iter()
+        .rposition(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. }))
+        .expect("post-finalize workspace update");
+    assert!(
+        committed_index < close_index,
+        "the Monitor failure must commit before the exact window is removed"
+    );
+    assert!(
+        !runtime.window_lookup.contains_key(&window_id),
+        "a diagnostically durable Monitor-owned pre-PTY failure must not leave a restorable husk"
+    );
+    assert!(
+        runtime
+            .persist_dispatcher
+            .wait_idle(std::time::Duration::from_secs(5)),
+        "post-finalize workspace persistence must drain"
+    );
+    let restored = load_restored_workspace_state(temp.path()).expect("reload persisted workspace");
+    assert!(
+        restored.windows.iter().all(|window| window.id != "agent-1"),
+        "the failed window must not return from persisted workspace state"
+    );
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(temp.path()))
+            .expect("reload durable Issue Monitor failure");
+    assert!(prefs
+        .failed_issues
+        .iter()
+        .any(|failed| { failed.issue_number == 42 && failed.message == "binary missing" }));
+}
+
+#[test]
+fn app_runtime_launch_failure_keeps_window_when_durable_close_persistence_fails() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let workspace_path = gwt::workspace_state_path(temp.path());
+    fs::create_dir_all(&workspace_path).expect("block workspace file with a directory");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+
+    let events = runtime.launch_error_events(
+        window_id.clone(),
+        "binary missing".to_string(),
+        Some(LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root: Some(temp.path().to_path_buf()),
+            issue_monitor_session_mode: None,
+        }),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorLaunchFailed { issue_number, .. } if *issue_number == 42
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message.contains("durable failed-window cleanup persistence failed")
+    )));
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "a failed durable absence barrier must keep the diagnostic window in memory"
+    );
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(temp.path()))
+            .expect("reload committed failure");
+    assert!(prefs
+        .failed_issues
+        .iter()
+        .any(|failed| failed.issue_number == 42 && failed.message == "binary missing"));
+}
+
+#[test]
+fn app_runtime_manual_launch_error_retains_the_diagnostic_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+
+    let events =
+        runtime.launch_error_events(window_id.clone(), "manual binary missing".to_string(), None);
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                id,
+                status: WindowProcessStatus::Error,
+                ..
+            } if id == &window_id
+        )
+    }));
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "manual/non-Monitor errors remain visible for diagnosis"
+    );
+}
+
+#[test]
+fn app_runtime_uncommitted_monitor_launch_error_retains_the_diagnostic_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let delivery_id = "launch:rejected-42";
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&window_id)
+        .expect("failed window identity");
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "launch rejected before commit".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(failed_window.clone()),
+        },
+    );
+
+    let events = runtime.issue_monitor_launch_failed_result_events_with_delivery(
+        Some(&repo),
+        42,
+        "launch rejected before commit",
+        Some(delivery_id),
+        super::IssueMonitorLaunchFailureFinalizeContext {
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(&failed_window),
+        },
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
+                "rejected".to_string(),
+            ),
+        ),
+    );
+
+    assert!(events.iter().all(|event| {
+        !matches!(
+            &event.event,
+            BackendEvent::IssueMonitorLaunchFailed { issue_number, .. }
+                if *issue_number == 42
+        )
+    }));
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "a window must remain when the durable Monitor acknowledgement is absent"
+    );
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. })
+    ));
+}
+
+#[test]
+fn app_runtime_delayed_launch_failure_ack_does_not_close_a_replacement_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let failed_window_id = combined_window_id("tab-1", "agent-1");
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&failed_window_id)
+        .expect("failed window identity");
+
+    let closed = runtime.close_window_after_issue_monitor_finalize_events(&failed_window_id);
+    assert!(!closed.is_empty());
+    let replacement = runtime.tab_mut("tab-1").expect("tab").workspace.add_window(
+        WindowPreset::Agent,
+        WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 500.0,
+        },
+    );
+    assert_eq!(replacement.id, "agent-1", "fixture must reuse the raw id");
+    runtime.register_window("tab-1", &replacement.id);
+    assert!(runtime.window_lookup.contains_key(&failed_window_id));
+
+    let events = runtime.issue_monitor_launch_failed_result_events_with_delivery(
+        None,
+        42,
+        "old launch failed",
+        None,
+        super::IssueMonitorLaunchFailureFinalizeContext {
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(&failed_window),
+        },
+        Ok(()),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorLaunchFailed { issue_number, .. } if *issue_number == 42
+    )));
+    assert!(
+        runtime.window_lookup.contains_key(&failed_window_id),
+        "a delayed acknowledgement for the old incarnation must not close its replacement"
+    );
 }
 
 #[test]
@@ -39314,8 +39557,15 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
     ));
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed lifecycle prefs");
     let before = fs::read(&prefs_path).expect("read lifecycle prefs");
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let failed_window_id = combined_window_id("tab-1", "agent-1");
     runtime.issue_monitor_materializer_id = "gui-a".to_string();
     reset_local_issue_monitor_fallback_commit_count();
 
@@ -39324,7 +39574,10 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         42,
         "launch failed",
         Some("launch:effect-42"),
-        gwt_agent::SessionMode::Normal,
+        super::IssueMonitorLaunchFailureFinalizeContext {
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: None,
+        },
         Ok(()),
     );
     assert!(published.is_empty());
@@ -39333,13 +39586,19 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         fs::read(&prefs_path).expect("reload published prefs"),
         before
     );
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&failed_window_id)
+        .expect("failed window identity");
 
     let fallback = runtime.issue_monitor_launch_failed_result_events_with_delivery(
         Some(&repo),
         42,
         "launch failed",
         Some("launch:effect-42"),
-        gwt_agent::SessionMode::Normal,
+        super::IssueMonitorLaunchFailureFinalizeContext {
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(&failed_window),
+        },
         Err(
             gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
                 "daemon not running".to_string(),
@@ -39369,6 +39628,10 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         .failed_issues
         .iter()
         .any(|failed| failed.issue_number == 42 && failed.message == "launch failed"));
+    assert!(
+        !runtime.window_lookup.contains_key(&failed_window_id),
+        "a durable delivery failure must remove its exact pre-PTY window"
+    );
 }
 
 #[test]
@@ -41150,6 +41413,120 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         .expect("reload ACKed prefs")
         .pending_launch_deliveries
         .is_empty());
+}
+
+#[test]
+fn durable_issue_monitor_delivery_restart_records_interruption_before_cleanup() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3165,
+        title: "SPEC: interrupted durable delivery".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3165,
+        "claim-3165",
+        "host/session",
+        "effect-3165",
+        "2026-07-28T00:00:00Z",
+    ));
+    assert!(monitor.claim_launch_delivery(
+        3165,
+        "launch:effect-3165",
+        "crashed-gui",
+        2_000_000_000,
+        "tab-1::agent-1",
+        |_| false,
+    ));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+        .expect("seed interrupted delivery");
+
+    let persisted_tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    gwt::save_workspace_state(
+        &gwt::workspace_state_path(&repo),
+        persisted_tab.workspace.persisted(),
+    )
+    .expect("persist interrupted diagnostic window");
+    let restored_workspace = gwt::load_restored_workspace_state(&repo).expect("restore workspace");
+    assert_eq!(
+        restored_workspace.windows[0].status,
+        WindowProcessStatus::Stopped,
+        "restart fixture must lose process-local Error status"
+    );
+    let restored_tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(restored_workspace),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (mut restarted, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![restored_tab], Some("tab-1"));
+    restarted.issue_monitor_materializer_id = "restarted-gui".to_string();
+
+    let events = restarted.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+
+    let committed_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorLaunchFailed { issue_number, message }
+                    if *issue_number == 3165
+                        && message == super::ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE
+            )
+        })
+        .expect("restart interruption must commit to the Issue Monitor");
+    let close_index = events
+        .iter()
+        .rposition(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
+        .expect("restart interruption must remove the bound window");
+    assert!(committed_index < close_index);
+    assert!(restarted.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .all(|window| window.id != "agent-1"));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload interruption result");
+    assert!(persisted.pending_launch_deliveries.is_empty());
+    assert!(persisted.failed_issues.iter().any(|failed| {
+        failed.issue_number == 3165
+            && failed.message == super::ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE
+    }));
+    let restored = gwt::load_restored_workspace_state(&repo).expect("reload cleaned workspace");
+    assert!(restored.windows.iter().all(|window| window.id != "agent-1"));
 }
 
 #[test]

@@ -2053,6 +2053,7 @@ impl AppRuntime {
                 Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed {
                     message,
                     session_mode,
+                    failed_window,
                 }) => {
                     return self.issue_monitor_launch_failed_delivery_events_with_mode(
                         Some(project_root),
@@ -2060,6 +2061,7 @@ impl AppRuntime {
                         &message,
                         Some(delivery_id),
                         session_mode,
+                        failed_window.as_ref(),
                     );
                 }
                 None => {}
@@ -2086,8 +2088,18 @@ impl AppRuntime {
                     }
                 }
                 if !was_materialized {
-                    recovery_events
-                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                    let failed_window = self.issue_monitor_failed_window_identity(&window_id);
+                    recovery_events.extend(
+                        self.issue_monitor_launch_failed_delivery_events_with_mode(
+                            Some(project_root),
+                            issue_number,
+                            super::ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE,
+                            Some(delivery_id),
+                            gwt_agent::SessionMode::Normal,
+                            failed_window.as_ref(),
+                        ),
+                    );
+                    return recovery_events;
                 } else {
                     let Some((window_id, materialized, workspace_durable)) = self
                         .existing_issue_monitor_delivery_window(

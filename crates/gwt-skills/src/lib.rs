@@ -1977,6 +1977,23 @@ mod tests {
     }
 
     #[test]
+    fn agents_routes_mandatory_behavior_to_durable_delivery_surfaces() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+
+        for needle in [
+            "プロジェクト全体の必須挙動は managed skill / hook / runtime に実装する",
+            "work-notes memory は学習・理由の記録であり、必須挙動の配信面として使わない",
+        ] {
+            assert!(
+                agents.contains(needle),
+                "expected AGENTS.md to document durable behavior policy: {needle}"
+            );
+        }
+    }
+
+    #[test]
     fn agents_does_not_duplicate_generated_guidance_body() {
         // SPEC-1935 US-* (Coordination Guidance Generator):
         // Board / Workspace operational rules (kind taxonomy, audience

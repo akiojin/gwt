@@ -894,7 +894,9 @@ impl AppRuntime {
         tab.workspace.close_window(&raw_id);
         let combined = combined_window_id(tab_id, &raw_id);
         self.window_lookup.remove(&combined);
+        self.window_incarnations.remove(&combined);
         self.window_details.remove(&combined);
+        self.launch_error_terminal_details.remove(&combined);
         Some(geometry)
     }
 

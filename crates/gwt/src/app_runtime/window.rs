@@ -451,6 +451,55 @@ impl AppRuntime {
             .events
     }
 
+    /// Close a diagnostically finalized failed window only after its absence is
+    /// crash-durable. The dispatcher barrier runs after every older snapshot,
+    /// so a queued pre-failure workspace cannot resurrect the pane on restart.
+    /// If persistence fails, keep the in-memory pane fail-closed for inspection.
+    pub(crate) fn close_window_after_issue_monitor_failure_finalize_events(
+        &mut self,
+        id: &str,
+        issue_number: u64,
+    ) -> Vec<OutboundEvent> {
+        if let Err(error) = self.persist_failed_window_absence_durable(id) {
+            return self.issue_monitor_control_error_events(
+                None,
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                    format!("durable failed-window cleanup persistence failed: {error}"),
+                ),
+                "persist-finalized-launch-failure-window-close",
+                Some(issue_number),
+            );
+        }
+        self.close_window_outcome_with_monitor_notification(id, false)
+            .events
+    }
+
+    fn persist_failed_window_absence_durable(&self, id: &str) -> Result<(), String> {
+        let address = self
+            .window_lookup
+            .get(id)
+            .ok_or_else(|| format!("failed window {id} is not registered"))?;
+        let tab = self.tab(&address.tab_id).ok_or_else(|| {
+            format!(
+                "failed window project tab {} is unavailable",
+                address.tab_id
+            )
+        })?;
+        let mut workspace = self.persistable_workspace_state(tab);
+        let before = workspace.windows.len();
+        workspace
+            .windows
+            .retain(|window| window.id != address.raw_id);
+        if workspace.windows.len() == before {
+            return Err(format!(
+                "failed window {id} is absent from the workspace snapshot"
+            ));
+        }
+        self.persist_dispatcher
+            .flush_workspace_durable(gwt::workspace_state_path(&tab.project_root), workspace)
+            .map_err(|error| error.to_string())
+    }
+
     fn close_window_outcome_with_monitor_notification(
         &mut self,
         id: &str,
@@ -479,6 +528,8 @@ impl AppRuntime {
                 events: Vec::new(),
             };
         }
+        self.launch_error_terminal_details.remove(id);
+        self.window_incarnations.remove(id);
         let pm_deregistered = match (
             closing_session_id.as_deref(),
             issue_monitor_project_root.as_ref(),

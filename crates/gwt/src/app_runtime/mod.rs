@@ -695,7 +695,23 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
     LaunchFailed {
         message: String,
         session_mode: gwt_agent::SessionMode,
+        failed_window: Option<IssueMonitorFailedWindowIdentity>,
     },
+}
+
+/// Process-local identity for one exact canvas-window incarnation. Raw window
+/// IDs are reusable after close, so an asynchronous Monitor acknowledgement
+/// must carry this token to avoid closing a later replacement with the same ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueMonitorFailedWindowIdentity {
+    window_id: String,
+    incarnation: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IssueMonitorLaunchFailureFinalizeContext<'a> {
+    session_mode: gwt_agent::SessionMode,
+    failed_window: Option<&'a IssueMonitorFailedWindowIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -723,6 +739,8 @@ fn issue_monitor_writer_conflict_commit(
 }
 
 const ISSUE_MONITOR_MATERIALIZING_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE: &str =
+    "Issue Monitor launch was interrupted before terminal materialization";
 
 #[derive(Debug, Clone)]
 pub struct IssueLaunchWizardPrepared {
@@ -868,6 +886,9 @@ pub struct AppRuntime {
     pub(crate) window_details: HashMap<String, String>,
     pub(crate) launch_error_terminal_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
+    /// Process-local, non-reusable identity for each current canvas window.
+    /// Persisted raw IDs such as `agent-1` can be reused after close.
+    pub(crate) window_incarnations: HashMap<String, String>,
     pub(crate) board_all_view_windows: HashSet<String>,
     pub(crate) session_state_path: PathBuf,
     pub(crate) log_dir: PathBuf,
@@ -2097,6 +2118,7 @@ impl AppRuntime {
             window_details: HashMap::new(),
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
+            window_incarnations: HashMap::new(),
             board_all_view_windows: HashSet::new(),
             session_state_path,
             log_dir,
@@ -3008,6 +3030,7 @@ impl AppRuntime {
             message,
             delivery_id,
             gwt_agent::SessionMode::Normal,
+            None,
         )
     }
 
@@ -3018,6 +3041,7 @@ impl AppRuntime {
         message: &str,
         delivery_id: Option<&str>,
         session_mode: gwt_agent::SessionMode,
+        failed_window: Option<&IssueMonitorFailedWindowIdentity>,
     ) -> Vec<OutboundEvent> {
         let message = if gwt::issue_monitor::is_git_https_auth_error(message) {
             gwt::issue_monitor::git_https_auth_setup_message(message)
@@ -3030,6 +3054,7 @@ impl AppRuntime {
                 IssueMonitorLaunchDeliveryState::LaunchFailed {
                     message: message.clone(),
                     session_mode,
+                    failed_window: failed_window.cloned(),
                 },
             );
         }
@@ -3060,7 +3085,10 @@ impl AppRuntime {
             issue_number,
             &message,
             delivery_id,
-            session_mode,
+            IssueMonitorLaunchFailureFinalizeContext {
+                session_mode,
+                failed_window,
+            },
             publication,
         )
     }
@@ -3103,7 +3131,10 @@ impl AppRuntime {
             issue_number,
             message,
             None,
-            gwt_agent::SessionMode::Normal,
+            IssueMonitorLaunchFailureFinalizeContext {
+                session_mode: gwt_agent::SessionMode::Normal,
+                failed_window: None,
+            },
             publication,
         )
     }
@@ -3114,11 +3145,15 @@ impl AppRuntime {
         issue_number: u64,
         message: &str,
         delivery_id: Option<&str>,
-        session_mode: gwt_agent::SessionMode,
+        context: IssueMonitorLaunchFailureFinalizeContext<'_>,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
+        let IssueMonitorLaunchFailureFinalizeContext {
+            session_mode,
+            failed_window,
+        } = context;
         let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
-        let (mut events, committed, retain_delivery) = match publication {
+        let (mut events, committed) = match publication {
             Ok(()) => (
                 Vec::new(),
                 match &failure {
@@ -3142,7 +3177,6 @@ impl AppRuntime {
                         })
                     }),
                 },
-                false,
             ),
             Err(error) if error.allows_local_fallback() && project_root.is_some() => {
                 let project_root = project_root.expect("guarded by is_some");
@@ -3187,10 +3221,9 @@ impl AppRuntime {
                     Ok((monitor, IssueMonitorFailureCommit::Committed(_))) => (
                         self.issue_monitor_snapshot_events_for(None, Some(project_root), monitor),
                         true,
-                        false,
                     ),
                     Ok((_monitor, IssueMonitorFailureCommit::Rejected)) => {
-                        (Vec::new(), false, false)
+                        (Vec::new(), false)
                     }
                     Ok((_monitor, IssueMonitorFailureCommit::AuthorityExhausted)) => (
                         self.issue_monitor_control_error_events(
@@ -3200,7 +3233,6 @@ impl AppRuntime {
                             Some(issue_number),
                         ),
                         false,
-                        true,
                     ),
                     Err(local_error) => (
                         self.issue_monitor_control_error_events(
@@ -3209,7 +3241,6 @@ impl AppRuntime {
                             "launch-failed",
                             Some(issue_number),
                         ),
-                        false,
                         false,
                     ),
                 }
@@ -3222,10 +3253,12 @@ impl AppRuntime {
                     Some(issue_number),
                 ),
                 false,
-                false,
             ),
         };
         if committed {
+            if let Some(delivery_id) = delivery_id {
+                self.issue_monitor_launch_deliveries.remove(delivery_id);
+            }
             events.extend([
                 OutboundEvent::broadcast(BackendEvent::IssueMonitorLaunchFailed {
                     issue_number,
@@ -3237,9 +3270,15 @@ impl AppRuntime {
                     issue_number: Some(issue_number),
                 }),
             ]);
-        } else if !retain_delivery {
-            if let Some(delivery_id) = delivery_id {
-                self.issue_monitor_launch_deliveries.remove(delivery_id);
+            if let Some(failed_window) = failed_window {
+                if self.issue_monitor_failed_window_is_current(failed_window) {
+                    events.extend(
+                        self.close_window_after_issue_monitor_failure_finalize_events(
+                            &failed_window.window_id,
+                            issue_number,
+                        ),
+                    );
+                }
             }
         }
         events
@@ -3771,13 +3810,13 @@ impl AppRuntime {
                 })
             })
         });
-        let autoclose_failed_window = issue_number.is_some_and(|issue_number| {
+        let autoclose_failed_issue = issue_number.filter(|issue_number| {
             prefs.as_ref().is_some_and(|prefs| {
                 prefs.autonomous_mode
                     && prefs
                         .autonomous_records
                         .iter()
-                        .any(|record| record.issue_number == issue_number)
+                        .any(|record| record.issue_number == *issue_number)
             })
         });
         self.pending_launch_feedback_contexts.remove(window_id);
@@ -3795,8 +3834,13 @@ impl AppRuntime {
             message: message.to_string(),
             issue_number,
         }));
-        if autoclose_failed_window {
-            events.extend(self.close_window_after_issue_monitor_finalize_events(window_id));
+        if let Some(issue_number) = autoclose_failed_issue {
+            events.extend(
+                self.close_window_after_issue_monitor_failure_finalize_events(
+                    window_id,
+                    issue_number,
+                ),
+            );
         }
         events
     }
@@ -6956,13 +7000,17 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
+        let window_id = combined_window_id(tab_id, raw_id);
         self.window_lookup.insert(
-            combined_window_id(tab_id, raw_id),
+            window_id.clone(),
             WindowAddress {
                 tab_id: tab_id.to_string(),
                 raw_id: raw_id.to_string(),
             },
         );
+        self.window_incarnations
+            .entry(window_id)
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string());
     }
 
     pub(crate) fn set_window_status(
@@ -7021,6 +7069,7 @@ impl AppRuntime {
 
     pub(crate) fn rebuild_window_lookup(&mut self) {
         self.window_lookup.clear();
+        self.window_incarnations.clear();
         let pairs = self
             .tabs
             .iter()
@@ -7036,6 +7085,25 @@ impl AppRuntime {
         for (tab_id, raw_id) in pairs {
             self.register_window(&tab_id, &raw_id);
         }
+    }
+
+    fn issue_monitor_failed_window_identity(
+        &self,
+        window_id: &str,
+    ) -> Option<IssueMonitorFailedWindowIdentity> {
+        Some(IssueMonitorFailedWindowIdentity {
+            window_id: window_id.to_string(),
+            incarnation: self.window_incarnations.get(window_id)?.clone(),
+        })
+    }
+
+    fn issue_monitor_failed_window_is_current(
+        &self,
+        failed_window: &IssueMonitorFailedWindowIdentity,
+    ) -> bool {
+        self.window_incarnations
+            .get(&failed_window.window_id)
+            .is_some_and(|current| current == &failed_window.incarnation)
     }
 
     fn window_preset(&self, window_id: &str) -> Option<WindowPreset> {
