@@ -59,6 +59,11 @@ const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often a serving daemon re-checks that its endpoint descriptor is still
+/// on disk and still describes this process (#3766 AC-2 self-heal). A cheap
+/// stat per tick; short enough that CLI callers recover within seconds after
+/// something deletes or clobbers the descriptor.
+const ENDPOINT_DESCRIPTOR_HEAL_INTERVAL: Duration = Duration::from_secs(5);
 
 struct DaemonShutdown {
     requested: AtomicBool,
@@ -107,7 +112,12 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
             "failed to prepare daemon socket directory: {err}"
         )));
     }
-    cleanup_stale_socket(&socket_path);
+    // A live daemon still answering on this socket means this start is a
+    // duplicate. Unlinking the socket anyway (the pre-#3766 behavior)
+    // stranded the live daemon on an unlinked inode, and the loser's exit
+    // cleanup then deleted the live daemon's endpoint descriptor, leaving
+    // every CLI caller on "authority fence ... has no usable endpoint".
+    ensure_socket_not_served(&socket_path)?;
 
     let auth_token = uuid::Uuid::new_v4().to_string();
     let endpoint = DaemonEndpoint::new(
@@ -157,7 +167,7 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
 
     let hub = BroadcastHub::new();
     let result = runtime.block_on(run_server(
-        endpoint,
+        endpoint.clone(),
         socket_path.clone(),
         endpoint_path.clone(),
         hub,
@@ -166,8 +176,16 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     // shutdown unbounded after the worker's own absolute-deadline cleanup.
     runtime.shutdown_timeout(DAEMON_RUNTIME_SHUTDOWN_TIMEOUT);
 
-    let _ = fs::remove_file(&socket_path);
-    let _ = fs::remove_file(&endpoint_path);
+    // Unlink only artifacts this process still owns (#3766): a concurrent
+    // daemon may have replaced them while we were serving. Our listener is
+    // already dropped, so a socket that still accepts connections belongs
+    // to someone else.
+    if std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
+        let _ = fs::remove_file(&socket_path);
+    }
+    if endpoint_descriptor_describes(&endpoint_path, &endpoint) {
+        let _ = fs::remove_file(&endpoint_path);
+    }
 
     result
 }
@@ -219,7 +237,17 @@ async fn run_server_with_shutdown_and_worker_config(
     let endpoint = Arc::new(endpoint);
     let started_at = Instant::now();
     let connections = Arc::new(AtomicUsize::new(0));
-    let _endpoint_path = endpoint_path; // retained for symmetry with future watch flows
+    // #3766 AC-2 self-heal: while this daemon serves the socket, its endpoint
+    // descriptor must stay discoverable. Anything that deletes or clobbers
+    // the descriptor (a concurrent duplicate start, bootstrap hygiene from a
+    // version-skewed client) would otherwise permanently strand every CLI
+    // caller on "authority fence ... has no usable endpoint".
+    let heal_task = tokio::spawn(heal_endpoint_descriptor_loop(
+        Arc::clone(&endpoint),
+        endpoint_path,
+        ENDPOINT_DESCRIPTOR_HEAL_INTERVAL,
+        Arc::clone(&shutdown),
+    ));
     loop {
         tokio::select! {
             biased;
@@ -255,6 +283,7 @@ async fn run_server_with_shutdown_and_worker_config(
     // startup race where Notify::notify_waiters can occur before the worker has
     // registered its waiter.
     shutdown.request();
+    heal_task.abort();
 
     // The worker owns authority revocation, durable compensations, and child
     // reaping. Do not let the server return (and drop the Tokio runtime) before
@@ -3975,9 +4004,132 @@ fn ensure_socket_parent(socket_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn cleanup_stale_socket(socket_path: &Path) {
-    if socket_path.exists() {
-        let _ = fs::remove_file(socket_path);
+/// Refuse to start when a live daemon still answers on `socket_path`;
+/// remove the socket file only when nothing accepts connections on it.
+fn ensure_socket_not_served(socket_path: &Path) -> Result<(), SpecOpsError> {
+    if !socket_path.exists() {
+        return Ok(());
+    }
+    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+        return Err(config_error(format!(
+            "daemon socket {} is already served by a live daemon; refusing duplicate start",
+            socket_path.display()
+        )));
+    }
+    let _ = fs::remove_file(socket_path);
+    Ok(())
+}
+
+/// Whether the descriptor at `endpoint_path` still describes this daemon
+/// process. Exit cleanup must not delete a descriptor a concurrent daemon
+/// has since written for itself (#3766).
+fn endpoint_descriptor_describes(endpoint_path: &Path, endpoint: &DaemonEndpoint) -> bool {
+    let Ok(payload) = fs::read(endpoint_path) else {
+        return false;
+    };
+    serde_json::from_slice::<DaemonEndpoint>(&payload).is_ok_and(|existing| {
+        existing.pid == endpoint.pid && existing.auth_token == endpoint.auth_token
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointDescriptorHeal {
+    /// The descriptor on disk already describes this daemon.
+    Intact,
+    /// The descriptor was missing, unreadable, or stale and was rewritten.
+    Rewritten,
+    /// Another live daemon owns the descriptor; it was left untouched.
+    ForeignLive,
+    /// The rewrite itself failed; the failure was logged.
+    WriteFailed,
+}
+
+/// Issue #3766 AC-2: a serving daemon must keep its endpoint descriptor
+/// discoverable. Rewrites the descriptor when it is missing, unreadable, or
+/// describes a dead process; never overwrites a descriptor owned by another
+/// live daemon. Every failure in the write path is logged, not swallowed.
+fn heal_endpoint_descriptor(
+    endpoint: &DaemonEndpoint,
+    endpoint_path: &Path,
+    is_process_alive: &dyn Fn(u32) -> bool,
+) -> EndpointDescriptorHeal {
+    match fs::read(endpoint_path) {
+        Ok(payload) => match serde_json::from_slice::<DaemonEndpoint>(&payload) {
+            Ok(existing)
+                if existing.pid == endpoint.pid
+                    && existing.auth_token == endpoint.auth_token
+                    && existing.bind == endpoint.bind =>
+            {
+                return EndpointDescriptorHeal::Intact;
+            }
+            Ok(existing)
+                if existing.pid != endpoint.pid
+                    && existing.pid > 0
+                    && is_process_alive(existing.pid) =>
+            {
+                tracing::error!(
+                    path = %endpoint_path.display(),
+                    foreign_pid = existing.pid,
+                    "gwtd daemon: endpoint descriptor is owned by another live daemon; \
+                     leaving it untouched"
+                );
+                return EndpointDescriptorHeal::ForeignLive;
+            }
+            Ok(_) | Err(_) => {}
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(
+                path = %endpoint_path.display(),
+                "gwtd daemon: endpoint descriptor is unreadable ({error}); rewriting"
+            );
+        }
+    }
+    let refreshed = DaemonEndpoint::new(
+        endpoint.scope.clone(),
+        endpoint.pid,
+        endpoint.bind.clone(),
+        endpoint.auth_token.clone(),
+        endpoint.daemon_version.clone(),
+    );
+    match persist_endpoint(endpoint_path, &refreshed) {
+        Ok(()) => {
+            tracing::warn!(
+                path = %endpoint_path.display(),
+                pid = endpoint.pid,
+                "gwtd daemon: endpoint descriptor was missing or stale; rewrote it \
+                 (#3766 self-heal)"
+            );
+            EndpointDescriptorHeal::Rewritten
+        }
+        Err(error) => {
+            tracing::error!(
+                path = %endpoint_path.display(),
+                "gwtd daemon: failed to rewrite endpoint descriptor: {error}"
+            );
+            EndpointDescriptorHeal::WriteFailed
+        }
+    }
+}
+
+async fn heal_endpoint_descriptor_loop(
+    endpoint: Arc<DaemonEndpoint>,
+    endpoint_path: PathBuf,
+    interval: Duration,
+    shutdown: Arc<DaemonShutdown>,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => return,
+            _ = tokio::time::sleep(interval) => {
+                heal_endpoint_descriptor(
+                    &endpoint,
+                    &endpoint_path,
+                    &crate::process::is_process_alive,
+                );
+            }
+        }
     }
 }
 
@@ -4019,6 +4171,184 @@ mod tests {
         spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, ConnectionGuard,
         DaemonShutdown, IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
     };
+
+    /// Issue #3766 AC-1 regression: a duplicate `gwtd` start against a socket
+    /// that a live daemon is still serving must refuse to start instead of
+    /// unlinking the live socket and clobbering / deleting the live daemon's
+    /// endpoint descriptor.
+    #[test]
+    fn serve_blocking_refuses_to_clobber_a_live_daemon_socket() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let scope = RuntimeScope::new(
+            "feedfeedfeedfeed",
+            "cafecafecafecafe",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let endpoint_path = temp.path().join("live-daemon.json");
+        let socket_path = gwt_core::daemon::resolve_daemon_socket_path(&endpoint_path)
+            .expect("resolve socket path")
+            .path;
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("bind live daemon socket");
+        let live = sample_endpoint(scope.clone(), &socket_path, "live-token");
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &live).expect("persist live descriptor");
+        let descriptor_before = fs::read(&endpoint_path).expect("descriptor before");
+
+        let (tx, rx) = mpsc::channel();
+        let serve_endpoint_path = endpoint_path.clone();
+        thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = tx.send(super::serve_blocking(scope, serve_endpoint_path, &mut sink).is_err());
+        });
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).ok(),
+            Some(true),
+            "duplicate start must promptly refuse to serve a live socket"
+        );
+        assert!(
+            socket_path.exists(),
+            "live daemon socket must survive a duplicate start"
+        );
+        assert_eq!(
+            fs::read(&endpoint_path).expect("descriptor after"),
+            descriptor_before,
+            "live daemon endpoint descriptor must survive a duplicate start"
+        );
+    }
+
+    /// Issue #3766 AC-2/AC-4 regression: the incident shape — a daemon still
+    /// serving (fence holder) whose endpoint descriptor was deleted — must
+    /// self-heal without a restart.
+    #[tokio::test]
+    async fn heal_loop_restores_deleted_descriptor_while_serving() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let scope = RuntimeScope::new(
+            "beefbeefbeefbeef",
+            "d00dd00dd00dd00d",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let endpoint_path = temp.path().join("loop-heal.json");
+        let endpoint = sample_endpoint(scope, &temp.path().join("loop-heal.sock"), "loop-secret");
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
+            .expect("persist initial descriptor");
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let task = tokio::spawn(super::heal_endpoint_descriptor_loop(
+            Arc::new(endpoint.clone()),
+            endpoint_path.clone(),
+            Duration::from_millis(20),
+            Arc::clone(&shutdown),
+        ));
+
+        fs::remove_file(&endpoint_path).expect("simulate descriptor loss");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !endpoint_path.exists() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            endpoint_path.exists(),
+            "self-heal must restore the deleted endpoint descriptor"
+        );
+        let restored: DaemonEndpoint =
+            serde_json::from_slice(&fs::read(&endpoint_path).expect("read restored descriptor"))
+                .expect("parse restored descriptor");
+        assert_eq!(restored.pid, endpoint.pid);
+        assert_eq!(restored.auth_token, endpoint.auth_token);
+        assert_eq!(restored.bind, endpoint.bind);
+
+        shutdown.request();
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    }
+
+    #[test]
+    fn heal_keeps_intact_descriptor_untouched() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let scope = RuntimeScope::new(
+            "beefbeefbeefbeef",
+            "d00dd00dd00dd00d",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let endpoint_path = temp.path().join("intact.json");
+        let endpoint = sample_endpoint(scope, &temp.path().join("intact.sock"), "intact-secret");
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint).expect("persist descriptor");
+        let payload_before = fs::read(&endpoint_path).expect("descriptor before");
+
+        assert_eq!(
+            super::heal_endpoint_descriptor(&endpoint, &endpoint_path, &|_| true),
+            super::EndpointDescriptorHeal::Intact
+        );
+        assert_eq!(
+            fs::read(&endpoint_path).expect("descriptor after"),
+            payload_before,
+            "an intact descriptor must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn heal_refuses_to_overwrite_descriptor_of_foreign_live_daemon() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let scope = RuntimeScope::new(
+            "beefbeefbeefbeef",
+            "d00dd00dd00dd00d",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let endpoint_path = temp.path().join("foreign.json");
+        let ours = sample_endpoint(
+            scope.clone(),
+            &temp.path().join("foreign.sock"),
+            "our-secret",
+        );
+        let mut foreign = ours.clone();
+        foreign.pid = ours.pid.wrapping_add(1);
+        foreign.auth_token = "foreign-secret".to_string();
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &foreign)
+            .expect("persist foreign descriptor");
+        let payload_before = fs::read(&endpoint_path).expect("descriptor before");
+
+        assert_eq!(
+            super::heal_endpoint_descriptor(&ours, &endpoint_path, &|_| true),
+            super::EndpointDescriptorHeal::ForeignLive
+        );
+        assert_eq!(
+            fs::read(&endpoint_path).expect("descriptor after"),
+            payload_before,
+            "a live foreign daemon's descriptor must not be overwritten"
+        );
+
+        // Once the foreign owner is dead, the serving daemon reclaims the
+        // descriptor for itself.
+        assert_eq!(
+            super::heal_endpoint_descriptor(&ours, &endpoint_path, &|_| false),
+            super::EndpointDescriptorHeal::Rewritten
+        );
+        let reclaimed: DaemonEndpoint =
+            serde_json::from_slice(&fs::read(&endpoint_path).expect("read reclaimed descriptor"))
+                .expect("parse reclaimed descriptor");
+        assert_eq!(reclaimed.pid, ours.pid);
+        assert_eq!(reclaimed.auth_token, ours.auth_token);
+    }
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
         DaemonEndpoint::new(
