@@ -626,8 +626,10 @@ gwt が対処メッセージを表示）。
 - `Tile` で表示中のウィンドウをグリッド整列
 - `Stack` でタイトルバーを残したまま重ねて表示
 - `Align` でウィンドウサイズを変えずにグリッド整列
-- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` でフォーカス切替
-  - フォーカスされたウィンドウは中央へ寄ります
+- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で Canvas 上の Agent を
+  状態順（running/starting → waiting/idle → その他）に切り替え
+  - Agent 以外はスキップし、非表示の Agent タブは選択時に表示して、対象の
+    Agent を中央へ寄せます
 
 ## Operator デザイン言語 (SPEC-2356)
 

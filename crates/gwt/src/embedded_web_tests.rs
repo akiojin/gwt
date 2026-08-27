@@ -1765,17 +1765,19 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
     let apply_status = regex::Regex::new(
-            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*runtimeState\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*status\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
         )
         .expect("valid regex");
 
     assert!(
-        js.contains("const windowRuntimeStateMap = new Map();"),
-        "expected embedded js to keep a shared runtime-state map for badges and the window list",
+        js.contains("const windowRuntimeStateMap = new Map();")
+            && js.contains("return normalizeWindowRuntimeState(sourceState, windowData.preset);")
+            && js.contains("function runtimeStateForAgentFocus(windowData)"),
+        "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
             apply_status.is_match(js),
-            "expected applyStatus to normalize runtime state once, update the shared map, and re-render the window list",
+            "expected applyStatus to retain source state, normalize display state once, and re-render the window list",
         );
 }
 

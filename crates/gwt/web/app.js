@@ -153,6 +153,7 @@
         mapAgentTelemetryState,
         normalizeWindowRuntimeState,
         presetSupportsWaitingStatus,
+        selectNextAgentFocusWindowId,
         windowRuntimeLabel,
       } from "/window-runtime-state.js";
       import {
@@ -1652,11 +1653,16 @@
       // remaining caller).
 
       function runtimeStateForWindow(windowData) {
-        const cachedState = windowRuntimeStateMap.get(windowData.id);
-        if (cachedState) {
-          return cachedState;
-        }
-        return normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        const sourceState = windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id)
+          : windowData.status;
+        return normalizeWindowRuntimeState(sourceState, windowData.preset);
+      }
+
+      function runtimeStateForAgentFocus(windowData) {
+        return windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id)
+          : windowData.status;
       }
 
       // SPEC-3064 Phase 3 (E7): the Window List dropdown
@@ -2237,7 +2243,12 @@
       function resolvePendingWindowFrames() {
         if (pendingFrameWindowId) {
           const windowId = pendingFrameWindowId;
-          if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+          const windowData = workspaceWindowById(windowId);
+          if (
+            windowData &&
+            visibleWindowData(windowData) &&
+            windowMap.has(windowId)
+          ) {
             pendingFrameWindowId = null;
             frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
           }
@@ -2428,25 +2439,29 @@
       }
 
       function cycleFocus(direction) {
-        if (windowMap.size === 0) {
-          return;
-        }
-        // SPEC-2008 camera-focus: cycling flies the local camera between
-        // windows in creation order (per viewer) instead of asking the backend
-        // to move a shared focus. Keep notifying the backend of the new focus
-        // for z-order/highlight, but the camera move is local.
-        const windows = (activeWorkspace().windows || []).filter(visibleWindowData);
-        if (windows.length === 0) {
-          return;
-        }
-        const currentIndex = windows.findIndex(
-          (windowData) => windowData.id === focusedId,
+        // SPEC-3263 FR-014..FR-019 / Issue #3551: cycle the Canvas Agent
+        // projection in runtime-priority order. Hidden tab members remain
+        // candidates and are activated before the existing local camera frame
+        // path notifies the backend of focus for z-order/highlight.
+        const windows = activeWorkspace().windows || [];
+        const nextWindowId = selectNextAgentFocusWindowId(
+          windows,
+          focusedId,
+          direction,
+          runtimeStateForAgentFocus,
         );
-        const delta = direction === "backward" ? -1 : 1;
-        const baseIndex = currentIndex === -1 ? 0 : currentIndex;
-        const nextIndex =
-          (baseIndex + delta + windows.length) % windows.length;
-        frameWindow(windows[nextIndex].id);
+        if (!nextWindowId) {
+          return;
+        }
+        const nextWindow = windows.find(
+          (windowData) => windowData.id === nextWindowId,
+        );
+        if (nextWindow?.tab_group_id && !nextWindow.tab_group_active) {
+          pendingFrameWindowId = nextWindowId;
+          send({ kind: "activate_window_tab", id: nextWindowId });
+          return;
+        }
+        frameWindow(nextWindowId);
       }
 
       function shouldHandleFocusShortcut(event) {
@@ -3391,7 +3406,7 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
-            windowRuntimeStateMap.set(windowId, runtimeState);
+            windowRuntimeStateMap.set(windowId, status);
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3640,9 +3655,7 @@
           return;
         }
         const isAgentWindow = shouldShowRuntimeStatus(windowData);
-        const runtimeState =
-          windowRuntimeStateMap.get(windowId) ||
-          normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        const runtimeState = runtimeStateForWindow(windowData);
         windowCloseConfirmState = {
           open: true,
           windowId,
@@ -3667,9 +3680,7 @@
           if (!element) continue;
           const windowData = workspaceWindowById(windowId);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
-          const runtimeState =
-            windowRuntimeStateMap.get(windowId) ||
-            normalizeWindowRuntimeState(windowData.status, windowData.preset);
+          const runtimeState = runtimeStateForWindow(windowData);
           if (!STOPPED_RUNTIME_STATES.has(runtimeState)) {
             count += 1;
           }
@@ -3697,10 +3708,7 @@
       // surfaces render plain tabs.
       function windowTabTelemetryState(tab) {
         if (!shouldShowRuntimeStatus(tab)) return "";
-        const runtimeState =
-          windowRuntimeStateMap.get(tab.id) ||
-          normalizeWindowRuntimeState(tab.status, tab.preset);
-        return runtimeState;
+        return runtimeStateForWindow(tab);
       }
 
       // AS-2.2: a runtime state change must repaint the tab strip of every
