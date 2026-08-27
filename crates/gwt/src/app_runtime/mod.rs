@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 #[derive(Clone)]
@@ -134,6 +135,10 @@ pub struct WindowRuntime {
     /// prove they still belong to the runtime currently stored for the id.
     incarnation: u64,
     pane: Arc<Mutex<Pane>>,
+    /// Lock-free process lifecycle handle captured before the reader/status
+    /// workers can contend on `pane`. GUI-thread teardown must never acquire
+    /// the display/parser mutex merely to signal or probe the child.
+    pty: Arc<PtyHandle>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
     /// its Arc clone of `pane` before the runtime is fully torn down.
@@ -142,6 +147,22 @@ pub struct WindowRuntime {
     /// because some agent exits can leave the terminal reader waiting even
     /// after the direct child has finished.
     status_thread: Option<JoinHandle<()>>,
+}
+
+impl WindowRuntime {
+    fn new(incarnation: u64, pane: Arc<Mutex<Pane>>) -> Self {
+        let pty = pane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shared_pty();
+        Self {
+            incarnation,
+            pane,
+            pty,
+            output_thread: None,
+            status_thread: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -6401,50 +6422,110 @@ impl AppRuntime {
         let workspace_state =
             self.agent_workspace_state_reply(client_id, principal, WorktreeFormProjection::Resolve);
         let allowed_window_ids = self
-            .window_lookup
+            .tabs
             .iter()
-            .filter_map(|(window_id, address)| {
-                self.tab(&address.tab_id)
-                    .filter(|tab| principal.authorizes_project_root(&tab.project_root))
-                    .map(|_| window_id.clone())
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .map(|window| combined_window_id(&tab.id, &window.id))
             })
             .collect::<std::collections::HashSet<_>>();
-        let mut terminal_snapshots = self
-            .runtimes
-            .iter()
-            .filter(|(id, _)| allowed_window_ids.contains(*id))
-            .filter_map(|(id, runtime)| {
-                let snapshot = runtime
-                    .pane
-                    .lock()
-                    .map(|pane| pane.snapshot_bytes())
-                    .unwrap_or_default();
-                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
-            })
-            .collect::<Vec<_>>();
-        let runtime_snapshot_ids = terminal_snapshots
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        for (id, detail) in &self.launch_error_terminal_details {
-            if allowed_window_ids.contains(id)
-                && !runtime_snapshot_ids.contains(id)
-                && self.window_status(id) == Some(WindowProcessStatus::Error)
-            {
-                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
+        let mut events = vec![workspace_state];
+        let mut empty_window_ids = Vec::new();
+        let mut busy_window_ids = Vec::new();
+        let mut unavailable_window_ids = Vec::new();
+        let mut failed_window_ids = Vec::new();
+        let mut ordered_window_ids = allowed_window_ids.into_iter().collect::<Vec<_>>();
+        ordered_window_ids.sort();
+        for id in ordered_window_ids {
+            let lock_started = Instant::now();
+            let launch_error = self
+                .launch_error_terminal_details
+                .get(&id)
+                .filter(|_| self.window_status(&id) == Some(WindowProcessStatus::Error));
+            let snapshot = match self.runtimes.get(&id) {
+                Some(runtime) => match runtime.pane.try_lock() {
+                    Ok(pane) => {
+                        let snapshot_started = Instant::now();
+                        let snapshot = pane.snapshot_bytes();
+                        let snapshot_elapsed_ms =
+                            u64::try_from(snapshot_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX);
+                        if snapshot_elapsed_ms >= 500 {
+                            tracing::warn!(
+                                target: "gwt.pane.sync",
+                                window_id = %id,
+                                stage = "pane_snapshot_serialize",
+                                elapsed_ms = snapshot_elapsed_ms,
+                                outcome = "slow",
+                                "pane snapshot serialization exceeded the GUI-loop budget"
+                            );
+                        }
+                        if snapshot.is_empty() {
+                            launch_error.map(|detail| Self::launch_error_terminal_bytes(detail))
+                        } else {
+                            Some(snapshot)
+                        }
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        let elapsed_ms =
+                            u64::try_from(lock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        tracing::warn!(
+                            target: "gwt.pane.sync",
+                            window_id = %id,
+                            stage = "pane_snapshot_try_lock",
+                            elapsed_ms,
+                            outcome = "busy",
+                            "pane snapshot skipped a contended runtime"
+                        );
+                        busy_window_ids.push(id.clone());
+                        None
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        let elapsed_ms =
+                            u64::try_from(lock_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        tracing::error!(
+                            target: "gwt.pane.sync",
+                            window_id = %id,
+                            stage = "pane_snapshot_try_lock",
+                            elapsed_ms,
+                            outcome = "poisoned",
+                            "pane snapshot skipped a poisoned runtime"
+                        );
+                        failed_window_ids.push(id.clone());
+                        None
+                    }
+                },
+                None => launch_error.map(|detail| Self::launch_error_terminal_bytes(detail)),
+            };
+            if let Some(snapshot) = snapshot {
+                events.push(OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::TerminalSnapshot {
+                        id,
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                    },
+                ));
+            } else if !busy_window_ids.contains(&id) && !failed_window_ids.contains(&id) {
+                if self.runtimes.contains_key(&id) {
+                    empty_window_ids.push(id);
+                } else {
+                    unavailable_window_ids.push(id);
+                }
             }
         }
-
-        let mut events = vec![workspace_state];
-        events.extend(terminal_snapshots.into_iter().map(|(id, snapshot)| {
-            OutboundEvent::reply(
-                client_id,
-                BackendEvent::TerminalSnapshot {
-                    id,
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-                },
-            )
-        }));
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::PaneSyncComplete {
+                empty_window_ids,
+                busy_window_ids,
+                unavailable_window_ids,
+                failed_window_ids,
+            },
+        ));
         events
     }
 

@@ -437,7 +437,7 @@ impl AppRuntime {
             .get(window_id)
             .filter(|runtime| runtime.incarnation == expected_incarnation)
             .ok_or_else(|| "The exact holder runtime incarnation changed".to_string())?;
-        let pane = runtime.pane.clone();
+        let pty = runtime.pty.clone();
         let capability = self
             .agent_capability_issuer
             .clone()
@@ -469,20 +469,35 @@ impl AppRuntime {
                     .transpose()
                     .map_err(std::io::Error::other)?;
                 let stop_result = (|| {
-                    pane.lock()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?
-                        .kill()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    tracing::info!(
+                        target: "gwt.pane.teardown",
+                        window_id,
+                        stage = "exact_pty_kill",
+                        outcome = "starting",
+                        "starting exact-holder PTY teardown stage"
+                    );
+                    let kill_started = Instant::now();
+                    let kill_result = pty.kill();
+                    let kill_elapsed_ms =
+                        u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    tracing::info!(
+                        target: "gwt.pane.teardown",
+                        window_id,
+                        stage = "exact_pty_kill",
+                        elapsed_ms = kill_elapsed_ms,
+                        ok = kill_result.is_ok(),
+                        outcome = if kill_result.is_ok() { "completed" } else { "failed" },
+                        "exact-holder PTY teardown stage completed"
+                    );
+                    kill_result.map_err(|error| std::io::Error::other(error.to_string()))?;
                     // Issue #3705: never sleep on the GUI event loop waiting
                     // for reap. Persist under lease only when the child is
                     // already gone; otherwise `start_window_runtime_stop`
                     // finishes the proof on a background thread.
-                    let exited = pane
-                        .lock()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?
-                        .process_has_exited()
+                    let exited = pty
+                        .try_wait()
                         .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    if exited
+                    if exited.is_some()
                         && !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
                             &sessions_dir,
                             expected_session,
@@ -589,23 +604,49 @@ impl AppRuntime {
         };
         let mut exact_terminal_persisted = false;
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
-            let pane = runtime.pane.clone();
-            if let Ok(guard) = pane.lock() {
-                let _ = guard.kill();
-            } else {
+            let pty = runtime.pty.clone();
+            tracing::info!(
+                target: "gwt.pane.teardown",
+                window_id,
+                stage = "pty_kill",
+                outcome = "starting",
+                "starting PTY teardown stage"
+            );
+            let kill_started = Instant::now();
+            let kill_result = pty.kill();
+            let kill_elapsed_ms =
+                u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            tracing::info!(
+                target: "gwt.pane.teardown",
+                window_id,
+                stage = "pty_kill",
+                elapsed_ms = kill_elapsed_ms,
+                ok = kill_result.is_ok(),
+                outcome = if kill_result.is_ok() { "completed" } else { "failed" },
+                "PTY teardown stage completed"
+            );
+            if let Err(error) = &kill_result {
                 tracing::warn!(
                     target: "gwt.pane.teardown",
                     window_id,
+                    stage = "pty_kill",
+                    elapsed_ms = kill_elapsed_ms,
+                    outcome = "failed",
+                    %error,
+                    "PTY teardown stage failed"
+                );
+            }
+            if kill_elapsed_ms >= 500 {
+                tracing::warn!(
+                    target: "gwt.pane.teardown",
+                    window_id,
+                    elapsed_ms = kill_elapsed_ms,
                     "{}",
-                    pane_teardown_stall_message(window_id, "pane_lock", 0)
+                    pane_teardown_stall_message(window_id, "pty_kill", kill_elapsed_ms)
                 );
             }
             if let Some((identity, incarnation)) = exact_terminal.clone() {
-                let exited = pane
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.process_has_exited().ok())
-                    .unwrap_or(false);
+                let exited = pty.try_wait().ok().flatten().is_some();
                 if exited {
                     exact_terminal_persisted =
                         gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
@@ -623,12 +664,7 @@ impl AppRuntime {
                         let deadline = Instant::now() + Duration::from_secs(2);
                         let mut exited = false;
                         while Instant::now() < deadline {
-                            if pane
-                                .lock()
-                                .ok()
-                                .and_then(|guard| guard.process_has_exited().ok())
-                                .unwrap_or(false)
-                            {
+                            if pty.try_wait().ok().flatten().is_some() {
                                 exited = true;
                                 break;
                             }
