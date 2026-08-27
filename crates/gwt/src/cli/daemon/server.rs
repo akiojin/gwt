@@ -4123,11 +4123,23 @@ async fn heal_endpoint_descriptor_loop(
             biased;
             _ = shutdown.notified() => return,
             _ = tokio::time::sleep(interval) => {
-                heal_endpoint_descriptor(
-                    &endpoint,
-                    &endpoint_path,
-                    &crate::process::is_process_alive,
-                );
+                // The heal check is synchronous file I/O; keep it off the
+                // 2-worker runtime's async threads.
+                let endpoint = Arc::clone(&endpoint);
+                let endpoint_path = endpoint_path.clone();
+                let heal = tokio::task::spawn_blocking(move || {
+                    heal_endpoint_descriptor(
+                        &endpoint,
+                        &endpoint_path,
+                        &crate::process::is_process_alive,
+                    );
+                })
+                .await;
+                if let Err(error) = heal {
+                    tracing::warn!(
+                        "gwtd daemon: endpoint descriptor heal task failed: {error}"
+                    );
+                }
             }
         }
     }
