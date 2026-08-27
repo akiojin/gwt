@@ -1,6 +1,4 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
-use gwt_core::paths::ProjectScopeSource;
-use gwt_core::repo_hash::RepoIdentitySource;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::str::FromStr;
@@ -124,43 +122,10 @@ fn attach_project_store(payload: &mut Value) {
     let Some(object) = payload.as_object_mut() else {
         return;
     };
-    // Windows canonicalization yields `\\?\` verbatim paths. Reporting those
-    // would hand the caller a path it cannot paste back into a shell.
-    let readable = |path: &std::path::Path| {
-        gwt_core::paths::normalize_windows_child_process_path_text(&path.display().to_string())
-    };
-    let mut reported = serde_json::json!({
-        "project_root": readable(&store.project_root),
-        "hash": store.scope.hash.as_str(),
-        "source": store.scope.source.as_str(),
-        "identity_resolved": store.scope.source.identity_resolved(),
-        "store_path": readable(&store.store_path),
-    });
-    match &store.scope.source {
-        // The bare repository that lent the layout root its identity. Without
-        // it, "nested_bare_repository" names the mechanism but not the repo.
-        ProjectScopeSource::Repository(RepoIdentitySource::NestedBareRepository(path)) => {
-            reported["repository_path"] = Value::from(readable(path));
-        }
-        // Every rejected candidate, so a human can see *why* no identity was
-        // chosen rather than only that none was.
-        ProjectScopeSource::AmbiguousNestedBareRepositories(candidates) => {
-            reported["candidates"] = Value::Array(
-                candidates
-                    .iter()
-                    .map(|candidate| {
-                        serde_json::json!({
-                            "path": readable(&candidate.path),
-                            "normalized_origin": candidate.normalized_origin,
-                            "hash": candidate.hash.as_str(),
-                        })
-                    })
-                    .collect(),
-            );
-        }
-        ProjectScopeSource::Repository(RepoIdentitySource::Origin)
-        | ProjectScopeSource::PathFallback => {}
-    }
+    let reported = serde_json::to_value(
+        crate::runtime_daemon_events::ProjectStoreIdentity::from_operation_store(&store),
+    )
+    .expect("project store identity serializes");
     object.insert("project_store".to_string(), reported);
 }
 
@@ -1016,10 +981,16 @@ fn memory_add(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
 }
 
 fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(
+        params,
+        &["channels", "project_root", "timeout_seconds"],
+        "daemon.subscribe",
+    )?;
     let channels = optional_string_vec(params, "channels")?;
     if channels.is_empty() {
         return Err(CliParseError::MissingFlag("channels"));
     }
+    let project_root = optional_path(params, "project_root")?;
     let timeout_seconds = optional_u64(params, "timeout_seconds")?;
     if timeout_seconds == Some(0) {
         return Err(CliParseError::InvalidValue {
@@ -1029,6 +1000,7 @@ fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
     }
     Ok(CliCommand::Daemon(DaemonCommand::Subscribe {
         channels,
+        project_root,
         timeout_seconds,
     }))
 }
@@ -2962,6 +2934,60 @@ mod tests {
         )
         .to_string()
         .contains("timeout_seconds"));
+    }
+
+    /// Issue #3596: an explicit target must survive JSON parsing so runtime
+    /// daemon discovery does not silently fall back to the gwtd process cwd.
+    #[test]
+    fn daemon_subscribe_preserves_explicit_project_root_in_command() {
+        let command = ok(
+            "daemon.subscribe",
+            json!({
+                "channels": ["issue_monitor"],
+                "project_root": "/tmp/gwt-issue-3596-explicit-root"
+            }),
+        );
+
+        match command {
+            CliCommand::Daemon(DaemonCommand::Subscribe { project_root, .. }) => assert_eq!(
+                project_root.as_deref(),
+                Some(std::path::Path::new("/tmp/gwt-issue-3596-explicit-root"))
+            ),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// Issue #3596: omitting the optional target preserves the legacy cwd
+    /// resolution path by transporting `None` explicitly.
+    #[test]
+    fn daemon_subscribe_defaults_project_root_to_none() {
+        let command = ok("daemon.subscribe", json!({"channels": ["issue_monitor"]}));
+
+        match command {
+            CliCommand::Daemon(DaemonCommand::Subscribe { project_root, .. }) => {
+                assert_eq!(project_root, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// Issue #3596: misspelling a scope parameter must fail closed instead of
+    /// subscribing to whichever project happens to own the process cwd.
+    #[test]
+    fn daemon_subscribe_rejects_unknown_params() {
+        match err(
+            "daemon.subscribe",
+            json!({
+                "channels": ["issue_monitor"],
+                "project_rooot": "/tmp/gwt-issue-3596-typo"
+            }),
+        ) {
+            CliParseError::InvalidJson(message) => assert!(
+                message.contains("daemon.subscribe does not accept the parameter project_rooot"),
+                "unexpected error message: {message}"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
