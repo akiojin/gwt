@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.83.5] - 2026-08-27
+
+### Bug Fixes
+
+- **workspace:** 同一 container duplicate Work への二重 attach を遮断し ensure を self-heal 化 (#3684)
+- **daemon:** Respect subscribed project scope
+- Requeue 後の stale retry 復活を防止
+- **verify:** Persist bounded failure output tails
+- **pane:** GUIイベントループのPTY待機を解消する
+- **daemon:** Fence保持デーモンのendpoint descriptor消失をself-healで復旧 (#3766)
+- **daemon:** Descriptor self-healの同期I/Oをspawn_blockingへ退避 (#3766)
+
+### Miscellaneous Tasks
+
+- **ci:** Base 誤り PR #3687 close 後の CI 再実行トリガー (#3684)
+- **ci:** Test (Rust) の 105 分ハングを再トリガーで解消する (#3684)
+- **ci:** Build job の 60 分ハングを再トリガーで解消する (#3684)
+- **work:** Issue 3757 の完了状態を記録
+- **work:** Issue 3757 の開始記録を補完
+- **work:** Record issue 3596 delivery state
+- **work:** Settle issue 3596 delivery
+- **work:** Issue 3765 の実行イベント記録を追加 (#3765)
+
+
 ## [9.83.4] - 2026-08-25
 
 ### Bug Fixes

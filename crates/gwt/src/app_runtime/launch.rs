@@ -3590,9 +3590,12 @@ impl AppRuntime {
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) {
         let pane = Arc::new(Mutex::new(pane));
+        let mut runtime = WindowRuntime::new(incarnation, pane.clone());
         let output_thread =
             self.spawn_output_thread(id.to_string(), incarnation, pane.clone(), console_kind);
         let status_thread = self.spawn_status_thread(id.to_string(), incarnation, pane.clone());
+        runtime.output_thread = Some(output_thread);
+        runtime.status_thread = Some(status_thread);
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.window_pty_statuses
                 .insert(id.to_string(), WindowProcessStatus::Running);
@@ -3611,15 +3614,7 @@ impl AppRuntime {
         // target to write to. Registry holds a cloned `Arc<PtyHandle>`; the
         // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
         self.register_pty_writer(id, &pane);
-        self.runtimes.insert(
-            id.to_string(),
-            WindowRuntime {
-                incarnation,
-                pane,
-                output_thread: Some(output_thread),
-                status_thread: Some(status_thread),
-            },
-        );
+        self.runtimes.insert(id.to_string(), runtime);
     }
 
     /// Issue #3475: start the authenticated SessionStart readiness deadline for

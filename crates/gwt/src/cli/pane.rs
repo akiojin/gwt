@@ -1,6 +1,10 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -456,37 +460,91 @@ async fn read_pane_snapshot(
     requested_id: &str,
     lines: usize,
 ) -> Result<String, String> {
+    read_pane_snapshot_with_timeout(
+        ws_url,
+        project_root,
+        requested_id,
+        lines,
+        BACKEND_RESPONSE_TIMEOUT,
+    )
+    .await
+}
+
+async fn read_pane_snapshot_with_timeout(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: &str,
+    lines: usize,
+    response_timeout: Duration,
+) -> Result<String, String> {
     let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let mut windows = Vec::new();
     let mut snapshots = HashMap::<String, String>::new();
+    let mut received = 0usize;
+    tokio::time::timeout(response_timeout, async {
+        loop {
+            let value = next_backend_json_unbounded(&mut socket).await?;
+            received += 1;
+            if let Some(mut parsed) = parse_workspace_windows(&value, project_root) {
+                windows.append(&mut parsed);
+            }
+            if let Some((id, snapshot)) = parse_terminal_snapshot(&value)? {
+                snapshots.insert(id, snapshot);
+            }
 
-    for _ in 0..128 {
-        let value = next_backend_json(&mut socket).await?;
-        if let Some(mut parsed) = parse_workspace_windows(&value, project_root) {
-            windows.append(&mut parsed);
+            let resolved_id = resolve_window_id(&windows, requested_id).unwrap_or(requested_id);
+            if let Some(snapshot) = snapshots.get(resolved_id) {
+                return Ok(render_snapshot_lines(snapshot, lines));
+            }
+            let Some(completion) = parse_pane_sync_completion(&value)? else {
+                continue;
+            };
+            let Some(resolved_id) = resolve_window_id(&windows, requested_id) else {
+                let known = windows
+                    .iter()
+                    .map(|window| window.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "pane read: unknown pane {requested_id}; known panes: {known}"
+                ));
+            };
+            if completion.empty_window_ids.contains(resolved_id) {
+                return Ok(String::new());
+            }
+            if completion.busy_window_ids.contains(resolved_id) {
+                return Err(format!(
+                    "pane read: pane_read_busy — pane {resolved_id} is updating its terminal snapshot; retry"
+                ));
+            }
+            if completion.unavailable_window_ids.contains(resolved_id) {
+                return Err(format!(
+                    "pane read: pane_snapshot_unavailable — pane {resolved_id} has no live or launch-error snapshot"
+                ));
+            }
+            if completion.failed_window_ids.contains(resolved_id) {
+                return Err(format!(
+                    "pane read: pane_snapshot_failed — pane {resolved_id} snapshot state is poisoned"
+                ));
+            }
+            return Err(format!(
+                "pane read: pane_snapshot_unavailable — pane {resolved_id} was absent from the completed sync"
+            ));
         }
-        if let Some((id, snapshot)) = parse_terminal_snapshot(&value)? {
-            snapshots.insert(id, snapshot);
-        }
-
-        let resolved_id = resolve_window_id(&windows, requested_id).unwrap_or(requested_id);
-        if let Some(snapshot) = snapshots.get(resolved_id) {
-            return Ok(render_snapshot_lines(snapshot, lines));
-        }
-    }
-
-    let known = windows
-        .iter()
-        .map(|window| window.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(if known.is_empty() {
-        format!("pane read: no snapshot received for {requested_id}")
-    } else {
-        format!("pane read: no snapshot received for {requested_id}; known panes: {known}")
     })
+    .await
+    .map_err(|_| {
+        if received == 0 {
+            pane_backend_silence("pane read", received, response_timeout)
+        } else {
+            format!(
+                "pane read: pane_sync_incomplete — the backend sent {received} message(s) but no snapshot or completion for {requested_id} within {}ms",
+                response_timeout.as_millis()
+            )
+        }
+    })?
 }
 
 async fn close_pane(
@@ -1175,6 +1233,60 @@ fn parse_terminal_snapshot(value: &Value) -> Result<Option<(String, String)>, St
     Ok(Some((id, text)))
 }
 
+#[derive(Debug)]
+struct PaneSyncCompletion {
+    empty_window_ids: HashSet<String>,
+    busy_window_ids: HashSet<String>,
+    unavailable_window_ids: HashSet<String>,
+    failed_window_ids: HashSet<String>,
+}
+
+fn parse_pane_sync_completion(value: &Value) -> Result<Option<PaneSyncCompletion>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("pane_sync_complete") {
+        return Ok(None);
+    }
+    let parse_ids = |field: &str| -> Result<HashSet<String>, String> {
+        let values = value
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("pane_sync_complete missing {field}"))?;
+        let mut ids = HashSet::with_capacity(values.len());
+        for value in values {
+            let id = value
+                .as_str()
+                .ok_or_else(|| format!("pane_sync_complete {field} contains a non-string id"))?;
+            if !ids.insert(id.to_string()) {
+                return Err(format!(
+                    "pane_sync_complete {field} contains duplicate id {id}"
+                ));
+            }
+        }
+        Ok(ids)
+    };
+    let completion = PaneSyncCompletion {
+        empty_window_ids: parse_ids("empty_window_ids")?,
+        busy_window_ids: parse_ids("busy_window_ids")?,
+        unavailable_window_ids: parse_ids("unavailable_window_ids")?,
+        failed_window_ids: parse_ids("failed_window_ids")?,
+    };
+    let outcomes = [
+        ("empty_window_ids", &completion.empty_window_ids),
+        ("busy_window_ids", &completion.busy_window_ids),
+        ("unavailable_window_ids", &completion.unavailable_window_ids),
+        ("failed_window_ids", &completion.failed_window_ids),
+    ];
+    for (left_index, (left_name, left_ids)) in outcomes.iter().enumerate() {
+        for (right_name, right_ids) in outcomes.iter().skip(left_index + 1) {
+            if let Some(id) = left_ids.intersection(right_ids).min() {
+                return Err(format!(
+                    "pane_sync_complete contains conflicting outcomes for {id}: {left_name} and {right_name}"
+                ));
+            }
+        }
+    }
+    Ok(Some(completion))
+}
+
 fn render_snapshot_lines(snapshot: &str, lines: usize) -> String {
     let mut selected = snapshot.lines().rev().take(lines).collect::<Vec<_>>();
     selected.reverse();
@@ -1803,6 +1915,381 @@ mod tests {
     #[test]
     fn render_snapshot_lines_keeps_requested_tail() {
         assert_eq!(render_snapshot_lines("a\nb\nc\n", 2), "b\nc\n");
+    }
+
+    #[test]
+    fn pane_sync_completion_rejects_duplicate_and_conflicting_outcomes() {
+        let duplicate = json!({
+            "kind": "pane_sync_complete",
+            "empty_window_ids": ["tab::pane", "tab::pane"],
+            "busy_window_ids": [],
+            "unavailable_window_ids": [],
+            "failed_window_ids": [],
+        });
+        let error = parse_pane_sync_completion(&duplicate)
+            .expect_err("duplicate completion ids must fail closed");
+        assert!(error.contains("duplicate id tab::pane"), "{error}");
+
+        let conflicting = json!({
+            "kind": "pane_sync_complete",
+            "empty_window_ids": ["tab::pane"],
+            "busy_window_ids": ["tab::pane"],
+            "unavailable_window_ids": [],
+            "failed_window_ids": [],
+        });
+        let error = parse_pane_sync_completion(&conflicting)
+            .expect_err("conflicting completion outcomes must fail closed");
+        assert!(
+            error.contains("conflicting outcomes for tab::pane"),
+            "{error}"
+        );
+    }
+
+    /// Issue #3755 AC-2: a completed sync that could not inspect the target
+    /// mutex is a stable structured outcome, not fifteen seconds of silence.
+    #[test]
+    fn read_pane_snapshot_reports_a_busy_target_from_the_completion_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-read-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane read test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let pane_id = "tab-project::agent-project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind pane read mock");
+            let address = listener.local_addr().expect("pane read mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept pane read");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane read websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(pane_id, WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send pane read workspace state");
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "kind": "pane_sync_complete",
+                            "empty_window_ids": [],
+                            "busy_window_ids": [pane_id],
+                            "unavailable_window_ids": [],
+                            "failed_window_ids": [],
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send pane read completion");
+            });
+
+            let error = read_pane_snapshot(
+                &format!("ws://{address}/internal/pane-ws"),
+                project_root,
+                pane_id,
+                DEFAULT_READ_LINES,
+            )
+            .await
+            .expect_err("a busy target is an explicit read error");
+            server.await.expect("pane read mock task");
+
+            assert!(error.starts_with("pane read: pane_read_busy"), "{error}");
+            assert!(error.contains(pane_id), "{error}");
+        });
+    }
+
+    /// Issue #3755 AC-2: an idle pane with a legitimately empty terminal is a
+    /// successful empty read once the backend says hydration is complete.
+    #[test]
+    fn read_pane_snapshot_accepts_an_explicitly_empty_target() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-read-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane read test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let pane_id = "tab-project::agent-project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind empty pane read mock");
+            let address = listener.local_addr().expect("empty pane read mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept empty pane read");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept empty pane read websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(pane_id, WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send empty pane workspace state");
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "kind": "pane_sync_complete",
+                            "empty_window_ids": [pane_id],
+                            "busy_window_ids": [],
+                            "unavailable_window_ids": [],
+                            "failed_window_ids": [],
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send empty pane completion");
+            });
+
+            let output = read_pane_snapshot(
+                &format!("ws://{address}/internal/pane-ws"),
+                project_root,
+                pane_id,
+                DEFAULT_READ_LINES,
+            )
+            .await
+            .expect("explicitly empty pane read");
+            server.await.expect("empty pane read mock task");
+
+            assert_eq!(output, "");
+        });
+    }
+
+    /// Issue #3755 compatibility: an older GUI has no completion receipt,
+    /// but its snapshot remains sufficient for a non-empty pane read.
+    #[test]
+    fn read_pane_snapshot_accepts_a_legacy_snapshot_without_completion() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-read-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build legacy pane read runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let pane_id = "tab-project::agent-project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind legacy pane read mock");
+            let address = listener
+                .local_addr()
+                .expect("legacy pane read mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept legacy pane read");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept legacy pane read websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(pane_id, WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send legacy pane workspace state");
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "kind": "terminal_snapshot",
+                            "id": pane_id,
+                            "data_base64": "bGVnYWN5IG91dHB1dAo=",
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send legacy pane snapshot");
+            });
+
+            let output = read_pane_snapshot(
+                &format!("ws://{address}/internal/pane-ws"),
+                project_root,
+                pane_id,
+                DEFAULT_READ_LINES,
+            )
+            .await
+            .expect("legacy snapshot pane read");
+            server.await.expect("legacy pane read mock task");
+
+            assert_eq!(output, "legacy output\n");
+        });
+    }
+
+    #[test]
+    fn read_pane_snapshot_reports_an_unavailable_target() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-read-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build unavailable pane read runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let pane_id = "tab-project::agent-project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind unavailable pane read mock");
+            let address = listener.local_addr().expect("pane read mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept pane read");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane read websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(pane_id, WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send pane read workspace state");
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "kind": "pane_sync_complete",
+                            "empty_window_ids": [],
+                            "busy_window_ids": [],
+                            "unavailable_window_ids": [pane_id],
+                            "failed_window_ids": [],
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send unavailable pane completion");
+            });
+
+            let error = read_pane_snapshot(
+                &format!("ws://{address}/internal/pane-ws"),
+                project_root,
+                pane_id,
+                DEFAULT_READ_LINES,
+            )
+            .await
+            .expect_err("an unavailable target is explicit");
+            server.await.expect("unavailable pane mock task");
+
+            assert!(
+                error.starts_with("pane read: pane_snapshot_unavailable"),
+                "{error}"
+            );
+            assert!(error.contains(pane_id), "{error}");
+        });
+    }
+
+    /// Issue #3755 AC-2: unrelated traffic cannot reset pane.read's response
+    /// budget and stretch a structured error into an unbounded wait.
+    #[test]
+    fn read_pane_snapshot_uses_one_absolute_completion_deadline() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-read-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane deadline runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let pane_id = "tab-project::agent-project";
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind pane deadline mock");
+            let address = listener.local_addr().expect("pane deadline mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept pane deadline");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane deadline websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                let state = workspace_state_for_test(
+                    project_root,
+                    vec![window(pane_id, WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send pane deadline workspace state");
+                loop {
+                    if socket
+                        .send(Message::Text(
+                            json!({ "kind": "runtime_health", "snapshot": {} })
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+
+            let started = std::time::Instant::now();
+            let error = read_pane_snapshot_with_timeout(
+                &format!("ws://{address}/internal/pane-ws"),
+                project_root,
+                pane_id,
+                DEFAULT_READ_LINES,
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("missing completion must hit the absolute deadline");
+            server.await.expect("pane deadline mock task");
+
+            assert!(
+                error.starts_with("pane read: pane_sync_incomplete"),
+                "{error}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "unrelated frames extended pane.read beyond its budget"
+            );
+        });
     }
 
     fn workspace_state_for_test(project_root: &str, windows: Vec<PersistedWindowState>) -> Value {

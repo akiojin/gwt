@@ -3355,6 +3355,20 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
+            "pane_sync_complete" => {
+                for field in [
+                    "empty_window_ids",
+                    "busy_window_ids",
+                    "unavailable_window_ids",
+                    "failed_window_ids",
+                ] {
+                    value.get_mut(field)?.as_array_mut()?.retain(|id| {
+                        id.as_str()
+                            .is_some_and(|id| self.allowed_window_ids.contains(id))
+                    });
+                }
+                serde_json::to_string(&value).ok()
+            }
             "pane_send_result" if self.grant.principal().authorizes_producing_mutation() => value
                 .get("window_id")
                 .and_then(serde_json::Value::as_str)
@@ -5228,6 +5242,30 @@ mod tests {
                 .to_string()
             )
             .is_none());
+        let completion = scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "pane_sync_complete",
+                    "empty_window_ids": ["tab-owned::agent-1", "tab-foreign::agent-2"],
+                    "busy_window_ids": ["tab-foreign::agent-2"],
+                    "unavailable_window_ids": ["tab-owned::agent-1"],
+                    "failed_window_ids": ["tab-foreign::agent-2"]
+                })
+                .to_string(),
+            )
+            .expect("pane completion reaches its origin client");
+        let completion: serde_json::Value =
+            serde_json::from_str(&completion).expect("filtered pane completion");
+        assert_eq!(
+            completion["empty_window_ids"],
+            serde_json::json!(["tab-owned::agent-1"])
+        );
+        assert_eq!(completion["busy_window_ids"], serde_json::json!([]));
+        assert_eq!(
+            completion["unavailable_window_ids"],
+            serde_json::json!(["tab-owned::agent-1"])
+        );
+        assert_eq!(completion["failed_window_ids"], serde_json::json!([]));
         assert!(
             scope
                 .filter_inbound(FrontendEvent::CloseWindow {
@@ -8427,6 +8465,65 @@ mod tests {
         assert_eq!(payloads.len(), 2, "distinct windows must both be delivered");
         assert!(payloads.iter().any(|payload| payload.contains("window-1")));
         assert!(payloads.iter().any(|payload| payload.contains("window-2")));
+    }
+
+    /// Issue #3755 AC-2: pane hydration finishes with one lossless receipt.
+    /// Queue pressure may drop terminal output, but it must preserve both the
+    /// latest snapshot and the completion ordering observed by pane.read.
+    #[test]
+    fn client_queue_preserves_pane_snapshot_before_completion_under_pressure() {
+        let queue = ClientQueue::default();
+        let pane_id = "tab-1::agent-7";
+        for index in 0..(LOSSY_HIGH_WATER + 10) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                pane_id,
+                &format!("chunk-{index}"),
+            )));
+        }
+
+        assert!(
+            !queue.enqueue(&prepare_outbound(&BackendEvent::TerminalSnapshot {
+                id: pane_id.to_string(),
+                data_base64: "c25hcHNob3QK".to_string(),
+            }))
+        );
+        assert!(
+            !queue.enqueue(&prepare_outbound(&BackendEvent::PaneSyncComplete {
+                empty_window_ids: Vec::new(),
+                busy_window_ids: Vec::new(),
+                unavailable_window_ids: Vec::new(),
+                failed_window_ids: Vec::new(),
+            }))
+        );
+
+        let (payloads, _) = drain_all(&queue);
+        let kinds = payloads
+            .iter()
+            .map(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .expect("queued backend event json")
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("queued backend event kind")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let snapshot_index = kinds
+            .iter()
+            .position(|kind| kind == "terminal_snapshot")
+            .expect("terminal snapshot survives pressure");
+        let completion_index = kinds
+            .iter()
+            .position(|kind| kind == "pane_sync_complete")
+            .expect("pane completion survives pressure");
+        assert!(snapshot_index < completion_index);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| kind.as_str() == "pane_sync_complete")
+                .count(),
+            1
+        );
     }
 
     // Issue #3315: under a terminal-output flood that saturates the lossy
