@@ -1174,7 +1174,6 @@ function createActionRegistry(doc) {
     // SPEC-3431 FR-026: the rail gear only appears on hover, so the palette is
     // the keyboard-reachable entry to PM settings.
     { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
-    { id: "intake-session", label: "Intake", hint: "Curate · new work", group: "Workflow", handler: dispatch("intake-session") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "open-branches", label: "Open Workspace", hint: "Execute · existing branch", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },

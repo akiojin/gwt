@@ -56,29 +56,22 @@ impl LaunchWizardState {
             (None, None) => {}
         }
 
-        // SPEC-3214 Phase 3: an intake session launches an ephemeral, detached
-        // worktree on the base ref and creates NO branch — bypass all
-        // branch/worktree wiring below.
-        if let Some(base_ref) = &self.context.ephemeral_base_ref {
-            builder = builder.ephemeral(Some(base_ref.clone()));
-        } else {
-            if !self.is_new_branch {
-                if let Some(worktree_path) = &self.context.worktree_path {
-                    builder = builder.working_dir(worktree_path.clone());
-                }
+        if !self.is_new_branch {
+            if let Some(worktree_path) = &self.context.worktree_path {
+                builder = builder.working_dir(worktree_path.clone());
             }
+        }
 
-            if !self.branch_name.is_empty() {
-                builder = builder.branch(self.branch_name.clone());
-            }
+        if !self.branch_name.is_empty() {
+            builder = builder.branch(self.branch_name.clone());
+        }
 
-            if self.is_new_branch {
-                builder = builder.base_branch(
-                    self.base_branch_name
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
-                );
-            }
+        if self.is_new_branch {
+            builder = builder.base_branch(
+                self.base_branch_name
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+            );
         }
 
         if let Some(model) = self.explicit_model_for_launch() {
@@ -219,20 +212,6 @@ impl LaunchWizardState {
             // SPEC-3214 FR-010: the standalone picker cannot launch until the
             // user has picked a branch — there is no reserved fallback name.
             return Err("Select a branch to open before launching".to_string());
-        }
-        if self.wizard_mode == LaunchWizardMode::Intake {
-            // SPEC-3214 FR-001: intake launches are branch-free and get a
-            // disposable detached worktree from the launch runtime. Clearing
-            // branch/base/working_dir here is the invariant guard — no wizard
-            // state may leak a named branch into an intake launch.
-            // #3374: the ephemeral base ref is NOT branch state — it is the
-            // intake base (e.g. `origin/develop`). Clearing it made the launch
-            // runtime fall back to `HEAD` and materialize a stale worktree.
-            config.is_ephemeral = true;
-            config.ephemeral_base_ref = self.context.ephemeral_base_ref.clone();
-            config.branch = None;
-            config.base_branch = None;
-            config.working_dir = None;
         }
         Ok(config)
     }
@@ -388,55 +367,6 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--model" && pair[1] == "DefaultXL"));
-    }
-
-    #[test]
-    fn build_launch_config_for_intake_is_ephemeral_and_branchless() {
-        // SPEC-3214 Phase 3: an intake session wizard produces an ephemeral,
-        // branchless LaunchConfig (detached `.intake-*` worktree on the base
-        // ref), never a named branch.
-        let mut state = LaunchWizardState::open_with(
-            intake_context("origin/develop"),
-            sample_agent_options(),
-            Vec::new(),
-        );
-        state.agent_id = "codex".to_string();
-
-        let config = state.build_launch_config().expect("intake launch config");
-        assert!(config.is_ephemeral, "intake launch is ephemeral");
-        assert_eq!(config.ephemeral_base_ref.as_deref(), Some("origin/develop"));
-        assert!(config.branch.is_none(), "intake launch creates no branch");
-        assert!(
-            config.base_branch.is_none(),
-            "intake launch reserves no base branch"
-        );
-    }
-
-    #[test]
-    fn build_launch_config_for_intake_wizard_mode_keeps_ephemeral_base_ref() {
-        // #3374: the production intake path goes through
-        // `mark_as_ephemeral_intake`, which sets `wizard_mode = Intake`. The
-        // Intake invariant guard must clear branch state WITHOUT wiping the
-        // ephemeral base ref — losing it makes the launch runtime fall back to
-        // `HEAD` (the possibly months-stale main checkout), which is exactly
-        // the stale-intake-worktree bug.
-        let mut state = LaunchWizardState::open_with(
-            context(branch("develop"), "develop"),
-            sample_agent_options(),
-            Vec::new(),
-        );
-        state.mark_as_ephemeral_intake("origin/develop");
-
-        let config = state.build_launch_config().expect("intake launch config");
-        assert!(config.is_ephemeral, "intake launch is ephemeral");
-        assert_eq!(
-            config.ephemeral_base_ref.as_deref(),
-            Some("origin/develop"),
-            "the Intake invariant guard must keep the ephemeral base ref"
-        );
-        assert!(config.branch.is_none(), "intake launch creates no branch");
-        assert!(config.base_branch.is_none());
-        assert!(config.working_dir.is_none());
     }
 
     #[test]
@@ -1475,36 +1405,6 @@ mod tests {
         assert_eq!(config.branch.as_deref(), Some("feature-foo"));
         assert!(config.base_branch.is_none());
         assert!(!config.is_ephemeral, "continue-on-branch is not ephemeral");
-    }
-
-    /// SPEC-3214 T-020 / FR-001: the Intake wizard mode builds an ephemeral
-    /// launch — no branch, no base branch, no pre-resolved working dir — so
-    /// the launch runtime materializes a disposable `.intake-*` detached
-    /// worktree instead of a named-branch worktree.
-    #[test]
-    fn open_intake_hides_branch_controls_and_builds_ephemeral_config() {
-        let state = LaunchWizardState::open_intake_with_previous_profiles(
-            context(branch("develop"), "develop"),
-            sample_agent_options(),
-            Vec::new(),
-            LaunchWizardPreviousProfiles::default(),
-        );
-
-        let view = state.view();
-        assert_eq!(view.mode, LaunchWizardMode::Intake);
-        assert!(
-            !view.show_branch_controls,
-            "intake sessions have no branch to pick"
-        );
-
-        let config = state.build_launch_config().expect("intake launch config");
-        assert!(config.is_ephemeral, "intake launches must be ephemeral");
-        assert!(config.branch.is_none(), "no named branch may be involved");
-        assert!(config.base_branch.is_none());
-        assert!(
-            config.working_dir.is_none(),
-            "the ephemeral worktree is materialized at launch time"
-        );
     }
 
     #[test]

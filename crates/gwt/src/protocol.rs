@@ -618,10 +618,6 @@ pub enum FrontendEvent {
         id: String,
         issue_number: u64,
     },
-    /// SPEC-3245 Phase 3 / SPEC-3214: open the Launch Wizard for an ephemeral
-    /// intake session (branchless, detached worktree). The primary "start new
-    /// work" entry that replaces the removed Start Work.
-    OpenIntakeSession,
     OpenStartWorkInAgentKanban {
         board_id: String,
         lane_id: AgentKanbanLane,
@@ -3894,17 +3890,17 @@ mod tests {
         );
     }
 
-    // SPEC-3245 Phase 3: Start Work is removed; the global "start new work"
-    // command is the ephemeral Intake session.
+    // SPEC-3245 Stage E: the Intake-only product route is retired. Legacy
+    // frontend bundles must not be able to reopen it through the wire protocol.
     #[test]
-    fn frontend_event_accepts_global_open_intake_session_command() {
-        let event: FrontendEvent =
-            serde_json::from_value(serde_json::json!({ "kind": "open_intake_session" }))
-                .expect("deserialize open_intake_session");
+    fn frontend_event_rejects_legacy_open_intake_session_command() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "open_intake_session"
+        }));
 
         assert!(
-            matches!(event, FrontendEvent::OpenIntakeSession),
-            "Intake session must be a global command, not a Branches window event"
+            event.is_err(),
+            "legacy open_intake_session payload must be rejected"
         );
     }
 

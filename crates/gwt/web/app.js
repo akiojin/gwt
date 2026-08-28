@@ -4708,7 +4708,6 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openIntakePendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -6012,8 +6011,8 @@
             applyLaunchWizardStateEvent(event);
             break;
           case "work_advisory_result":
-            // SPEC-2359 US-80: duplicate-work advisory results for the Start
-            // Work intake prompt.
+            // SPEC-2359 US-80: duplicate-work advisory results for the Plan
+            // Agent work-registration prompt.
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
@@ -6750,14 +6749,8 @@
         openModal();
       });
 
-      // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
-      document
-        .getElementById("canvas-empty-intake")
-        ?.addEventListener("click", () => {
-          document.dispatchEvent(
-            new CustomEvent("op:command", { detail: { id: "intake-session" } }),
-          );
-        });
+      // SPEC-3038 AS-4.5 / SPEC-3245 Stage E: the empty canvas keeps the
+      // normal Workspace and Add Window actions after Intake removal.
       document
         .getElementById("canvas-empty-open-workspace")
         ?.addEventListener("click", () => {
@@ -7055,13 +7048,6 @@
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");
-            return;
-          case "intake-session":
-            // SPEC-3214 Phase 3: ephemeral intake session (branchless).
-            openIntakePendingWizard();
-            frontendUnits.socketTransport.send({
-              kind: "open_intake_session",
-            });
             return;
           case "stop-all-windows":
             requestStopAllWindows();

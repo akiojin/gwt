@@ -2,7 +2,7 @@
  * SPEC-2014 2026-05-27 follow-up — Launch Wizard Fast mode live E2E.
  *
  * Runs against a real gwt browser-server backend and exercises the user-facing path
- * that regressed: Intake -> Configure intake -> Claude Code -> Fast mode
+ * that regressed: Work branch -> Configure launch -> Claude Code -> Fast mode
  * -> runtime context resolution. The test stops before the final launch so it
  * does not create a branch or start a real Claude Code process.
  */
@@ -11,22 +11,23 @@ import {
   acquireLiveGwtBackendLock,
   clearLiveLaunchWizard,
   gotoLiveGwt,
+  openLiveLaunchWizardForBranch,
   openLiveGwtProject,
   sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const REAL_CLAUDE_LAUNCH = process.env.GWT_PLAYWRIGHT_LAUNCH_REAL_CLAUDE === "1";
-const BRANCH_NAME =
-  process.env.GWT_PLAYWRIGHT_BRANCH_NAME ?? "work/20260527-0745";
 
 test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
   test.setTimeout(120_000);
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
+  let cleanupLaunchFixture: (() => Promise<void>) | undefined;
 
   test.beforeEach(async ({ page }, testInfo) => {
+    cleanupLaunchFixture = undefined;
     test.skip(
       testInfo.project.name !== "chromium-dark",
       "live Launch Wizard E2E runs once against the shared backend",
@@ -40,8 +41,14 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
 
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
+    const cleanup = cleanupLaunchFixture;
+    cleanupLaunchFixture = undefined;
     try {
-      await clearLiveLaunchWizard(page);
+      try {
+        await clearLiveLaunchWizard(page);
+      } finally {
+        await cleanup?.();
+      }
     } finally {
       await releaseBackendLock();
       releaseBackendLock = undefined;
@@ -51,7 +58,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
   test("Claude Code Fast mode stays on after runtime context resolution", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
+    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
 
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
@@ -96,7 +103,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     const beforeIds = await claudeWindowIds(page);
     let launchedWindowId: string | null = null;
     try {
-      await openLaunchWizardForCurrentBranch(page);
+      cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
 
       const wizard = page.locator("#wizard-modal");
       await expect(wizard).toBeVisible();
@@ -193,17 +200,6 @@ function fastModeSummaryValue(page: Page) {
     .locator(".wizard-summary-value");
 }
 
-async function openLaunchWizardForCurrentBranch(page: Page): Promise<void> {
-  const workWindow = await createWorkWindow(page);
-  const workWindowId = await workWindow.getAttribute("data-id");
-  expect(workWindowId).toBeTruthy();
-  await sendLiveGwtEvent(page, {
-    kind: "open_launch_wizard",
-    id: workWindowId,
-    branch_name: BRANCH_NAME,
-  });
-}
-
 async function chooseConfigureAndStart(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const agentSelect = wizard.getByLabel("Agent", { exact: true });
@@ -224,31 +220,6 @@ async function blurActiveElement(page: Page): Promise<void> {
     const active = document.activeElement;
     if (active instanceof HTMLElement) active.blur();
   });
-}
-
-async function createWorkWindow(page: Page) {
-  const beforeIds = await page
-    .locator(".workspace-window")
-    .evaluateAll((nodes) =>
-      nodes.map((node) => (node as HTMLElement).dataset.id || ""),
-    );
-  await sendLiveGwtEvent(page, {
-    kind: "create_window",
-    preset: "work",
-    bounds: { x: 96, y: 96, width: 880, height: 520 },
-  });
-  const id = await page
-    .waitForFunction(
-      ({ beforeIds }) => {
-        const seen = new Set(beforeIds);
-        const node = Array.from(document.querySelectorAll(".workspace-window"))
-          .find((candidate) => !seen.has((candidate as HTMLElement).dataset.id || ""));
-        return node ? (node as HTMLElement).dataset.id || "" : "";
-      },
-      { beforeIds },
-    )
-    .then((handle) => handle.jsonValue());
-  return page.locator(`.workspace-window[data-id="${id}"]`);
 }
 
 async function claudeWindowIds(page: Page): Promise<string[]> {

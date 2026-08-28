@@ -214,32 +214,6 @@ impl LaunchWizardState {
         state
     }
 
-    /// SPEC-3214 FR-001: open the wizard for an intake session. No branch is
-    /// selected or created — the launch materializes an ephemeral detached
-    /// `.intake-*` worktree at submit time.
-    pub fn open_intake_with_previous_profiles(
-        context: LaunchWizardContext,
-        agent_options: Vec<AgentOption>,
-        quick_start_entries: Vec<QuickStartEntry>,
-        previous_profiles: LaunchWizardPreviousProfiles,
-    ) -> Self {
-        let mut state = Self::new_with(
-            context,
-            agent_options,
-            quick_start_entries,
-            previous_profiles,
-            false,
-        );
-        state.wizard_mode = LaunchWizardMode::Intake;
-        state.step = LaunchWizardStep::LaunchTarget;
-        state.launch_path = LaunchWizardLaunchPath::ManualSetup;
-        state.selected = step_default_selection(state.step, &state);
-        state.is_new_branch = false;
-        state.base_branch_name = None;
-        state.branch_name = String::new();
-        state
-    }
-
     /// SPEC-3214 FR-010: open the wizard as a standalone existing-branch
     /// picker. No work/* branch is reserved; `SelectExistingBranch` flips the
     /// state into the normal continue-on-branch launch (US-83 mechanics).
@@ -372,20 +346,6 @@ impl LaunchWizardState {
         self.selected = self
             .selected
             .min(self.current_options().len().saturating_sub(1));
-    }
-
-    /// SPEC-3214 Phase 3: convert this wizard into an ephemeral intake session.
-    /// The agent/profile picker is unchanged, but the launch becomes branchless
-    /// and detached on `base_ref` — build_launch_config then yields
-    /// `is_ephemeral=true` with no branch.
-    pub fn mark_as_ephemeral_intake(&mut self, base_ref: impl Into<String>) {
-        self.wizard_mode = LaunchWizardMode::Intake;
-        self.context.ephemeral_base_ref = Some(base_ref.into());
-        self.context.normalized_branch_name = String::new();
-        self.context.worktree_path = None;
-        self.branch_name = String::new();
-        self.is_new_branch = false;
-        self.base_branch_name = None;
     }
 
     pub fn mark_runtime_context_unresolved(&mut self) {

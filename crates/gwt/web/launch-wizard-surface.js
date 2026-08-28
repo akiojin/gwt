@@ -77,9 +77,10 @@ export function createLaunchWizardSurface({
       let launchWizardPendingAction = null;
       let launchWizardPendingActionDisconnected = false;
       let launchWizardPendingActionQueued = false;
-      // SPEC-2359 US-80 — Start Work duplicate-work advisory. The intake prompt
-      // is always skippable; these locals drive the debounced query and the
-      // non-blocking results panel. `wizardAdvisoryLatestRequestId` guards
+      // SPEC-2359 US-80 — Plan Agent duplicate-work advisory. The
+      // work-registration prompt is always skippable; these locals drive the
+      // debounced query and non-blocking results panel.
+      // `wizardAdvisoryLatestRequestId` guards
       // against stale responses arriving out of order.
       let wizardPromptDraft = "";
       let wizardPromptBackendValue = "";
@@ -450,9 +451,9 @@ export function createLaunchWizardSurface({
         });
       }
 
-      // SPEC-2359 US-80 — is this a Start Work launch (where the work branch is
-      // auto-created)? Start Work hides the branch controls; that is the signal
-      // for showing the optional intake prompt + duplicate-work advisory.
+      // SPEC-2359 US-80 — is this a Plan Agent launch (where the work branch is
+      // auto-created)? Plan Agent hides the branch controls; that is the signal
+      // for showing the optional work-registration prompt and advisory.
       function isStartWorkLaunch() {
         return Boolean(launchWizard) && launchWizard.show_branch_controls === false;
       }
@@ -736,14 +737,6 @@ export function createLaunchWizardSurface({
         renderLaunchWizard();
       }
 
-      function openIntakePendingWizard() {
-        openLaunchPendingWizard({
-          title: "Intake",
-          meta: "Intake session",
-          message: "Preparing Intake session...",
-        });
-      }
-
       // SPEC-3214 T-042: the standalone existing-branch picker keeps the
       // pending-wizard UX the removed Start Work entry used to provide.
       function openExistingBranchPendingWizard() {
@@ -887,7 +880,7 @@ export function createLaunchWizardSurface({
             wizardFocusTrapRelease = null;
           }
           // SPEC-2356 — restore focus to the trigger that opened the wizard
-          // so keyboard users land back on Start Work / Launch Agent / etc.
+          // so keyboard users land back on Open Workspace / Launch Agent / etc.
           if (wasOpenBeforeClose && wizardFocusReturn && typeof wizardFocusReturn.focus === "function") {
             try { wizardFocusReturn.focus({ preventScroll: true }); }
             catch { wizardFocusReturn.focus(); }
@@ -912,8 +905,8 @@ export function createLaunchWizardSurface({
         syncWizardDraftState();
         closeModal();
         // Issue #3192 — this derivation runs BEFORE the opening/openError
-        // early returns below, so it is reached for the Start Work /
-        // Launch Agent pending states where `launchWizard` is null
+        // early returns below, so it is reached for generic branch / agent
+        // pending states where `launchWizard` is null
         // (`launchWizardOpening` is set instead). Read the field null-safely:
         // a bare `launchWizard.launch_materialization_pending` throws and
         // renderLaunchWizard() never reaches the `.open` toggle, so the rail
@@ -950,9 +943,9 @@ export function createLaunchWizardSurface({
 
         if (launchWizardOpening) {
           if (wizardTitle) {
-            wizardTitle.textContent = launchWizardOpening.title || "Start Work";
+            wizardTitle.textContent = launchWizardOpening.title || "Launch Agent";
           }
-          wizardMeta.textContent = launchWizardOpening.meta || "Plan Agent launch";
+          wizardMeta.textContent = launchWizardOpening.meta || "Agent launch";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = true;
           wizardSubmitButton.hidden = true;
@@ -968,7 +961,7 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              launchWizardOpening.message || "Preparing Plan Agent...",
+              launchWizardOpening.message || "Preparing Launch Agent...",
             ),
           );
           wizardBody.appendChild(openingPanel);
@@ -980,9 +973,7 @@ export function createLaunchWizardSurface({
             wizardTitle.textContent = launchWizardOpenError.title || "Launch Agent";
           }
           wizardMeta.textContent =
-            launchWizardOpenError.title === "Intake"
-              ? "Curate session"
-              : launchWizardOpenError.title === "Start Work"
+            launchWizardOpenError.title === "Start Work"
               ? "Plan Agent launch"
               : "Launch Agent";
           wizardBackButton.hidden = true;
@@ -1025,12 +1016,9 @@ export function createLaunchWizardSurface({
             );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
-        const isIntakeWizard = launchWizard.mode === "intake";
-        wizardMeta.textContent = isIntakeWizard
-          ? "Curate session"
-          : launchWizard.show_branch_controls === false
-            ? "Plan Agent launch"
-            : `Selected branch · ${
+        wizardMeta.textContent = launchWizard.show_branch_controls === false
+          ? "Plan Agent launch"
+          : `Selected branch · ${
               displayBranchName(
                 launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
               )
@@ -1178,14 +1166,12 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // SPEC-3165 — the prompt is still skippable and still drives the
-        // duplicate-work advisory; Intake keeps its Curate-facing copy.
+        // SPEC-3165 — the generic work-registration prompt stays skippable
+        // and continues to drive the duplicate-work advisory.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
             "Register an Issue",
-            isIntakeWizard
-              ? "Optional — describe the work to turn into an Issue or SPEC. You can skip this."
-              : "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
+            "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
           );
           const textarea = createNode("textarea", "launch-intake-input");
           textarea.placeholder = "e.g. register an issue for the login auth bug";
@@ -1232,10 +1218,8 @@ export function createLaunchWizardSurface({
 
         if (showStartMethods) {
           const section = createLaunchSection(
-            isIntakeWizard ? "Intake setup" : "Start methods",
-            isIntakeWizard
-              ? "Choose how to prepare this intake session."
-              : "Pick the safest next step for this agent on the selected branch.",
+            "Start methods",
+            "Pick the safest next step for this agent on the selected branch.",
           );
 
           const methodList = createNode("div", "start-method-list");
@@ -1248,16 +1232,12 @@ export function createLaunchWizardSurface({
             {
               id: "available",
               title: "Available",
-              copy: isIntakeWizard
-                ? "Other ways to prepare or resume this intake session."
-                : "Other ways to start, resume, or focus this agent.",
+              copy: "Other ways to start, resume, or focus this agent.",
             },
             {
               id: "unavailable",
               title: "Unavailable",
-              copy: isIntakeWizard
-                ? "Requires saved settings, saved sessions, or a running intake session."
-                : "Requires saved settings, saved sessions, or a running agent.",
+              copy: "Requires saved settings, saved sessions, or a running agent.",
             },
           ];
           const methodsByGroup = new Map(
@@ -2120,7 +2100,6 @@ export function createLaunchWizardSurface({
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openIntakePendingWizard,
         openExistingBranchPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,

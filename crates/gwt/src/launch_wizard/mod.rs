@@ -60,9 +60,6 @@ pub enum LaunchWizardMode {
     Branch,
     StartWork,
     Knowledge,
-    /// SPEC-3214 FR-001: disposable branch-free intake session on an
-    /// ephemeral detached worktree.
-    Intake,
     /// SPEC-3214 FR-010: standalone existing-branch picker (US-83
     /// SelectExistingBranch) that continues on a remote branch without
     /// minting a new work/* branch.
@@ -587,11 +584,6 @@ pub struct LaunchWizardContext {
     /// environment. This gate applies to installed, `latest`, and pinned
     /// versions.
     pub claude_workflows_enabled: bool,
-    /// SPEC-3214 Phase 3: when `Some(base_ref)`, this wizard launches an
-    /// ephemeral **intake session** — the agent runs in a detached, throwaway
-    /// worktree based on `base_ref` (e.g. `origin/develop`) and creates no
-    /// branch. `None` is the normal branch-based launch.
-    pub ephemeral_base_ref: Option<String>,
 }
 
 impl LaunchWizardContext {

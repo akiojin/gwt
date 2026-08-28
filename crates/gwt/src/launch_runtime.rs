@@ -167,12 +167,13 @@ pub fn resolve_launch_worktree_request(
     Ok(())
 }
 
-/// Resolve a working directory for an ephemeral intake launch (SPEC-3214
-/// T-004): materialize a detached `.intake-*` worktree at `base_ref` and set
-/// `working_dir`. Unlike [`resolve_launch_worktree_request`] this never creates
-/// a branch — the intake worktree hosts a short-lived session and is removed
-/// when the session ends. `working_dir` already set is a no-op (idempotent /
-/// reuse). Collisions with existing worktrees are avoided by suffixing.
+/// Resolve a working directory for a generic ephemeral launch: materialize a
+/// detached worktree at `base_ref` and set `working_dir`. The `.intake-*`
+/// filesystem prefix is retained as a compatibility contract even though the
+/// former Intake product route is gone. Unlike [`resolve_launch_worktree_request`]
+/// this never creates a branch; the short-lived worktree is removed when the
+/// session ends. `working_dir` already set is a no-op (idempotent / reuse).
+/// Collisions with existing worktrees are avoided by suffixing.
 pub fn resolve_ephemeral_launch_worktree(
     repo_path: &Path,
     base_ref: Option<&str>,
@@ -194,13 +195,14 @@ pub fn resolve_ephemeral_launch_worktree(
         .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
 
     // Default to HEAD: `git worktree add --detach <path> HEAD` always resolves
-    // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
+    // in a repo with commits. Generic ephemeral callers may pass an explicit
     // base ref such as `origin/develop` when they need a specific base.
     // #3374: a remote base must reflect the FRESH origin state — fetch before
     // materializing so the remote-tracking ref is not months stale. Unlike
-    // Start Work's prepare step, intake never creates remote branches: a repo
-    // without an origin remote, or whose origin lacks the base branch, falls
-    // back to HEAD (the local checkout is the only truth there).
+    // Start Work's prepare step, an ephemeral launch never creates remote
+    // branches: a repo without an origin remote, or whose origin lacks the
+    // base branch, falls back to HEAD (the local checkout is the only truth
+    // there).
     let base_ref = base_ref.unwrap_or("HEAD");
     let base_ref = if base_ref.starts_with("origin/") {
         let has_origin = manager
@@ -237,14 +239,15 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
         .is_some_and(|name| !name.is_empty())
 }
 
-/// Reap orphaned ephemeral intake worktrees at startup (SPEC-3214 T-006).
+/// Reap orphaned legacy-prefixed ephemeral worktrees at startup.
 ///
-/// A crash between an intake launch and its session-end cleanup leaves a
-/// detached `.intake-*` worktree behind. On startup no intake session is live,
-/// so every `.intake-*` worktree is an orphan: remove the clean ones and keep
-/// the dirty ones (uncommitted work is never destroyed). Bounded by
-/// `max_removals` so a pathological pile-up cannot stall startup. Returns the
-/// number removed. Never errors — best-effort recovery.
+/// A crash between an ephemeral launch and its session-end cleanup can leave
+/// a detached `.intake-*` worktree behind. The prefix remains for filesystem
+/// compatibility. At startup every worktree in the fixed snapshot is an
+/// orphan: remove the clean ones and keep the dirty ones (uncommitted work is
+/// never destroyed). Bounded by `max_removals` so a pathological pile-up
+/// cannot stall startup. Returns the number removed. Never errors — best-effort
+/// recovery.
 #[cfg(test)]
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
     let Some(plan) = plan_orphan_intake_worktree_prune(repo_path) else {
@@ -256,7 +259,7 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
 /// Fixed startup snapshot of detached `.intake-*` worktrees that existed
 /// before the GUI became interactive. Keeping discovery separate from safety
 /// inspection lets startup dispatch the expensive per-worktree checks to a
-/// worker without ever considering an intake created after startup.
+/// worker without ever considering an ephemeral worktree created after startup.
 #[derive(Debug)]
 pub struct OrphanIntakePrunePlan {
     main_repo_path: PathBuf,
@@ -325,8 +328,8 @@ pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
-    // SPEC-3214: an ephemeral intake launch resolves a detached throwaway
-    // worktree instead of creating/reusing a branch worktree.
+    // A generic ephemeral launch resolves a detached throwaway worktree
+    // instead of creating/reusing a branch worktree.
     if config.is_ephemeral {
         resolve_ephemeral_launch_worktree(
             repo_path,

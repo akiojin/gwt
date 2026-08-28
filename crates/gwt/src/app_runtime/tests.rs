@@ -5842,7 +5842,6 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
-                ephemeral_base_ref: None,
             },
             Vec::new(),
         ),
@@ -6058,7 +6057,6 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
-                ephemeral_base_ref: None,
             },
             Vec::new(),
             Vec::new(),
@@ -6101,7 +6099,6 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
             linked_issue_kind: None,
             ultracode_supported: false,
             claude_workflows_enabled: false,
-            ephemeral_base_ref: None,
         },
         base_branch,
         sample_agent_options(),
@@ -6175,7 +6172,6 @@ fn sample_ready_agent_launch_wizard_session(
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
-                ephemeral_base_ref: None,
             },
             sample_agent_options(),
             Vec::new(),
@@ -10425,60 +10421,6 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
         "non-active tab window must also be listed: {ids:?}"
     );
     assert_eq!(windows.len(), 2, "all project-tab windows must be listed");
-}
-
-#[test]
-fn app_runtime_open_intake_session_without_active_project_uses_intake_error_copy() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
-
-    assert!(runtime.launch_wizard.is_none());
-    assert!(matches!(
-        events.first().map(|event| &event.target),
-        Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
-    ));
-    assert!(matches!(
-        events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Intake" && message == "Open a project before starting an intake session"
-    ));
-}
-
-#[test]
-fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
-    let temp = tempdir().expect("tempdir");
-    // Issue #3609: the reservation directory this path creates must land in
-    // this test's tempdir, not in whichever one a parallel test installed as
-    // the process-global `HOME`.
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo,
-        ProjectKind::Git,
-        &[WindowPreset::Board],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
-
-    assert!(runtime.launch_wizard.is_none());
-    assert!(matches!(
-        events.first().map(|event| &event.target),
-        Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
-    ));
-    assert!(matches!(
-        events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Intake" && !message.is_empty()
-    ));
 }
 
 #[test]
@@ -45803,90 +45745,6 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
             ..
         } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
     )));
-}
-
-// SPEC-3214 Phase 3: OpenIntakeSession opens the Launch Wizard flagged as an
-// ephemeral intake — the resulting launch will be branchless / detached.
-#[test]
-fn open_intake_session_opens_ephemeral_branchless_wizard() {
-    let temp = tempdir().expect("tempdir");
-    // Issue #3609: `OpenIntakeSession` reaches
-    // `reserve_start_work_branch_name_for_project`, which resolves
-    // `gwt_project_dir_for_repo_path` from the process-global `HOME`. Without
-    // this pin the reservation directory is created inside whichever tempdir a
-    // parallel test installed, and this test fails with
-    // "Failed to reserve Start Work branch name: Invalid argument (os error 22)"
-    // once that tempdir is gone. Observed under parallel load on 2026-08-16.
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    run_git(&repo, &["config", "user.email", "test@example.com"]);
-    run_git(&repo, &["config", "user.name", "Test User"]);
-    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
-
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })),
-        "intake session opens without error: {events:?}"
-    );
-
-    let wizard = &runtime
-        .launch_wizard
-        .as_ref()
-        .expect("intake wizard")
-        .wizard;
-    assert_eq!(wizard.view().mode, gwt::LaunchWizardMode::Intake);
-    assert_eq!(
-        wizard.view().title,
-        "Intake",
-        "hydrated intake wizard must not fall back to Start Work copy"
-    );
-    assert_eq!(
-        wizard.context.ephemeral_base_ref.as_deref(),
-        Some(gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0]),
-        "intake wizard is flagged ephemeral on the base ref"
-    );
-    assert!(
-        wizard.context.normalized_branch_name.is_empty(),
-        "intake wizard reserves no branch"
-    );
-}
-
-#[test]
-fn open_intake_session_refuses_while_migration_pending() {
-    // SPEC-1934 US-7 / FR-034: Workspace Start Work must not run on a tab
-    // whose Normal → Nested Bare+Worktree migration is still pending.
-    // Without this gate, the launch path tries to fetch
-    // `origin/work/<branch>` on a single-branch refspec and dies with
-    // `fatal: invalid reference: origin/work/<branch>`.
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project dir");
-
-    let tab = migration_pending_tab("tab-1", project);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events = runtime.open_intake_session("client-1");
-
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Client(_),
-                event: BackendEvent::LaunchWizardOpenError { message, .. },
-                ..
-            } if message == "Complete the project migration before starting an intake session"
-        )),
-        "Start Work on a migration_pending tab must surface a clear error: {events:?}"
-    );
 }
 
 #[test]

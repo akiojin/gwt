@@ -24,6 +24,10 @@ const launchWizardSource = readFileSync(
   resolve(here, "../launch-wizard-surface.js"),
   "utf8",
 );
+const liveGwtHelperSource = readFileSync(
+  resolve(here, "../../playwright/tests/_helpers/live-gwt.ts"),
+  "utf8",
+);
 // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved from app.js
 // to file-tree-surface.js.
 const fileTreeSurfaceSource = readFileSync(
@@ -247,9 +251,9 @@ test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
   }
 });
 
-// SPEC-3245 Phase 3: Start Work is removed from the command rail and palette;
-// the 2-lane entries (Intake / Open Workspace) replace it.
-test("command rail and palette drop Start Work in favor of the 2-lane entries", () => {
+// SPEC-3245 Stage E: the deprecated Intake launch entry is removed while the
+// normal Workspace route stays available.
+test("command rail and palette omit deprecated launch entries while preserving Open Workspace", () => {
   assert.equal(
     document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]'),
     null,
@@ -270,25 +274,33 @@ test("command rail and palette drop Start Work in favor of the 2-lane entries", 
     /case\s+"start-work":/,
     "app.js must not route a start-work command",
   );
-  // The replacements exist.
-  assert.match(operatorShellSource, /id:\s*"intake-session"/, "Intake entry present");
-  assert.match(operatorShellSource, /id:\s*"open-branches"/, "Open Workspace entry present");
-});
-
-// SPEC-3214 Phase 3 / SPEC-3245 Phase 4: the command palette exposes an
-// "Intake" entry (the "session" suffix is dropped to avoid colliding with the
-// Session domain term) that sends open_intake_session (the ephemeral,
-// branchless new-work entry).
-test("command palette exposes Intake wired to open_intake_session", () => {
-  assert.match(
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="intake-session"]'),
+    null,
+    "the Command Rail must not expose the deprecated Intake action",
+  );
+  assert.doesNotMatch(
     operatorShellSource,
-    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
-    "expected Command Palette registry to include the Intake entry",
+    /id:\s*"intake-session"/,
+    "Command Palette registry must not include the deprecated Intake action",
   );
   assert.match(
+    operatorShellSource,
+    /id:\s*"open-branches"/,
+    "Open Workspace entry must remain available",
+  );
+});
+
+test("deprecated Intake command route emits no open_intake_session wire", () => {
+  assert.doesNotMatch(
+    operatorShellSource,
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
+    "Command Palette registry must not include the deprecated Intake entry",
+  );
+  assert.doesNotMatch(
     appSource,
     /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
-    "expected Intake session command to send open_intake_session",
+    "app.js must not route the deprecated command to open_intake_session",
   );
 });
 
@@ -1690,16 +1702,16 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
     empty.hasAttribute("hidden"),
     "empty state ships hidden until the workspace reports zero windows",
   );
-  // SPEC-3245 Phase 3: the empty state offers the 2-lane entries (Curate =
-  // Intake, Execute = Open Workspace) + Add window — Start Work is removed.
+  // SPEC-3245 Stage E: only the normal Workspace and Add Window actions remain.
   assert.equal(
     empty.querySelector("#canvas-empty-start-work"),
     null,
     "Start Work action must be removed (SPEC-3245)",
   );
-  assert.ok(
+  assert.equal(
     empty.querySelector("#canvas-empty-intake"),
-    "expected an Intake (Curate) action",
+    null,
+    "deprecated Intake action must be removed",
   );
   assert.ok(
     empty.querySelector("#canvas-empty-open-workspace"),
@@ -1715,7 +1727,11 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
     "app.js must toggle the empty state from the live window count",
   );
   assert.doesNotMatch(appSource, /canvas-empty-start-work/, "Start Work wiring must be removed");
-  assert.match(appSource, /canvas-empty-intake/, "Intake action must be wired");
+  assert.doesNotMatch(
+    appSource,
+    /canvas-empty-intake/,
+    "deprecated Intake action wiring must be removed",
+  );
   assert.match(appSource, /canvas-empty-open-workspace/, "Open Workspace action must be wired");
   assert.match(appSource, /canvas-empty-add-window/, "Add window action must be wired");
 });
@@ -2473,10 +2489,10 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
     /wizardModal\.classList\.contains\("open"\)[\s\S]{0,700}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc/close to locally dismiss error-only wizard state before sending backend cancel",
   );
-  assert.match(
+  assert.doesNotMatch(
     launchWizardSource,
-    /launchWizardOpenError\.title\s*===\s*"Intake"[\s\S]{0,80}?\?\s*"Curate session"/,
-    "expected Intake open errors to keep Intake/Curate copy instead of Plan Agent copy",
+    /launchWizardOpenError\.title\s*===\s*"Intake"/,
+    "Launch Wizard open errors must not retain an Intake-specific copy branch",
   );
 });
 
@@ -3890,65 +3906,79 @@ function cssBlockContaining(css, selector) {
 
 // === merged from origin/develop: SPEC-1939/2014 perf + Launch Wizard coverage ===
 
-// SPEC-3245 Phase 3: the Intake session command reuses the pending-wizard
-// mechanism (formerly Start Work) to keep the modal open before backend state.
-test("Intake session command opens a pending wizard before backend state arrives", () => {
-  const commandCase = appSource.match(
-    /case\s+"intake-session":[\s\S]*?case\s+"theme-cycle"/,
+// SPEC-3245 Stage E: the deprecated Intake command cannot leave behind a
+// local pending surface or a frontend wire.
+test("deprecated Intake command has no pending wizard route", () => {
+  assert.doesNotMatch(
+    appSource,
+    /case\s+"intake-session":/,
+    "app.js must not retain the deprecated Intake command case",
   );
-  assert.ok(commandCase, "expected Intake session command case");
-  assert.match(
-    commandCase[0],
-    /openIntakePendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
-    "expected Intake session to render a local pending wizard before sending open_intake_session",
-  );
-  assert.match(
+  assert.doesNotMatch(
     launchWizardSource,
-    /function\s+openIntakePendingWizard\(\)[\s\S]*?title:\s*"Intake"[\s\S]*?message:\s*"Preparing Intake session\.\.\."/,
-    "expected Intake pending wizard copy to avoid Start Work wording",
+    /function\s+openIntakePendingWizard\(\)/,
+    "Launch Wizard must not retain the deprecated Intake pending helper",
   );
-  assert.match(
+  assert.doesNotMatch(
     launchWizardSource,
-    /let\s+launchWizardOpening\s*=\s*null/,
-    "expected local pending wizard state",
-  );
-  assert.match(
-    launchWizardSource,
-    /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
-    "renderLaunchWizard must keep the modal open for local pending Start Work state",
+    /Preparing Intake session\.\.\./,
+    "Launch Wizard must not retain deprecated Intake pending copy",
   );
 });
 
-test("Hydrated Intake wizard uses Curate copy instead of direct Launch copy", () => {
-  assert.match(
+test("hydrated Launch Wizard has no Intake-specific copy override", () => {
+  assert.doesNotMatch(
     launchWizardSource,
-    /const\s+isIntakeWizard\s*=\s*launchWizard\.mode\s*===\s*"intake"/,
-    "hydrated Intake wizard must derive copy from the backend mode",
+    /launchWizard\.mode\s*===\s*"intake"|isIntakeWizard/,
+    "Launch Wizard must not branch on the deprecated Intake mode",
+  );
+  assert.doesNotMatch(
+    launchWizardSource,
+    /"Curate session"|"Intake setup"|prepare this intake session|running intake session/,
+    "Launch Wizard must not retain Intake-specific user-facing copy",
   );
   assert.match(
     launchWizardSource,
-    /isIntakeWizard[\s\S]{0,120}?"Curate session"/,
-    "hydrated Intake wizard meta must identify the Curate lane",
+    /createLaunchSection\(\s*"Start methods",\s*"Pick the safest next step for this agent on the selected branch\."/,
+    "normal branch Launch Wizard must keep the generic start-method copy",
   );
   assert.match(
     launchWizardSource,
-    /isIntakeWizard\s*\?\s*"Intake setup"\s*:\s*"Start methods"/,
-    "hydrated Intake wizard must not reuse the direct Launch start-method heading",
+    /"Optional — describe the work for the Plan Agent to turn into an Issue or SPEC\. You can skip this\."/,
+    "generic work-registration prompt must remain available",
+  );
+});
+
+test("live Launch Wizard helper reuses only visible Work surfaces and owns only new ids", () => {
+  assert.match(
+    liveGwtHelperSource,
+    /const preexistingWorkSurfaceIds = await liveWorkSurfaceIds\(page\);/,
+    "helper must snapshot every existing Work/legacy Branches id before create_window",
   );
   assert.match(
-    launchWizardSource,
-    /"Choose how to prepare this intake session\."/,
-    "hydrated Intake wizard must use Curate-oriented start-method copy",
+    liveGwtHelperSource,
+    /async function topmostLiveWorkSurfaceId[\s\S]{0,400}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
+    "existing wizard targets must exclude hidden other-project Work surfaces",
   );
   assert.match(
-    launchWizardSource,
-    /"Other ways to prepare or resume this intake session\."/,
-    "hydrated Intake wizard must avoid direct Launch available-group copy",
+    liveGwtHelperSource,
+    /\.waitForFunction\(\(selector\) => \{[\s\S]{0,300}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
+    "materialized wizard targets must exclude hidden other-project Work surfaces",
   );
   assert.match(
-    launchWizardSource,
-    /isIntakeWizard\s*\?\s*"Optional — describe the work to turn into an Issue or SPEC\. You can skip this\."/,
-    "hydrated Intake wizard must not mention the Plan Agent in the Register an Issue prompt",
+    liveGwtHelperSource,
+    /const createdWorkWindow = !preexistingWorkSurfaceIds\.has\(id\);/,
+    "cleanup ownership must come from the returned id, not from whether create_window was sent",
+  );
+  assert.doesNotMatch(
+    liveGwtHelperSource,
+    /const createdWorkWindow = !id;/,
+    "a hidden existing singleton must never be treated as helper-owned",
+  );
+  assert.match(
+    liveGwtHelperSource,
+    /cleanup:\s*async \(\) => \{\s*if \(!createdWorkWindow \|\| cleaned\) return;[\s\S]{0,700}?kind:\s*"close_window"/,
+    "cleanup must gate close_window on ownership of the returned id",
   );
 });
 
