@@ -47,6 +47,26 @@ fn run_canonical_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Ou
         .map_err(|error| GwtError::Git(format!("git {}: {error}", args.join(" "))))
 }
 
+fn bare_repository_metadata_exists(path: &Path) -> bool {
+    path.join("objects").is_dir()
+        && (path.join("refs").is_dir() || path.join("packed-refs").is_file())
+        && (path.join("HEAD").exists() || path.join("config").is_file())
+}
+
+fn repository_metadata_exists(requested_path: &Path, effective_path: &Path) -> bool {
+    requested_path
+        .ancestors()
+        .any(|path| path.join(".git").exists())
+        || bare_repository_metadata_exists(requested_path)
+        || bare_repository_metadata_exists(effective_path)
+        || std::fs::read_dir(requested_path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| bare_repository_metadata_exists(&entry.path()))
+}
+
 /// Resolve the first locally available canonical ref to its immutable root
 /// tree OID. No fetch is attempted: refresh admission must pin a snapshot of
 /// the refs already present on disk.
@@ -61,10 +81,11 @@ pub fn resolve_canonical_root_tree(repo_path: &Path) -> Result<Option<CanonicalR
         ("origin/master", "refs/remotes/origin/master"),
     ];
 
-    let repo_path = effective_refs_root(repo_path);
+    let requested_path = repo_path;
+    let repo_path = effective_refs_root(requested_path);
     let repository_probe = run_canonical_git(&repo_path, &["rev-parse", "--is-inside-work-tree"])?;
     if !repository_probe.status.success() {
-        if repo_path.join(".git").exists() {
+        if repository_metadata_exists(requested_path, &repo_path) {
             let stderr = String::from_utf8_lossy(&repository_probe.stderr)
                 .trim()
                 .to_string();
@@ -428,6 +449,41 @@ mod tests {
             .args(["init", "--initial-branch=main"])
             .current_dir(dir.path()));
         assert_eq!(resolve_canonical_root_tree(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_root_tree_returns_none_for_non_git_directory() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(resolve_canonical_root_tree(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_root_tree_returns_none_for_unborn_bare_repository() {
+        let dir = TempDir::new().unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "repo.git"])
+            .current_dir(dir.path()));
+        assert_eq!(
+            resolve_canonical_root_tree(&dir.path().join("repo.git")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_root_tree_rejects_corrupt_bare_repository_metadata() {
+        let layout = TempDir::new().unwrap();
+        let bare = layout.path().join("repo.git");
+        run(gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "repo.git"])
+            .current_dir(layout.path()));
+        std::fs::write(bare.join("HEAD"), "invalid HEAD\n").unwrap();
+
+        for repo_path in [&bare, layout.path()] {
+            let error = resolve_canonical_root_tree(repo_path)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("repository metadata"), "{error}");
+        }
     }
 
     #[test]

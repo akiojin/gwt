@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -389,6 +390,21 @@ class _IncrementalFixture(unittest.TestCase):
 
 
 class IncrementalGenerationTests(_IncrementalFixture):
+    def test_file_index_v2_collection_creation_failure_closes_client(self):
+        for operation, client_method in (
+            (runner._make_file_index_v2_collection, "get_or_create_collection"),
+            (runner._open_file_index_v2_collection, "get_collection"),
+        ):
+            with self.subTest(operation=operation.__name__):
+                client = mock.MagicMock()
+                getattr(client, client_method).side_effect = RuntimeError("store failure")
+                chromadb = types.ModuleType("chromadb")
+                chromadb.PersistentClient = mock.Mock(return_value=client)
+                with mock.patch.dict(sys.modules, {"chromadb": chromadb}):
+                    with self.assertRaisesRegex(RuntimeError, "store failure"):
+                        operation(self.db_root / "failed-store", "files_code")
+                client.close.assert_called_once_with()
+
     def test_large_v2_corpus_uses_bounded_batches_and_metadata_only_warm_reuse(self):
         large_project = self.base / "large-project"
         large_src = large_project / "src"

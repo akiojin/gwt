@@ -1830,11 +1830,16 @@ def _make_file_index_v2_collection(db_path: Path, collection_name: str):
 
     db_path.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(db_path))
-    return client, client.get_or_create_collection(
-        name=collection_name,
-        embedding_function=None,
-        metadata={"hnsw:space": "cosine"},
-    )
+    try:
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"},
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
 
 
 def _open_file_index_v2_collection(db_path: Path, collection_name: str):
