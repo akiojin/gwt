@@ -54,21 +54,34 @@ impl FileIndexCompatibilityDescriptor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileGenerationReference {
+    pub store: String,
+    pub collection: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIndexDocumentCounts {
+    pub files: usize,
+    #[serde(rename = "files-docs")]
+    pub files_docs: usize,
+    pub total: usize,
+}
+
 /// Immutable repo-scoped aggregate containing both Files collections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaseGenerationDescriptor {
     pub schema_version: u32,
     pub kind: String,
+    pub base_generation_id: String,
     pub repo_hash: String,
-    pub source_identity: String,
     pub root_tree_oid: Option<String>,
     pub canonical_ref: Option<String>,
     pub compatibility: FileIndexCompatibilityDescriptor,
-    pub generation_id: String,
+    pub files_generation: FileGenerationReference,
+    pub files_docs_generation: FileGenerationReference,
     pub manifest_digest: String,
-    pub store: String,
-    pub collections: BTreeMap<String, String>,
-    pub document_counts: BTreeMap<String, usize>,
+    pub document_counts: FileIndexDocumentCounts,
     pub build_state: String,
     pub created_at: String,
     pub verified_at: String,
@@ -79,16 +92,18 @@ pub struct BaseGenerationDescriptor {
 pub struct OverlayGenerationDescriptor {
     pub schema_version: u32,
     pub kind: String,
+    pub overlay_generation_id: String,
     pub repo_hash: String,
     pub worktree_hash: String,
-    pub source_identity: String,
     pub base_generation_id: String,
+    pub source_snapshot_id: String,
     pub compatibility: FileIndexCompatibilityDescriptor,
-    pub generation_id: String,
+    pub files_generation: FileGenerationReference,
+    pub files_docs_generation: FileGenerationReference,
+    pub files_shadow: Vec<String>,
+    pub files_docs_shadow: Vec<String>,
+    pub tombstones: Vec<String>,
     pub manifest_digest: String,
-    pub store: String,
-    pub collections: BTreeMap<String, String>,
-    pub document_counts: BTreeMap<String, usize>,
     pub build_state: String,
     pub created_at: String,
     pub verified_at: String,
@@ -147,56 +162,47 @@ mod tests {
 
     #[test]
     fn aggregate_generation_descriptors_roundtrip_python_json_shape() {
-        let collections = BTreeMap::from([
-            ("files".into(), "files_code".into()),
-            ("files-docs".into(), "files_docs".into()),
-        ]);
-        let document_counts =
-            BTreeMap::from([("files".into(), 8usize), ("files-docs".into(), 2usize)]);
-        let base = BaseGenerationDescriptor {
-            schema_version: 1,
-            kind: "base".into(),
-            repo_hash: "repo".into(),
-            source_identity: "tree".into(),
-            root_tree_oid: Some("tree".into()),
-            canonical_ref: Some("origin/develop".into()),
-            compatibility: compatibility(),
-            generation_id: "base".into(),
-            manifest_digest: "manifest".into(),
-            store: "store".into(),
-            collections: collections.clone(),
-            document_counts: document_counts.clone(),
-            build_state: "verified".into(),
-            created_at: "2026-08-29T00:00:00+00:00".into(),
-            verified_at: "2026-08-29T00:00:00+00:00".into(),
-        };
-        let base_json = serde_json::to_string(&base).unwrap();
-        assert_eq!(
-            serde_json::from_str::<BaseGenerationDescriptor>(&base_json).unwrap(),
-            base
-        );
+        let compatibility = serde_json::to_value(compatibility()).unwrap();
+        let base_json = serde_json::json!({
+            "schema_version": 1,
+            "kind": "base",
+            "base_generation_id": "base",
+            "repo_hash": "repo",
+            "root_tree_oid": "tree",
+            "canonical_ref": "origin/develop",
+            "compatibility": compatibility.clone(),
+            "files_generation": {"store": "store", "collection": "files_code"},
+            "files_docs_generation": {"store": "store", "collection": "files_docs"},
+            "manifest_digest": "manifest",
+            "document_counts": {"files": 8, "files-docs": 2, "total": 10},
+            "build_state": "verified",
+            "created_at": "2026-08-29T00:00:00+00:00",
+            "verified_at": "2026-08-29T00:00:00+00:00"
+        });
+        let base: BaseGenerationDescriptor = serde_json::from_value(base_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(base).unwrap(), base_json);
 
-        let overlay = OverlayGenerationDescriptor {
-            schema_version: 1,
-            kind: "overlay".into(),
-            repo_hash: "repo".into(),
-            worktree_hash: "worktree".into(),
-            source_identity: "snapshot".into(),
-            base_generation_id: "base".into(),
-            compatibility: compatibility(),
-            generation_id: "overlay".into(),
-            manifest_digest: "manifest".into(),
-            store: "store".into(),
-            collections,
-            document_counts,
-            build_state: "verified".into(),
-            created_at: "2026-08-29T00:00:00+00:00".into(),
-            verified_at: "2026-08-29T00:00:00+00:00".into(),
-        };
-        let overlay_json = serde_json::to_string(&overlay).unwrap();
-        assert_eq!(
-            serde_json::from_str::<OverlayGenerationDescriptor>(&overlay_json).unwrap(),
-            overlay
-        );
+        let overlay_json = serde_json::json!({
+            "schema_version": 1,
+            "kind": "overlay",
+            "overlay_generation_id": "overlay",
+            "repo_hash": "repo",
+            "worktree_hash": "worktree",
+            "base_generation_id": "base",
+            "source_snapshot_id": "snapshot",
+            "compatibility": compatibility,
+            "files_generation": {"store": "store", "collection": "files_code"},
+            "files_docs_generation": {"store": "store", "collection": "files_docs"},
+            "files_shadow": ["src/lib.rs"],
+            "files_docs_shadow": ["README.md"],
+            "tombstones": ["deleted.rs"],
+            "manifest_digest": "manifest",
+            "build_state": "verified",
+            "created_at": "2026-08-29T00:00:00+00:00",
+            "verified_at": "2026-08-29T00:00:00+00:00"
+        });
+        let overlay: OverlayGenerationDescriptor =
+            serde_json::from_value(overlay_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(overlay).unwrap(), overlay_json);
     }
 }

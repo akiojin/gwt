@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -387,6 +388,37 @@ class _IncrementalFixture(unittest.TestCase):
 
 
 class IncrementalGenerationTests(_IncrementalFixture):
+    def test_non_git_and_unborn_sources_use_empty_base_and_full_overlay(self):
+        non_git = self._build_protocol_v2(self.project, WORKTREE_HASH)
+
+        unborn = self.base / "unborn"
+        unborn_src = unborn / "src"
+        unborn_src.mkdir(parents=True)
+        for index in range(8):
+            (unborn_src / f"module_{index:02}.rs").write_text(
+                f"//! module {index}\nfn feature_{index}() {{}}\n",
+                encoding="utf-8",
+            )
+        self._run_git("init", "--quiet", str(unborn))
+        unborn_result = self._build_protocol_v2(
+            unborn,
+            "0000000000000301",
+            repo_hash="abc1234567890301",
+        )
+
+        for result in (non_git, unborn_result):
+            with self.subTest(result=result):
+                self.assertTrue(result.get("ok"), result)
+                self.assertEqual(result.get("base_document_count"), 0, result)
+                self.assertEqual(result.get("overlay_document_count"), 8, result)
+                self.assertEqual(result.get("requested_embeddings"), 8, result)
+                self.assertEqual(
+                    result.get("requested_embeddings"),
+                    result.get("embedding_cache_hits", 0)
+                    + result.get("computed_embeddings", 0),
+                    result,
+                )
+
     def test_same_repo_second_worktree_reuses_all_v2_embeddings(self):
         second_project = self._make_worktree_project("second-project")
 
@@ -475,6 +507,304 @@ class IncrementalGenerationTests(_IncrementalFixture):
 
         self.assertTrue(result.get("ok"), result)
         self.assertNotIn("src/oversized.txt", requested_paths)
+
+    def test_aggregate_base_and_overlay_materialize_both_file_scopes(self):
+        canonical_repo = self._make_canonical_repo()
+        docs = canonical_repo / "docs"
+        docs.mkdir()
+        (docs / "guide.md").write_text(
+            "# Canonical guide\nShared base documentation.\n", encoding="utf-8"
+        )
+        self._run_git("-C", str(canonical_repo), "add", "docs/guide.md")
+        self._run_git(
+            "-C",
+            str(canonical_repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "add canonical docs",
+        )
+        project = self.base / "aggregate-scopes"
+        self._run_git("clone", "--quiet", str(canonical_repo), str(project))
+        (project / "src" / "overlay.rs").write_text(
+            "//! overlay code\nfn overlay() {}\n", encoding="utf-8"
+        )
+        (project / "docs" / "overlay.md").write_text(
+            "# Overlay guide\nWorktree documentation.\n", encoding="utf-8"
+        )
+
+        result = self._build_protocol_v2(
+            project,
+            "0000000000000302",
+            repo_hash="abc1234567890302",
+        )
+        self.assertTrue(result.get("ok"), result)
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            "abc1234567890302",
+            result["base_generation_id"],
+            db_root=self.db_root,
+        )
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            "abc1234567890302",
+            "0000000000000302",
+            result["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        base_descriptor = json.loads(
+            (base_dir / "descriptor.json").read_text(encoding="utf-8")
+        )
+        overlay_descriptor = json.loads(
+            (overlay_dir / "descriptor.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(set(base_descriptor), {
+            "schema_version",
+            "kind",
+            "base_generation_id",
+            "repo_hash",
+            "root_tree_oid",
+            "canonical_ref",
+            "compatibility",
+            "files_generation",
+            "files_docs_generation",
+            "manifest_digest",
+            "document_counts",
+            "build_state",
+            "created_at",
+            "verified_at",
+        })
+        self.assertEqual(set(overlay_descriptor), {
+            "schema_version",
+            "kind",
+            "overlay_generation_id",
+            "repo_hash",
+            "worktree_hash",
+            "base_generation_id",
+            "source_snapshot_id",
+            "compatibility",
+            "files_generation",
+            "files_docs_generation",
+            "files_shadow",
+            "files_docs_shadow",
+            "tombstones",
+            "manifest_digest",
+            "build_state",
+            "created_at",
+            "verified_at",
+        })
+        self.assertEqual(base_descriptor["document_counts"], {
+            "files": 8,
+            "files-docs": 1,
+            "total": 9,
+        })
+        self.assertEqual(
+            base_descriptor["files_generation"],
+            {"store": "store", "collection": runner.V2_FILES_CODE_COLLECTION},
+        )
+        self.assertEqual(
+            base_descriptor["files_docs_generation"],
+            {"store": "store", "collection": runner.V2_FILES_DOCS_COLLECTION},
+        )
+        self.assertEqual(
+            overlay_descriptor["files_generation"],
+            {"store": "store", "collection": runner.V2_FILES_CODE_COLLECTION},
+        )
+        self.assertEqual(
+            overlay_descriptor["files_docs_generation"],
+            {"store": "store", "collection": runner.V2_FILES_DOCS_COLLECTION},
+        )
+        self.assertEqual(overlay_descriptor["files_shadow"], ["src/overlay.rs"])
+        self.assertEqual(
+            overlay_descriptor["files_docs_shadow"], ["docs/overlay.md"]
+        )
+        self.assertEqual(overlay_descriptor["tombstones"], [])
+
+        for artifact_dir, expected_counts in (
+            (base_dir, {runner.V2_FILES_CODE_COLLECTION: 8, runner.V2_FILES_DOCS_COLLECTION: 1}),
+            (overlay_dir, {runner.V2_FILES_CODE_COLLECTION: 1, runner.V2_FILES_DOCS_COLLECTION: 1}),
+        ):
+            for collection_name, expected_count in expected_counts.items():
+                client, collection = runner._open_file_index_v2_collection(
+                    artifact_dir / "store", collection_name
+                )
+                try:
+                    self.assertEqual(collection.count(), expected_count)
+                finally:
+                    runner._close_chroma_client(client)
+
+    def test_concurrent_subprocess_builds_single_flight_cas_and_atomic_artifacts(self):
+        canonical_repo = self._make_canonical_repo()
+        worktrees = [
+            (
+                self._clone_canonical_worktree(
+                    canonical_repo, "concurrent-worktree-a", overlay_index=1
+                ),
+                "0000000000000303",
+            ),
+            (
+                self._clone_canonical_worktree(
+                    canonical_repo, "concurrent-worktree-b", overlay_index=2
+                ),
+                "0000000000000304",
+            ),
+        ]
+        barrier_root = self.base / "cold-miss-barrier"
+        barrier_root.mkdir()
+        driver = textwrap.dedent(
+            """
+            import json
+            import os
+            import sys
+            import time
+            from pathlib import Path
+
+            sys.path.insert(0, os.environ["GWT_TEST_RUNNER_DIR"])
+            import chroma_index_runner as runner
+
+            original_resolve = runner._resolve_record_vectors
+            first_resolve = True
+
+            def synchronized_resolve(records, descriptor, cas_root):
+                global first_resolve
+                if first_resolve:
+                    first_resolve = False
+                    barrier = Path(os.environ["GWT_TEST_BARRIER_ROOT"])
+                    (barrier / f"{os.getpid()}.ready").write_text("ready")
+                    deadline = time.monotonic() + 10
+                    while len(list(barrier.glob("*.ready"))) < 2:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("file-index-v2 cold-miss barrier timed out")
+                        time.sleep(0.01)
+                return original_resolve(records, descriptor, cas_root)
+
+            original_encode = runner._FakeEmbeddingModel.encode
+
+            def slow_encode(self, texts, **kwargs):
+                time.sleep(0.3)
+                return original_encode(self, texts, **kwargs)
+
+            runner._resolve_record_vectors = synchronized_resolve
+            runner._FakeEmbeddingModel.encode = slow_encode
+            result = runner.action_index_files_v2(
+                project_root=os.environ["GWT_TEST_PROJECT_ROOT"],
+                repo_hash=os.environ["GWT_TEST_REPO_HASH"],
+                worktree_hash=os.environ["GWT_TEST_WORKTREE_HASH"],
+                mode="full",
+                db_root=Path(os.environ["GWT_TEST_DB_ROOT"]),
+                scope="files",
+                file_index_protocol="v2",
+            )
+            print(json.dumps(result, sort_keys=True))
+            """
+        )
+        processes = []
+        for project, worktree_hash in worktrees:
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GWT_TEST_RUNNER_DIR": str(Path(runner.__file__).resolve().parent),
+                    "GWT_TEST_BARRIER_ROOT": str(barrier_root),
+                    "GWT_TEST_PROJECT_ROOT": str(project),
+                    "GWT_TEST_REPO_HASH": "abc1234567890303",
+                    "GWT_TEST_WORKTREE_HASH": worktree_hash,
+                    "GWT_TEST_DB_ROOT": str(self.db_root),
+                }
+            )
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", driver],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=environment,
+                )
+            )
+        results = []
+        for process in processes:
+            try:
+                stdout, stderr = process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate(timeout=5)
+                self.fail(
+                    "concurrent file-index-v2 subprocess timed out\n"
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                )
+            self.assertEqual(
+                process.returncode,
+                0,
+                f"stdout:\n{stdout}\nstderr:\n{stderr}",
+            )
+            results.append(json.loads(stdout.splitlines()[-1]))
+
+        for result in results:
+            self.assertTrue(result.get("ok"), result)
+        self.assertEqual(len(list(barrier_root.glob("*.ready"))), 2)
+        self.assertEqual(sum(result["requested_embeddings"] for result in results), 18)
+        self.assertEqual(sum(result["computed_embeddings"] for result in results), 10)
+        self.assertEqual(sum(result["embedding_cache_hits"] for result in results), 8)
+        self.assertTrue(
+            any(result["embedding_cache_hits"] > 0 for result in results),
+            results,
+        )
+        for result in results:
+            self.assertEqual(
+                result["requested_embeddings"],
+                result["computed_embeddings"] + result["embedding_cache_hits"],
+                result,
+            )
+        self.assertEqual(
+            {result["base_generation_id"] for result in results},
+            {results[0]["base_generation_id"]},
+        )
+        self.assertEqual(
+            len({result["overlay_generation_id"] for result in results}),
+            2,
+        )
+
+        v2_root = runner.resolve_file_index_v2_root(
+            "abc1234567890303", db_root=self.db_root
+        )
+        self.assertFalse(list(v2_root.rglob("*.staging-*")))
+        self.assertFalse(list(v2_root.rglob("*.quarantine-*")))
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            "abc1234567890303",
+            results[0]["base_generation_id"],
+            db_root=self.db_root,
+        )
+        artifact_counts = [(base_dir, 8)]
+        artifact_counts.extend(
+            (
+                runner.resolve_file_index_v2_overlay_dir(
+                    "abc1234567890303",
+                    worktree_hash,
+                    result["overlay_generation_id"],
+                    db_root=self.db_root,
+                ),
+                1,
+            )
+            for (_, worktree_hash), result in zip(worktrees, results)
+        )
+        for artifact_dir, expected_count in artifact_counts:
+            self.assertTrue((artifact_dir / "descriptor.json").is_file())
+            self.assertTrue((artifact_dir / "manifest.json").is_file())
+            self.assertTrue((artifact_dir / "store" / "chroma.sqlite3").is_file())
+            descriptor = json.loads(
+                (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(descriptor["build_state"], "verified")
+            self.assertEqual(
+                descriptor["manifest_digest"],
+                runner._sha256_json(manifest["entries"]),
+            )
+            self.assertEqual(len(manifest["entries"]), expected_count)
 
     def test_same_repo_reuse_survives_a_fresh_runner_process(self):
         second_project = self._make_worktree_project("fresh-process-project")

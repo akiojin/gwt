@@ -1,9 +1,10 @@
 //! Phase 8: integration tests for `gwt_core::index::paths`.
 
-use std::{fs, process::Command};
+use std::fs;
 
 use gwt_core::{
     index::paths::{gwt_index_db_path, gwt_index_repo_dir, gwt_index_root, Scope},
+    process::{resolved_command, ProcessPlanRequest},
     repo_hash::compute_repo_hash,
     worktree_hash::compute_worktree_hash,
 };
@@ -252,13 +253,10 @@ gwt-core = {{ path = {manifest_dir:?} }}
             .to_path_buf(),
     };
 
-    let lock_output = Command::new(env!("CARGO"))
-        .arg("generate-lockfile")
-        .arg("--offline")
-        .arg("--manifest-path")
-        .arg(fixture.path().join("Cargo.toml"))
-        .output()
-        .unwrap();
+    let lock_request = ProcessPlanRequest::new(env!("CARGO"))
+        .args(["generate-lockfile", "--offline", "--manifest-path"])
+        .arg(fixture.path().join("Cargo.toml"));
+    let lock_output = resolved_command(lock_request).unwrap().output().unwrap();
     assert!(
         lock_output.status.success(),
         "failed to derive the isolated contract lock from the repository lock\nstdout:\n{}\nstderr:\n{}",
@@ -266,19 +264,14 @@ gwt-core = {{ path = {manifest_dir:?} }}
         String::from_utf8_lossy(&lock_output.stderr),
     );
 
-    let output = Command::new(env!("CARGO"))
-        .arg("run")
-        .arg("--quiet")
-        .arg("--locked")
-        .arg("--offline")
-        .arg("--profile")
+    let run_request = ProcessPlanRequest::new(env!("CARGO"))
+        .args(["run", "--quiet", "--locked", "--offline", "--profile"])
         .arg(cargo_profile)
         .arg("--manifest-path")
         .arg(fixture.path().join("Cargo.toml"))
         .arg("--target-dir")
-        .arg(target_root)
-        .output()
-        .unwrap();
+        .arg(target_root);
+    let output = resolved_command(run_request).unwrap().output().unwrap();
 
     assert!(
         output.status.success(),

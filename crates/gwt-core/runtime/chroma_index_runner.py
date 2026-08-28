@@ -2550,7 +2550,8 @@ def _json_typed_equal(left: Any, right: Any) -> bool:
 
 def _count_incompatible_artifacts(
     artifacts_root: Path,
-    source_identity: str,
+    source_field: str,
+    source_identity: Optional[str],
     descriptor: Dict[str, Any],
 ) -> int:
     try:
@@ -2560,11 +2561,53 @@ def _count_incompatible_artifacts(
     rejected = 0
     for artifact in artifacts:
         existing = _read_artifact_descriptor(artifact)
-        if not existing or existing.get("source_identity") != source_identity:
+        if (
+            not existing
+            or source_field not in existing
+            or existing.get(source_field) != source_identity
+        ):
             continue
         if not file_index_compatibility(existing.get("compatibility", {}), descriptor):
             rejected += 1
     return rejected
+
+
+def _overlay_snapshot_and_shadow_sets(
+    base_records: Sequence[Dict[str, Any]],
+    visible_records: Sequence[Dict[str, Any]],
+    overlay_records: Sequence[Dict[str, Any]],
+) -> tuple[str, List[str], List[str], List[str]]:
+    base_by_path = {record["path"]: record for record in base_records}
+    visible_by_path = {record["path"]: record for record in visible_records}
+    files_shadow = set()
+    files_docs_shadow = set()
+
+    def add_shadow(record: Dict[str, Any]) -> None:
+        target = files_shadow if record["bucket"] == "code" else files_docs_shadow
+        target.add(record["path"])
+
+    for record in overlay_records:
+        add_shadow(record)
+        inherited = base_by_path.get(record["path"])
+        if inherited is not None and inherited["bucket"] != record["bucket"]:
+            add_shadow(inherited)
+
+    tombstones = sorted(set(base_by_path) - set(visible_by_path))
+    for path in tombstones:
+        add_shadow(base_by_path[path])
+
+    source_snapshot_id = _sha256_json(
+        [
+            [record["path"], record["source_digest"], record["bucket"]]
+            for record in visible_records
+        ]
+    )
+    return (
+        source_snapshot_id,
+        sorted(files_shadow),
+        sorted(files_docs_shadow),
+        tombstones,
+    )
 
 
 def _artifact_pair_is_verified(
@@ -3033,14 +3076,11 @@ def _action_index_files_protocol_v2(
         )
     visible_records = _visible_file_records(root)
     canonical = _canonical_git_tree(root)
-    if canonical is None:
-        base_records = visible_records
-        base_source_identity = _sha256_json(
-            [[record["path"], record["source_digest"]] for record in base_records]
-        )
-    else:
+    if canonical is not None and canonical.get("root_tree_oid") is not None:
         base_records = _canonical_base_records(root, canonical)
-        base_source_identity = canonical["root_tree_oid"] or "empty-tree"
+    else:
+        base_records = []
+    root_tree_oid = canonical.get("root_tree_oid") if canonical else None
 
     base_by_path = {record["path"]: record for record in base_records}
     overlay_records = [
@@ -3050,6 +3090,14 @@ def _action_index_files_protocol_v2(
         or record["source_digest"]
         != base_by_path[record["path"]]["source_digest"]
     ]
+    (
+        source_snapshot_id,
+        files_shadow,
+        files_docs_shadow,
+        tombstones,
+    ) = _overlay_snapshot_and_shadow_sets(
+        base_records, visible_records, overlay_records
+    )
     v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
     cas_root = v2_root / "cas"
     base_vectors, base_identities, base_computed, base_hits = _resolve_record_vectors(
@@ -3068,7 +3116,7 @@ def _action_index_files_protocol_v2(
     semantic_contract = _semantic_file_index_contract(descriptor)
     base_generation_id = _sha256_json(
         {
-            "source_identity": base_source_identity,
+            "root_tree_oid": root_tree_oid,
             "compatibility": semantic_contract,
             "records": [
                 [record["path"], identity["cas_key"]]
@@ -3076,12 +3124,9 @@ def _action_index_files_protocol_v2(
             ],
         }
     )
-    overlay_source_identity = _sha256_json(
-        [[record["path"], record["source_digest"]] for record in overlay_records]
-    )
     overlay_generation_id = _sha256_json(
         {
-            "source_identity": overlay_source_identity,
+            "source_snapshot_id": source_snapshot_id,
             "base_generation_id": base_generation_id,
             "compatibility": semantic_contract,
             "records": [
@@ -3094,10 +3139,10 @@ def _action_index_files_protocol_v2(
     bases_root = v2_root / "bases"
     overlays_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash) / "overlays"
     compatibility_rejections = _count_incompatible_artifacts(
-        bases_root, base_source_identity, descriptor
+        bases_root, "root_tree_oid", root_tree_oid, descriptor
     )
     compatibility_rejections += _count_incompatible_artifacts(
-        overlays_root, overlay_source_identity, descriptor
+        overlays_root, "source_snapshot_id", source_snapshot_id, descriptor
     )
     base_dir = resolve_file_index_v2_base_dir(
         repo_hash, base_generation_id, db_root=db_root
@@ -3109,13 +3154,20 @@ def _action_index_files_protocol_v2(
         "files": sum(record["bucket"] == "code" for record in base_records),
         "files-docs": sum(record["bucket"] == "docs" for record in base_records),
     }
+    base_document_counts["total"] = (
+        base_document_counts["files"] + base_document_counts["files-docs"]
+    )
     overlay_document_counts = {
         "files": sum(record["bucket"] == "code" for record in overlay_records),
         "files-docs": sum(record["bucket"] == "docs" for record in overlay_records),
     }
-    collection_refs = {
-        "files": V2_FILES_CODE_COLLECTION,
-        "files-docs": V2_FILES_DOCS_COLLECTION,
+    files_generation = {
+        "store": "store",
+        "collection": V2_FILES_CODE_COLLECTION,
+    }
+    files_docs_generation = {
+        "store": "store",
+        "collection": V2_FILES_DOCS_COLLECTION,
     }
     base_timestamp = _file_index_timestamp()
     _materialize_file_artifact_pair(
@@ -3126,15 +3178,14 @@ def _action_index_files_protocol_v2(
         {
             "schema_version": 1,
             "kind": "base",
+            "base_generation_id": base_generation_id,
             "repo_hash": repo_hash,
-            "source_identity": base_source_identity,
-            "root_tree_oid": canonical.get("root_tree_oid") if canonical else None,
+            "root_tree_oid": root_tree_oid,
             "canonical_ref": canonical.get("reference") if canonical else None,
             "compatibility": descriptor,
-            "generation_id": base_generation_id,
+            "files_generation": files_generation,
+            "files_docs_generation": files_docs_generation,
             "manifest_digest": _sha256_json(base_manifest),
-            "store": "store",
-            "collections": collection_refs,
             "document_counts": base_document_counts,
             "build_state": "verified",
             "created_at": base_timestamp,
@@ -3150,16 +3201,18 @@ def _action_index_files_protocol_v2(
         {
             "schema_version": 1,
             "kind": "overlay",
+            "overlay_generation_id": overlay_generation_id,
             "repo_hash": repo_hash,
             "worktree_hash": worktree_hash,
-            "source_identity": overlay_source_identity,
             "base_generation_id": base_generation_id,
+            "source_snapshot_id": source_snapshot_id,
             "compatibility": descriptor,
-            "generation_id": overlay_generation_id,
+            "files_generation": files_generation,
+            "files_docs_generation": files_docs_generation,
+            "files_shadow": files_shadow,
+            "files_docs_shadow": files_docs_shadow,
+            "tombstones": tombstones,
             "manifest_digest": _sha256_json(overlay_manifest),
-            "store": "store",
-            "collections": collection_refs,
-            "document_counts": overlay_document_counts,
             "build_state": "verified",
             "created_at": overlay_timestamp,
             "verified_at": overlay_timestamp,
@@ -3167,6 +3220,9 @@ def _action_index_files_protocol_v2(
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
+    requested = len(base_records) + len(overlay_records)
+    if requested != computed + cache_hits:
+        raise RuntimeError("file-index-v2 CAS accounting invariant violated")
     visible_count = sum(
         record["bucket"] == ("code" if scope == "files" else "docs")
         for record in visible_records
@@ -3180,6 +3236,7 @@ def _action_index_files_protocol_v2(
         "overlay_document_count": overlay_document_counts[scope],
         "base_generation_id": base_generation_id,
         "overlay_generation_id": overlay_generation_id,
+        "requested_embeddings": requested,
         "computed_embeddings": computed,
         "embedding_cache_hits": cache_hits,
         "compatibility_rejections": compatibility_rejections,
