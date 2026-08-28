@@ -51484,7 +51484,16 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = split_store_repo(temp.path());
+    fs::write(repo.linked.join("LINKED.md"), "linked-only commit\n")
+        .expect("write linked-only commit");
+    run_git(&repo.linked, &["add", "LINKED.md"]);
+    run_git(&repo.linked, &["commit", "-m", "advance linked checkout"]);
     let local_head = git_stdout(&repo.linked, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        local_head,
+        git_stdout(&repo.main, &["rev-parse", "HEAD"]),
+        "the fixture must distinguish the calling linked checkout from the main worktree"
+    );
 
     let second_tab = sample_project_tab(
         "tab-second",
@@ -52317,6 +52326,52 @@ fn bare_layout_uses_one_pm_project_identity_for_refresh_status_and_safe_boundary
             .is_some(),
         "spawn, status, and safe-boundary must share the opened project's PM store"
     );
+}
+
+#[test]
+fn bare_layout_remote_unavailable_materializes_bare_head_for_fresh_spawn() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let opened_project = temp.path().join("managed-project");
+    let (bare_repo, _develop_worktree) =
+        init_managed_workspace_with_develop_worktree(&opened_project);
+    let local_head = git_stdout(&bare_repo, &["rev-parse", "HEAD"]);
+    fs::rename(
+        opened_project.join(".seed"),
+        opened_project.join(".offline-seed"),
+    )
+    .expect("make the bare repository origin unavailable");
+
+    let outcome = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&opened_project)
+        .expect("bare-layout local HEAD must keep a fresh PM spawn available");
+
+    assert_eq!(
+        git_stdout(&outcome.worktree, &["rev-parse", "HEAD"]),
+        local_head
+    );
+    assert_eq!(
+        git_stdout(&outcome.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD"
+    );
+    assert_eq!(
+        outcome.freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        outcome.freshness.target_observation,
+        gwt::pm_registry::PmWorktreeTargetObservation::Unavailable
+    );
+    assert_eq!(
+        outcome.freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Fetch)
+    );
+    assert_eq!(outcome.freshness.head_sha.as_deref(), Some(local_head.as_str()));
+    assert_eq!(outcome.freshness.target_sha, None);
 }
 
 #[test]

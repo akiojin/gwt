@@ -2500,6 +2500,13 @@ fn git_sha_observation(repo: &Path, target: &str) -> (Option<String>, Option<Str
     }
 }
 
+fn is_nested_bare_layout_root(path: &Path) -> bool {
+    if fs::symlink_metadata(path.join(".git")).is_ok() {
+        return false;
+    }
+    gwt_core::repo_hash::child_bare_repositories(path).len() == 1
+}
+
 fn normalize_previous_generated_hook_configs(worktree: &Path) -> io::Result<()> {
     normalize_previous_generated_hook_configs_guarded(worktree, None)
 }
@@ -3006,6 +3013,12 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
 
 fn refresh_pm_worktree_at_locked(
     git_root: &Path,
+    // Fetch and worktree administration belong to the shared main Git root,
+    // while a remote-less first spawn first preserves the calling checkout's
+    // local HEAD (which may be a linked worktree at a different commit). A
+    // workspace-home caller is not itself a Git directory, so that layout
+    // falls back once more to the resolved bare Git root.
+    fallback_head_root: &Path,
     project_dir: &Path,
     worktree: &Path,
 ) -> io::Result<PmWorktreeRefreshOutcome> {
@@ -3125,11 +3138,21 @@ fn refresh_pm_worktree_at_locked(
                     .push_str(&format!("; cached target inspection also failed: {error}"));
             }
             if !existed {
-                let (local_head, local_head_inspect_error) = if cached_target.is_none() {
-                    git_sha_observation(git_root, "HEAD")
+                let (mut local_head, mut local_head_inspect_error) = if cached_target.is_none() {
+                    git_sha_observation(fallback_head_root, "HEAD")
                 } else {
                     (None, None)
                 };
+                if cached_target.is_none()
+                    && local_head.is_none()
+                    && is_nested_bare_layout_root(fallback_head_root)
+                {
+                    let (git_root_head, git_root_inspect_error) =
+                        git_sha_observation(git_root, "HEAD");
+                    local_head = git_root_head;
+                    local_head_inspect_error =
+                        git_root_inspect_error.or(local_head_inspect_error);
+                }
                 let materialization_sha = cached_target.as_deref().or(local_head.as_deref());
                 let Some(materialization_sha) = materialization_sha else {
                     failure_reason.push_str("; local HEAD is unavailable for degraded startup");
@@ -3594,7 +3617,7 @@ pub fn refresh_pm_worktree_for_repo_path(repo_path: &Path) -> io::Result<PmWorkt
             })?;
             return Err(error);
         }
-        refresh_pm_worktree_at_locked(&git_root, &project_dir, &worktree)
+        refresh_pm_worktree_at_locked(&git_root, repo_path, &project_dir, &worktree)
     })
 }
 
@@ -3807,7 +3830,7 @@ pub fn refresh_pm_worktree_at_safe_boundary(
             persist_scratch_preflight_failure_if_safe(project_dir, worktree, &error);
             return Err(error);
         }
-        refresh_pm_worktree_at_locked(&git_root, project_dir, worktree).map(Some)
+        refresh_pm_worktree_at_locked(&git_root, worktree, project_dir, worktree).map(Some)
     })
 }
 
