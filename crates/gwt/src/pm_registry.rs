@@ -2225,7 +2225,7 @@ pub fn migrate_legacy_pm_scratch_preserving_project_content(worktree: &Path) -> 
 pub const PM_WORKTREE_BASE_REF: &str = "origin/develop";
 
 /// Result of one serialized PM worktree refresh attempt. A degraded outcome
-/// remains launchable only when an already-materialized worktree was
+/// remains launchable only when a usable worktree was materialized or
 /// preserved; `freshness` explains why it could not advance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmWorktreeRefreshOutcome {
@@ -3125,7 +3125,18 @@ fn refresh_pm_worktree_at_locked(
                     .push_str(&format!("; cached target inspection also failed: {error}"));
             }
             if !existed {
-                let Some(target) = cached_target.as_deref() else {
+                let (local_head, local_head_inspect_error) = if cached_target.is_none() {
+                    git_sha_observation(git_root, "HEAD")
+                } else {
+                    (None, None)
+                };
+                let materialization_sha = cached_target.as_deref().or(local_head.as_deref());
+                let Some(materialization_sha) = materialization_sha else {
+                    failure_reason.push_str("; local HEAD is unavailable for degraded startup");
+                    if let Some(error) = local_head_inspect_error {
+                        failure_reason
+                            .push_str(&format!("; local HEAD inspection also failed: {error}"));
+                    }
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
@@ -3139,6 +3150,11 @@ fn refresh_pm_worktree_at_locked(
                         freshness.failure_reason.clone().unwrap_or_default(),
                     ));
                 };
+                if cached_target.is_none() {
+                    failure_reason.push_str(&format!(
+                        "; materialized local HEAD {materialization_sha} because the remote target was unavailable"
+                    ));
+                }
                 if let Some(parent) = worktree.parent() {
                     if let Err(create_error) = fs::create_dir_all(parent) {
                         let freshness = pm_refresh_failure(
@@ -3153,7 +3169,7 @@ fn refresh_pm_worktree_at_locked(
                         return Err(create_error);
                     }
                 }
-                if let Err(create_error) = manager.create_detached(target, worktree) {
+                if let Err(create_error) = manager.create_detached(materialization_sha, worktree) {
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,

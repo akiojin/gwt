@@ -51484,6 +51484,7 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = split_store_repo(temp.path());
+    let local_head = git_stdout(&repo.linked, &["rev-parse", "HEAD"]);
 
     let second_tab = sample_project_tab(
         "tab-second",
@@ -51519,6 +51520,37 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
         1,
         "a dead PM elsewhere must not leave the repository without one"
     );
+    let linked_pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.linked);
+    assert_eq!(
+        git_stdout(&linked_pm_worktree, &["rev-parse", "HEAD"]),
+        local_head,
+        "without remote evidence, a fresh PM must remain available from local HEAD"
+    );
+    assert_eq!(
+        git_stdout(&linked_pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD",
+        "the local fallback must still materialize a detached PM worktree"
+    );
+    let freshness = gwt::pm_registry::load_pm_prefs(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.linked),
+    )
+    .expect("load linked-store PM prefs")
+    .worktree_freshness
+    .expect("local fallback freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.target_observation,
+        gwt::pm_registry::PmWorktreeTargetObservation::Unavailable
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Fetch)
+    );
+    assert_eq!(freshness.head_sha.as_deref(), Some(local_head.as_str()));
+    assert_eq!(freshness.target_sha, None);
 }
 
 /// Issue #3607 AC-3: the stopped store was not even open, yet its PM came back
