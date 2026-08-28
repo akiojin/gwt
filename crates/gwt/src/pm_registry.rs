@@ -14,11 +14,12 @@
 //! stays testable without a running pane.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,12 +148,60 @@ impl Default for PmSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmWorktreeFreshnessState {
+    Fresh,
+    Stale,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmWorktreeTargetObservation {
+    Fresh,
+    Cached,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmWorktreeRefreshFailureStage {
+    Fetch,
+    Inspect,
+    LocalWork,
+    Repoint,
+    ManagedAssets,
+    ScratchMigration,
+}
+
+/// Durable observation of how closely the PM worktree follows its base ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmWorktreeFreshness {
+    pub state: PmWorktreeFreshnessState,
+    pub base_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u64>,
+    pub target_observation: PmWorktreeTargetObservation,
+    pub checked_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<PmWorktreeRefreshFailureStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PmPrefs {
     #[serde(default)]
     pub registration: Option<PmRegistration>,
     #[serde(default)]
     pub settings: PmSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_freshness: Option<PmWorktreeFreshness>,
 }
 
 /// Outcome of a singleton registration attempt (FR-001).
@@ -492,6 +541,3209 @@ pub fn finish_pm_delivery_receipt(
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
+}
+
+/// Project-state directory for PM-authored scratch notes.
+pub fn pm_scratch_dir_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-scratch")
+}
+
+/// Create the project-scoped PM scratch directory without following a
+/// symlink/reparse point at any owned path component.
+///
+/// The caller prepares the canonical project directory itself; this helper
+/// verifies that boundary, then creates `project-state` and `pm-scratch` one
+/// level at a time and rechecks each node before descending into it.
+pub fn ensure_pm_scratch_dir_for_repo_path(repo_path: &Path) -> io::Result<PathBuf> {
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
+    require_real_pm_scratch_directory(&project_dir, "project directory")?;
+    let project_state = project_dir.join("project-state");
+    ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
+    let scratch = project_state.join("pm-scratch");
+    ensure_real_pm_scratch_directory(&scratch, "scratch root")?;
+    Ok(scratch)
+}
+
+/// Resolve PM scratch only from a structurally canonical PM worktree.
+pub fn pm_scratch_dir_for_pm_worktree(worktree: &Path) -> Option<PathBuf> {
+    if !is_pm_worktree(worktree) {
+        return None;
+    }
+    Some(
+        worktree
+            .parent()?
+            .parent()?
+            .join("project-state/pm-scratch"),
+    )
+}
+
+const LEGACY_PM_SCRATCH_PATHS: [&str; 3] = ["tasks/todo.md", "tasks/pm-notes.md", "pm-notes.md"];
+
+fn legacy_pm_scratch_has_local_state(worktree: &Path, relative: &str) -> io::Result<bool> {
+    // Older installs and unit fixtures may contain the pre-externalization
+    // directory without Git metadata. Those files are legacy scratch by
+    // definition and retain the established migration behavior.
+    if !worktree.join(".git").exists() {
+        return Ok(true);
+    }
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "status",
+            "--porcelain=v1",
+            "--ignored",
+            "--untracked-files=all",
+            "--",
+            relative,
+        ],
+        Some(worktree),
+    )
+    .map_err(|error| {
+        io::Error::other(format!(
+            "inspect legacy PM scratch Git state for {relative} at {}: {error}",
+            worktree.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "inspect legacy PM scratch Git state for {relative} at {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+fn tracked_legacy_pm_scratch_with_local_state(worktree: &Path) -> io::Result<Vec<&'static str>> {
+    if !worktree.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let mut tracked = Vec::new();
+    for relative in LEGACY_PM_SCRATCH_PATHS {
+        if !worktree.join(relative).exists()
+            || !legacy_pm_scratch_has_local_state(worktree, relative)?
+        {
+            continue;
+        }
+        let output = gwt_core::process::run_git_logged(
+            &["ls-files", "--error-unmatch", "--", relative],
+            Some(worktree),
+        )?;
+        if output.status.success() {
+            tracked.push(relative);
+        }
+    }
+    Ok(tracked)
+}
+
+fn restore_tracked_pm_scratch_after_migration(worktree: &Path, tracked: &[&str]) -> io::Result<()> {
+    for relative in tracked {
+        let output = gwt_core::process::run_git_logged(
+            &["checkout", "HEAD", "--", relative],
+            Some(worktree),
+        )?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "restore tracked project content after PM scratch migration for {relative}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_tracked_pm_scratch_with_index_changes(
+    worktree: &Path,
+    tracked: &[&str],
+) -> io::Result<()> {
+    for relative in tracked {
+        let output = gwt_core::process::run_git_logged(
+            &["diff", "--cached", "--quiet", "--exit-code", "--", relative],
+            Some(worktree),
+        )?;
+        match output.status.code() {
+            Some(0) => {}
+            Some(1) => {
+                return Err(io::Error::other(format!(
+                    "refusing to externalize tracked legacy PM scratch with staged changes at {relative}; the index and working tree may contain distinct local versions"
+                )));
+            }
+            _ => {
+                return Err(io::Error::other(format!(
+                    "inspect staged legacy PM scratch state for {relative} at {}: {}",
+                    worktree.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PmScratchFileFingerprint {
+    content_len: u64,
+    content_sha256: [u8; 32],
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
+impl PmScratchFileFingerprint {
+    fn has_same_content(&self, other: &Self) -> bool {
+        self.content_len == other.content_len && self.content_sha256 == other.content_sha256
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StagedPmScratchFile {
+    path: PathBuf,
+    fingerprint: PmScratchFileFingerprint,
+}
+
+#[derive(Debug)]
+struct PmScratchMigration {
+    relative: &'static str,
+    source: PathBuf,
+    destination: PathBuf,
+    source_fingerprint: PmScratchFileFingerprint,
+    staged_fingerprint: Option<PmScratchFileFingerprint>,
+}
+
+fn pm_scratch_path_error(error: io::Error, action: &str, path: &Path) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{action} at {}: {error}", path.display()),
+    )
+}
+
+#[cfg(windows)]
+fn windows_pm_scratch_open_file_identity(
+    file: &fs::File,
+    path: &Path,
+    action: &str,
+) -> io::Result<(u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowsFileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct WindowsByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: WindowsFileTime,
+        last_access_time: WindowsFileTime,
+        last_write_time: WindowsFileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            file: *mut std::ffi::c_void,
+            information: *mut WindowsByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = WindowsByHandleFileInformation::default();
+    // SAFETY: `file` owns a valid Windows handle for the duration of the call,
+    // and `information` is writable storage matching the Win32 structure.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
+    if succeeded == 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{action} identity unavailable for {}: {error}",
+                path.display()
+            ),
+        ));
+    }
+    if information.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{action} identity unavailable because the handle is not a regular non-reparse file: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok((
+        information.volume_serial_number,
+        (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low),
+    ))
+}
+
+#[cfg(windows)]
+fn windows_pm_scratch_metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn windows_pm_scratch_metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn pm_scratch_open_file_fingerprint(
+    file: &mut fs::File,
+    path: &Path,
+    action: &str,
+) -> io::Result<PmScratchFileFingerprint> {
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| pm_scratch_path_error(error, action, path))?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{action} opened a non-regular file: {}", path.display()),
+        ));
+    }
+    #[cfg(windows)]
+    let opened_windows_identity = windows_pm_scratch_open_file_identity(file, path, action)?;
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| pm_scratch_path_error(error, action, path))?;
+    let mut hasher = Sha256::new();
+    let mut content_len = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| pm_scratch_path_error(error, action, path))?;
+        if read == 0 {
+            break;
+        }
+        content_len = content_len.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{action} exceeded the supported size: {}", path.display()),
+            )
+        })?;
+        hasher.update(&buffer[..read]);
+    }
+    let final_metadata = file
+        .metadata()
+        .map_err(|error| pm_scratch_path_error(error, action, path))?;
+    if opened_metadata.len() != content_len || final_metadata.len() != content_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{action} changed while being read: {}", path.display()),
+        ));
+    }
+
+    #[cfg(windows)]
+    let (volume_serial_number, file_index) = {
+        let final_identity = windows_pm_scratch_open_file_identity(file, path, action)?;
+        if final_identity != opened_windows_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{action} identity changed while being read: {}",
+                    path.display()
+                ),
+            ));
+        }
+        opened_windows_identity
+    };
+
+    Ok(PmScratchFileFingerprint {
+        content_len,
+        content_sha256: hasher.finalize().into(),
+        #[cfg(unix)]
+        device: {
+            use std::os::unix::fs::MetadataExt;
+            opened_metadata.dev()
+        },
+        #[cfg(unix)]
+        inode: {
+            use std::os::unix::fs::MetadataExt;
+            opened_metadata.ino()
+        },
+        #[cfg(windows)]
+        volume_serial_number,
+        #[cfg(windows)]
+        file_index,
+    })
+}
+
+fn pm_scratch_file_fingerprint(path: &Path, action: &str) -> io::Result<PmScratchFileFingerprint> {
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|error| pm_scratch_path_error(error, action, path))?;
+    if !path_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{action} requires a regular file: {}", path.display()),
+        ));
+    }
+    #[cfg(windows)]
+    if windows_pm_scratch_metadata_is_reparse_point(&path_metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{action} identity unavailable for a reparse-point file: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| pm_scratch_path_error(error, action, path))?;
+    let fingerprint = pm_scratch_open_file_fingerprint(&mut file, path, action)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current_metadata = fs::symlink_metadata(path)
+            .map_err(|error| pm_scratch_path_error(error, action, path))?;
+        if path_metadata.dev() != fingerprint.device
+            || path_metadata.ino() != fingerprint.inode
+            || !current_metadata.file_type().is_file()
+            || current_metadata.dev() != fingerprint.device
+            || current_metadata.ino() != fingerprint.inode
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{action} observed a replaced file: {}", path.display()),
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let current_metadata = fs::symlink_metadata(path)
+            .map_err(|error| pm_scratch_path_error(error, action, path))?;
+        if !current_metadata.file_type().is_file()
+            || windows_pm_scratch_metadata_is_reparse_point(&current_metadata)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{action} observed a replaced file: {}", path.display()),
+            ));
+        }
+        let current_file = options
+            .open(path)
+            .map_err(|error| pm_scratch_path_error(error, action, path))?;
+        let current_identity = windows_pm_scratch_open_file_identity(&current_file, path, action)?;
+        let opened_identity = (fingerprint.volume_serial_number, fingerprint.file_index);
+        if current_identity != opened_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{action} observed a replaced file: {}", path.display()),
+            ));
+        }
+    }
+
+    Ok(fingerprint)
+}
+
+fn optional_real_pm_scratch_directory(path: &Path, role: &str) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_dir()
+                && !windows_pm_scratch_metadata_is_reparse_point(&metadata) =>
+        {
+            Ok(true)
+        }
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PM scratch {role} must be a real directory, not a symlink or other node: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(pm_scratch_path_error(error, role, path)),
+    }
+}
+
+fn require_real_pm_scratch_directory(path: &Path, role: &str) -> io::Result<()> {
+    if optional_real_pm_scratch_directory(path, role)? {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("PM scratch {role} does not exist: {}", path.display()),
+        ))
+    }
+}
+
+fn ensure_real_pm_scratch_directory(path: &Path, role: &str) -> io::Result<()> {
+    if optional_real_pm_scratch_directory(path, role)? {
+        return Ok(());
+    }
+    fs::create_dir(path).map_err(|error| pm_scratch_path_error(error, role, path))?;
+    require_real_pm_scratch_directory(path, role)
+}
+
+#[derive(Debug)]
+struct PmScratchQuarantine {
+    directory: PathBuf,
+    node: PathBuf,
+}
+
+fn create_pm_scratch_quarantine(path: &Path) -> io::Result<PmScratchQuarantine> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "PM scratch quarantine target has no parent: {}",
+                path.display()
+            ),
+        )
+    })?;
+    for _ in 0..8 {
+        let directory = parent.join(format!(
+            ".gwt-pm-scratch-quarantine-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&directory) {
+            Ok(()) => {
+                // The node lives inside a freshly created UUID directory.
+                // No rename target existed, so `rename` cannot replace a
+                // pre-existing caller node during the quarantine move.
+                return Ok(PmScratchQuarantine {
+                    node: directory.join("owned-node"),
+                    directory,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(pm_scratch_path_error(
+                    error,
+                    "create PM scratch quarantine directory",
+                    &directory,
+                ));
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not allocate a unique PM scratch quarantine beside {}",
+            path.display()
+        ),
+    ))
+}
+
+fn remove_empty_pm_scratch_quarantine(quarantine: &PmScratchQuarantine) -> io::Result<()> {
+    fs::remove_dir(&quarantine.directory).map_err(|error| {
+        pm_scratch_path_error(
+            error,
+            "remove empty PM scratch quarantine directory",
+            &quarantine.directory,
+        )
+    })?;
+    sync_parent_directory(&quarantine.directory).map_err(|error| {
+        pm_scratch_path_error(
+            error,
+            "sync PM scratch quarantine parent",
+            &quarantine.directory,
+        )
+    })
+}
+
+fn restore_quarantined_pm_scratch_no_replace_with_sync<O, Q>(
+    quarantine: &PmScratchQuarantine,
+    original: &Path,
+    quarantined_fingerprint: Option<&PmScratchFileFingerprint>,
+    original_parent_sync: O,
+    quarantine_directory_sync: Q,
+) -> io::Result<()>
+where
+    O: FnOnce(&Path) -> io::Result<()>,
+    Q: FnOnce(&Path) -> io::Result<()>,
+{
+    fs::hard_link(&quarantine.node, original).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "could not create PM scratch original link {} from quarantine {}; inspect the quarantine path: {error}",
+                original.display(),
+                quarantine.node.display(),
+            ),
+        )
+    })?;
+    original_parent_sync(original).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "PM scratch original link was created at {} from quarantine {}; original-parent durability sync failed: {error}",
+                original.display(),
+                quarantine.node.display()
+            ),
+        )
+    })?;
+
+    let Some(expected) = quarantined_fingerprint else {
+        return Ok(());
+    };
+    let restored =
+        pm_scratch_file_fingerprint(original, "verify no-replace PM scratch quarantine restore")?;
+    let quarantined = pm_scratch_file_fingerprint(
+        &quarantine.node,
+        "reverify PM scratch quarantine before cleanup",
+    )?;
+    if restored != *expected || quarantined != *expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PM scratch quarantine restore identity changed; cleanup stopped, inspect original {} and quarantine {}",
+                original.display(),
+                quarantine.node.display()
+            ),
+        ));
+    }
+
+    fs::remove_file(&quarantine.node).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "PM scratch original link was created at {}, but verified quarantine link removal failed at {}: {error}",
+                original.display(),
+                quarantine.node.display(),
+            ),
+        )
+    })?;
+    quarantine_directory_sync(&quarantine.node).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "PM scratch original link was created at {}, quarantine link was removed at {}, but quarantine-directory durability sync failed: {error}",
+                original.display(),
+                quarantine.node.display()
+            ),
+        )
+    })?;
+    remove_empty_pm_scratch_quarantine(quarantine)
+}
+
+fn restore_quarantined_pm_scratch_no_replace(
+    quarantine: &PmScratchQuarantine,
+    original: &Path,
+    quarantined_fingerprint: Option<&PmScratchFileFingerprint>,
+) -> io::Result<()> {
+    restore_quarantined_pm_scratch_no_replace_with_sync(
+        quarantine,
+        original,
+        quarantined_fingerprint,
+        sync_parent_directory,
+        sync_parent_directory,
+    )
+}
+
+fn quarantine_and_remove_owned_pm_scratch_file_with_restore<R>(
+    path: &Path,
+    expected: &PmScratchFileFingerprint,
+    action: &str,
+    mut restore: R,
+) -> io::Result<()>
+where
+    R: FnMut(&PmScratchQuarantine, &Path, Option<&PmScratchFileFingerprint>) -> io::Result<()>,
+{
+    let quarantine = create_pm_scratch_quarantine(path)?;
+    if let Err(error) = fs::rename(path, &quarantine.node) {
+        let cleanup_error = remove_empty_pm_scratch_quarantine(&quarantine).err();
+        return Err(io::Error::new(
+            error.kind(),
+            match cleanup_error {
+                Some(cleanup_error) => format!(
+                    "{action} by atomic quarantine rename from {} to {}: {error}; empty quarantine cleanup also failed: {cleanup_error}",
+                    path.display(),
+                    quarantine.node.display()
+                ),
+                None => format!(
+                    "{action} by atomic quarantine rename from {} to {}: {error}",
+                    path.display(),
+                    quarantine.node.display()
+                ),
+            },
+        ));
+    }
+
+    let sync_result =
+        sync_parent_directory(path).and_then(|()| sync_parent_directory(&quarantine.node));
+    if let Err(error) = sync_result {
+        let quarantined_fingerprint = pm_scratch_file_fingerprint(
+            &quarantine.node,
+            "fingerprint PM scratch quarantine after sync failure",
+        )
+        .ok();
+        let restore_error = restore(&quarantine, path, quarantined_fingerprint.as_ref()).err();
+        return Err(io::Error::new(
+            error.kind(),
+            match restore_error {
+                Some(restore_error) => format!(
+                    "{action} quarantine durability sync failed after moving original {} to quarantine {}; restore attempt reported: {restore_error}; inspect both paths: {error}",
+                    path.display(),
+                    quarantine.node.display()
+                ),
+                None if quarantined_fingerprint.is_some() => format!(
+                    "{action} quarantine sync failed for {}; original path restored: {error}",
+                    path.display()
+                ),
+                None => format!(
+                    "{action} quarantine sync failed for {}; recovery created the original link and did not remove the unverified quarantine node at {}: {error}",
+                    path.display(),
+                    quarantine.node.display()
+                ),
+            },
+        ));
+    }
+
+    let quarantined = match pm_scratch_file_fingerprint(
+        &quarantine.node,
+        "fingerprint quarantined PM scratch node before removal",
+    ) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let restore_error = restore(&quarantine, path, None).err();
+            return Err(io::Error::new(
+                error.kind(),
+                match restore_error {
+                    Some(restore_error) => format!(
+                        "{action} could not verify quarantine {} for original {}; restore attempt reported: {restore_error}; inspect both paths: {error}",
+                        quarantine.node.display(),
+                        path.display()
+                    ),
+                    None => format!(
+                        "{action} could not verify quarantine {} for original {}; recovery created the original link and did not remove the quarantine node: {error}",
+                        quarantine.node.display(),
+                        path.display()
+                    ),
+                },
+            ));
+        }
+    };
+    if quarantined != *expected {
+        let restore_error = restore(&quarantine, path, Some(&quarantined)).err();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            match restore_error {
+                Some(restore_error) => format!(
+                    "{action} quarantined a replaced node from original {} to {}; restore attempt reported: {restore_error}; inspect both paths",
+                    path.display(),
+                    quarantine.node.display()
+                ),
+                None => format!(
+                    "{action} refused a replaced node and restored it without replacement at {}",
+                    path.display()
+                ),
+            },
+        ));
+    }
+
+    fs::remove_file(&quarantine.node).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{action} verified quarantine link removal failed at {}; inspect the quarantine path: {error}",
+                quarantine.node.display(),
+            ),
+        )
+    })?;
+    sync_parent_directory(&quarantine.node).map_err(|error| {
+        pm_scratch_path_error(
+            error,
+            &format!("{action} sync quarantine directory"),
+            &quarantine.node,
+        )
+    })?;
+    remove_empty_pm_scratch_quarantine(&quarantine)
+}
+
+fn quarantine_and_remove_owned_pm_scratch_file(
+    path: &Path,
+    expected: &PmScratchFileFingerprint,
+    action: &str,
+) -> io::Result<()> {
+    quarantine_and_remove_owned_pm_scratch_file_with_restore(
+        path,
+        expected,
+        action,
+        restore_quarantined_pm_scratch_no_replace,
+    )
+}
+
+fn durably_copy_pm_scratch_no_replace_with_ops<F, C, S, P>(
+    source: &Path,
+    destination: &Path,
+    before_create: F,
+    copy: C,
+    destination_sync: S,
+    parent_sync: P,
+) -> io::Result<PmScratchFileFingerprint>
+where
+    F: FnOnce() -> io::Result<()>,
+    C: FnOnce(&mut fs::File, &mut fs::File) -> io::Result<u64>,
+    S: FnOnce(&fs::File) -> io::Result<()>,
+    P: FnOnce(&Path) -> io::Result<()>,
+{
+    let mut source_file = fs::File::open(source)
+        .map_err(|error| pm_scratch_path_error(error, "open PM scratch source", source))?;
+    let source_metadata = source_file.metadata().map_err(|error| {
+        pm_scratch_path_error(error, "inspect opened PM scratch source", source)
+    })?;
+    if !source_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "opened PM scratch source is not a regular file: {}",
+                source.display()
+            ),
+        ));
+    }
+
+    before_create().map_err(|error| {
+        pm_scratch_path_error(error, "run PM scratch before-create guard", destination)
+    })?;
+    let mut destination_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "create PM scratch destination without replacement from {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                ),
+            )
+        })?;
+
+    let result = copy(&mut source_file, &mut destination_file)
+        .map(|_| ())
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "copy PM scratch source {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                ),
+            )
+        })
+        .and_then(|()| {
+            destination_sync(&destination_file).map_err(|error| {
+                pm_scratch_path_error(error, "sync PM scratch destination", destination)
+            })
+        })
+        .and_then(|()| {
+            parent_sync(destination).map_err(|error| {
+                pm_scratch_path_error(error, "sync PM scratch destination parent", destination)
+            })
+        });
+
+    match result {
+        Ok(()) => {
+            let created_fingerprint = pm_scratch_open_file_fingerprint(
+                &mut destination_file,
+                destination,
+                "fingerprint created PM scratch destination before success",
+            )
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot verify created PM scratch destination {} before success; no cleanup was attempted and the canonical path requires inspection: {error}",
+                        destination.display()
+                    ),
+                )
+            })?;
+            drop(destination_file);
+            let canonical_fingerprint = pm_scratch_file_fingerprint(
+                destination,
+                "fingerprint canonical PM scratch destination before success",
+            )
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot verify canonical PM scratch destination {} before success; no cleanup was attempted at the canonical path: {error}",
+                        destination.display()
+                    ),
+                )
+            })?;
+            if canonical_fingerprint != created_fingerprint {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "canonical PM scratch destination identity or content changed before success; unknown node is preserved at {}",
+                        destination.display()
+                    ),
+                ));
+            }
+            Ok(created_fingerprint)
+        }
+        Err(error) => {
+            let owned_fingerprint = pm_scratch_open_file_fingerprint(
+                &mut destination_file,
+                destination,
+                "fingerprint created PM scratch destination after durable copy operation failure",
+            );
+            drop(destination_file);
+            let expected = match owned_fingerprint {
+                Ok(fingerprint) => fingerprint,
+                Err(fingerprint_error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{error}; cannot prove ownership for PM scratch destination {}, so no cleanup was attempted and the path requires inspection: {fingerprint_error}",
+                            destination.display()
+                        ),
+                    ));
+                }
+            };
+            match quarantine_and_remove_owned_pm_scratch_file(
+                destination,
+                &expected,
+                "rollback created PM scratch destination after durable copy operation failure",
+            ) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{error}; guarded PM scratch destination rollback also reported: {rollback_error}"
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+fn durably_copy_pm_scratch_no_replace_with<F>(
+    source: &Path,
+    destination: &Path,
+    before_create: F,
+) -> io::Result<PmScratchFileFingerprint>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    durably_copy_pm_scratch_no_replace_with_ops(
+        source,
+        destination,
+        before_create,
+        io::copy,
+        fs::File::sync_all,
+        sync_parent_directory,
+    )
+}
+
+fn durably_copy_pm_scratch_no_replace(
+    source: &Path,
+    destination: &Path,
+) -> io::Result<PmScratchFileFingerprint> {
+    durably_copy_pm_scratch_no_replace_with(source, destination, || Ok(()))
+}
+
+fn rollback_owned_pm_scratch_file(staged: &StagedPmScratchFile) -> io::Result<()> {
+    match fs::symlink_metadata(&staged.path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(pm_scratch_path_error(
+                error,
+                "inspect staged PM scratch destination for guarded rollback",
+                &staged.path,
+            ));
+        }
+        Ok(_) => {}
+    }
+    quarantine_and_remove_owned_pm_scratch_file(
+        &staged.path,
+        &staged.fingerprint,
+        "rollback owned PM scratch destination",
+    )
+}
+
+fn rollback_staged_pm_scratch(destinations: &[StagedPmScratchFile]) -> io::Result<()> {
+    let mut failures = Vec::new();
+    for destination in destinations.iter().rev() {
+        if let Err(error) = rollback_owned_pm_scratch_file(destination) {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")))
+    }
+}
+
+fn pm_scratch_stage_error(
+    error: io::Error,
+    staged_destinations: &[StagedPmScratchFile],
+) -> io::Error {
+    match rollback_staged_pm_scratch(staged_destinations) {
+        Ok(()) => error,
+        Err(rollback_error) => io::Error::new(
+            error.kind(),
+            format!("{error}; PM scratch stage rollback also failed: {rollback_error}"),
+        ),
+    }
+}
+
+fn verify_staged_pm_scratch_destinations(migrations: &[PmScratchMigration]) -> io::Result<()> {
+    for migration in migrations {
+        let expected = migration.staged_fingerprint.as_ref().ok_or_else(|| {
+            io::Error::other(format!(
+                "missing staged PM scratch fingerprint for {}: {}",
+                migration.relative,
+                migration.destination.display()
+            ))
+        })?;
+        let current = pm_scratch_file_fingerprint(
+            &migration.destination,
+            &format!(
+                "verify staged PM scratch destination ownership for {}",
+                migration.relative
+            ),
+        )?;
+        if current != *expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged PM scratch destination was replaced for {}: {}",
+                    migration.relative,
+                    migration.destination.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn pm_scratch_error_preserving_backups(
+    error: io::Error,
+    migrations: &[PmScratchMigration],
+    preserve_indices: &[usize],
+) -> io::Error {
+    let mut details = Vec::new();
+    let mut rollback_failures = Vec::new();
+
+    for (index, migration) in migrations.iter().enumerate() {
+        let Some(expected) = migration.staged_fingerprint.as_ref() else {
+            continue;
+        };
+        if preserve_indices.contains(&index) {
+            match pm_scratch_file_fingerprint(
+                &migration.destination,
+                &format!(
+                    "verify preserved PM scratch backup for {}",
+                    migration.relative
+                ),
+            ) {
+                Ok(current) if current == *expected => details.push(format!(
+                    "original legacy PM scratch source backup preserved at {}",
+                    migration.destination.display()
+                )),
+                Ok(_) => details.push(format!(
+                    "preserved PM scratch backup ownership changed for {}; unknown node remains fail-closed at {}",
+                    migration.relative,
+                    migration.destination.display()
+                )),
+                Err(inspection_error) => details.push(format!(
+                    "could not verify preserved PM scratch backup for {}; node remains fail-closed at {}: {inspection_error}",
+                    migration.relative,
+                    migration.destination.display()
+                )),
+            }
+            continue;
+        }
+
+        if let Err(rollback_error) = rollback_owned_pm_scratch_file(&StagedPmScratchFile {
+            path: migration.destination.clone(),
+            fingerprint: expected.clone(),
+        }) {
+            rollback_failures.push(rollback_error.to_string());
+        }
+    }
+
+    if details.is_empty() && rollback_failures.is_empty() {
+        return error;
+    }
+    let mut message = error.to_string();
+    if !details.is_empty() {
+        message.push_str("; ");
+        message.push_str(&details.join("; "));
+    }
+    if !rollback_failures.is_empty() {
+        message.push_str("; selective PM scratch destination rollback also failed: ");
+        message.push_str(&rollback_failures.join("; "));
+    }
+    io::Error::new(error.kind(), message)
+}
+
+fn restore_removed_pm_scratch_sources<C>(
+    migrations: &[PmScratchMigration],
+    committed_removals: usize,
+    recovery_copy: &mut C,
+) -> (Vec<usize>, Vec<String>)
+where
+    C: FnMut(&Path, &Path) -> io::Result<PmScratchFileFingerprint>,
+{
+    let mut preserve_backups = Vec::new();
+    let mut failures = Vec::new();
+    for (index, migration) in migrations.iter().take(committed_removals).enumerate() {
+        match fs::symlink_metadata(&migration.source) {
+            Ok(_) => match pm_scratch_file_fingerprint(
+                &migration.source,
+                &format!(
+                    "fingerprint legacy PM scratch source during recovery for {}",
+                    migration.relative
+                ),
+            ) {
+                Ok(current) if current == migration.source_fingerprint => continue,
+                Ok(_) => {
+                    preserve_backups.push(index);
+                    failures.push(format!(
+                        "refusing to overwrite a replaced legacy PM scratch source during recovery for {}: {}",
+                        migration.relative,
+                        migration.source.display()
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    preserve_backups.push(index);
+                    failures.push(error.to_string());
+                    continue;
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                preserve_backups.push(index);
+                failures.push(
+                    pm_scratch_path_error(
+                        error,
+                        &format!(
+                            "inspect legacy PM scratch source during recovery for {}",
+                            migration.relative
+                        ),
+                        &migration.source,
+                    )
+                    .to_string(),
+                );
+                continue;
+            }
+        }
+
+        let Some(expected_destination) = migration.staged_fingerprint.as_ref() else {
+            preserve_backups.push(index);
+            failures.push(format!(
+                "cannot restore legacy PM scratch source without a staged fingerprint for {}: {}",
+                migration.relative,
+                migration.source.display()
+            ));
+            continue;
+        };
+        let current_destination = match pm_scratch_file_fingerprint(
+            &migration.destination,
+            &format!(
+                "fingerprint PM scratch recovery source for {}",
+                migration.relative
+            ),
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                preserve_backups.push(index);
+                failures.push(error.to_string());
+                continue;
+            }
+        };
+        if current_destination != *expected_destination {
+            preserve_backups.push(index);
+            failures.push(format!(
+                "refusing to restore from a replaced PM scratch destination for {}: {}",
+                migration.relative,
+                migration.destination.display()
+            ));
+            continue;
+        }
+
+        let recovery_token = match recovery_copy(&migration.destination, &migration.source) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                preserve_backups.push(index);
+                failures.push(
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "restore legacy PM scratch source {} from {} to {}: {error}",
+                            migration.relative,
+                            migration.destination.display(),
+                            migration.source.display()
+                        ),
+                    )
+                    .to_string(),
+                );
+                continue;
+            }
+        };
+
+        match pm_scratch_file_fingerprint(
+            &migration.source,
+            &format!(
+                "verify restored legacy PM scratch source for {}",
+                migration.relative
+            ),
+        ) {
+            Ok(restored)
+                if restored == recovery_token
+                    && restored.has_same_content(&migration.source_fingerprint)
+                    && restored.has_same_content(expected_destination) => {}
+            Ok(_) => {
+                preserve_backups.push(index);
+                failures.push(format!(
+                    "restored legacy PM scratch source identity or content was replaced during recovery ownership handoff for {}: {}",
+                    migration.relative,
+                    migration.source.display()
+                ));
+            }
+            Err(error) => {
+                preserve_backups.push(index);
+                failures.push(error.to_string());
+            }
+        }
+    }
+
+    preserve_backups.sort_unstable();
+    preserve_backups.dedup();
+    (preserve_backups, failures)
+}
+
+fn pm_scratch_remove_error<C>(
+    error: io::Error,
+    migrations: &[PmScratchMigration],
+    committed_removals: usize,
+    current_candidate: Option<usize>,
+    recovery_copy: &mut C,
+) -> io::Error
+where
+    C: FnMut(&Path, &Path) -> io::Result<PmScratchFileFingerprint>,
+{
+    let (mut preserve_backups, recovery_failures) =
+        restore_removed_pm_scratch_sources(migrations, committed_removals, recovery_copy);
+    let mut recovery_details = recovery_failures;
+
+    if let Some(index) = current_candidate {
+        let migration = &migrations[index];
+        let current_is_original = match pm_scratch_file_fingerprint(
+            &migration.source,
+            &format!(
+                "reinspect current legacy PM scratch source after removal failure for {}",
+                migration.relative
+            ),
+        ) {
+            Ok(current) => {
+                let matches_staged = migration
+                    .staged_fingerprint
+                    .as_ref()
+                    .is_some_and(|staged| current.has_same_content(staged));
+                current == migration.source_fingerprint && matches_staged
+            }
+            Err(inspection_error) => {
+                recovery_details.push(inspection_error.to_string());
+                false
+            }
+        };
+        if !current_is_original {
+            preserve_backups.push(index);
+        }
+    }
+
+    preserve_backups.sort_unstable();
+    preserve_backups.dedup();
+    let error = if recovery_details.is_empty() {
+        error
+    } else {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; PM scratch source recovery also reported: {}",
+                recovery_details.join("; ")
+            ),
+        )
+    };
+    pm_scratch_error_preserving_backups(error, migrations, &preserve_backups)
+}
+
+fn migrate_legacy_pm_scratch_with_all_ops<F, R, C>(
+    worktree: &Path,
+    mut stage: F,
+    mut before_remove: R,
+    mut recovery_copy: C,
+) -> io::Result<usize>
+where
+    F: FnMut(&Path, &Path) -> io::Result<PmScratchFileFingerprint>,
+    R: FnMut(&Path) -> io::Result<()>,
+    C: FnMut(&Path, &Path) -> io::Result<PmScratchFileFingerprint>,
+{
+    let scratch = pm_scratch_dir_for_pm_worktree(worktree).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "PM scratch migration requires a canonical PM worktree: {}",
+                worktree.display()
+            ),
+        )
+    })?;
+
+    if !optional_real_pm_scratch_directory(worktree, "worktree")? {
+        return Ok(0);
+    }
+    let pm_dir = worktree.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("PM worktree has no parent: {}", worktree.display()),
+        )
+    })?;
+    let project_dir = pm_dir.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "PM worktree has no project directory: {}",
+                worktree.display()
+            ),
+        )
+    })?;
+    require_real_pm_scratch_directory(project_dir, "project directory")?;
+    require_real_pm_scratch_directory(pm_dir, "PM directory")?;
+
+    let mut migrations = Vec::new();
+
+    for relative in LEGACY_PM_SCRATCH_PATHS {
+        let source = worktree.join(relative);
+        let source_parent = source.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "legacy PM scratch source has no parent for {relative}: {}",
+                    source.display()
+                ),
+            )
+        })?;
+        if source_parent != worktree
+            && !optional_real_pm_scratch_directory(source_parent, "source parent")?
+        {
+            continue;
+        }
+        let source_metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "inspect legacy PM scratch source {relative} at {}: {error}",
+                        source.display()
+                    ),
+                ));
+            }
+        };
+        if !source_metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "legacy PM scratch source {relative} at {} is not a regular file",
+                    source.display()
+                ),
+            ));
+        }
+        if !legacy_pm_scratch_has_local_state(worktree, relative)? {
+            continue;
+        }
+        let destination = scratch.join(relative);
+        let source_fingerprint = pm_scratch_file_fingerprint(
+            &source,
+            &format!("fingerprint legacy PM scratch source {relative}"),
+        )?;
+        migrations.push(PmScratchMigration {
+            relative,
+            source,
+            destination,
+            source_fingerprint,
+            staged_fingerprint: None,
+        });
+    }
+
+    if migrations.is_empty() {
+        return Ok(0);
+    }
+
+    let project_state = project_dir.join("project-state");
+    ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
+    ensure_real_pm_scratch_directory(&scratch, "scratch root")?;
+    if migrations
+        .iter()
+        .any(|migration| migration.relative.starts_with("tasks/"))
+    {
+        ensure_real_pm_scratch_directory(&scratch.join("tasks"), "scratch tasks directory")?;
+    }
+
+    for migration in &migrations {
+        match fs::symlink_metadata(&migration.destination) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "legacy PM scratch destination conflict for {}: {}",
+                        migration.relative,
+                        migration.destination.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "inspect legacy PM scratch destination {} at {}: {error}",
+                        migration.relative,
+                        migration.destination.display()
+                    ),
+                ));
+            }
+        }
+    }
+
+    let mut staged_destinations = Vec::new();
+    for migration in &mut migrations {
+        let fingerprint = match stage(&migration.source, &migration.destination) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let error = io::Error::new(
+                    error.kind(),
+                    format!(
+                        "stage legacy PM scratch {} from {} to {}: {error}",
+                        migration.relative,
+                        migration.source.display(),
+                        migration.destination.display()
+                    ),
+                );
+                return Err(pm_scratch_stage_error(error, &staged_destinations));
+            }
+        };
+        let canonical_fingerprint = match pm_scratch_file_fingerprint(
+            &migration.destination,
+            &format!(
+                "verify staged PM scratch destination ownership handoff for {}",
+                migration.relative
+            ),
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return Err(pm_scratch_stage_error(error, &staged_destinations)),
+        };
+        if canonical_fingerprint != fingerprint {
+            let error = io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "staged PM scratch destination identity or content was replaced during ownership handoff for {}: {}",
+                    migration.relative,
+                    migration.destination.display()
+                ),
+            );
+            return Err(pm_scratch_stage_error(error, &staged_destinations));
+        }
+        migration.staged_fingerprint = Some(fingerprint.clone());
+        staged_destinations.push(StagedPmScratchFile {
+            path: migration.destination.clone(),
+            fingerprint,
+        });
+    }
+
+    if let Err(error) = verify_staged_pm_scratch_destinations(&migrations) {
+        return Err(pm_scratch_stage_error(error, &staged_destinations));
+    }
+    for (index, migration) in migrations.iter().enumerate() {
+        let current_source = match pm_scratch_file_fingerprint(
+            &migration.source,
+            &format!(
+                "reinspect legacy PM scratch source {} before commit",
+                migration.relative
+            ),
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return Err(pm_scratch_error_preserving_backups(
+                    error,
+                    &migrations,
+                    &[index],
+                ));
+            }
+        };
+        let staged_fingerprint = migration
+            .staged_fingerprint
+            .as_ref()
+            .expect("every migration is fingerprinted after successful staging");
+        if current_source != migration.source_fingerprint
+            || !current_source.has_same_content(staged_fingerprint)
+        {
+            let error = io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to remove a replaced or changed legacy PM scratch source {}: {}",
+                    migration.relative,
+                    migration.source.display()
+                ),
+            );
+            return Err(pm_scratch_error_preserving_backups(
+                error,
+                &migrations,
+                &[index],
+            ));
+        }
+    }
+
+    for (committed_removals, migration) in migrations.iter().enumerate() {
+        if let Err(error) = verify_staged_pm_scratch_destinations(&migrations) {
+            return Err(pm_scratch_remove_error(
+                error,
+                &migrations,
+                committed_removals,
+                Some(committed_removals),
+                &mut recovery_copy,
+            ));
+        }
+        let current_source = match pm_scratch_file_fingerprint(
+            &migration.source,
+            &format!(
+                "fingerprint legacy PM scratch source {} immediately before removal",
+                migration.relative
+            ),
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return Err(pm_scratch_remove_error(
+                    error,
+                    &migrations,
+                    committed_removals,
+                    Some(committed_removals),
+                    &mut recovery_copy,
+                ));
+            }
+        };
+        let staged_fingerprint = migration
+            .staged_fingerprint
+            .as_ref()
+            .expect("every migration is fingerprinted after successful staging");
+        if current_source != migration.source_fingerprint
+            || !current_source.has_same_content(staged_fingerprint)
+        {
+            let error = io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "legacy PM scratch source changed before removal for {}: {}",
+                    migration.relative,
+                    migration.source.display()
+                ),
+            );
+            return Err(pm_scratch_remove_error(
+                error,
+                &migrations,
+                committed_removals,
+                Some(committed_removals),
+                &mut recovery_copy,
+            ));
+        }
+
+        if let Err(error) = before_remove(&migration.source) {
+            let error = pm_scratch_path_error(
+                error,
+                &format!(
+                    "run before-remove hook for migrated legacy PM scratch source {}",
+                    migration.relative
+                ),
+                &migration.source,
+            );
+            return Err(pm_scratch_remove_error(
+                error,
+                &migrations,
+                committed_removals,
+                Some(committed_removals),
+                &mut recovery_copy,
+            ));
+        }
+        if let Err(error) = quarantine_and_remove_owned_pm_scratch_file(
+            &migration.source,
+            &migration.source_fingerprint,
+            &format!(
+                "commit migrated legacy PM scratch source {}",
+                migration.relative
+            ),
+        ) {
+            return Err(pm_scratch_remove_error(
+                error,
+                &migrations,
+                committed_removals,
+                Some(committed_removals),
+                &mut recovery_copy,
+            ));
+        }
+    }
+
+    Ok(migrations.len())
+}
+
+fn migrate_legacy_pm_scratch_with_ops<F, R>(
+    worktree: &Path,
+    stage: F,
+    before_remove: R,
+) -> io::Result<usize>
+where
+    F: FnMut(&Path, &Path) -> io::Result<PmScratchFileFingerprint>,
+    R: FnMut(&Path) -> io::Result<()>,
+{
+    migrate_legacy_pm_scratch_with_all_ops(
+        worktree,
+        stage,
+        before_remove,
+        durably_copy_pm_scratch_no_replace,
+    )
+}
+
+fn migrate_legacy_pm_scratch_with<F>(worktree: &Path, stage: F) -> io::Result<usize>
+where
+    F: FnMut(&Path, &Path) -> io::Result<PmScratchFileFingerprint>,
+{
+    migrate_legacy_pm_scratch_with_ops(worktree, stage, |_| Ok(()))
+}
+
+/// Move the exact legacy PM note allowlist out of the worktree without
+/// following symlinked source or destination directories.
+pub fn migrate_legacy_pm_scratch(worktree: &Path) -> io::Result<usize> {
+    migrate_legacy_pm_scratch_with(worktree, durably_copy_pm_scratch_no_replace)
+}
+
+/// Externalize locally changed tracked legacy notes, then restore the
+/// repository-owned bytes from HEAD so a subsequent refresh or cleanup does
+/// not mistake the migration's tracked deletion for unknown local work.
+pub fn migrate_legacy_pm_scratch_preserving_project_content(worktree: &Path) -> io::Result<usize> {
+    let tracked = tracked_legacy_pm_scratch_with_local_state(worktree)?;
+    reject_tracked_pm_scratch_with_index_changes(worktree, &tracked)?;
+    let migrated = migrate_legacy_pm_scratch(worktree)?;
+    restore_tracked_pm_scratch_after_migration(worktree, &tracked)?;
+    Ok(migrated)
+}
+
+pub const PM_WORKTREE_BASE_REF: &str = "origin/develop";
+
+/// Result of one serialized PM worktree refresh attempt. A degraded outcome
+/// remains launchable only when an already-materialized worktree was
+/// preserved; `freshness` explains why it could not advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmWorktreeRefreshOutcome {
+    pub worktree: PathBuf,
+    pub freshness: PmWorktreeFreshness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmWorktreeCleanupOutcome {
+    Absent,
+    Removed,
+    RetainedLocalWork,
+}
+
+const PM_WORKTREE_IDENTITY_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PmWorktreeIdentity {
+    schema_version: u32,
+    project_root: PathBuf,
+    git_root: PathBuf,
+    worktree: PathBuf,
+}
+
+impl PmWorktreeRefreshOutcome {
+    pub fn is_fresh(&self) -> bool {
+        self.freshness.state == PmWorktreeFreshnessState::Fresh
+    }
+}
+
+fn pm_refresh_checked_at() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn git_sha(repo: &Path, revision: &str) -> io::Result<Option<String>> {
+    let output = gwt_core::process::run_git_logged(
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+        Some(repo),
+    )
+    .map_err(|error| {
+        io::Error::other(format!(
+            "resolve Git revision {revision:?} in {}: {error}",
+            repo.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!sha.is_empty()).then_some(sha))
+}
+
+fn detached_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
+    let dot_git = worktree.join(".git");
+    let metadata = match fs::symlink_metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let git_dir = if metadata.file_type().is_dir() {
+        dot_git
+    } else if metadata.file_type().is_file() {
+        let marker = fs::read_to_string(&dot_git)?;
+        let raw = marker
+            .trim()
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid linked-worktree gitdir marker: {}",
+                        dot_git.display()
+                    ),
+                )
+            })?;
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            worktree.join(path)
+        }
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PM worktree .git is neither a file nor directory: {}",
+                dot_git.display()
+            ),
+        ));
+    };
+    let head = fs::read_to_string(git_dir.join("HEAD"))?;
+    let head = head.trim();
+    if head.starts_with("ref:") {
+        return git_sha(worktree, "HEAD");
+    }
+    if matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(Some(head.to_ascii_lowercase()));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("invalid detached PM worktree HEAD at {}", git_dir.display()),
+    ))
+}
+
+fn fetch_pm_worktree_base(git_root: &Path) -> io::Result<()> {
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "fetch",
+            "origin",
+            "--prune",
+            "+refs/heads/develop:refs/remotes/origin/develop",
+        ],
+        Some(git_root),
+    )?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "fetch PM base {PM_WORKTREE_BASE_REF}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn git_behind(repo: &Path, head: Option<&str>, target: Option<&str>) -> Option<u64> {
+    let (Some(head), Some(target)) = (head, target) else {
+        return None;
+    };
+    let range = format!("{head}..{target}");
+    let output =
+        gwt_core::process::run_git_logged(&["rev-list", "--count", &range], Some(repo)).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+fn pm_refresh_failure(
+    git_root: &Path,
+    worktree: &Path,
+    target_sha: Option<String>,
+    target_observation: PmWorktreeTargetObservation,
+    stage: PmWorktreeRefreshFailureStage,
+    reason: impl Into<String>,
+) -> PmWorktreeFreshness {
+    let head_sha = detached_worktree_head_sha(worktree).ok().flatten();
+    let behind = git_behind(git_root, head_sha.as_deref(), target_sha.as_deref());
+    let state = match (&head_sha, &target_sha) {
+        (Some(head), Some(target)) if head != target => PmWorktreeFreshnessState::Stale,
+        _ => PmWorktreeFreshnessState::Unknown,
+    };
+    PmWorktreeFreshness {
+        state,
+        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        head_sha,
+        target_sha,
+        behind,
+        target_observation,
+        checked_at: pm_refresh_checked_at(),
+        failure_stage: Some(stage),
+        failure_reason: Some(reason.into()),
+    }
+}
+
+fn persist_pm_worktree_freshness(
+    project_dir: &Path,
+    freshness: &PmWorktreeFreshness,
+) -> io::Result<()> {
+    let prefs_path = project_dir.join("project-state/pm.json");
+    mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.worktree_freshness = Some(freshness.clone());
+    })?;
+    Ok(())
+}
+
+fn persist_unknown_pm_worktree_failure(
+    project_dir: &Path,
+    worktree: &Path,
+    stage: PmWorktreeRefreshFailureStage,
+    reason: impl Into<String>,
+) -> io::Result<PmWorktreeFreshness> {
+    let freshness = PmWorktreeFreshness {
+        state: PmWorktreeFreshnessState::Unknown,
+        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        head_sha: detached_worktree_head_sha(worktree).ok().flatten(),
+        target_sha: None,
+        behind: None,
+        target_observation: PmWorktreeTargetObservation::Unavailable,
+        checked_at: pm_refresh_checked_at(),
+        failure_stage: Some(stage),
+        failure_reason: Some(reason.into()),
+    };
+    persist_pm_worktree_freshness(project_dir, &freshness)?;
+    Ok(freshness)
+}
+
+fn persist_untrusted_pm_worktree_failure(
+    project_dir: &Path,
+    stage: PmWorktreeRefreshFailureStage,
+    reason: impl Into<String>,
+) -> io::Result<PmWorktreeFreshness> {
+    let freshness = PmWorktreeFreshness {
+        state: PmWorktreeFreshnessState::Unknown,
+        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        head_sha: None,
+        target_sha: None,
+        behind: None,
+        target_observation: PmWorktreeTargetObservation::Unavailable,
+        checked_at: pm_refresh_checked_at(),
+        failure_stage: Some(stage),
+        failure_reason: Some(reason.into()),
+    };
+    persist_pm_worktree_freshness(project_dir, &freshness)?;
+    Ok(freshness)
+}
+
+fn append_pm_worktree_refresh_failure_reason(
+    project_dir: &Path,
+    additional_reason: &str,
+) -> io::Result<()> {
+    let prefs_path = project_dir.join("project-state/pm.json");
+    mutate_pm_prefs(&prefs_path, |prefs| {
+        let freshness = prefs
+            .worktree_freshness
+            .get_or_insert_with(|| PmWorktreeFreshness {
+                state: PmWorktreeFreshnessState::Unknown,
+                base_ref: PM_WORKTREE_BASE_REF.to_string(),
+                head_sha: None,
+                target_sha: None,
+                behind: None,
+                target_observation: PmWorktreeTargetObservation::Unavailable,
+                checked_at: pm_refresh_checked_at(),
+                failure_stage: Some(PmWorktreeRefreshFailureStage::Inspect),
+                failure_reason: None,
+            });
+        if freshness.failure_stage.is_none() {
+            freshness.state = PmWorktreeFreshnessState::Unknown;
+            freshness.head_sha = None;
+            freshness.target_sha = None;
+            freshness.behind = None;
+            freshness.target_observation = PmWorktreeTargetObservation::Unavailable;
+            freshness.failure_stage = Some(PmWorktreeRefreshFailureStage::Inspect);
+        }
+        freshness.failure_reason = Some(match freshness.failure_reason.take() {
+            Some(existing) if !existing.is_empty() => {
+                format!("{existing}; {additional_reason}")
+            }
+            _ => additional_reason.to_string(),
+        });
+    })?;
+    Ok(())
+}
+
+fn pm_identity_authorizes_project_state(project_dir: &Path, worktree: &Path) -> bool {
+    load_pm_worktree_identity(project_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|identity| {
+            let identity_project_dir =
+                gwt_core::paths::gwt_project_dir_for_repo_path(&identity.project_root);
+            same_canonical_path(project_dir, &identity_project_dir)
+                && same_canonical_path(worktree, &identity.worktree)
+        })
+}
+
+fn git_sha_observation(repo: &Path, target: &str) -> (Option<String>, Option<String>) {
+    match git_sha(repo, target) {
+        Ok(value) => (value, None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+fn normalize_previous_generated_hook_configs(worktree: &Path) -> io::Result<()> {
+    normalize_previous_generated_hook_configs_guarded(worktree, None)
+}
+
+fn normalize_previous_generated_hook_configs_guarded(
+    worktree: &Path,
+    mut snapshot: Option<&mut PmGeneratedHookConfigSnapshot>,
+) -> io::Result<()> {
+    for relative in [".claude/settings.local.json", ".codex/hooks.json"] {
+        let path = worktree.join(relative);
+        let guarded = snapshot
+            .as_deref()
+            .is_some_and(|snapshot| snapshot.contains(&path));
+        if guarded {
+            snapshot
+                .as_deref()
+                .expect("guarded snapshot")
+                .verify_captured_ownership(&path)?;
+        } else if !crate::managed_assets::managed_hook_config_is_disposable(worktree, relative) {
+            continue;
+        }
+        let cached = gwt_core::process::run_git_logged(
+            &["diff", "--cached", "--quiet", "--exit-code", "--", relative],
+            Some(worktree),
+        )?;
+        match cached.status.code() {
+            Some(0) => {}
+            Some(1) => {
+                if guarded {
+                    snapshot
+                        .as_deref_mut()
+                        .expect("guarded snapshot")
+                        .record_normalized_state(&path)?;
+                }
+                continue;
+            }
+            _ => {
+                return Err(io::Error::other(format!(
+                    "inspect staged generated hook config {relative}: {}",
+                    String::from_utf8_lossy(&cached.stderr).trim()
+                )));
+            }
+        }
+        let tracked = gwt_core::process::run_git_logged(
+            &["ls-files", "--error-unmatch", "--", relative],
+            Some(worktree),
+        )?;
+        match tracked.status.code() {
+            Some(0) => {
+                let restore = gwt_core::process::run_git_logged(
+                    &["checkout", "--", relative],
+                    Some(worktree),
+                )?;
+                if !restore.status.success() {
+                    return Err(io::Error::other(format!(
+                        "restore prior generated hook config {relative}: {}",
+                        String::from_utf8_lossy(&restore.stderr).trim()
+                    )));
+                }
+            }
+            Some(1) => fs::remove_file(&path)?,
+            _ => {
+                return Err(io::Error::other(format!(
+                    "inspect tracked generated hook config {relative}: {}",
+                    String::from_utf8_lossy(&tracked.stderr).trim()
+                )));
+            }
+        }
+        if guarded {
+            snapshot
+                .as_deref_mut()
+                .expect("guarded snapshot")
+                .record_normalized_state(&path)?;
+        }
+    }
+    Ok(())
+}
+
+struct PmGeneratedHookConfigSnapshot {
+    entries: Vec<PmGeneratedHookConfigSnapshotEntry>,
+}
+
+struct PmGeneratedHookConfigSnapshotEntry {
+    path: PathBuf,
+    contents: Vec<u8>,
+    permissions: fs::Permissions,
+    normalized_state: Option<PmGeneratedHookNodeState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PmGeneratedHookNodeState {
+    Absent,
+    Regular(Vec<u8>),
+}
+
+impl PmGeneratedHookConfigSnapshot {
+    fn capture(worktree: &Path) -> io::Result<Self> {
+        let mut entries = Vec::new();
+        for relative in [".claude/settings.local.json", ".codex/hooks.json"] {
+            if !crate::managed_assets::managed_hook_config_is_disposable(worktree, relative) {
+                continue;
+            }
+            let path = worktree.join(relative);
+            require_regular_pm_worktree_control_file(&path, "generated PM hook config")?;
+            let metadata = fs::symlink_metadata(&path)?;
+            entries.push(PmGeneratedHookConfigSnapshotEntry {
+                contents: fs::read(&path)?,
+                permissions: metadata.permissions(),
+                path,
+                normalized_state: None,
+            });
+        }
+        Ok(Self { entries })
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.entries.iter().any(|entry| entry.path == path)
+    }
+
+    fn verify_captured_ownership(&self, path: &Path) -> io::Result<()> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .ok_or_else(|| io::Error::other("generated PM hook snapshot entry is missing"))?;
+        let current = pm_generated_hook_node_state(path)?;
+        if current == PmGeneratedHookNodeState::Regular(entry.contents.clone()) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "generated PM hook config ownership changed after capture: {}",
+                    path.display()
+                ),
+            ))
+        }
+    }
+
+    fn record_normalized_state(&mut self, path: &Path) -> io::Result<()> {
+        let state = pm_generated_hook_node_state(path)?;
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.path == path)
+            .ok_or_else(|| io::Error::other("generated PM hook snapshot entry is missing"))?;
+        entry.normalized_state = Some(state);
+        Ok(())
+    }
+
+    fn restore(self) -> io::Result<()> {
+        let mut failures = Vec::new();
+        for entry in self.entries {
+            let scratch = unique_pm_scratch_path(&entry.path);
+            let prepare = (|| {
+                let mut file = fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&scratch)?;
+                file.write_all(&entry.contents)?;
+                file.sync_all()?;
+                fs::set_permissions(&scratch, entry.permissions)
+            })();
+            if let Err(error) = prepare {
+                failures.push(format!(
+                    "prepare {}: {error}; partial recovery retained at {}",
+                    entry.path.display(),
+                    scratch.display()
+                ));
+                continue;
+            }
+
+            let current = match pm_generated_hook_node_state(&entry.path) {
+                Ok(current) => current,
+                Err(error) => {
+                    failures.push(format!(
+                        "inspect {}: {error}; recovery retained at {}",
+                        entry.path.display(),
+                        scratch.display()
+                    ));
+                    continue;
+                }
+            };
+            let captured = PmGeneratedHookNodeState::Regular(entry.contents.clone());
+            let Some(expected) = entry.normalized_state else {
+                if current == captured {
+                    let _ = fs::remove_file(&scratch);
+                    continue;
+                }
+                failures.push(format!(
+                    "refuse to restore {} after ownership changed before normalization; recovery retained at {}",
+                    entry.path.display(),
+                    scratch.display()
+                ));
+                continue;
+            };
+            if current != expected {
+                failures.push(format!(
+                    "refuse to restore {} after its normalized state changed; recovery retained at {}",
+                    entry.path.display(),
+                    scratch.display()
+                ));
+                continue;
+            }
+            if current == captured {
+                let _ = fs::remove_file(&scratch);
+                continue;
+            }
+            let quarantine = matches!(current, PmGeneratedHookNodeState::Regular(_))
+                .then(|| unique_pm_scratch_path(&entry.path));
+            if let Some(quarantine) = quarantine.as_ref() {
+                if let Err(error) = fs::rename(&entry.path, quarantine) {
+                    failures.push(format!(
+                        "quarantine {}: {error}; recovery retained at {}",
+                        entry.path.display(),
+                        scratch.display()
+                    ));
+                    continue;
+                }
+            }
+            if let Err(error) = fs::rename(&scratch, &entry.path) {
+                let put_back = quarantine
+                    .as_ref()
+                    .map_or(Ok(()), |quarantine| fs::rename(quarantine, &entry.path));
+                failures.push(format!(
+                    "restore {}: {error}; changed-tree recovery={put_back:?} at {}; prior config retained at {}",
+                    entry.path.display(),
+                    quarantine
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new("<no quarantine>"))
+                        .display(),
+                    scratch.display()
+                ));
+                continue;
+            }
+            if let Some(quarantine) = quarantine {
+                if let Err(error) = fs::remove_file(&quarantine) {
+                    failures.push(format!(
+                        "remove generated PM hook rollback quarantine {}: {error}",
+                        quarantine.display()
+                    ));
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "restore prior generated PM hook configs: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+}
+
+fn pm_generated_hook_node_state(path: &Path) -> io::Result<PmGeneratedHookNodeState> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            require_regular_pm_worktree_control_file(path, "generated PM hook rollback target")?;
+            Ok(PmGeneratedHookNodeState::Regular(fs::read(path)?))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(PmGeneratedHookNodeState::Absent)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn finish_degraded_pm_refresh(
+    git_root: &Path,
+    project_dir: &Path,
+    worktree: &Path,
+    freshness: PmWorktreeFreshness,
+) -> io::Result<PmWorktreeRefreshOutcome> {
+    if let Err(error) = crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
+    {
+        let original = freshness
+            .failure_stage
+            .map(|stage| format!(" after {stage:?} degradation"))
+            .unwrap_or_default();
+        let asset_failure = pm_refresh_failure(
+            git_root,
+            worktree,
+            freshness.target_sha.clone(),
+            freshness.target_observation,
+            PmWorktreeRefreshFailureStage::ManagedAssets,
+            format!("managed asset refresh failed{original}: {error}"),
+        );
+        persist_pm_worktree_freshness(project_dir, &asset_failure)?;
+        return Err(error);
+    }
+    persist_pm_worktree_freshness(project_dir, &freshness)?;
+    Ok(PmWorktreeRefreshOutcome {
+        worktree: worktree.to_path_buf(),
+        freshness,
+    })
+}
+
+fn with_pm_worktree_refresh_lock<T>(
+    project_dir: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let project_state = project_dir.join("project-state");
+    ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(project_state.join("pm-refresh.lock"))?;
+    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    let result = operation();
+    let unlock = FileExt::unlock(&lock);
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn ensure_existing_pm_worktree_owned_by_git_root(
+    expected_git_root: &Path,
+    worktree: &Path,
+) -> io::Result<()> {
+    match fs::symlink_metadata(worktree.join(".git")) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    require_real_pm_scratch_directory(worktree, "PM worktree")?;
+    let actual_git_root = gwt_git::worktree::main_worktree_root(worktree)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if same_canonical_path(expected_git_root, &actual_git_root) {
+        return validate_linked_pm_worktree_marker(expected_git_root, worktree);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "PM worktree Git-root ownership mismatch: {} belongs to {}, expected {}",
+            worktree.display(),
+            actual_git_root.display(),
+            expected_git_root.display()
+        ),
+    ))
+}
+
+fn require_regular_pm_worktree_control_file(path: &Path, label: &str) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} must be a regular file: {}", path.display()),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{label} must not be a reparse point: {}", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_pm_worktree_control_path(path: &Path, prefix: Option<&str>) -> io::Result<PathBuf> {
+    require_regular_pm_worktree_control_file(path, "PM linked-worktree control file")?;
+    let raw = fs::read_to_string(path)?;
+    let value = match prefix {
+        Some(prefix) => raw.trim().strip_prefix(prefix).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "PM linked-worktree marker has an invalid format: {}",
+                    path.display()
+                ),
+            )
+        })?,
+        None => raw.trim(),
+    };
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PM linked-worktree control path is empty: {}",
+                path.display()
+            ),
+        ));
+    }
+    let value = PathBuf::from(value);
+    Ok(if value.is_absolute() {
+        value
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(value)
+    })
+}
+
+fn git_common_dir(git_root: &Path) -> io::Result<PathBuf> {
+    let output =
+        gwt_core::process::run_git_logged(&["rev-parse", "--git-common-dir"], Some(git_root))?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "resolve PM Git common directory: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if common.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resolve PM Git common directory: Git returned an empty path",
+        ));
+    }
+    Ok(if common.is_absolute() {
+        common
+    } else {
+        git_root.join(common)
+    })
+}
+
+fn git_repository_is_bare(git_root: &Path) -> io::Result<bool> {
+    let output =
+        gwt_core::process::run_git_logged(&["rev-parse", "--is-bare-repository"], Some(git_root))?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "inspect whether PM Git root is bare: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        value => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Git returned an invalid bare-repository flag: {value:?}"),
+        )),
+    }
+}
+
+fn legacy_pm_project_root_for_identity(
+    git_root: &Path,
+    project_dir: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let mut candidates = vec![git_root.to_path_buf()];
+    if git_repository_is_bare(git_root)? {
+        if let Some(parent) = git_root.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+    Ok(candidates.into_iter().find(|candidate| {
+        let candidate_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(candidate);
+        same_canonical_path(project_dir, &candidate_project_dir)
+    }))
+}
+
+fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::Result<()> {
+    let dot_git = worktree.join(".git");
+    let admin_dir = parse_pm_worktree_control_path(&dot_git, Some("gitdir: "))?;
+    require_real_pm_scratch_directory(&admin_dir, "PM linked-worktree admin directory")?;
+    let common_dir = git_common_dir(git_root)?;
+    let worktrees_dir = common_dir.join("worktrees");
+    let canonical_admin = dunce::canonicalize(&admin_dir)?;
+    let canonical_worktrees = dunce::canonicalize(&worktrees_dir)?;
+    if canonical_admin.parent() != Some(canonical_worktrees.as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "PM linked-worktree admin directory is outside the expected Git common directory: {}",
+                admin_dir.display()
+            ),
+        ));
+    }
+    let backpointer = parse_pm_worktree_control_path(&admin_dir.join("gitdir"), None)?;
+    if !same_canonical_path(&backpointer, &dot_git) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "PM linked-worktree admin backpointer does not authorize {}",
+                worktree.display()
+            ),
+        ));
+    }
+    let registered = gwt_git::WorktreeManager::new(git_root)
+        .list()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .into_iter()
+        .filter(|entry| same_canonical_path(&entry.path, worktree))
+        .count();
+    if registered != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "PM worktree must have exactly one Git registration, found {registered}: {}",
+                worktree.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn refresh_pm_worktree_at_locked(
+    git_root: &Path,
+    project_dir: &Path,
+    worktree: &Path,
+) -> io::Result<PmWorktreeRefreshOutcome> {
+    let manager = gwt_git::WorktreeManager::new(git_root);
+    let existed = worktree.join(".git").exists();
+    if worktree.exists() && !existed {
+        let (cached_target, inspect_error) = git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let observation = if cached_target.is_some() {
+            PmWorktreeTargetObservation::Cached
+        } else {
+            PmWorktreeTargetObservation::Unavailable
+        };
+        let mut reason = format!(
+            "canonical PM worktree path exists without Git metadata: {}",
+            worktree.display()
+        );
+        if let Some(error) = inspect_error {
+            reason.push_str(&format!("; cached target inspection also failed: {error}"));
+        }
+        let freshness = pm_refresh_failure(
+            git_root,
+            worktree,
+            cached_target,
+            observation,
+            PmWorktreeRefreshFailureStage::Inspect,
+            reason,
+        );
+        persist_pm_worktree_freshness(project_dir, &freshness)?;
+        return Err(io::Error::other(
+            freshness.failure_reason.clone().unwrap_or_default(),
+        ));
+    }
+
+    let mut generated_hook_snapshot = if existed {
+        match PmGeneratedHookConfigSnapshot::capture(worktree) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                persist_unknown_pm_worktree_failure(
+                    project_dir,
+                    worktree,
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    error.to_string(),
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let refresh = (|| {
+        if existed {
+            if let Err(error) = normalize_previous_generated_hook_configs_guarded(
+                worktree,
+                generated_hook_snapshot.as_mut(),
+            ) {
+                let (cached_target, inspect_error) =
+                    git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+                let observation = if cached_target.is_some() {
+                    PmWorktreeTargetObservation::Cached
+                } else {
+                    PmWorktreeTargetObservation::Unavailable
+                };
+                let mut reason = error.to_string();
+                if let Some(error) = inspect_error {
+                    reason.push_str(&format!("; cached target inspection also failed: {error}"));
+                }
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    cached_target,
+                    observation,
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    reason,
+                );
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(error);
+                }
+                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+            }
+            if let Err(error) = migrate_legacy_pm_scratch_preserving_project_content(worktree) {
+                let (cached_target, inspect_error) =
+                    git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+                let observation = if cached_target.is_some() {
+                    PmWorktreeTargetObservation::Cached
+                } else {
+                    PmWorktreeTargetObservation::Unavailable
+                };
+                let mut reason = error.to_string();
+                if let Some(error) = inspect_error {
+                    reason.push_str(&format!("; cached target inspection also failed: {error}"));
+                }
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    cached_target,
+                    observation,
+                    PmWorktreeRefreshFailureStage::ScratchMigration,
+                    reason,
+                );
+                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+            }
+        }
+
+        if let Err(error) = fetch_pm_worktree_base(git_root) {
+            let (cached_target, inspect_error) =
+                git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+            let observation = if cached_target.is_some() {
+                PmWorktreeTargetObservation::Cached
+            } else {
+                PmWorktreeTargetObservation::Unavailable
+            };
+            let mut failure_reason = error.to_string();
+            if let Some(error) = inspect_error {
+                failure_reason
+                    .push_str(&format!("; cached target inspection also failed: {error}"));
+            }
+            if !existed {
+                let Some(target) = cached_target.as_deref() else {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        None,
+                        observation,
+                        PmWorktreeRefreshFailureStage::Fetch,
+                        failure_reason,
+                    );
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(io::Error::other(
+                        freshness.failure_reason.clone().unwrap_or_default(),
+                    ));
+                };
+                if let Some(parent) = worktree.parent() {
+                    if let Err(create_error) = fs::create_dir_all(parent) {
+                        let freshness = pm_refresh_failure(
+                            git_root,
+                            worktree,
+                            cached_target,
+                            observation,
+                            PmWorktreeRefreshFailureStage::Repoint,
+                            create_error.to_string(),
+                        );
+                        persist_pm_worktree_freshness(project_dir, &freshness)?;
+                        return Err(create_error);
+                    }
+                }
+                if let Err(create_error) = manager.create_detached(target, worktree) {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        cached_target,
+                        observation,
+                        PmWorktreeRefreshFailureStage::Repoint,
+                        create_error.to_string(),
+                    );
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(io::Error::other(create_error.to_string()));
+                }
+            }
+            let freshness = pm_refresh_failure(
+                git_root,
+                worktree,
+                cached_target,
+                observation,
+                PmWorktreeRefreshFailureStage::Fetch,
+                failure_reason,
+            );
+            return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+        }
+
+        let (target_sha, target_inspect_error) =
+            git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let Some(target_sha) = target_sha else {
+            let reason = target_inspect_error
+                .unwrap_or_else(|| format!("{} is unavailable after fetch", PM_WORKTREE_BASE_REF));
+            let freshness = pm_refresh_failure(
+                git_root,
+                worktree,
+                None,
+                PmWorktreeTargetObservation::Unavailable,
+                PmWorktreeRefreshFailureStage::Inspect,
+                reason,
+            );
+            if existed {
+                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+            }
+            persist_pm_worktree_freshness(project_dir, &freshness)?;
+            return Err(io::Error::other(
+                freshness.failure_reason.clone().unwrap_or_default(),
+            ));
+        };
+
+        let old_head = if existed {
+            match detached_worktree_head_sha(worktree) {
+                Ok(head) => head,
+                Err(error) => {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        Some(target_sha),
+                        PmWorktreeTargetObservation::Fresh,
+                        PmWorktreeRefreshFailureStage::Inspect,
+                        error.to_string(),
+                    );
+                    return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+                }
+            }
+        } else {
+            None
+        };
+        if existed {
+            let safety = manager
+                .detached_repoint_safety(worktree)
+                .map_err(|error| io::Error::other(error.to_string()));
+            let failure = match safety {
+                Ok(gwt_git::worktree::DetachedRepointSafety::Ready) => None,
+                Ok(gwt_git::worktree::DetachedRepointSafety::SymbolicHead { branch }) => Some((
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    format!("PM worktree HEAD is symbolic ({branch})"),
+                )),
+                Ok(gwt_git::worktree::DetachedRepointSafety::TrackedOrIndexChanges) => Some((
+                    PmWorktreeRefreshFailureStage::LocalWork,
+                    "PM worktree has tracked or index changes".to_string(),
+                )),
+                Ok(gwt_git::worktree::DetachedRepointSafety::DetachedOnlyCommit) => Some((
+                    PmWorktreeRefreshFailureStage::LocalWork,
+                    "PM worktree has a detached-only commit".to_string(),
+                )),
+                Err(error) => Some((PmWorktreeRefreshFailureStage::Inspect, error.to_string())),
+            };
+            if let Some((stage, reason)) = failure {
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    stage,
+                    reason,
+                );
+                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+            }
+        }
+        if let Some(head) = old_head.as_deref().filter(|head| *head != target_sha) {
+            if let Err(error) = manager.repoint_detached(worktree, &target_sha) {
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    PmWorktreeRefreshFailureStage::Repoint,
+                    error.to_string(),
+                );
+                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+            }
+            debug_assert!(!head.is_empty());
+        } else if !existed {
+            if let Some(parent) = worktree.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        Some(target_sha),
+                        PmWorktreeTargetObservation::Fresh,
+                        PmWorktreeRefreshFailureStage::Repoint,
+                        error.to_string(),
+                    );
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = manager.create_detached(&target_sha, worktree) {
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    PmWorktreeRefreshFailureStage::Repoint,
+                    error.to_string(),
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                return Err(io::Error::other(error.to_string()));
+            }
+        }
+
+        if let Err(error) =
+            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
+        {
+            let mut failure_reason = error.to_string();
+            if let Some(old_head) = old_head
+                .as_deref()
+                .filter(|old_head| *old_head != target_sha)
+            {
+                let rollback = normalize_previous_generated_hook_configs(worktree)
+                    .map_err(|error| error.to_string())
+                    .and_then(|()| {
+                        manager
+                            .repoint_detached(worktree, old_head)
+                            .map_err(|error| error.to_string())
+                    });
+                if let Err(rollback_error) = rollback {
+                    failure_reason.push_str(&format!(
+                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
+                ));
+                }
+            }
+            let freshness = pm_refresh_failure(
+                git_root,
+                worktree,
+                Some(target_sha),
+                PmWorktreeTargetObservation::Fresh,
+                PmWorktreeRefreshFailureStage::ManagedAssets,
+                &failure_reason,
+            );
+            persist_pm_worktree_freshness(project_dir, &freshness)?;
+            return Err(io::Error::other(failure_reason));
+        }
+
+        let observed_head = match detached_worktree_head_sha(worktree) {
+            Ok(head) => head,
+            Err(error) => {
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    error.to_string(),
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                return Ok(PmWorktreeRefreshOutcome {
+                    worktree: worktree.to_path_buf(),
+                    freshness,
+                });
+            }
+        };
+        if observed_head.as_deref() != Some(target_sha.as_str()) {
+            let freshness = pm_refresh_failure(
+                git_root,
+                worktree,
+                Some(target_sha),
+                PmWorktreeTargetObservation::Fresh,
+                PmWorktreeRefreshFailureStage::Inspect,
+                "PM worktree HEAD changed before freshness could be committed",
+            );
+            persist_pm_worktree_freshness(project_dir, &freshness)?;
+            return Ok(PmWorktreeRefreshOutcome {
+                worktree: worktree.to_path_buf(),
+                freshness,
+            });
+        }
+
+        let freshness = PmWorktreeFreshness {
+            state: PmWorktreeFreshnessState::Fresh,
+            base_ref: PM_WORKTREE_BASE_REF.to_string(),
+            head_sha: Some(target_sha.clone()),
+            target_sha: Some(target_sha),
+            behind: Some(0),
+            target_observation: PmWorktreeTargetObservation::Fresh,
+            checked_at: pm_refresh_checked_at(),
+            failure_stage: None,
+            failure_reason: None,
+        };
+        persist_pm_worktree_freshness(project_dir, &freshness)?;
+        Ok(PmWorktreeRefreshOutcome {
+            worktree: worktree.to_path_buf(),
+            freshness,
+        })
+    })();
+
+    match (refresh, generated_hook_snapshot) {
+        (Ok(outcome), _) => Ok(outcome),
+        (Err(error), Some(snapshot)) => match snapshot.restore() {
+            Ok(()) => Err(error),
+            Err(restore_error) => {
+                let restore_reason = format!(
+                    "restoring prior generated PM hook configs also failed: {restore_error}"
+                );
+                let persistence =
+                    append_pm_worktree_refresh_failure_reason(project_dir, &restore_reason);
+                let persistence_suffix = persistence
+                    .err()
+                    .map(|persist_error| {
+                        format!("; persisting rollback failure also failed: {persist_error}")
+                    })
+                    .unwrap_or_default();
+                Err(io::Error::other(format!(
+                    "{error}; {restore_reason}{persistence_suffix}"
+                )))
+            }
+        },
+        (Err(error), None) => Err(error),
+    }
+}
+
+fn same_canonical_path(left: &Path, right: &Path) -> bool {
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn pm_worktree_identity_path(project_dir: &Path) -> PathBuf {
+    project_dir.join("project-state/pm-worktree-identity.json")
+}
+
+fn require_regular_pm_identity_file(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PM worktree identity is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "PM worktree identity must not be a reparse point: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn load_pm_worktree_identity(project_dir: &Path) -> io::Result<Option<PmWorktreeIdentity>> {
+    let path = pm_worktree_identity_path(project_dir);
+    match require_regular_pm_identity_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let identity: PmWorktreeIdentity = serde_json::from_slice(&fs::read(&path)?)?;
+    if identity.schema_version != PM_WORKTREE_IDENTITY_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported PM worktree identity schema {} at {}",
+                identity.schema_version,
+                path.display()
+            ),
+        ));
+    }
+    Ok(Some(identity))
+}
+
+fn save_pm_worktree_identity(
+    project_dir: &Path,
+    project_root: &Path,
+    git_root: &Path,
+    worktree: &Path,
+) -> io::Result<()> {
+    let project_state = project_dir.join("project-state");
+    require_real_pm_scratch_directory(&project_state, "project-state directory")?;
+    let path = pm_worktree_identity_path(project_dir);
+    match require_regular_pm_identity_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let identity = PmWorktreeIdentity {
+        schema_version: PM_WORKTREE_IDENTITY_SCHEMA_VERSION,
+        project_root: dunce::canonicalize(project_root)
+            .unwrap_or_else(|_| project_root.to_path_buf()),
+        git_root: dunce::canonicalize(git_root).unwrap_or_else(|_| git_root.to_path_buf()),
+        worktree: worktree.to_path_buf(),
+    };
+    let scratch = unique_pm_scratch_path(&path);
+    fs::write(&scratch, serde_json::to_vec_pretty(&identity)?)?;
+    fs::rename(scratch, path)
+}
+
+fn persist_preflight_failure_if_safe(
+    project_dir: &Path,
+    worktree: &Path,
+    stage: PmWorktreeRefreshFailureStage,
+    error: &io::Error,
+) {
+    let project_state = project_dir.join("project-state");
+    if require_real_pm_scratch_directory(project_dir, "project directory").is_ok()
+        && require_real_pm_scratch_directory(&project_state, "project-state directory").is_ok()
+    {
+        let _ =
+            persist_unknown_pm_worktree_failure(project_dir, worktree, stage, error.to_string());
+    }
+}
+
+fn persist_scratch_preflight_failure_if_safe(
+    project_dir: &Path,
+    worktree: &Path,
+    error: &io::Error,
+) {
+    persist_preflight_failure_if_safe(
+        project_dir,
+        worktree,
+        PmWorktreeRefreshFailureStage::ScratchMigration,
+        error,
+    );
+}
+
+fn persist_untrusted_inspection_failure_if_safe(project_dir: &Path, error: &io::Error) {
+    let project_state = project_dir.join("project-state");
+    if require_real_pm_scratch_directory(project_dir, "project directory").is_ok()
+        && require_real_pm_scratch_directory(&project_state, "project-state directory").is_ok()
+    {
+        let _ = persist_untrusted_pm_worktree_failure(
+            project_dir,
+            PmWorktreeRefreshFailureStage::Inspect,
+            error.to_string(),
+        );
+    }
+}
+
+/// Refresh the canonical resident PM worktree before a process starts or
+/// resumes. This is the repo-root entrypoint used by AppRuntime.
+pub fn refresh_pm_worktree_for_repo_path(repo_path: &Path) -> io::Result<PmWorktreeRefreshOutcome> {
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
+    let worktree = project_dir.join("pm/worktree");
+    let git_root = match gwt_git::worktree::main_worktree_root(repo_path) {
+        Ok(git_root) => git_root,
+        Err(error) => {
+            let error = io::Error::other(error.to_string());
+            persist_untrusted_inspection_failure_if_safe(&project_dir, &error);
+            return Err(error);
+        }
+    };
+    fs::create_dir_all(&project_dir)?;
+    with_pm_worktree_refresh_lock(&project_dir, || {
+        if let Err(error) = ensure_existing_pm_worktree_owned_by_git_root(&git_root, &worktree) {
+            let reason = error.to_string();
+            persist_untrusted_pm_worktree_failure(
+                &project_dir,
+                PmWorktreeRefreshFailureStage::Inspect,
+                &reason,
+            )
+            .map_err(|persist_error| {
+                io::Error::other(format!(
+                    "{reason}; persist PM inspection failure: {persist_error}"
+                ))
+            })?;
+            return Err(error);
+        }
+        if let Err(error) = ensure_pm_scratch_dir_for_repo_path(repo_path) {
+            persist_scratch_preflight_failure_if_safe(&project_dir, &worktree, &error);
+            return Err(error);
+        }
+        if let Err(error) = save_pm_worktree_identity(&project_dir, repo_path, &git_root, &worktree)
+        {
+            let reason = error.to_string();
+            persist_unknown_pm_worktree_failure(
+                &project_dir,
+                &worktree,
+                PmWorktreeRefreshFailureStage::Inspect,
+                &reason,
+            )
+            .map_err(|persist_error| {
+                io::Error::other(format!(
+                    "{reason}; persist PM identity storage failure: {persist_error}"
+                ))
+            })?;
+            return Err(error);
+        }
+        refresh_pm_worktree_at_locked(&git_root, &project_dir, &worktree)
+    })
+}
+
+/// Serialize PM worktree cleanup with every refresh boundary. The caller
+/// supplies the higher-layer classifier for generated merged hook configs;
+/// all unknown local work remains a fail-closed retention signal.
+pub fn cleanup_pm_worktree_for_repo_path<F>(
+    repo_path: &Path,
+    extra_disposable: F,
+) -> io::Result<PmWorktreeCleanupOutcome>
+where
+    F: Fn(&Path, &str) -> bool,
+{
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
+    let worktree = project_dir.join("pm/worktree");
+    let git_root = match gwt_git::worktree::main_worktree_root(repo_path) {
+        Ok(git_root) => git_root,
+        Err(error) => {
+            let error = io::Error::other(error.to_string());
+            persist_untrusted_inspection_failure_if_safe(&project_dir, &error);
+            return Err(error);
+        }
+    };
+    fs::create_dir_all(&project_dir)?;
+    with_pm_worktree_refresh_lock(&project_dir, || {
+        if let Err(error) = ensure_existing_pm_worktree_owned_by_git_root(&git_root, &worktree) {
+            let reason = error.to_string();
+            persist_untrusted_pm_worktree_failure(
+                &project_dir,
+                PmWorktreeRefreshFailureStage::Inspect,
+                &reason,
+            )
+            .map_err(|persist_error| {
+                io::Error::other(format!(
+                    "{reason}; persist PM cleanup inspection failure: {persist_error}"
+                ))
+            })?;
+            return Err(error);
+        }
+        if !worktree.exists() {
+            return Ok(PmWorktreeCleanupOutcome::Absent);
+        }
+        if let Err(error) = migrate_legacy_pm_scratch_preserving_project_content(&worktree) {
+            let (target_sha, inspect_error) = git_sha_observation(&git_root, PM_WORKTREE_BASE_REF);
+            let observation = if target_sha.is_some() {
+                PmWorktreeTargetObservation::Cached
+            } else {
+                PmWorktreeTargetObservation::Unavailable
+            };
+            let mut reason = error.to_string();
+            if let Some(error) = inspect_error {
+                reason.push_str(&format!("; cached target inspection also failed: {error}"));
+            }
+            let freshness = pm_refresh_failure(
+                &git_root,
+                &worktree,
+                target_sha,
+                observation,
+                PmWorktreeRefreshFailureStage::ScratchMigration,
+                reason,
+            );
+            persist_pm_worktree_freshness(&project_dir, &freshness)?;
+            return Err(error);
+        }
+        let manager = gwt_git::WorktreeManager::new(git_root.clone());
+        if manager
+            .ephemeral_worktree_has_local_work_with(&worktree, |entry| {
+                extra_disposable(&worktree, entry)
+            })
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
+            return Ok(PmWorktreeCleanupOutcome::RetainedLocalWork);
+        }
+        manager
+            .remove_force_twice(&worktree)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(PmWorktreeCleanupOutcome::Removed)
+    })
+}
+
+/// Refresh a running resident PM at an explicit pre-turn or completed-Stop
+/// boundary. Structural path validation prevents ordinary worktrees named
+/// `pm/worktree` from gaining this authority.
+pub fn refresh_pm_worktree_at_safe_boundary(
+    worktree: &Path,
+) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
+    if !is_pm_worktree(worktree) {
+        return Ok(None);
+    }
+    let Some(project_dir) = worktree.parent().and_then(Path::parent) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "canonical PM worktree has no project directory: {}",
+                worktree.display()
+            ),
+        ));
+    };
+    require_real_pm_scratch_directory(project_dir, "project directory")?;
+    require_real_pm_scratch_directory(worktree, "PM worktree")?;
+    with_pm_worktree_refresh_lock(project_dir, || {
+        let git_root = match gwt_git::worktree::main_worktree_root(worktree) {
+            Ok(git_root) => git_root,
+            Err(error) => {
+                let error = io::Error::other(error.to_string());
+                if pm_identity_authorizes_project_state(project_dir, worktree) {
+                    persist_untrusted_pm_worktree_failure(
+                        project_dir,
+                        PmWorktreeRefreshFailureStage::Inspect,
+                        error.to_string(),
+                    )?;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = ensure_existing_pm_worktree_owned_by_git_root(&git_root, worktree) {
+            if pm_identity_authorizes_project_state(project_dir, worktree) {
+                persist_untrusted_pm_worktree_failure(
+                    project_dir,
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    error.to_string(),
+                )?;
+            }
+            return Err(error);
+        }
+        let root_derived_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&git_root);
+        let identity = match load_pm_worktree_identity(project_dir) {
+            Ok(identity) => identity,
+            Err(error) => {
+                if same_canonical_path(project_dir, &root_derived_project_dir) {
+                    let reason = error.to_string();
+                    persist_unknown_pm_worktree_failure(
+                        project_dir,
+                        worktree,
+                        PmWorktreeRefreshFailureStage::Inspect,
+                        &reason,
+                    )
+                    .map_err(|persist_error| {
+                        io::Error::other(format!(
+                            "{reason}; persist PM identity inspection failure: {persist_error}"
+                        ))
+                    })?;
+                }
+                return Err(error);
+            }
+        };
+        let identity_matches = match identity {
+            Some(identity) => {
+                let identity_project_dir =
+                    gwt_core::paths::gwt_project_dir_for_repo_path(&identity.project_root);
+                same_canonical_path(project_dir, &identity_project_dir)
+                    && same_canonical_path(&git_root, &identity.git_root)
+                    && same_canonical_path(worktree, &identity.worktree)
+            }
+            None => {
+                let legacy_project_root =
+                    legacy_pm_project_root_for_identity(&git_root, project_dir)?;
+                let Some(legacy_project_root) = legacy_project_root else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "PM worktree has no identity and no authorized legacy project root: {}",
+                            worktree.display()
+                        ),
+                    ));
+                };
+                let expected_worktree = project_dir.join("pm/worktree");
+                if !same_canonical_path(worktree, &expected_worktree) {
+                    false
+                } else if let Err(error) = save_pm_worktree_identity(
+                    project_dir,
+                    &legacy_project_root,
+                    &git_root,
+                    worktree,
+                ) {
+                    let reason = error.to_string();
+                    persist_unknown_pm_worktree_failure(
+                        project_dir,
+                        worktree,
+                        PmWorktreeRefreshFailureStage::Inspect,
+                        &reason,
+                    )
+                    .map_err(|persist_error| {
+                        io::Error::other(format!(
+                            "{reason}; persist legacy PM identity migration failure: {persist_error}"
+                        ))
+                    })?;
+                    return Err(error);
+                } else {
+                    true
+                }
+            }
+        };
+        if !identity_matches {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "PM worktree project identity mismatch: {} does not authorize Git root {}",
+                    worktree.display(),
+                    git_root.display()
+                ),
+            ));
+        }
+        let project_state = project_dir.join("project-state");
+        ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
+        if let Err(error) = ensure_real_pm_scratch_directory(
+            &project_state.join("pm-scratch"),
+            "PM scratch directory",
+        ) {
+            persist_scratch_preflight_failure_if_safe(project_dir, worktree, &error);
+            return Err(error);
+        }
+        refresh_pm_worktree_at_locked(&git_root, project_dir, worktree).map(Some)
+    })
 }
 
 /// SPEC-3431 FR-012: durable state for the resident-loop driver. Lives beside
@@ -857,6 +4109,8 @@ pub struct PmStatusReport {
     pub session_record_present: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_freshness: Option<PmWorktreeFreshness>,
     /// FR-014: the PM never occupies an Issue Monitor implementation slot.
     /// Always 0; kept explicit so operators can see the accounting rule.
     /// The global resource cap engine itself remains SPEC #3200's
@@ -906,12 +4160,143 @@ pub fn pm_status_report_for_caller(
         registration,
         session_record_present: record_present,
         stale_hint: record_present.map(|present| !present),
+        worktree_freshness: prefs.worktree_freshness.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_hook_snapshot_restore_rejects_a_replaced_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("worktree");
+        let codex = worktree.join(".codex");
+        fs::create_dir_all(&codex).expect("Codex config directory");
+        let hook = codex.join("hooks.json");
+        fs::write(&hook, b"{}\n").expect("prior generated-only hook config");
+        assert!(crate::managed_assets::managed_hook_config_is_disposable(
+            &worktree,
+            ".codex/hooks.json"
+        ));
+        let snapshot = PmGeneratedHookConfigSnapshot::capture(&worktree)
+            .expect("capture regular generated hook config");
+        let external = dir.path().join("external.json");
+        fs::write(&external, b"external content must remain\n").expect("external config");
+        fs::remove_file(&hook).expect("replace captured hook");
+        symlink(&external, &hook).expect("indirect rollback target");
+
+        let error = snapshot
+            .restore()
+            .expect_err("rollback must reject a replaced symlink target");
+
+        assert_eq!(
+            fs::read(&external).expect("external config remains"),
+            b"external content must remain\n"
+        );
+        assert!(
+            fs::symlink_metadata(&hook)
+                .expect("rollback target remains")
+                .file_type()
+                .is_symlink(),
+            "rollback must not replace or follow the indirect target"
+        );
+        let recovery = fs::read_dir(&codex)
+            .expect("scan recovery directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".hooks.json.tmp-"))
+            })
+            .expect("prior bytes remain in a same-parent recovery file");
+        assert_eq!(fs::read(&recovery).expect("recovery bytes"), b"{}\n");
+        assert!(error.to_string().contains(&recovery.display().to_string()));
+    }
+
+    #[test]
+    fn generated_hook_snapshot_restore_preserves_a_replaced_regular_user_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("worktree");
+        let codex = worktree.join(".codex");
+        fs::create_dir_all(&codex).expect("Codex config directory");
+        let hook = codex.join("hooks.json");
+        fs::write(&hook, b"{}\n").expect("prior generated-only hook config");
+        let snapshot = PmGeneratedHookConfigSnapshot::capture(&worktree)
+            .expect("capture regular generated hook config");
+        let user_config = br#"{"hooks":{},"user-owned":true}
+"#;
+        fs::write(&hook, user_config).expect("replace with regular user config");
+
+        let error = snapshot
+            .restore()
+            .expect_err("rollback must reject a replaced regular user config");
+
+        assert_eq!(
+            fs::read(&hook).expect("user config remains"),
+            user_config,
+            "ownership mismatch must preserve the newer regular file"
+        );
+        let recovery = fs::read_dir(&codex)
+            .expect("scan recovery directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".hooks.json.tmp-"))
+            })
+            .expect("prior bytes remain in a same-parent recovery file");
+        assert_eq!(fs::read(&recovery).expect("recovery bytes"), b"{}\n");
+        assert!(error.to_string().contains(&recovery.display().to_string()));
+    }
+
+    #[test]
+    fn generated_hook_rollback_failure_is_durable_in_the_typed_status_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_dir = dir.path().join("project");
+        let prefs_path = project_dir.join("project-state/pm.json");
+        let checked_at = "2026-08-29T00:00:00Z".to_string();
+        mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.worktree_freshness = Some(PmWorktreeFreshness {
+                state: PmWorktreeFreshnessState::Unknown,
+                base_ref: PM_WORKTREE_BASE_REF.to_string(),
+                head_sha: None,
+                target_sha: Some("target".to_string()),
+                behind: None,
+                target_observation: PmWorktreeTargetObservation::Fresh,
+                checked_at: checked_at.clone(),
+                failure_stage: Some(PmWorktreeRefreshFailureStage::ManagedAssets),
+                failure_reason: Some("managed asset refresh failed".to_string()),
+            });
+        })
+        .expect("seed typed refresh failure");
+        let recovery = project_dir.join("pm/worktree/.codex/.hooks.json.tmp-recovery");
+        append_pm_worktree_refresh_failure_reason(
+            &project_dir,
+            &format!("rollback recovery retained at {}", recovery.display()),
+        )
+        .expect("append durable rollback failure");
+
+        let prefs = load_pm_prefs(&prefs_path).expect("read back PM prefs");
+        let status = pm_status_report(&prefs, |_| false);
+        let freshness = status
+            .worktree_freshness
+            .expect("pm.status freshness snapshot");
+        assert_eq!(freshness.state, PmWorktreeFreshnessState::Unknown);
+        assert_eq!(
+            freshness.failure_stage,
+            Some(PmWorktreeRefreshFailureStage::ManagedAssets),
+            "outer rollback failure must not erase the typed primary stage"
+        );
+        assert_eq!(freshness.checked_at, checked_at);
+        let reason = freshness.failure_reason.expect("stable failure reason");
+        assert!(reason.contains("managed asset refresh failed"), "{reason}");
+        assert!(reason.contains(&recovery.display().to_string()), "{reason}");
+    }
 
     fn temp_prefs_path() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -927,6 +4312,105 @@ mod tests {
             created_at: Some("2026-08-03T00:00:00Z".to_string()),
             consecutive_crashes: 0,
             next_not_before: None,
+        }
+    }
+
+    fn pm_scratch_quarantine_residue(root: &Path) -> Vec<PathBuf> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut residue = Vec::new();
+        while let Some(directory) = pending.pop() {
+            let metadata = match fs::symlink_metadata(&directory) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => panic!(
+                    "inspect quarantine scan root {}: {error}",
+                    directory.display()
+                ),
+            };
+            if !metadata.file_type().is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&directory).expect("read quarantine scan directory") {
+                let entry = entry.expect("quarantine scan entry");
+                let path = entry.path();
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gwt-pm-scratch-quarantine-")
+                {
+                    residue.push(path);
+                } else if entry
+                    .file_type()
+                    .expect("quarantine scan entry type")
+                    .is_dir()
+                {
+                    pending.push(path);
+                }
+            }
+        }
+        residue.sort();
+        residue
+    }
+
+    fn assert_no_pm_scratch_quarantine_residue(root: &Path) {
+        let residue = pm_scratch_quarantine_residue(root);
+        assert!(
+            residue.is_empty(),
+            "PM scratch quarantine residue must be cleaned up: {residue:?}"
+        );
+    }
+
+    fn run_pm_scratch_git(worktree: &Path, args: &[&str]) -> std::process::Output {
+        let output = gwt_core::process::run_git_logged(args, Some(worktree))
+            .expect("run git for PM scratch fixture");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed for PM scratch fixture: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    fn commit_tracked_pm_scratch(worktree: &Path, relative: &str, contents: &[u8]) {
+        fs::create_dir_all(worktree.join("tasks")).expect("create tracked scratch parent");
+        run_pm_scratch_git(worktree, &["init"]);
+        fs::write(worktree.join(relative), contents).expect("write tracked scratch fixture");
+        run_pm_scratch_git(worktree, &["add", "--", relative]);
+        run_pm_scratch_git(
+            worktree,
+            &[
+                "-c",
+                "user.name=gwt test",
+                "-c",
+                "user.email=gwt-test@example.invalid",
+                "commit",
+                "-m",
+                "tracked PM scratch fixture",
+            ],
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pm_scratch_file_fingerprint_distinguishes_same_content_file_identities() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.md");
+        let second = dir.path().join("second.md");
+        fs::write(&first, b"same bytes").expect("write first file");
+        fs::write(&second, b"same bytes").expect("write second file");
+
+        match (
+            pm_scratch_file_fingerprint(&first, "fingerprint first Windows file"),
+            pm_scratch_file_fingerprint(&second, "fingerprint second Windows file"),
+        ) {
+            (Ok(first_fingerprint), Ok(second_fingerprint)) => assert_ne!(
+                first_fingerprint, second_fingerprint,
+                "same-content files must remain distinct by volume/file identity"
+            ),
+            (Err(error), _) | (_, Err(error)) => assert!(
+                error.to_string().contains("identity"),
+                "identity retrieval may fail closed only with an explicit identity error: {error}"
+            ),
         }
     }
 
@@ -959,6 +4443,7 @@ mod tests {
                 auto_start: false,
                 ..PmSettings::default()
             },
+            ..PmPrefs::default()
         };
         save_pm_prefs(&path, &prefs).expect("save");
         let loaded = load_pm_prefs(&path).expect("load");
@@ -1171,6 +4656,1472 @@ mod tests {
     }
 
     #[test]
+    fn pm_scratch_paths_use_project_state_and_only_accept_the_canonical_pm_worktree() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+        let repo = Path::new("/tmp/pm-scratch-repo");
+        let expected =
+            gwt_core::paths::gwt_project_dir_for_repo_path(repo).join("project-state/pm-scratch");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+
+        assert_eq!(pm_scratch_dir_for_repo_path(repo), expected);
+        assert_eq!(
+            pm_scratch_dir_for_pm_worktree(&worktree),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            pm_scratch_dir_for_pm_worktree(
+                worktree
+                    .parent()
+                    .expect("pm directory")
+                    .join("worktree-copy")
+                    .as_path()
+            ),
+            None,
+            "a sibling of the canonical PM worktree must not resolve scratch"
+        );
+        assert_eq!(
+            pm_scratch_dir_for_pm_worktree(Path::new("/tmp/project/pm/worktree")),
+            None,
+            "a production branch path named pm/worktree must not resolve scratch"
+        );
+    }
+
+    #[test]
+    fn pm_scratch_migration_preserves_known_notes_and_leaves_unknown_files_untouched() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-migration-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+
+        fs::create_dir_all(worktree.join("tasks")).expect("create legacy tasks directory");
+        let known = [
+            ("tasks/todo.md", b"todo contents\n".as_slice()),
+            ("tasks/pm-notes.md", b"task note contents\n".as_slice()),
+            ("pm-notes.md", b"root note contents\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            fs::write(worktree.join(relative), contents).expect("write legacy scratch");
+        }
+        fs::write(worktree.join("tasks/unknown.md"), b"unknown task note\n")
+            .expect("write unknown task file");
+        fs::write(worktree.join("unknown.txt"), b"unknown root file\n")
+            .expect("write unknown root file");
+
+        assert_eq!(
+            migrate_legacy_pm_scratch(&worktree).expect("migrate legacy PM scratch"),
+            3
+        );
+
+        for (relative, contents) in known {
+            assert_eq!(
+                fs::read(scratch.join(relative)).expect("read migrated scratch"),
+                contents
+            );
+            assert!(
+                !worktree.join(relative).exists(),
+                "migrated source must be removed: {relative}"
+            );
+        }
+        assert_eq!(
+            fs::read(worktree.join("tasks/unknown.md")).expect("unknown task file remains"),
+            b"unknown task note\n"
+        );
+        assert_eq!(
+            fs::read(worktree.join("unknown.txt")).expect("unknown root file remains"),
+            b"unknown root file\n"
+        );
+        assert!(!scratch.join("tasks/unknown.md").exists());
+        assert!(!scratch.join("unknown.txt").exists());
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn pm_scratch_migration_keeps_clean_tracked_allowlist_file_in_worktree() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-clean-tracked-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let relative = "tasks/todo.md";
+        let committed_contents = b"tracked project task\n";
+        commit_tracked_pm_scratch(&worktree, relative, committed_contents);
+        let status = run_pm_scratch_git(&worktree, &["status", "--porcelain", "--", relative]);
+        assert!(
+            status.stdout.is_empty(),
+            "tracked allowlist fixture must be clean before migration: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+
+        assert_eq!(
+            migrate_legacy_pm_scratch(&worktree).expect("inspect clean tracked PM scratch"),
+            0,
+            "an allowlisted path that is clean in HEAD is project content, not legacy PM scratch"
+        );
+        assert_eq!(
+            fs::read(worktree.join(relative)).expect("clean tracked file remains"),
+            committed_contents
+        );
+        assert!(
+            !scratch.join(relative).exists(),
+            "clean tracked project content must not be copied into external PM scratch"
+        );
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn pm_scratch_migration_moves_modified_tracked_allowlist_file_to_external_scratch() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-modified-tracked-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let relative = "tasks/todo.md";
+        commit_tracked_pm_scratch(&worktree, relative, b"tracked project task\n");
+        let modified_contents = b"PM-local task update\n";
+        fs::write(worktree.join(relative), modified_contents)
+            .expect("modify tracked allowlist fixture");
+        let status = run_pm_scratch_git(&worktree, &["status", "--porcelain", "--", relative]);
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout),
+            " M tasks/todo.md\n",
+            "positive fixture must be a locally modified tracked allowlist file"
+        );
+
+        assert_eq!(
+            migrate_legacy_pm_scratch(&worktree).expect("migrate modified tracked PM scratch"),
+            1
+        );
+        assert!(
+            !worktree.join(relative).exists(),
+            "locally modified tracked legacy scratch must be removed after durable migration"
+        );
+        assert_eq!(
+            fs::read(scratch.join(relative)).expect("read migrated modified scratch"),
+            modified_contents
+        );
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn preserving_pm_scratch_migration_rejects_staged_and_unstaged_versions_without_mutation() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-staged-and-unstaged-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let relative = "tasks/todo.md";
+        commit_tracked_pm_scratch(&worktree, relative, b"tracked project task\n");
+        fs::write(worktree.join(relative), b"staged PM-local update\n")
+            .expect("write staged legacy scratch fixture");
+        run_pm_scratch_git(&worktree, &["add", "--", relative]);
+        let index_before = run_pm_scratch_git(&worktree, &["write-tree"]).stdout;
+        fs::write(worktree.join(relative), b"unstaged PM-local update\n")
+            .expect("write unstaged legacy scratch fixture");
+        let working_bytes_before = fs::read(worktree.join(relative)).expect("read working bytes");
+
+        migrate_legacy_pm_scratch_preserving_project_content(&worktree)
+            .expect_err("two distinct local versions cannot be represented by one scratch file");
+
+        assert_eq!(
+            run_pm_scratch_git(&worktree, &["write-tree"]).stdout,
+            index_before,
+            "the staged version must remain in the index"
+        );
+        assert_eq!(
+            fs::read(worktree.join(relative)).expect("read preserved working bytes"),
+            working_bytes_before,
+            "the unstaged version must remain in the worktree"
+        );
+        assert!(
+            !scratch.join(relative).exists(),
+            "a rejected migration must not publish a partial scratch copy"
+        );
+    }
+
+    #[test]
+    fn pm_scratch_migration_collision_preserves_source_and_destination() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-collision-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+        let collision = scratch.join("tasks/pm-notes.md");
+        fs::create_dir_all(collision.parent().expect("destination parent"))
+            .expect("create destination parent");
+        fs::write(&collision, b"existing destination\n").expect("write destination");
+
+        migrate_legacy_pm_scratch(&worktree).expect_err("a destination collision must fail closed");
+        for (relative, contents) in known {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("collision source remains"),
+                contents,
+                "all legacy sources must remain unchanged: {relative}"
+            );
+            if relative != "tasks/pm-notes.md" {
+                assert!(
+                    !scratch.join(relative).exists(),
+                    "migration must not partially move another source: {relative}"
+                );
+            }
+        }
+        assert_eq!(
+            fs::read(&collision).expect("collision destination remains"),
+            b"existing destination\n"
+        );
+    }
+
+    #[test]
+    fn pm_scratch_staging_failure_rolls_back_destinations_and_preserves_all_sources() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-stage-failure-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+
+        let mut stages = 0;
+        migrate_legacy_pm_scratch_with(&worktree, |source: &Path, destination: &Path| {
+            stages += 1;
+            if stages == 2 {
+                assert_eq!(
+                    fs::read(scratch.join("tasks/todo.md")).expect("first staged destination"),
+                    b"todo source\n",
+                    "the first destination must be durably staged before the injected failure"
+                );
+                assert_eq!(
+                    fs::read(worktree.join("tasks/todo.md")).expect("first source remains staged"),
+                    b"todo source\n",
+                    "staging must not remove a source"
+                );
+                return Err(io::Error::other("injected second-stage failure"));
+            }
+            durably_copy_pm_scratch_no_replace(source, destination)
+        })
+        .expect_err("a staging failure must fail the whole migration");
+        assert_eq!(stages, 2, "the failure must occur on the second stage");
+
+        for (relative, contents) in known {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("source remains after rollback"),
+                contents,
+                "all sources must remain unchanged after staging rollback: {relative}"
+            );
+            assert!(
+                !scratch.join(relative).exists(),
+                "every destination created by this attempt must be rolled back: {relative}"
+            );
+        }
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn pm_scratch_remove_failure_restores_sources_and_rolls_back_destinations() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-remove-failure-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+
+        let unknown_directory = worktree.join("tasks/unknown-directory");
+        let unknown_marker = unknown_directory.join("marker.txt");
+        fs::create_dir(&unknown_directory).expect("create unknown directory");
+        fs::write(&unknown_marker, b"unknown marker\n").expect("write unknown marker");
+        #[cfg(unix)]
+        let (unknown_link, unknown_link_target) = {
+            let link = worktree.join("tasks/unknown-link");
+            let target = PathBuf::from("unknown-directory/marker.txt");
+            std::os::unix::fs::symlink(&target, &link).expect("create unknown symlink");
+            (link, target)
+        };
+
+        let first_source = worktree.join("tasks/todo.md");
+        let second_source = worktree.join("tasks/pm-notes.md");
+        let mut before_remove_calls = 0;
+        migrate_legacy_pm_scratch_with_ops(
+            &worktree,
+            durably_copy_pm_scratch_no_replace,
+            |source: &Path| {
+                before_remove_calls += 1;
+                match before_remove_calls {
+                    1 => {
+                        assert_eq!(source, first_source);
+                        Ok(())
+                    }
+                    2 => {
+                        assert_eq!(source, second_source);
+                        assert!(
+                            !first_source.exists(),
+                            "the first source must have been removed before the injected failure"
+                        );
+                        assert!(
+                            second_source.exists(),
+                            "the failing remove must not delete its source"
+                        );
+                        Err(io::Error::other("injected second-remove failure"))
+                    }
+                    _ => panic!("migration must stop after the injected remove failure"),
+                }
+            },
+        )
+        .expect_err("a remove failure must fail the whole migration");
+        assert_eq!(
+            before_remove_calls, 2,
+            "the failure must occur before the second internal remove"
+        );
+
+        for (relative, contents) in known {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("source restored after remove rollback"),
+                contents,
+                "all sources must retain their original bytes after remove rollback: {relative}"
+            );
+            assert!(
+                !scratch.join(relative).exists(),
+                "every staged destination must be rolled back: {relative}"
+            );
+        }
+        assert!(unknown_directory.is_dir());
+        assert_eq!(
+            fs::read(&unknown_marker).expect("unknown marker remains"),
+            b"unknown marker\n"
+        );
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(&unknown_link)
+                .expect("unknown link metadata")
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                fs::read_link(&unknown_link).expect("unknown link target"),
+                unknown_link_target
+            );
+        }
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_recovery_rejects_same_content_source_identity_handoff() {
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-recovery-identity-handoff-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+
+        let first_source = worktree.join(known[0].0);
+        let second_source = worktree.join(known[1].0);
+        let first_backup = scratch.join(known[0].0);
+        let prepared_competitor = home.path().join("prepared-recovery-competitor.md");
+        fs::write(&prepared_competitor, known[0].1).expect("write prepared competitor");
+        let competitor_inode = fs::symlink_metadata(&prepared_competitor)
+            .expect("prepared competitor metadata")
+            .ino();
+        let mut before_remove_calls = 0;
+        let mut recovery_copy_calls = 0;
+
+        let error = migrate_legacy_pm_scratch_with_all_ops(
+            &worktree,
+            durably_copy_pm_scratch_no_replace,
+            |source: &Path| -> io::Result<()> {
+                before_remove_calls += 1;
+                match before_remove_calls {
+                    1 => {
+                        assert_eq!(source, first_source);
+                        Ok(())
+                    }
+                    2 => {
+                        assert_eq!(source, second_source);
+                        assert!(!first_source.exists());
+                        Err(io::Error::other("injected benign second-remove failure"))
+                    }
+                    _ => panic!("migration must stop at the second before-remove hook"),
+                }
+            },
+            |backup: &Path, restored_source: &Path| -> io::Result<PmScratchFileFingerprint> {
+                recovery_copy_calls += 1;
+                assert_eq!(recovery_copy_calls, 1);
+                assert_eq!(backup, first_backup);
+                assert_eq!(restored_source, first_source);
+                let fingerprint = durably_copy_pm_scratch_no_replace(backup, restored_source)?;
+                assert_ne!(
+                    fs::symlink_metadata(restored_source)?.ino(),
+                    competitor_inode,
+                    "the restored source and prepared competitor must be distinct nodes"
+                );
+                fs::remove_file(restored_source)?;
+                fs::rename(&prepared_competitor, restored_source)?;
+                Ok(fingerprint)
+            },
+        )
+        .expect_err("recovery must reject a same-content restored source identity handoff");
+
+        assert_eq!(before_remove_calls, 2);
+        assert_eq!(recovery_copy_calls, 1);
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("identity") || error_text.contains("replaced"),
+            "the error must explain the recovery identity violation: {error_text}"
+        );
+        assert!(
+            error_text.contains(&first_backup.display().to_string()),
+            "the error must identify the preserved recovery backup: {error_text}"
+        );
+        assert_eq!(
+            fs::read(&first_source).expect("competitor source remains"),
+            known[0].1
+        );
+        assert_eq!(
+            fs::symlink_metadata(&first_source)
+                .expect("competitor source metadata")
+                .ino(),
+            competitor_inode
+        );
+        assert!(!prepared_competitor.exists());
+        assert_eq!(
+            fs::read(&first_backup).expect("original recovery backup remains"),
+            known[0].1
+        );
+        for (relative, contents) in known.into_iter().skip(1) {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("unaffected source remains"),
+                contents
+            );
+            assert!(
+                !scratch.join(relative).exists(),
+                "unaffected backup must be rolled back: {relative}"
+            );
+        }
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn pm_scratch_before_remove_replacement_preserves_competitor_and_staged_backups() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-before-remove-replacement-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+        let unknown = worktree.join("tasks/unknown.md");
+        fs::write(&unknown, b"unknown source bytes\n").expect("write unknown source");
+
+        let first_source = worktree.join("tasks/todo.md");
+        let replaced_source = worktree.join("tasks/pm-notes.md");
+        let prepared_replacement = home.path().join("prepared-before-remove-replacement.md");
+        fs::write(&prepared_replacement, b"replacement after precommit")
+            .expect("write prepared replacement");
+        #[cfg(unix)]
+        let original_source_inode = fs::symlink_metadata(&replaced_source)
+            .expect("original source metadata")
+            .ino();
+        #[cfg(unix)]
+        let prepared_replacement_inode = fs::symlink_metadata(&prepared_replacement)
+            .expect("prepared replacement metadata")
+            .ino();
+        #[cfg(unix)]
+        assert_ne!(original_source_inode, prepared_replacement_inode);
+
+        let mut before_remove_calls = 0;
+        let error = migrate_legacy_pm_scratch_with_ops(
+            &worktree,
+            durably_copy_pm_scratch_no_replace,
+            |source: &Path| {
+                before_remove_calls += 1;
+                match before_remove_calls {
+                    1 => {
+                        assert_eq!(source, first_source);
+                        Ok(())
+                    }
+                    2 => {
+                        assert_eq!(source, replaced_source);
+                        fs::remove_file(source)?;
+                        fs::rename(&prepared_replacement, source)?;
+                        Ok(())
+                    }
+                    _ => panic!("migration must abort after the second source is replaced"),
+                }
+            },
+        )
+        .expect_err("a source replaced immediately before quarantine must fail closed");
+        assert_eq!(before_remove_calls, 2);
+
+        assert_eq!(
+            fs::read(&first_source).expect("first source restored"),
+            known[0].1,
+            "the already removed first source must be restored from its staged backup"
+        );
+        assert_eq!(
+            fs::read(&replaced_source).expect("replacement source remains"),
+            b"replacement after precommit"
+        );
+        #[cfg(unix)]
+        {
+            let current_inode = fs::symlink_metadata(&replaced_source)
+                .expect("replacement source metadata")
+                .ino();
+            assert_eq!(current_inode, prepared_replacement_inode);
+            assert_ne!(current_inode, original_source_inode);
+        }
+        assert_eq!(
+            fs::read(worktree.join(known[2].0)).expect("third source remains"),
+            known[2].1,
+            "the third source must remain unchanged"
+        );
+        let preserved_backup = scratch.join("tasks/pm-notes.md");
+        assert!(
+            error
+                .to_string()
+                .contains(&preserved_backup.display().to_string()),
+            "the error must identify the preserved durable backup: {error}"
+        );
+        assert_eq!(
+            fs::read(&preserved_backup).expect("affected source backup remains"),
+            known[1].1,
+            "the affected source must retain its durable staged backup"
+        );
+        assert!(
+            !scratch.join(known[0].0).exists(),
+            "the restored first source backup must be rolled back"
+        );
+        assert!(
+            !scratch.join(known[2].0).exists(),
+            "the untouched third source backup must be rolled back"
+        );
+        assert_eq!(
+            fs::read(&unknown).expect("unknown source remains"),
+            b"unknown source bytes\n"
+        );
+        assert!(!scratch.join("tasks/unknown.md").exists());
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn pm_scratch_source_replacement_after_staging_aborts_without_deleting_replacement() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-source-replacement-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+        let unknown = worktree.join("tasks/unknown.md");
+        fs::write(&unknown, b"unknown source bytes\n").expect("write unknown source");
+
+        let first_source = worktree.join("tasks/todo.md");
+        let prepared_replacement = home.path().join("prepared-source-replacement.md");
+        fs::write(&prepared_replacement, b"replacement unknown bytes")
+            .expect("write prepared replacement");
+        #[cfg(unix)]
+        let original_source_inode = fs::symlink_metadata(&first_source)
+            .expect("original source metadata")
+            .ino();
+        #[cfg(unix)]
+        let prepared_replacement_inode = fs::symlink_metadata(&prepared_replacement)
+            .expect("prepared replacement metadata")
+            .ino();
+        #[cfg(unix)]
+        assert_ne!(
+            original_source_inode, prepared_replacement_inode,
+            "the prepared replacement must be a distinct filesystem node"
+        );
+
+        let mut stages = 0;
+        let error =
+            migrate_legacy_pm_scratch_with(&worktree, |source: &Path, destination: &Path| {
+                let fingerprint = durably_copy_pm_scratch_no_replace(source, destination)?;
+                stages += 1;
+                if stages == known.len() {
+                    fs::remove_file(&first_source)?;
+                    fs::rename(&prepared_replacement, &first_source)?;
+                }
+                Ok(fingerprint)
+            })
+            .expect_err("replacing a source after staging must abort the migration");
+        assert_eq!(stages, known.len(), "all sources must have been staged");
+
+        assert_eq!(
+            fs::read(&first_source).expect("replacement source remains"),
+            b"replacement unknown bytes",
+            "the replacement must never be deleted or overwritten"
+        );
+        assert!(
+            !prepared_replacement.exists(),
+            "the prepared replacement must have been renamed into the source path"
+        );
+        #[cfg(unix)]
+        {
+            let replacement_inode = fs::symlink_metadata(&first_source)
+                .expect("replacement source metadata")
+                .ino();
+            assert_eq!(replacement_inode, prepared_replacement_inode);
+            assert_ne!(replacement_inode, original_source_inode);
+        }
+        for (relative, contents) in known.into_iter().skip(1) {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("unchanged source remains"),
+                contents,
+                "an untouched source must retain its original bytes: {relative}"
+            );
+        }
+        let preserved_backup = scratch.join("tasks/todo.md");
+        assert!(
+            error
+                .to_string()
+                .contains(&preserved_backup.display().to_string()),
+            "the error must identify the preserved durable backup: {error}"
+        );
+        assert_eq!(
+            fs::read(&preserved_backup).expect("affected source backup remains"),
+            known[0].1,
+            "the affected source must retain its durable staged backup"
+        );
+        for (relative, _) in known.into_iter().skip(1) {
+            assert!(
+                !scratch.join(relative).exists(),
+                "an unaffected source backup must be rolled back: {relative}"
+            );
+        }
+        assert_eq!(
+            fs::read(&unknown).expect("unknown source remains"),
+            b"unknown source bytes\n"
+        );
+        assert!(!scratch.join("tasks/unknown.md").exists());
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_stage_rejects_same_content_destination_identity_handoff() {
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-stage-identity-handoff-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+
+        let first_destination = scratch.join(known[0].0);
+        let prepared_competitor = home.path().join("prepared-same-content-competitor.md");
+        fs::write(&prepared_competitor, known[0].1).expect("write prepared competitor");
+        let competitor_inode = fs::symlink_metadata(&prepared_competitor)
+            .expect("prepared competitor metadata")
+            .ino();
+        let mut stages = 0;
+
+        let error = migrate_legacy_pm_scratch_with(
+            &worktree,
+            |source: &Path, destination: &Path| -> io::Result<PmScratchFileFingerprint> {
+                let fingerprint = durably_copy_pm_scratch_no_replace(source, destination)?;
+                stages += 1;
+                if stages == 1 {
+                    assert_eq!(destination, first_destination);
+                    assert_ne!(
+                        fs::symlink_metadata(destination)?.ino(),
+                        competitor_inode,
+                        "the durable-copy node and prepared competitor must be distinct"
+                    );
+                    fs::remove_file(destination)?;
+                    fs::rename(&prepared_competitor, destination)?;
+                }
+                Ok(fingerprint)
+            },
+        )
+        .expect_err("migration must reject a same-content staged destination identity handoff");
+
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("identity") || error_text.contains("replaced"),
+            "the error must explain the staged identity violation: {error_text}"
+        );
+        assert!(
+            error_text.contains(&first_destination.display().to_string()),
+            "the error must identify the replaced destination: {error_text}"
+        );
+        for (relative, contents) in known {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("source remains"),
+                contents,
+                "identity handoff rejection must preserve every source: {relative}"
+            );
+        }
+        assert_eq!(
+            fs::read(&first_destination).expect("competitor destination remains"),
+            known[0].1
+        );
+        assert_eq!(
+            fs::symlink_metadata(&first_destination)
+                .expect("competitor destination metadata")
+                .ino(),
+            competitor_inode
+        );
+        assert!(!prepared_competitor.exists());
+        for (relative, _) in known.into_iter().skip(1) {
+            assert!(
+                !scratch.join(relative).exists(),
+                "unaffected staged destination must be rolled back: {relative}"
+            );
+        }
+        assert_no_pm_scratch_quarantine_residue(home.path());
+    }
+
+    #[test]
+    fn pm_scratch_stage_rollback_preserves_a_replaced_destination_node() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-destination-replacement-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let known = [
+            ("tasks/todo.md", b"todo source\n".as_slice()),
+            ("tasks/pm-notes.md", b"notes source\n".as_slice()),
+            ("pm-notes.md", b"root source\n".as_slice()),
+        ];
+        for (relative, contents) in known {
+            let source = worktree.join(relative);
+            fs::create_dir_all(source.parent().expect("source parent"))
+                .expect("create source parent");
+            fs::write(source, contents).expect("write source");
+        }
+
+        let first_destination = scratch.join("tasks/todo.md");
+        let prepared_competitor = home.path().join("prepared-destination-competitor.md");
+        fs::write(&prepared_competitor, b"competitor destination bytes")
+            .expect("write prepared competitor");
+        #[cfg(unix)]
+        let competitor_inode = fs::symlink_metadata(&prepared_competitor)
+            .expect("prepared competitor metadata")
+            .ino();
+        #[cfg(unix)]
+        let mut staged_destination_inode = None;
+
+        let mut stages = 0;
+        migrate_legacy_pm_scratch_with(&worktree, |source: &Path, destination: &Path| {
+            stages += 1;
+            match stages {
+                1 => {
+                    assert_eq!(destination, first_destination);
+                    let fingerprint = durably_copy_pm_scratch_no_replace(source, destination)?;
+                    #[cfg(unix)]
+                    {
+                        let inode = fs::symlink_metadata(destination)
+                            .expect("first staged destination metadata")
+                            .ino();
+                        assert_ne!(
+                            inode, competitor_inode,
+                            "the staged destination and prepared competitor must be distinct nodes"
+                        );
+                        staged_destination_inode = Some(inode);
+                    }
+                    Ok(fingerprint)
+                }
+                2 => {
+                    fs::remove_file(&first_destination)?;
+                    fs::rename(&prepared_competitor, &first_destination)?;
+                    #[cfg(unix)]
+                    {
+                        let replacement_inode = fs::symlink_metadata(&first_destination)
+                            .expect("competitor destination metadata")
+                            .ino();
+                        assert_eq!(replacement_inode, competitor_inode);
+                        assert_ne!(
+                            replacement_inode,
+                            staged_destination_inode.expect("first staged destination inode")
+                        );
+                    }
+                    Err(io::Error::other(
+                        "injected second-stage failure after destination replacement",
+                    ))
+                }
+                _ => panic!("migration must stop after the injected staging failure"),
+            }
+        })
+        .expect_err("a staging failure after destination replacement must abort migration");
+        assert_eq!(stages, 2, "the failure must occur on the second stage");
+
+        for (relative, contents) in known {
+            assert_eq!(
+                fs::read(worktree.join(relative)).expect("source remains after staging failure"),
+                contents,
+                "staging failure must leave every source unchanged: {relative}"
+            );
+        }
+        assert!(fs::symlink_metadata(&first_destination)
+            .expect("competitor destination remains")
+            .file_type()
+            .is_file());
+        assert_eq!(
+            fs::read(&first_destination).expect("read competitor destination"),
+            b"competitor destination bytes"
+        );
+        assert!(
+            !prepared_competitor.exists(),
+            "the prepared competitor must have been renamed into the destination path"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::symlink_metadata(&first_destination)
+                .expect("competitor destination metadata after rollback")
+                .ino(),
+            competitor_inode
+        );
+        for (relative, _) in known.into_iter().skip(1) {
+            assert!(
+                !scratch.join(relative).exists(),
+                "no other destination may remain after staging rollback: {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn pm_scratch_durable_copy_rolls_back_an_owned_destination_after_copy_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+
+        durably_copy_pm_scratch_no_replace_with_ops(
+            &source,
+            &destination,
+            || Ok(()),
+            |_: &mut fs::File, destination_file: &mut fs::File| -> io::Result<u64> {
+                destination_file.write_all(b"partial destination")?;
+                Err(io::Error::other("injected copy failure"))
+            },
+            |_: &fs::File| -> io::Result<()> {
+                panic!("destination sync must not run after copy failure")
+            },
+            |_: &Path| -> io::Result<()> { panic!("parent sync must not run after copy failure") },
+        )
+        .expect_err("a copy failure after create must roll back the owned destination");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert!(
+            !destination.exists(),
+            "an owned partial destination must be removed through guarded quarantine"
+        );
+        assert_no_pm_scratch_quarantine_residue(dir.path());
+    }
+
+    #[test]
+    fn pm_scratch_durable_copy_rolls_back_an_owned_destination_after_sync_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+
+        durably_copy_pm_scratch_no_replace_with_ops(
+            &source,
+            &destination,
+            || Ok(()),
+            |source_file: &mut fs::File, destination_file: &mut fs::File| -> io::Result<u64> {
+                io::copy(source_file, destination_file)
+            },
+            |_: &fs::File| -> io::Result<()> {
+                Err(io::Error::other("injected destination sync failure"))
+            },
+            |_: &Path| -> io::Result<()> {
+                panic!("parent sync must not run after destination sync failure")
+            },
+        )
+        .expect_err("a sync failure after create must roll back the owned destination");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert!(
+            !destination.exists(),
+            "an owned synced destination must be removed through guarded quarantine"
+        );
+        assert_no_pm_scratch_quarantine_residue(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_durable_copy_preserves_a_destination_replaced_inside_sync_failure() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        let prepared_competitor = dir.path().join("prepared-competitor.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+        fs::write(&prepared_competitor, b"competitor destination bytes")
+            .expect("write prepared competitor");
+        #[cfg(unix)]
+        let prepared_competitor_inode = fs::symlink_metadata(&prepared_competitor)
+            .expect("prepared competitor metadata")
+            .ino();
+
+        durably_copy_pm_scratch_no_replace_with_ops(
+            &source,
+            &destination,
+            || Ok(()),
+            |source_file: &mut fs::File, destination_file: &mut fs::File| -> io::Result<u64> {
+                io::copy(source_file, destination_file)
+            },
+            |destination_file: &fs::File| -> io::Result<()> {
+                destination_file.sync_all()?;
+                #[cfg(unix)]
+                assert_ne!(
+                    destination_file
+                        .metadata()
+                        .expect("owned destination metadata")
+                        .ino(),
+                    prepared_competitor_inode,
+                    "owned destination and competitor must be distinct nodes"
+                );
+                fs::remove_file(&destination)?;
+                fs::rename(&prepared_competitor, &destination)?;
+                Err(io::Error::other(
+                    "injected sync failure after destination replacement",
+                ))
+            },
+            |_: &Path| -> io::Result<()> {
+                panic!("parent sync must not run after destination sync failure")
+            },
+        )
+        .expect_err("cleanup must not delete a competitor installed during sync failure");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("competitor destination remains"),
+            b"competitor destination bytes"
+        );
+        assert!(!prepared_competitor.exists());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::symlink_metadata(&destination)
+                .expect("competitor destination metadata")
+                .ino(),
+            prepared_competitor_inode
+        );
+        assert_no_pm_scratch_quarantine_residue(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_durable_copy_rejects_success_after_destination_identity_replacement() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        let prepared_competitor = dir.path().join("prepared-competitor.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+        fs::write(&prepared_competitor, b"competitor destination bytes")
+            .expect("write prepared competitor");
+        let prepared_competitor_inode = fs::symlink_metadata(&prepared_competitor)
+            .expect("prepared competitor metadata")
+            .ino();
+
+        durably_copy_pm_scratch_no_replace_with_ops(
+            &source,
+            &destination,
+            || Ok(()),
+            |source_file: &mut fs::File, destination_file: &mut fs::File| -> io::Result<u64> {
+                io::copy(source_file, destination_file)
+            },
+            |destination_file: &fs::File| destination_file.sync_all(),
+            |path: &Path| -> io::Result<()> {
+                sync_parent_directory(path)?;
+                assert_ne!(
+                    fs::symlink_metadata(path)?.ino(),
+                    prepared_competitor_inode,
+                    "owned destination and competitor must be distinct nodes"
+                );
+                fs::remove_file(path)?;
+                fs::rename(&prepared_competitor, path)?;
+                Ok(())
+            },
+        )
+        .expect_err("a replaced canonical destination must never be reported as success");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("competitor destination remains"),
+            b"competitor destination bytes"
+        );
+        assert!(!prepared_competitor.exists());
+        assert_eq!(
+            fs::symlink_metadata(&destination)
+                .expect("competitor destination metadata")
+                .ino(),
+            prepared_competitor_inode
+        );
+        assert_no_pm_scratch_quarantine_residue(dir.path());
+    }
+
+    #[test]
+    fn pm_scratch_durable_copy_missing_canonical_destination_does_not_claim_preservation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+
+        let error = durably_copy_pm_scratch_no_replace_with_ops(
+            &source,
+            &destination,
+            || Ok(()),
+            |source_file: &mut fs::File, destination_file: &mut fs::File| -> io::Result<u64> {
+                io::copy(source_file, destination_file)
+            },
+            |destination_file: &fs::File| destination_file.sync_all(),
+            |path: &Path| -> io::Result<()> {
+                sync_parent_directory(path)?;
+                fs::remove_file(path)?;
+                Ok(())
+            },
+        )
+        .expect_err("a missing canonical destination must fail final inspection");
+
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("cannot verify canonical PM scratch destination"),
+            "the error must explain the canonical inspection failure: {error_text}"
+        );
+        assert!(
+            error_text.contains(&destination.display().to_string()),
+            "the error must identify the missing destination: {error_text}"
+        );
+        assert!(
+            !error_text.contains("canonical destination is preserved"),
+            "the error must not claim that a missing canonical destination was preserved: {error_text}"
+        );
+        assert!(
+            !error_text.contains(&format!("data is preserved at {}", destination.display())),
+            "the error must not claim that data exists at the missing path: {error_text}"
+        );
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert!(!destination.exists());
+        assert_no_pm_scratch_quarantine_residue(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_quarantine_restore_sync_error_does_not_claim_deleted_node_remains() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = dir.path().join("original.md");
+        let quarantine = create_pm_scratch_quarantine(&original).expect("create quarantine");
+        fs::write(&quarantine.node, b"quarantined bytes\n").expect("write quarantine node");
+        let expected =
+            pm_scratch_file_fingerprint(&quarantine.node, "fingerprint quarantine restore fixture")
+                .expect("fingerprint quarantine fixture");
+
+        let error = restore_quarantined_pm_scratch_no_replace_with_sync(
+            &quarantine,
+            &original,
+            Some(&expected),
+            |path: &Path| sync_parent_directory(path),
+            |path: &Path| -> io::Result<()> {
+                assert_eq!(path, quarantine.node);
+                assert!(
+                    !quarantine.node.exists(),
+                    "the quarantine link must be removed before its directory sync"
+                );
+                Err(io::Error::other(
+                    "injected quarantine directory sync failure",
+                ))
+            },
+        )
+        .expect_err("a quarantine directory sync failure must remain visible");
+
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains(&original.display().to_string()),
+            "the error must identify the restored original: {error_text}"
+        );
+        assert!(
+            error_text.contains(&quarantine.node.display().to_string()),
+            "the error must identify the quarantine path whose sync failed: {error_text}"
+        );
+        assert!(
+            error_text.contains("sync") || error_text.contains("durability"),
+            "the error must explain the durability failure: {error_text}"
+        );
+        assert!(
+            !error_text.contains(&format!(
+                "data is preserved at {}",
+                quarantine.node.display()
+            )),
+            "the error must not claim that the deleted quarantine node holds data: {error_text}"
+        );
+        assert!(
+            !error_text.contains("remains quarantined"),
+            "the error must not claim that the deleted node remains quarantined: {error_text}"
+        );
+        assert_eq!(
+            fs::read(&original).expect("restored original remains"),
+            b"quarantined bytes\n"
+        );
+        assert!(!quarantine.node.exists());
+        assert!(
+            quarantine.directory.is_dir(),
+            "the quarantine directory may remain after its sync fails"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_quarantine_owner_mismatch_sync_error_does_not_claim_deleted_node_remains() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.md");
+        let expected_fixture = dir.path().join("expected.md");
+        fs::write(&target, b"actual target bytes\n").expect("write actual target");
+        fs::write(&expected_fixture, b"different expected bytes\n")
+            .expect("write expected fixture");
+        let expected = pm_scratch_file_fingerprint(
+            &expected_fixture,
+            "fingerprint mismatched expected fixture",
+        )
+        .expect("fingerprint expected fixture");
+        let mut quarantine_node = None;
+        let mut quarantine_directory = None;
+
+        let error = quarantine_and_remove_owned_pm_scratch_file_with_restore(
+            &target,
+            &expected,
+            "test PM scratch ownership mismatch",
+            |quarantine: &PmScratchQuarantine,
+             original: &Path,
+             quarantined_fingerprint: Option<&PmScratchFileFingerprint>|
+             -> io::Result<()> {
+                assert_eq!(original, target);
+                let quarantined_fingerprint = quarantined_fingerprint
+                    .expect("ownership mismatch restore must receive the actual fingerprint");
+                quarantine_node = Some(quarantine.node.clone());
+                quarantine_directory = Some(quarantine.directory.clone());
+                restore_quarantined_pm_scratch_no_replace_with_sync(
+                    quarantine,
+                    original,
+                    Some(quarantined_fingerprint),
+                    |path: &Path| sync_parent_directory(path),
+                    |path: &Path| -> io::Result<()> {
+                        assert_eq!(path, quarantine.node);
+                        assert!(!quarantine.node.exists());
+                        Err(io::Error::other(
+                            "injected outer quarantine directory sync failure",
+                        ))
+                    },
+                )
+            },
+        )
+        .expect_err("ownership mismatch restore sync failure must remain visible");
+
+        let quarantine_node = quarantine_node.expect("restore closure captures quarantine node");
+        let quarantine_directory =
+            quarantine_directory.expect("restore closure captures quarantine directory");
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains(&target.display().to_string()),
+            "the outer error must identify the restored original: {error_text}"
+        );
+        assert!(
+            error_text.contains(&quarantine_node.display().to_string()),
+            "the outer error must identify the quarantine sync path: {error_text}"
+        );
+        assert!(
+            error_text.contains("sync") || error_text.contains("durability"),
+            "the outer error must explain the durability failure: {error_text}"
+        );
+        assert!(
+            !error_text.contains(&format!(
+                "data is preserved at {}",
+                quarantine_node.display()
+            )),
+            "the outer error must not claim deleted quarantine data remains: {error_text}"
+        );
+        assert!(
+            !error_text.contains("remains quarantined"),
+            "the outer error must not claim the deleted node remains quarantined: {error_text}"
+        );
+        assert_eq!(
+            fs::read(&target).expect("actual target restored"),
+            b"actual target bytes\n"
+        );
+        assert!(!quarantine_node.exists());
+        assert!(quarantine_directory.is_dir());
+    }
+
+    #[test]
+    fn pm_scratch_durable_copy_rolls_back_an_owned_destination_after_parent_sync_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+
+        durably_copy_pm_scratch_no_replace_with_ops(
+            &source,
+            &destination,
+            || Ok(()),
+            |source_file: &mut fs::File, destination_file: &mut fs::File| -> io::Result<u64> {
+                io::copy(source_file, destination_file)
+            },
+            |destination_file: &fs::File| destination_file.sync_all(),
+            |_: &Path| -> io::Result<()> {
+                Err(io::Error::other("injected destination parent sync failure"))
+            },
+        )
+        .expect_err("a parent sync failure must roll back the owned destination");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert!(!destination.exists());
+        assert_no_pm_scratch_quarantine_residue(dir.path());
+    }
+
+    #[test]
+    fn pm_scratch_durable_copy_rejects_an_existing_destination_without_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+        fs::write(&destination, b"destination bytes\n").expect("write destination");
+
+        durably_copy_pm_scratch_no_replace(&source, &destination)
+            .expect_err("an existing destination must be rejected atomically");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("destination remains"),
+            b"destination bytes\n"
+        );
+    }
+
+    #[test]
+    fn pm_scratch_durable_copy_rejects_a_destination_created_immediately_before_create_new() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.md");
+        let destination = dir.path().join("destination.md");
+        fs::write(&source, b"source bytes\n").expect("write source");
+
+        durably_copy_pm_scratch_no_replace_with(&source, &destination, || {
+            fs::write(&destination, b"competitor bytes\n")
+        })
+        .expect_err("create_new must reject a destination won by a competitor");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("competitor destination remains"),
+            b"competitor bytes\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_migration_rejects_a_symlinked_source_parent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-source-symlink-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let external = home.path().join("external-source");
+        let tasks_link = worktree.join("tasks");
+        let original_target = external.clone();
+        fs::create_dir_all(&worktree).expect("create worktree");
+        fs::create_dir_all(&external).expect("create external source directory");
+        fs::write(external.join("todo.md"), b"external source\n").expect("write external source");
+        std::os::unix::fs::symlink(&external, &tasks_link).expect("symlink source parent");
+
+        migrate_legacy_pm_scratch(&worktree)
+            .expect_err("a symlinked legacy source parent must be rejected");
+
+        assert_eq!(
+            fs::read(external.join("todo.md")).expect("external source remains"),
+            b"external source\n"
+        );
+        assert!(!scratch.join("tasks/todo.md").exists());
+        assert!(fs::symlink_metadata(&tasks_link)
+            .expect("source parent link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&tasks_link).expect("source parent link target"),
+            original_target
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_migration_rejects_a_symlinked_destination_parent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-destination-symlink-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let source = worktree.join("tasks/todo.md");
+        let external = home.path().join("external-destination");
+        let tasks_link = scratch.join("tasks");
+        let original_target = external.clone();
+        fs::create_dir_all(source.parent().expect("source parent")).expect("create source parent");
+        fs::write(&source, b"source bytes\n").expect("write source");
+        fs::create_dir_all(&scratch).expect("create scratch root");
+        fs::create_dir_all(&external).expect("create external destination directory");
+        std::os::unix::fs::symlink(&external, &tasks_link).expect("symlink destination parent");
+
+        migrate_legacy_pm_scratch(&worktree)
+            .expect_err("a symlinked scratch destination parent must be rejected");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert!(!external.join("todo.md").exists());
+        assert!(fs::symlink_metadata(&tasks_link)
+            .expect("destination parent link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&tasks_link).expect("destination parent link target"),
+            original_target
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_scratch_migration_rejects_a_symlinked_scratch_root() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = Path::new("/tmp/pm-scratch-root-symlink-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        let scratch = pm_scratch_dir_for_repo_path(repo);
+        let source = worktree.join("pm-notes.md");
+        let external = home.path().join("external-scratch-root");
+        let original_target = external.clone();
+        fs::create_dir_all(&worktree).expect("create worktree");
+        fs::write(&source, b"source bytes\n").expect("write source");
+        fs::create_dir_all(scratch.parent().expect("scratch parent"))
+            .expect("create scratch parent");
+        fs::create_dir_all(&external).expect("create external scratch directory");
+        std::os::unix::fs::symlink(&external, &scratch).expect("symlink scratch root");
+
+        migrate_legacy_pm_scratch(&worktree)
+            .expect_err("a symlinked scratch root must be rejected");
+
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source bytes\n"
+        );
+        assert!(!external.join("pm-notes.md").exists());
+        assert!(fs::symlink_metadata(&scratch)
+            .expect("scratch root link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&scratch).expect("scratch root link target"),
+            original_target
+        );
+    }
+
+    #[test]
     fn prefs_path_lives_under_project_state() {
         let path = pm_prefs_path_for_repo_path(Path::new("/tmp/some-repo"));
         assert!(
@@ -1181,6 +6132,229 @@ mod tests {
     }
 
     #[test]
+    fn pm_worktree_freshness_roundtrips_typed_states_and_legacy_json_defaults_to_none() {
+        for legacy in [
+            serde_json::json!({}),
+            serde_json::json!({"settings": {"auto_start": false}}),
+        ] {
+            let prefs: PmPrefs = serde_json::from_value(legacy).expect("parse legacy PM prefs");
+            assert_eq!(prefs.worktree_freshness, None);
+        }
+
+        let cases = [
+            serde_json::json!({
+                "state": "fresh",
+                "base_ref": "origin/develop",
+                "head_sha": "aaaaaaaa",
+                "target_sha": "aaaaaaaa",
+                "behind": 0,
+                "target_observation": "fresh",
+                "checked_at": "2026-08-14T00:00:00Z"
+            }),
+            serde_json::json!({
+                "state": "stale",
+                "base_ref": "origin/develop",
+                "head_sha": "aaaaaaaa",
+                "target_sha": "bbbbbbbb",
+                "behind": 1,
+                "target_observation": "cached",
+                "checked_at": "2026-08-14T00:01:00Z",
+                "failure_stage": "fetch",
+                "failure_reason": "network unavailable"
+            }),
+            serde_json::json!({
+                "state": "unknown",
+                "base_ref": "origin/develop",
+                "head_sha": "aaaaaaaa",
+                "target_observation": "unavailable",
+                "checked_at": "2026-08-14T00:02:00Z",
+                "failure_stage": "inspect",
+                "failure_reason": "target ref unavailable"
+            }),
+        ];
+
+        for expected in cases {
+            let (_dir, path) = temp_prefs_path();
+            let prefs: PmPrefs = serde_json::from_value(serde_json::json!({
+                "worktree_freshness": expected.clone()
+            }))
+            .expect("deserialize typed PM worktree freshness");
+            let freshness: &PmWorktreeFreshness = prefs
+                .worktree_freshness
+                .as_ref()
+                .expect("freshness is present");
+            let serialized = serde_json::to_value(freshness).expect("serialize freshness");
+            for field in [
+                "state",
+                "base_ref",
+                "head_sha",
+                "target_sha",
+                "behind",
+                "target_observation",
+                "checked_at",
+                "failure_stage",
+                "failure_reason",
+            ] {
+                match expected.get(field) {
+                    Some(expected_value) => assert_eq!(
+                        serialized.get(field),
+                        Some(expected_value),
+                        "present freshness field must round-trip exactly: {field}"
+                    ),
+                    None => assert!(
+                        serialized.get(field).is_none_or(serde_json::Value::is_null),
+                        "absent optional freshness field must stay absent or null: {field}"
+                    ),
+                }
+            }
+
+            save_pm_prefs(&path, &prefs).expect("persist freshness");
+            assert_eq!(
+                load_pm_prefs(&path).expect("reload freshness"),
+                prefs,
+                "PmPrefs must durably round-trip typed freshness"
+            );
+        }
+    }
+
+    #[test]
+    fn pm_worktree_freshness_enums_use_snake_case_and_reject_unknown_values() {
+        for (state, expected) in [
+            (PmWorktreeFreshnessState::Fresh, "fresh"),
+            (PmWorktreeFreshnessState::Stale, "stale"),
+            (PmWorktreeFreshnessState::Unknown, "unknown"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize freshness state"),
+                serde_json::json!(expected)
+            );
+            assert_eq!(
+                serde_json::from_value::<PmWorktreeFreshnessState>(serde_json::json!(expected))
+                    .expect("deserialize freshness state"),
+                state
+            );
+        }
+        assert!(
+            serde_json::from_value::<PmWorktreeFreshnessState>(serde_json::json!("newer")).is_err()
+        );
+
+        for (observation, expected) in [
+            (PmWorktreeTargetObservation::Fresh, "fresh"),
+            (PmWorktreeTargetObservation::Cached, "cached"),
+            (PmWorktreeTargetObservation::Unavailable, "unavailable"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(observation).expect("serialize target observation"),
+                serde_json::json!(expected)
+            );
+            assert_eq!(
+                serde_json::from_value::<PmWorktreeTargetObservation>(serde_json::json!(expected))
+                    .expect("deserialize target observation"),
+                observation
+            );
+        }
+        assert!(
+            serde_json::from_value::<PmWorktreeTargetObservation>(serde_json::json!("newer"))
+                .is_err()
+        );
+
+        for (stage, expected) in [
+            (PmWorktreeRefreshFailureStage::Fetch, "fetch"),
+            (PmWorktreeRefreshFailureStage::Inspect, "inspect"),
+            (PmWorktreeRefreshFailureStage::LocalWork, "local_work"),
+            (PmWorktreeRefreshFailureStage::Repoint, "repoint"),
+            (
+                PmWorktreeRefreshFailureStage::ManagedAssets,
+                "managed_assets",
+            ),
+            (
+                PmWorktreeRefreshFailureStage::ScratchMigration,
+                "scratch_migration",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(stage).expect("serialize refresh failure stage"),
+                serde_json::json!(expected)
+            );
+            assert_eq!(
+                serde_json::from_value::<PmWorktreeRefreshFailureStage>(serde_json::json!(
+                    expected
+                ))
+                .expect("deserialize refresh failure stage"),
+                stage
+            );
+        }
+        assert!(
+            serde_json::from_value::<PmWorktreeRefreshFailureStage>(serde_json::json!("newer"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pm_worktree_freshness_propagates_to_status_independently_of_session_stale_hint() {
+        let mut prefs: PmPrefs = serde_json::from_value(serde_json::json!({
+            "worktree_freshness": {
+                "state": "stale",
+                "base_ref": "origin/develop",
+                "head_sha": "aaaaaaaa",
+                "target_sha": "bbbbbbbb",
+                "behind": 1,
+                "target_observation": "cached",
+                "checked_at": "2026-08-14T00:01:00Z",
+                "failure_stage": "fetch",
+                "failure_reason": "network unavailable"
+            }
+        }))
+        .expect("deserialize stale freshness");
+        prefs.registration = Some(registration("live-session"));
+
+        let report = pm_status_report(&prefs, |session_id| {
+            assert_eq!(session_id, "live-session");
+            true
+        });
+        assert_eq!(report.worktree_freshness, prefs.worktree_freshness);
+        assert_eq!(report.stale_hint, Some(false));
+        let freshness: &PmWorktreeFreshness = report
+            .worktree_freshness
+            .as_ref()
+            .expect("status propagates freshness");
+        let serialized = serde_json::to_value(freshness).expect("serialize status freshness");
+        assert_eq!(serialized["state"], "stale");
+        assert_eq!(serialized["target_observation"], "cached");
+        assert_eq!(serialized["behind"], 1);
+    }
+
+    #[test]
+    fn pm_worktree_freshness_stays_fresh_when_the_session_record_is_stale() {
+        let mut prefs: PmPrefs = serde_json::from_value(serde_json::json!({
+            "worktree_freshness": {
+                "state": "fresh",
+                "base_ref": "origin/develop",
+                "head_sha": "aaaaaaaa",
+                "target_sha": "aaaaaaaa",
+                "behind": 0,
+                "target_observation": "fresh",
+                "checked_at": "2026-08-14T00:03:00Z"
+            }
+        }))
+        .expect("deserialize fresh worktree state");
+        prefs.registration = Some(registration("missing-session"));
+
+        let report = pm_status_report(&prefs, |session_id| {
+            assert_eq!(session_id, "missing-session");
+            false
+        });
+
+        assert_eq!(report.worktree_freshness, prefs.worktree_freshness);
+        assert_eq!(report.stale_hint, Some(true));
+        let freshness = report
+            .worktree_freshness
+            .as_ref()
+            .expect("status propagates fresh worktree state");
+        assert_eq!(freshness.state, PmWorktreeFreshnessState::Fresh);
+    }
+
+    #[test]
     fn status_report_without_registration_omits_liveness_fields() {
         let prefs = PmPrefs {
             registration: None,
@@ -1188,6 +6362,7 @@ mod tests {
                 auto_start: false,
                 ..PmSettings::default()
             },
+            ..PmPrefs::default()
         };
         let report = pm_status_report(&prefs, |_| panic!("probe must not run unregistered"));
         assert_eq!(report.schema_version, 1);

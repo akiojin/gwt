@@ -482,6 +482,19 @@ impl AppRuntime {
         workspace_resume_context: Option<WorkspaceResumeContext>,
         fallback_geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
+            if let Err(error) =
+                gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&session.worktree_path)
+            {
+                tracing::warn!(
+                    session_id = %session.id,
+                    worktree = %session.worktree_path.display(),
+                    %error,
+                    "failed to refresh the resident PM before resume"
+                );
+                return Vec::new();
+            }
+        }
         let config = launch_config_from_persisted_session(&session);
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id)

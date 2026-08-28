@@ -43499,6 +43499,153 @@ fn pm_registration_fixture(session_id: &str, worktree: &Path) -> gwt::pm_registr
     }
 }
 
+fn create_detached_pm_worktree_fixture(repo: &Path) -> PathBuf {
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(repo);
+    fs::create_dir_all(worktree.parent().expect("PM worktree parent"))
+        .expect("create PM directory");
+    run_git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("PM worktree path"),
+        ],
+    );
+    worktree
+}
+
+fn git_stdout(repo: &Path, args: &[&str]) -> String {
+    let output = gwt_core::process::hidden_command("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("run git for stdout");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git stdout must be UTF-8")
+        .trim()
+        .to_string()
+}
+
+fn advance_origin_develop_by_one_commit(repo: &Path, origin: &Path) -> String {
+    let seed = repo.parent().expect("repo parent").join("seed");
+    fs::write(seed.join("UPSTREAM.md"), "origin/develop commit B\n")
+        .expect("write upstream change");
+    run_git(&seed, &["add", "UPSTREAM.md"]);
+    run_git(&seed, &["commit", "-qm", "advance develop"]);
+    run_git(
+        &seed,
+        &["push", origin.to_str().expect("origin path"), "develop"],
+    );
+    git_stdout(&seed, &["rev-parse", "HEAD"])
+}
+
+fn close_registered_pm_worktree_fixture(
+    runtime_root: &Path,
+    repo: &Path,
+    pm_worktree: &Path,
+    suffix: &str,
+) {
+    let tab_id = format!("tab-{suffix}");
+    let raw_id = "agent-1";
+    let tab = sample_project_tab_with_window_at(
+        &tab_id,
+        raw_id,
+        repo.to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(runtime_root, vec![tab], Some(&tab_id));
+    let window_id = format!("{tab_id}::{raw_id}");
+    let session_id = format!("pm-session-{suffix}");
+    let mut session = sample_active_agent_session(&tab_id, &window_id);
+    session.session_id = session_id.clone();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture(&session_id, pm_worktree),
+        |_| false,
+    )
+    .expect("seed PM registration");
+
+    runtime.close_window_events(&window_id);
+}
+
+#[test]
+fn pm_cleanup_holds_the_shared_lifecycle_lock_through_probe_and_remove() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = create_detached_pm_worktree_fixture(&repo);
+    fs::write(
+        worktree.join("cleanup-barrier.txt"),
+        "generated cleanup probe\n",
+    )
+    .expect("write cleanup barrier entry");
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&repo);
+    fs::create_dir_all(project_dir.join("project-state")).expect("create project state");
+    let lock_path = project_dir.join("project-state/pm-refresh.lock");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let worker_repo = repo.clone();
+    let worker_gwt_home = temp.path().join(".gwt");
+    let worker = thread::spawn(move || {
+        let _worker_home = ScopedGwtHome::set(worker_gwt_home);
+        gwt::pm_registry::cleanup_pm_worktree_for_repo_path(&worker_repo, |_worktree, entry| {
+            if entry == "cleanup-barrier.txt" {
+                entered_tx.send(()).expect("signal cleanup probe");
+                release_rx.recv().expect("release cleanup probe");
+                true
+            } else {
+                false
+            }
+        })
+    });
+    if let Err(error) = entered_rx.recv_timeout(Duration::from_secs(5)) {
+        panic!(
+            "cleanup must reach its local-work probe ({error:?}); worker={:?}",
+            worker.join()
+        );
+    }
+    let competing_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open competing PM lifecycle lock");
+
+    assert!(
+        competing_lock.try_lock_exclusive().is_err(),
+        "refresh must not acquire the shared lock while cleanup is probing"
+    );
+    release_tx.send(()).expect("release cleanup worker");
+    let outcome = worker
+        .join()
+        .expect("join cleanup worker")
+        .expect("cleanup");
+
+    assert_eq!(outcome, gwt::pm_registry::PmWorktreeCleanupOutcome::Removed);
+    assert!(
+        !worktree.exists(),
+        "serialized cleanup must remove the worktree"
+    );
+}
+
 #[test]
 fn pm_ensure_focuses_live_pm_instead_of_spawning() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
@@ -43651,6 +43798,1043 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         "the PM must spawn in its canonical worktree at {}",
         pm_worktree.display()
     );
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
+    assert!(
+        !scratch.starts_with(&pm_worktree),
+        "PM spawn preparation must keep scratch outside the disposable worktree"
+    );
+    assert!(
+        scratch.is_dir(),
+        "PM spawn preparation must create the project-state scratch directory at {}",
+        scratch.display()
+    );
+}
+
+#[test]
+fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develop() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    assert_ne!(
+        commit_a, commit_b,
+        "the fixture must contain commits A and B"
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        gwt::pm_registry::pm_worktree_path_for_repo_path(&repo),
+        pm_worktree,
+        "fresh spawn must reuse the canonical PM worktree path"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD",
+        "the refreshed PM worktree must remain detached"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        commit_b,
+        "an unregistered PM must start from the latest origin/develop"
+    );
+}
+
+#[test]
+fn repeated_pm_refresh_does_not_treat_pure_generated_hook_config_as_local_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let seed = temp.path().join("seed");
+    gwt_skills::generate_codex_hooks(&seed).expect("generate tracked Codex hook fixture");
+    let hook_path = seed.join(".codex/hooks.json");
+    let current = fs::read_to_string(&hook_path).expect("read generated hook fixture");
+    fs::write(
+        &hook_path,
+        current.replace("target/debug/gwtd", "target/old/gwtd"),
+    )
+    .expect("make tracked hook fixture stale but still purely generated");
+    run_git(&seed, &["add", ".codex/hooks.json"]);
+    run_git(
+        &seed,
+        &["commit", "-qm", "track stale generated hook config"],
+    );
+    run_git(
+        &seed,
+        &["push", origin.to_str().expect("origin path"), "develop"],
+    );
+    run_git(&repo, &["fetch", "origin", "develop"]);
+    run_git(&repo, &["reset", "--hard", "origin/develop"]);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let main_hook_before = fs::read(repo.join(".codex/hooks.json"))
+        .expect("read main-checkout hook config before PM refresh");
+
+    gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect("first refresh materializes current managed hooks");
+    assert!(
+        crate::runtime_support::intake_hook_config_is_disposable(&pm_worktree, ".codex/hooks.json"),
+        "the refresh-produced hook diff must contain only gwt-managed content"
+    );
+    let commit_c = advance_origin_develop_by_one_commit(&repo, &origin);
+
+    let outcome = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect("second refresh must accept its own generated hook diff");
+
+    assert!(outcome.is_fresh(), "{outcome:?}");
+    assert_eq!(git_stdout(&pm_worktree, &["rev-parse", "HEAD"]), commit_c);
+    assert_eq!(
+        fs::read(repo.join(".codex/hooks.json")).expect("read main-checkout hook config"),
+        main_hook_before,
+        "PM safe-boundary refresh must not rewrite the linked main checkout"
+    );
+}
+
+#[test]
+fn pm_safe_boundary_rejects_a_worktree_owned_by_a_different_project_hash() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo_a = temp.path().join("project-a/repo");
+    let repo_b = temp.path().join("project-b/repo");
+    init_git_clone_with_origin(&repo_a);
+    init_git_clone_with_origin(&repo_b);
+    let mismatched_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo_a);
+    fs::create_dir_all(mismatched_worktree.parent().expect("PM directory"))
+        .expect("create mismatched PM directory");
+    run_git(
+        &repo_b,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            mismatched_worktree
+                .to_str()
+                .expect("mismatched worktree path"),
+        ],
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo_a);
+    let sentinel = gwt::pm_registry::PmWorktreeFreshness {
+        state: gwt::pm_registry::PmWorktreeFreshnessState::Fresh,
+        base_ref: "origin/develop".to_string(),
+        head_sha: Some("repo-a-sentinel".to_string()),
+        target_sha: Some("repo-a-sentinel".to_string()),
+        behind: Some(0),
+        target_observation: gwt::pm_registry::PmWorktreeTargetObservation::Fresh,
+        checked_at: "2026-08-29T00:00:00Z".to_string(),
+        failure_stage: None,
+        failure_reason: None,
+    };
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.worktree_freshness = Some(sentinel.clone());
+    })
+    .expect("seed repo A prefs sentinel");
+
+    gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&mismatched_worktree)
+        .expect_err("repo B must not mutate repo A project-state through a shaped PM path");
+
+    assert_eq!(
+        gwt::pm_registry::load_pm_prefs(&prefs_path)
+            .expect("reload repo A prefs")
+            .worktree_freshness,
+        Some(sentinel),
+        "identity rejection must not mutate the mismatched project's prefs"
+    );
+}
+
+#[test]
+fn pm_process_refresh_rejects_a_foreign_worktree_before_any_mutation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo_a = temp.path().join("project-a/repo");
+    let repo_b = temp.path().join("project-b/repo");
+    init_git_clone_with_origin(&repo_a);
+    init_git_clone_with_origin(&repo_b);
+    let foreign_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo_a);
+    fs::create_dir_all(foreign_worktree.parent().expect("PM directory"))
+        .expect("create foreign PM directory");
+    run_git(
+        &repo_b,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            foreign_worktree.to_str().expect("foreign worktree path"),
+        ],
+    );
+    let legacy_notes = foreign_worktree.join("tasks/todo.md");
+    fs::create_dir_all(legacy_notes.parent().expect("legacy notes parent"))
+        .expect("create legacy notes parent");
+    fs::write(&legacy_notes, b"foreign PM notes must stay here\n").expect("write foreign notes");
+    let prior_head = git_stdout(&foreign_worktree, &["rev-parse", "HEAD"]);
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&repo_a);
+    let scratch = project_dir.join("project-state/pm-scratch/tasks/todo.md");
+    let identity = project_dir.join("project-state/pm-worktree-identity.json");
+    let prefs_path = project_dir.join("project-state/pm.json");
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.worktree_freshness = Some(gwt::pm_registry::PmWorktreeFreshness {
+            state: gwt::pm_registry::PmWorktreeFreshnessState::Fresh,
+            base_ref: "origin/develop".to_string(),
+            head_sha: Some("stale-fresh-sentinel".to_string()),
+            target_sha: Some("stale-fresh-sentinel".to_string()),
+            behind: Some(0),
+            target_observation: gwt::pm_registry::PmWorktreeTargetObservation::Fresh,
+            checked_at: "2026-08-29T00:00:00Z".to_string(),
+            failure_stage: None,
+            failure_reason: None,
+        });
+    })
+    .expect("seed repo A prior Fresh state");
+
+    gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo_a)
+        .expect_err("process refresh must reject a foreign canonical-looking PM worktree");
+
+    assert_eq!(
+        git_stdout(&foreign_worktree, &["rev-parse", "HEAD"]),
+        prior_head
+    );
+    assert_eq!(
+        fs::read(&legacy_notes).expect("foreign notes remain"),
+        b"foreign PM notes must stay here\n"
+    );
+    assert!(
+        !scratch.exists(),
+        "foreign notes must not migrate into repo A state"
+    );
+    assert!(
+        !identity.exists(),
+        "rejected identity must not be persisted"
+    );
+    let freshness = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("reload repo A PM prefs")
+        .worktree_freshness
+        .expect("ownership inspection failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+    assert_eq!(
+        freshness.head_sha, None,
+        "foreign worktree must not be read"
+    );
+
+    gwt::pm_registry::cleanup_pm_worktree_for_repo_path(&repo_a, |_, _| false)
+        .expect_err("cleanup must reject the same foreign PM worktree before migration/removal");
+    assert_eq!(
+        git_stdout(&foreign_worktree, &["rev-parse", "HEAD"]),
+        prior_head
+    );
+    assert_eq!(
+        fs::read(&legacy_notes).expect("foreign notes remain after cleanup rejection"),
+        b"foreign PM notes must stay here\n"
+    );
+    assert!(!scratch.exists(), "cleanup must not migrate foreign notes");
+}
+
+#[test]
+fn pm_process_refresh_rejects_a_swapped_linked_worktree_admin_before_mutation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let other_worktree = temp.path().join("other-worktree");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            other_worktree.to_str().expect("other worktree path"),
+        ],
+    );
+    fs::write(
+        pm_worktree.join(".git"),
+        fs::read(other_worktree.join(".git")).expect("read other linked marker"),
+    )
+    .expect("swap PM linked-worktree marker");
+    let legacy_notes = pm_worktree.join("tasks/todo.md");
+    fs::create_dir_all(legacy_notes.parent().expect("legacy notes parent"))
+        .expect("legacy notes parent");
+    fs::write(&legacy_notes, b"notes survive swapped admin rejection\n").expect("legacy notes");
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.worktree_freshness = Some(gwt::pm_registry::PmWorktreeFreshness {
+            state: gwt::pm_registry::PmWorktreeFreshnessState::Fresh,
+            base_ref: "origin/develop".to_string(),
+            head_sha: Some("stale-fresh-sentinel".to_string()),
+            target_sha: Some("stale-fresh-sentinel".to_string()),
+            behind: Some(0),
+            target_observation: gwt::pm_registry::PmWorktreeTargetObservation::Fresh,
+            checked_at: "2026-08-29T00:00:00Z".to_string(),
+            failure_stage: None,
+            failure_reason: None,
+        });
+    })
+    .expect("seed prior Fresh state");
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo).join("tasks/todo.md");
+
+    gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect_err("swapped linked-worktree admin must fail closed");
+
+    assert_eq!(
+        fs::read(&legacy_notes).expect("legacy notes remain"),
+        b"notes survive swapped admin rejection\n"
+    );
+    assert!(
+        !scratch.exists(),
+        "inspection rejection must precede scratch migration"
+    );
+    let freshness = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("inspection failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+    assert_eq!(freshness.head_sha, None, "untrusted admin must not be read");
+}
+
+#[cfg(unix)]
+#[test]
+fn pm_process_refresh_persists_inspect_unknown_when_identity_storage_is_unsafe() {
+    use std::os::unix::fs::symlink;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).expect("seed PM identity");
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&repo);
+    let identity = project_dir.join("project-state/pm-worktree-identity.json");
+    let external = temp.path().join("external-identity.json");
+    fs::write(&external, b"external identity must remain unchanged\n").expect("external identity");
+    fs::remove_file(&identity).expect("remove seeded identity");
+    symlink(&external, &identity).expect("symlink unsafe identity");
+
+    gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect_err("process refresh must reject a symlinked identity file");
+
+    assert!(fs::symlink_metadata(&identity)
+        .expect("identity metadata")
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read(&external).expect("external identity remains"),
+        b"external identity must remain unchanged\n"
+    );
+    let freshness = gwt::pm_registry::load_pm_prefs(&project_dir.join("project-state/pm.json"))
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("identity storage failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+}
+
+#[test]
+fn pm_safe_boundary_persists_inspect_unknown_for_corrupt_local_identity() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let outcome =
+        gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).expect("seed PM identity");
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&repo);
+    let identity = project_dir.join("project-state/pm-worktree-identity.json");
+    fs::write(&identity, b"{invalid identity json\n").expect("corrupt local identity");
+
+    gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&outcome.worktree)
+        .expect_err("safe boundary must reject corrupt local identity");
+
+    let freshness = gwt::pm_registry::load_pm_prefs(&project_dir.join("project-state/pm.json"))
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("identity inspection failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+}
+
+#[test]
+fn pm_safe_boundary_persists_inspect_unknown_when_git_root_becomes_unreadable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let outcome =
+        gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).expect("seed PM identity");
+    fs::write(outcome.worktree.join(".git"), b"invalid linked marker\n")
+        .expect("corrupt linked-worktree marker");
+
+    gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&outcome.worktree)
+        .expect_err("safe boundary must reject an unreadable Git root");
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let freshness = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("Git-root inspection failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+    assert_eq!(freshness.head_sha, None);
+}
+
+#[test]
+fn pm_safe_boundary_persists_inspect_unknown_for_a_swapped_linked_admin() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let outcome =
+        gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).expect("seed PM identity");
+    let other_worktree = temp.path().join("other-worktree");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            other_worktree.to_str().expect("other worktree path"),
+        ],
+    );
+    fs::write(
+        outcome.worktree.join(".git"),
+        fs::read(other_worktree.join(".git")).expect("read other linked marker"),
+    )
+    .expect("swap PM linked-worktree marker");
+
+    gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&outcome.worktree)
+        .expect_err("safe boundary must reject a swapped linked-worktree admin");
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let freshness = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("linked-admin inspection failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+    assert_eq!(freshness.head_sha, None);
+}
+
+#[test]
+fn bare_layout_safe_boundary_migrates_an_existing_identity_missing_pm() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let opened_project = temp.path().join("managed-project");
+    let (bare_repo, _develop_worktree) =
+        init_managed_workspace_with_develop_worktree(&opened_project);
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&opened_project);
+    fs::create_dir_all(worktree.parent().expect("PM parent")).expect("PM parent");
+    gwt_git::WorktreeManager::new(bare_repo)
+        .create_detached("develop", &worktree)
+        .expect("create pre-upgrade bare-layout PM worktree");
+    let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&opened_project);
+    let identity = project_dir.join("project-state/pm-worktree-identity.json");
+    assert!(!identity.exists(), "fixture must model a pre-identity PM");
+
+    let outcome = gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&worktree)
+        .expect("identity-missing bare-layout safe boundary")
+        .expect("canonical PM worktree");
+
+    assert!(outcome.is_fresh(), "{outcome:?}");
+    assert!(
+        identity.is_file(),
+        "safe boundary must seed the durable identity"
+    );
+    assert_eq!(outcome.worktree, worktree);
+}
+
+#[test]
+fn bare_layout_uses_one_pm_project_identity_for_refresh_status_and_safe_boundary() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let opened_project = temp.path().join("managed-project");
+    let (_bare_repo, _develop_worktree) =
+        init_managed_workspace_with_develop_worktree(&opened_project);
+    let expected_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&opened_project);
+    let expected_prefs = gwt::pm_registry::pm_prefs_path_for_repo_path(&opened_project);
+
+    let outcome = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&opened_project)
+        .expect("bare-layout process refresh");
+    let boundary = gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&expected_worktree)
+        .expect("bare-layout safe boundary")
+        .expect("canonical PM worktree");
+
+    assert_eq!(outcome.worktree, expected_worktree);
+    assert_eq!(boundary.worktree, expected_worktree);
+    assert!(outcome.is_fresh() && boundary.is_fresh());
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&expected_prefs)
+            .expect("bare-layout PM prefs")
+            .worktree_freshness
+            .is_some(),
+        "spawn, status, and safe-boundary must share the opened project's PM store"
+    );
+}
+
+#[test]
+fn pm_ensure_migrates_legacy_notes_before_refreshing_existing_unregistered_pm_worktree() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let legacy_notes = b"legacy PM notes survive refresh\n";
+    fs::write(pm_worktree.join("pm-notes.md"), legacy_notes).expect("write legacy PM notes");
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    assert_ne!(
+        commit_a, commit_b,
+        "the fixture must contain commits A and B"
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
+    assert_eq!(
+        fs::read(scratch.join("pm-notes.md")).expect("read migrated PM notes"),
+        legacy_notes,
+        "legacy PM notes must be preserved in project-state scratch before refresh"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD",
+        "the refreshed PM worktree must remain detached"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        commit_b,
+        "legacy scratch migration must not prevent refresh to origin/develop"
+    );
+}
+
+#[test]
+fn pm_ensure_externalizes_modified_tracked_legacy_notes_then_restores_project_content() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let seed = temp.path().join("seed");
+    fs::create_dir_all(seed.join("tasks")).expect("seed tasks");
+    fs::write(seed.join("tasks/todo.md"), "tracked project task\n").expect("tracked task");
+    run_git(&seed, &["add", "tasks/todo.md"]);
+    run_git(&seed, &["commit", "-qm", "add tracked project task"]);
+    run_git(
+        &seed,
+        &["push", origin.to_str().expect("origin path"), "develop"],
+    );
+    run_git(&repo, &["fetch", "origin", "develop"]);
+    run_git(&repo, &["reset", "--hard", "origin/develop"]);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let local_notes = b"PM-local task update\n";
+    fs::write(pm_worktree.join("tasks/todo.md"), local_notes).expect("modify tracked notes");
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(git_stdout(&pm_worktree, &["rev-parse", "HEAD"]), commit_b);
+    assert_eq!(
+        fs::read(gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo).join("tasks/todo.md"))
+            .expect("externalized PM notes"),
+        local_notes
+    );
+    assert_eq!(
+        fs::read_to_string(pm_worktree.join("tasks/todo.md")).expect("restored project content"),
+        "tracked project task\n"
+    );
+}
+
+#[test]
+fn pm_ensure_preserves_existing_pm_worktree_and_records_cached_target_when_fetch_fails() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    run_git(&repo, &["fetch", "origin", "develop"]);
+    assert_eq!(
+        git_stdout(&repo, &["rev-parse", "origin/develop"]),
+        commit_b,
+        "the fixture must cache commit B before fetch is made unavailable"
+    );
+    fs::rename(&origin, temp.path().join("offline-origin.git"))
+        .expect("make origin temporarily unavailable without changing project identity");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        commit_a,
+        "a failed fetch must preserve the existing PM worktree at commit A"
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load PM prefs");
+    let freshness = prefs
+        .worktree_freshness
+        .expect("fetch failure must persist PM worktree freshness");
+    assert!(matches!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Stale
+            | gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    ));
+    assert_eq!(
+        freshness.target_observation,
+        gwt::pm_registry::PmWorktreeTargetObservation::Cached
+    );
+    assert_eq!(freshness.behind, Some(1), "{freshness:?}");
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Fetch)
+    );
+}
+
+#[test]
+fn pm_ensure_preserves_tracked_local_work_and_records_local_work_stage() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    fs::write(pm_worktree.join("README.md"), "PM local tracked bytes\n")
+        .expect("write tracked local PM bytes");
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(git_stdout(&pm_worktree, &["rev-parse", "HEAD"]), commit_a);
+    assert_eq!(
+        fs::read_to_string(pm_worktree.join("README.md")).expect("read preserved local bytes"),
+        "PM local tracked bytes\n"
+    );
+    let freshness =
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .expect("PM prefs")
+            .worktree_freshness
+            .expect("local-work freshness");
+    assert_eq!(freshness.target_sha.as_deref(), Some(commit_b.as_str()));
+    assert_eq!(freshness.behind, Some(1));
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::LocalWork)
+    );
+}
+
+#[test]
+fn pm_ensure_focuses_live_registered_pm_without_refreshing_its_worktree() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    assert_ne!(
+        commit_a, commit_b,
+        "the remote must advance beyond the live PM"
+    );
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    session.worktree_path = pm_worktree.clone();
+    runtime.active_agent_sessions.insert(window_id, session);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed live PM registration");
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        commit_a,
+        "focusing a live registered PM must not refresh its running worktree"
+    );
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "focusing a live PM must not schedule another launch"
+    );
+}
+
+#[test]
+fn persisted_pm_resume_config_reinjects_project_state_scratch_dir() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::Codex);
+    session.agent_session_id = Some("pm-conversation-1".to_string());
+
+    let config = super::launch_config_from_persisted_session(&session);
+
+    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(
+        config.env_vars.get("GWT_PM_SCRATCH_DIR").map(PathBuf::from),
+        Some(gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo)),
+        "resuming a canonical PM session must restore its project-state scratch path"
+    );
+}
+
+#[test]
+fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
+    assert_ne!(commit_a, commit_b);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::Codex);
+    session.agent_session_id = Some("pm-conversation-resume".to_string());
+
+    let events = runtime.spawn_restored_agent_session("tab-1", session, None, canvas_bounds());
+
+    assert!(!events.is_empty(), "PM resume must still spawn its pane");
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        commit_b,
+        "generic startup/restart resume must refresh before process spawn"
+    );
+}
+
+#[test]
+fn pm_process_refresh_replaces_prior_fresh_when_git_root_inspection_fails() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("not-a-git-repository");
+    fs::create_dir_all(&repo).expect("non-Git project directory");
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.worktree_freshness = Some(gwt::pm_registry::PmWorktreeFreshness {
+            state: gwt::pm_registry::PmWorktreeFreshnessState::Fresh,
+            base_ref: "origin/develop".to_string(),
+            head_sha: Some("stale-fresh-sentinel".to_string()),
+            target_sha: Some("stale-fresh-sentinel".to_string()),
+            behind: Some(0),
+            target_observation: gwt::pm_registry::PmWorktreeTargetObservation::Fresh,
+            checked_at: "2026-08-29T00:00:00Z".to_string(),
+            failure_stage: None,
+            failure_reason: None,
+        });
+    })
+    .expect("seed prior Fresh state");
+
+    gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect_err("Git-root inspection must fail for a non-Git project");
+
+    let freshness = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("inspection failure freshness");
+    assert_eq!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Inspect)
+    );
+    assert_eq!(
+        freshness.target_observation,
+        gwt::pm_registry::PmWorktreeTargetObservation::Unavailable
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pm_ensure_fresh_spawn_rejects_symlinked_scratch_dir() {
+    use std::os::unix::fs::symlink;
+
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
+    fs::create_dir_all(scratch.parent().expect("project-state parent"))
+        .expect("create project-state");
+    let external = temp.path().join("external-scratch");
+    fs::create_dir_all(&external).expect("create external scratch target");
+    symlink(&external, &scratch).expect("symlink PM scratch root");
+    let original_target = fs::read_link(&scratch).expect("read scratch symlink target");
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.worktree_freshness = Some(gwt::pm_registry::PmWorktreeFreshness {
+            state: gwt::pm_registry::PmWorktreeFreshnessState::Fresh,
+            base_ref: "origin/develop".to_string(),
+            head_sha: Some("stale-fresh-sentinel".to_string()),
+            target_sha: Some("stale-fresh-sentinel".to_string()),
+            behind: Some(0),
+            target_observation: gwt::pm_registry::PmWorktreeTargetObservation::Fresh,
+            checked_at: "2026-08-29T00:00:00Z".to_string(),
+            failure_stage: None,
+            failure_reason: None,
+        });
+    })
+    .expect("seed prior Fresh state");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "a symlinked scratch root must stop PM spawn"
+    );
+    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(fs::symlink_metadata(&scratch)
+        .expect("scratch symlink metadata")
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_link(&scratch).expect("scratch symlink remains"),
+        original_target
+    );
+    assert!(
+        fs::read_dir(&external)
+            .expect("external scratch target")
+            .next()
+            .is_none(),
+        "spawn refusal must not create notes through the external target"
+    );
+    let freshness = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("reload PM prefs")
+        .worktree_freshness
+        .expect("preflight failure must replace prior Fresh state");
+    assert_ne!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Fresh,
+        "a rejected scratch preflight must not leave a stale Fresh claim"
+    );
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::ScratchMigration)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pm_ensure_fresh_spawn_rejects_symlinked_project_state_dir() {
+    use std::os::unix::fs::symlink;
+
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let project_state = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("project-state");
+    fs::create_dir_all(project_state.parent().expect("project directory"))
+        .expect("create project directory");
+    let external = temp.path().join("external-project-state");
+    fs::create_dir_all(&external).expect("create external project-state target");
+    symlink(&external, &project_state).expect("symlink project-state");
+    let original_target = fs::read_link(&project_state).expect("read project-state target");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "a symlinked project-state directory must stop PM spawn"
+    );
+    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(fs::symlink_metadata(&project_state)
+        .expect("project-state symlink metadata")
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_link(&project_state).expect("project-state symlink remains"),
+        original_target
+    );
+    assert!(
+        !external.join("pm-scratch").exists(),
+        "spawn refusal must not create scratch through the external target"
+    );
 }
 
 /// SPEC-3431 FR-021: "停止中・未起動でもボタンは押下可能で、押下すると起動
@@ -43734,6 +44918,39 @@ fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_projec
     assert_eq!(configured.model.as_deref(), Some("gpt-5.1-codex-max"));
     assert_eq!(configured.reasoning_level.as_deref(), Some("high"));
     assert!(configured.suppress_execution_control);
+}
+
+#[test]
+fn pm_launch_config_exports_project_state_scratch_dir() {
+    let home = tempdir().expect("gwt home");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo fixture");
+    init_repo(&repo);
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&worktree).expect("create canonical PM worktree fixture");
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
+    assert!(
+        !scratch.starts_with(&worktree),
+        "PM scratch must live outside the disposable PM worktree"
+    );
+
+    for agent_id in ["claude", "codex"] {
+        let config = AppRuntime::pm_launch_config(
+            &worktree,
+            &gwt::pm_registry::PmLaunchProfile {
+                agent_id: agent_id.to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+            },
+        );
+        assert_eq!(
+            config.env_vars.get("GWT_PM_SCRATCH_DIR").map(PathBuf::from),
+            Some(scratch.clone()),
+            "{agent_id} PM launch must receive the canonical project-state scratch path"
+        );
+    }
 }
 
 /// SPEC-3431 FR-012 / FR-026 (2026-08-06 ユーザー裁定): the PM runs unattended
@@ -44035,11 +45252,9 @@ fn pm_crash_records_backoff_and_respawns() {
 }
 
 #[test]
-fn pm_close_removes_clean_pm_worktree_and_keeps_dirty_one() {
-    // T-016 (research R-10): the PM worktree's lifecycle is bound to the
-    // registration — a clean worktree is reaped on deregistration, while
-    // local work (fail-closed: anything the reaper is unsure about) keeps
-    // the worktree for reuse by the next PM.
+fn pm_close_reaps_clean_and_migrated_legacy_scratch_but_keeps_unknown_files() {
+    // T-016/T249a: known legacy PM notes are migrated out of the disposable
+    // worktree before reaping. Unknown files remain fail-closed user work.
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
     let _env_lock = env_test_lock()
         .lock()
@@ -44047,65 +45262,220 @@ fn pm_close_removes_clean_pm_worktree_and_keeps_dirty_one() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
 
-    let pm_worktree = gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
-        .join("pm")
-        .join("worktree");
-    fs::create_dir_all(pm_worktree.parent().expect("parent")).expect("pm dir");
-    run_git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            pm_worktree.to_str().expect("pm worktree path"),
-        ],
-    );
-
-    let close_pm = |suffix: &str, dirty: bool| {
-        let tab_id = format!("tab-{suffix}");
-        let raw_id = "agent-1";
-        let tab = sample_project_tab_with_window_at(
-            &tab_id,
-            raw_id,
-            repo.clone(),
-            WindowPreset::Agent,
-            WindowProcessStatus::Running,
-        );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some(&tab_id));
-        let window_id = format!("{tab_id}::{raw_id}");
-        let session_id = format!("pm-session-{suffix}");
-        let mut session = sample_active_agent_session(&tab_id, &window_id);
-        session.session_id = session_id.clone();
-        runtime
-            .active_agent_sessions
-            .insert(window_id.clone(), session);
-        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-        gwt::pm_registry::try_register_pm(
-            &prefs_path,
-            pm_registration_fixture(&session_id, &pm_worktree),
-            |_| false,
-        )
-        .expect("seed registration");
-        if dirty {
-            fs::write(pm_worktree.join("pm-notes.md"), "local work").expect("write note");
-        }
-        runtime.close_window_events(&window_id);
-    };
-
-    close_pm("dirty", true);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    fs::write(pm_worktree.join("user-file.txt"), "user work").expect("write unknown user file");
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "unknown");
     assert!(
         pm_worktree.exists(),
-        "a PM worktree with local work must be kept for reuse"
+        "an unknown user-authored file must keep the PM worktree"
+    );
+    assert_eq!(
+        fs::read_to_string(pm_worktree.join("user-file.txt")).expect("read unknown user file"),
+        "user work"
     );
 
-    fs::remove_file(pm_worktree.join("pm-notes.md")).expect("clear note");
-    close_pm("clean", false);
+    fs::remove_file(pm_worktree.join("user-file.txt")).expect("remove unknown user file");
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "clean");
     assert!(
         !pm_worktree.exists(),
         "a clean PM worktree is reaped when the PM deregisters"
+    );
+
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let legacy_notes = b"legacy PM notes survive close";
+    fs::write(pm_worktree.join("pm-notes.md"), legacy_notes).expect("write legacy PM notes");
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "legacy");
+    assert!(
+        !pm_worktree.exists(),
+        "known legacy PM scratch is migrated and no longer keeps the worktree"
+    );
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
+    assert_eq!(
+        fs::read(scratch.join("pm-notes.md")).expect("read migrated PM notes"),
+        legacy_notes,
+        "legacy PM notes must be preserved byte-for-byte in project-state scratch"
+    );
+
+    let seed = temp.path().join("seed");
+    fs::create_dir_all(seed.join("tasks")).expect("seed tracked tasks");
+    fs::write(seed.join("tasks/todo.md"), "tracked project task\n").expect("tracked task");
+    run_git(&seed, &["add", "tasks/todo.md"]);
+    run_git(&seed, &["commit", "-qm", "add tracked project task"]);
+    run_git(
+        &seed,
+        &[
+            "push",
+            temp.path()
+                .join("origin.git")
+                .to_str()
+                .expect("origin path"),
+            "develop",
+        ],
+    );
+    run_git(&repo, &["fetch", "origin", "develop"]);
+    run_git(&repo, &["reset", "--hard", "origin/develop"]);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let modified_tracked_notes = b"PM-local tracked task update\n";
+    fs::write(pm_worktree.join("tasks/todo.md"), modified_tracked_notes)
+        .expect("modify tracked legacy notes");
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "tracked-legacy");
+    assert!(
+        !pm_worktree.exists(),
+        "durably externalized tracked legacy notes must not leave a synthetic deletion that blocks cleanup"
+    );
+    assert_eq!(
+        fs::read(scratch.join("tasks/todo.md")).expect("externalized tracked PM notes"),
+        modified_tracked_notes
+    );
+}
+
+#[test]
+fn pm_close_records_scratch_migration_failure_and_preserves_files() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let legacy = pm_worktree.join("pm-notes.md");
+    let legacy_bytes = b"legacy source remains";
+    fs::write(&legacy, legacy_bytes).expect("write legacy PM notes");
+    let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
+    fs::create_dir_all(&scratch).expect("create PM scratch root");
+    let destination = scratch.join("pm-notes.md");
+    let destination_bytes = b"existing destination remains";
+    fs::write(&destination, destination_bytes).expect("seed destination collision");
+
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "migration-failure");
+
+    assert!(
+        pm_worktree.exists(),
+        "migration failure must keep the PM worktree"
+    );
+    assert_eq!(fs::read(&legacy).expect("read legacy source"), legacy_bytes);
+    assert_eq!(
+        fs::read(&destination).expect("read colliding destination"),
+        destination_bytes
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load PM prefs");
+    let freshness = prefs
+        .worktree_freshness
+        .expect("scratch migration failure must be durably visible");
+    assert!(matches!(
+        freshness.state,
+        gwt::pm_registry::PmWorktreeFreshnessState::Stale
+            | gwt::pm_registry::PmWorktreeFreshnessState::Unknown
+    ));
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::ScratchMigration)
+    );
+    assert!(matches!(
+        freshness.target_observation,
+        gwt::pm_registry::PmWorktreeTargetObservation::Cached
+            | gwt::pm_registry::PmWorktreeTargetObservation::Unavailable
+    ));
+    let reason = freshness
+        .failure_reason
+        .expect("migration failure must include a reason");
+    let destination_text = destination.to_string_lossy();
+    assert!(
+        reason.contains(destination_text.as_ref()),
+        "failure reason must identify the colliding destination: {reason}"
+    );
+}
+
+#[test]
+fn pm_close_reaps_worktree_with_only_generated_hook_config() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    gwt_skills::generate_codex_hooks_for_mode(
+        &pm_worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+    )
+    .expect("generate managed Codex hooks");
+    let hooks = pm_worktree.join(".codex/hooks.json");
+    assert!(hooks.exists(), "managed hook fixture must exist");
+    assert!(
+        !gwt_skills::managed_hook_config_has_user_content(&hooks),
+        "freshly generated hooks must contain only disposable gwt content"
+    );
+
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "generated-hooks");
+
+    assert!(
+        !pm_worktree.exists(),
+        "pure gwt-generated hook config must not keep the PM worktree"
+    );
+}
+
+#[test]
+fn pm_close_keeps_generated_hook_config_with_user_content() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    gwt_skills::generate_codex_hooks_for_mode(
+        &pm_worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+    )
+    .expect("generate managed Codex hooks");
+    let hooks = pm_worktree.join(".codex/hooks.json");
+    let mut rendered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&hooks).expect("read managed hooks"))
+            .expect("parse managed hooks");
+    rendered
+        .as_object_mut()
+        .expect("managed hooks object")
+        .insert("user-setting".to_string(), serde_json::json!(true));
+    fs::write(
+        &hooks,
+        serde_json::to_vec_pretty(&rendered).expect("render user-extended hooks"),
+    )
+    .expect("write user-extended hooks");
+    assert!(
+        gwt_skills::managed_hook_config_has_user_content(&hooks),
+        "the added key must classify the merged config as user content"
+    );
+
+    close_registered_pm_worktree_fixture(temp.path(), &repo, &pm_worktree, "user-hooks");
+
+    assert!(
+        pm_worktree.exists(),
+        "user content in a merged hook config must keep the PM worktree"
+    );
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(&hooks).expect("read retained user hooks"))
+            .expect("parse retained user hooks");
+    assert_eq!(
+        persisted.get("user-setting"),
+        Some(&serde_json::json!(true))
     );
 }
 
@@ -44813,6 +46183,85 @@ fn pm_wake_defers_to_an_active_human_conversation() {
     );
 }
 
+#[test]
+fn malformed_or_old_quiet_timestamps_can_select_a_prompt_but_never_refresh_head() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let origin = temp.path().join("wake-origin.git");
+    run_git(
+        temp.path(),
+        &["init", "--bare", origin.to_str().expect("origin path")],
+    );
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            origin.to_str().expect("origin"),
+        ],
+    );
+    run_git(&repo, &["config", "user.name", "Wake Test"]);
+    run_git(&repo, &["config", "user.email", "wake@example.com"]);
+    run_git(&repo, &["checkout", "-b", "develop"]);
+    fs::write(repo.join("README.md"), "A\n").expect("write A");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "A"]);
+    run_git(&repo, &["push", "-u", "origin", "develop"]);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let commit_a = git_stdout(&pm_worktree, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("README.md"), "B\n").expect("write B");
+    run_git(&repo, &["commit", "-am", "B"]);
+    run_git(&repo, &["push", "origin", "develop"]);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("monitor prefs for stable remote identity");
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::deregister_pm(&prefs_path, "pm-session-live").expect("deregister old PM");
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &pm_worktree),
+        |_| false,
+    )
+    .expect("register canonical PM");
+    gwt::pm_registry::save_pm_loop_state(
+        &gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo),
+        &gwt::pm_registry::PmLoopState {
+            last_continued_at: Some("malformed".to_string()),
+            last_user_prompt_at: Some("2020-01-01T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("quiet state");
+
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-29T00:00:00Z")
+        .is_none());
+    assert!(runtime
+        .pm_wake_decision_at(
+            &repo,
+            &[pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)],
+            "2026-08-29T00:01:00Z",
+        )
+        .is_some());
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        commit_a,
+        "quiet-time prompt selection has no fetch or re-point authority"
+    );
+}
+
 /// Issue #3497: the PM must come up on a bare-layout project — a project
 /// root that is not itself a git repository but contains the bare `<name>.git`
 /// the worktrees hang off. The launch paths resolve this layout through
@@ -44825,14 +46274,17 @@ fn pm_spawn_prepares_the_worktree_for_a_bare_layout_project() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let canonical_home = fs::canonicalize(temp.path()).expect("canonical test home");
+    let _home = ScopedEnvVar::set("HOME", &canonical_home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &canonical_home);
+    let _gwt_home = ScopedGwtHome::set(canonical_home.join(".gwt"));
 
     // A seed repository with one commit, cloned bare into the layout the
     // user actually opens: parent/ (not a repo) containing parent/repo.git.
     let seed = temp.path().join("seed");
     fs::create_dir_all(&seed).expect("seed dir");
     init_repo_with_initial_commit(&seed);
+    run_git(&seed, &["branch", "-M", "develop"]);
     let parent = temp.path().join("parent");
     fs::create_dir_all(&parent).expect("parent dir");
     let clone = gwt_core::process::hidden_command("git")

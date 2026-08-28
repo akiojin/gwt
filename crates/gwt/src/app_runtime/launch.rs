@@ -1446,6 +1446,14 @@ pub(super) fn launch_config_from_persisted_session(
     if !session.display_name.is_empty() {
         config.display_name = session.display_name.clone();
     }
+    if let Some(scratch) = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path)
+    {
+        config.env_vars.insert(
+            "GWT_PM_SCRATCH_DIR".to_string(),
+            scratch.to_string_lossy().into_owned(),
+        );
+        config.suppress_execution_control = true;
+    }
     config
 }
 
