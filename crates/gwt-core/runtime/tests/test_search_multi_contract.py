@@ -490,6 +490,60 @@ class SearchMultiContractTests(unittest.TestCase):
                     finally:
                         path.write_bytes(original)
 
+            base_manifest_path = base_dir / "manifest.json"
+            base_descriptor_path = base_dir / "descriptor.json"
+            original_manifest = base_manifest_path.read_bytes()
+            original_descriptor = base_descriptor_path.read_bytes()
+
+            def write_coherent_manifest_pair(manifest: dict, descriptor: dict) -> None:
+                descriptor["manifest_digest"] = runner._sha256_json(
+                    manifest["entries"]
+                )
+                base_manifest_path.write_text(
+                    json.dumps(
+                        manifest,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ),
+                    encoding="utf-8",
+                )
+                base_descriptor_path.write_text(
+                    json.dumps(
+                        descriptor,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ),
+                    encoding="utf-8",
+                )
+
+            for label, field, replacement in (
+                (
+                    "content-addressed generation id",
+                    "cas_key",
+                    "c" * 64,
+                ),
+                (
+                    "visible source snapshot id",
+                    "source_digest",
+                    "d" * 64,
+                ),
+            ):
+                with self.subTest(label=label):
+                    try:
+                        manifest = json.loads(original_manifest.decode("utf-8"))
+                        descriptor = json.loads(original_descriptor.decode("utf-8"))
+                        manifest["entries"][0][field] = replacement
+                        write_coherent_manifest_pair(manifest, descriptor)
+                        self.assertFalse(
+                            verify(view_dir),
+                            f"{label} must be recomputed from the canonical manifest",
+                        )
+                    finally:
+                        base_manifest_path.write_bytes(original_manifest)
+                        base_descriptor_path.write_bytes(original_descriptor)
+
 
 if __name__ == "__main__":
     unittest.main()

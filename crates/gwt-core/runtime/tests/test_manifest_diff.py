@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -456,6 +457,276 @@ class Phase71OverlayManifestTests(unittest.TestCase):
             baseline_head.get("active_view_id"),
             "both scopes rotate through the same previous view",
         )
+
+        worktree_root = (
+            runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+            / "worktrees"
+            / WORKTREE_HASH
+        )
+        view_dir = worktree_root / "views" / head["active_view_id"]
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            result["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        descriptor_path = overlay_dir / "descriptor.json"
+        original = descriptor_path.read_bytes()
+
+        def replace_required_shadow_with_unrelated_base(payload: dict) -> None:
+            payload["files_shadow"].remove("src/move_old.rs")
+            payload["files_shadow"].append("src/keep.rs")
+            payload["files_shadow"].sort()
+
+        def add_tombstone_to_wrong_scope(payload: dict) -> None:
+            payload["files_docs_shadow"].append("src/delete.rs")
+            payload["files_docs_shadow"].sort()
+
+        def overlap_tombstone_and_upsert(payload: dict) -> None:
+            payload["tombstones"].append("src/change.rs")
+            payload["tombstones"].sort()
+
+        for label, mutate in (
+            ("scope move old-side shadow substitution", replace_required_shadow_with_unrelated_base),
+            ("tombstone in opposite scope", add_tombstone_to_wrong_scope),
+            ("tombstone overlapping an upsert", overlap_tombstone_and_upsert),
+        ):
+            with self.subTest(label=label):
+                try:
+                    payload = json.loads(original.decode("utf-8"))
+                    mutate(payload)
+                    descriptor_path.write_text(
+                        json.dumps(
+                            payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.assertFalse(
+                        runner._verify_file_index_v2_view(view_dir),
+                        f"{label} must invalidate the complete shadow closure",
+                    )
+                finally:
+                    descriptor_path.write_bytes(original)
+
+    def test_manifest_scope_partition_rejects_one_path_in_both_scopes(self):
+        parser = getattr(runner, "_validated_file_index_v2_manifest_scope_paths", None)
+        self.assertTrue(
+            callable(parser),
+            "closure verification needs one cross-scope manifest partition validator",
+        )
+
+        def entry(path: str, scope: str) -> dict:
+            digest = "a" * 64
+            return {
+                "path": path,
+                "source_object": f"fixture:{path}",
+                "source_digest": digest,
+                "payload_digest": digest,
+                "metadata_digest": digest,
+                "scope": scope,
+                "cas_key": digest,
+                "input_digest": digest,
+                "vector_checksum": digest,
+                "dimension": 16,
+            }
+
+        self.assertIsNone(
+            parser(
+                [
+                    entry("shared/path", "files"),
+                    entry("shared/path", "files-docs"),
+                ]
+            ),
+            "one artifact must never expose the same logical path in both collections",
+        )
+        self.assertFalse(runner._is_sorted_unique_string_list(["../escape.rs"]))
+        self.assertTrue(
+            runner._is_sorted_unique_string_list(["src/control-\u0085.rs"]),
+            "UTF-8 Git paths only reject ASCII controls at the Rust/Python boundary",
+        )
+
+    def test_clean_tracked_checkout_eol_uses_git_object_as_inherited_source(self):
+        filter_script = self.repo / "eol_filter.py"
+        filter_script.write_text(
+            "import sys\n"
+            "data = sys.stdin.buffer.read()\n"
+            "if sys.argv[1] == 'clean':\n"
+            "    data = data.replace(b'\\r\\n', b'\\n')\n"
+            "else:\n"
+            "    data = data.replace(b'\\n', b'\\r\\n')\n"
+            "sys.stdout.buffer.write(data)\n",
+            encoding="utf-8",
+        )
+        (self.repo / ".gitattributes").write_text(
+            "notes/*.txt filter=gwt-test-eol\n", encoding="utf-8"
+        )
+        quoted_python = subprocess.list2cmdline([sys.executable])
+        quoted_script = subprocess.list2cmdline([str(filter_script)])
+        self._git(
+            "-C",
+            str(self.repo),
+            "config",
+            "filter.gwt-test-eol.clean",
+            f"{quoted_python} {quoted_script} clean",
+        )
+        self._git(
+            "-C",
+            str(self.repo),
+            "config",
+            "filter.gwt-test-eol.smudge",
+            f"{quoted_python} {quoted_script} smudge",
+        )
+        self._git(
+            "-C", str(self.repo), "config", "filter.gwt-test-eol.required", "true"
+        )
+        notes = self.repo / "notes"
+        notes.mkdir()
+        clean = notes / "clean.txt"
+        clean.write_bytes(b"first line\nsecond line\n")
+        self._git(
+            "-C",
+            str(self.repo),
+            "add",
+            ".gitattributes",
+            "eol_filter.py",
+            "notes/clean.txt",
+        )
+        self._git(
+            "-C",
+            str(self.repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "tracked eol fixture",
+        )
+
+        # Force Git's configured smudge conversion instead of manually
+        # writing bytes that Git could correctly classify as dirty.
+        clean.unlink()
+        self._git("-C", str(self.repo), "checkout-index", "--force", "notes/clean.txt")
+        self.assertEqual(clean.read_bytes(), b"first line\r\nsecond line\r\n")
+        self._git("-C", str(self.repo), "add", "notes/clean.txt")
+        status = runner._git_command(
+            self.repo,
+            ["status", "--porcelain=v1", "--", "notes/clean.txt"],
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(status.stdout, b"", status.stdout)
+
+        result = self._build()
+        self.assertTrue(result.get("ok"), result)
+        overlay = self._overlay_descriptor(result)
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            result["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        manifest = json.loads((overlay_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "notes/clean.txt",
+            [entry["path"] for entry in manifest["entries"]],
+            "clean smudged bytes must inherit the pinned Git object instead of becoming an overlay",
+        )
+        self.assertNotIn("notes/clean.txt", overlay["files_docs_shadow"])
+
+    def test_clean_branch_index_blob_different_from_canonical_is_overlay(self):
+        self._git(
+            "-C",
+            str(self.repo),
+            "update-ref",
+            "refs/remotes/origin/develop",
+            "HEAD",
+        )
+        changed = self.repo / "src" / "keep.rs"
+        changed.write_text("//! branch version\nfn keep_on_branch() {}\n", encoding="utf-8")
+        self._git("-C", str(self.repo), "add", "src/keep.rs")
+        self._git(
+            "-C",
+            str(self.repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "branch source",
+        )
+
+        result = self._build()
+        self.assertTrue(result.get("ok"), result)
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            result["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        manifest = json.loads((overlay_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIn(
+            "src/keep.rs",
+            [entry["path"] for entry in manifest["entries"]],
+            "a clean branch/index blob that differs from the canonical ref belongs to Overlay",
+        )
+
+    def test_v2_source_capture_io_errors_never_replace_the_head(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        worktree_root = (
+            runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+            / "worktrees"
+            / WORKTREE_HASH
+        )
+        head_path = worktree_root / "head.json"
+        original_head = head_path.read_bytes()
+        unreadable = (self.repo / "src" / "unreadable.rs").resolve()
+        unreadable.write_text("fn unreadable() {}\n", encoding="utf-8")
+
+        real_walk = os.walk
+        real_stat = Path.stat
+        real_read_bytes = Path.read_bytes
+
+        def walk_failure(*args, **kwargs):
+            if "onerror" not in kwargs:
+                return real_walk(*args, **kwargs)
+            onerror = kwargs["onerror"]
+            onerror(PermissionError("walk denied"))
+            return iter(())
+
+        def stat_failure(path: Path, *args, **kwargs):
+            if path == unreadable:
+                raise PermissionError("stat denied")
+            return real_stat(path, *args, **kwargs)
+
+        def read_failure(path: Path, *args, **kwargs):
+            if path == unreadable:
+                raise PermissionError("read denied")
+            return real_read_bytes(path, *args, **kwargs)
+
+        for label, patcher in (
+            ("walk", mock.patch.object(runner.os, "walk", side_effect=walk_failure)),
+            ("stat", mock.patch.object(type(unreadable), "stat", stat_failure)),
+            ("read", mock.patch.object(type(unreadable), "read_bytes", read_failure)),
+        ):
+            with self.subTest(operation=label), patcher:
+                with self.assertRaisesRegex(RuntimeError, "file-index-v2 source"):
+                    self._build()
+                self.assertEqual(
+                    head_path.read_bytes(),
+                    original_head,
+                    f"{label} failure must not publish a partial visible corpus",
+                )
+
+        # Keep references visibly used so accidental fixture refactors do not
+        # silently change the mocked traversal contract.
+        self.assertTrue(callable(real_walk))
 
 
 if __name__ == "__main__":

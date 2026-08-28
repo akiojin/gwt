@@ -2118,19 +2118,166 @@ def _record_from_bytes(rel_path: str, content_bytes: bytes) -> Optional[Dict[str
     }
 
 
-def _visible_file_records(root: Path) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
-    for path in collect_files(root):
+class _FileIndexSourceSnapshotChanged(RuntimeError):
+    """A filesystem source disappeared or was renamed during fixed capture."""
+
+
+def _collect_file_index_v2_files_strict(project_root: Path) -> List[Path]:
+    """Collect v2 sources without turning I/O failures into deletions."""
+    policy = load_index_path_policy()
+    patterns = load_project_ignore_patterns(project_root)
+    compiled = [
+        pattern
+        for pattern in (
+            _pattern_to_regex(raw_pattern, base)
+            for base, raw_pattern in patterns
+        )
+        if pattern is not None
+    ]
+
+    def fail_walk(error: OSError) -> None:
+        if isinstance(error, FileNotFoundError):
+            raise _FileIndexSourceSnapshotChanged(
+                f"file-index-v2 source changed during traversal: {error.filename}"
+            ) from error
+        raise RuntimeError(
+            f"file-index-v2 source traversal failed: {error}"
+        ) from error
+
+    result: List[Path] = []
+    for current_root, directories, files in os.walk(
+        project_root, onerror=fail_walk
+    ):
+        root_path = Path(current_root)
+        relative_root = root_path.relative_to(project_root)
+        relative_root_text = "" if str(relative_root) == "." else str(relative_root)
+        directories[:] = [
+            directory
+            for directory in directories
+            if not _policy_denies_path(
+                f"{relative_root_text}/{directory}"
+                if relative_root_text
+                else directory,
+                policy,
+            )
+            and not should_ignore(
+                f"{relative_root_text}/{directory}"
+                if relative_root_text
+                else directory,
+                compiled,
+            )
+        ]
+        for filename in files:
+            relative_path = (
+                f"{relative_root_text}/{filename}"
+                if relative_root_text
+                else filename
+            )
+            if _policy_denies_path(relative_path, policy) or should_ignore(
+                relative_path, compiled
+            ):
+                continue
+            path = root_path / filename
+            if is_binary_file(path):
+                continue
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError as error:
+                raise _FileIndexSourceSnapshotChanged(
+                    f"file-index-v2 source changed during stat: {relative_path}"
+                ) from error
+            except OSError as error:
+                raise RuntimeError(
+                    f"file-index-v2 source stat failed: {relative_path}: {error}"
+                ) from error
+            if size <= MAX_FILE_SIZE:
+                result.append(path)
+    return result
+
+
+def _visible_file_records(
+    root: Path,
+    git_snapshot: Optional[Dict[str, Optional[str]]] = None,
+    inherited_records: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Capture one fixed visible corpus using Git objects for clean paths.
+
+    The index blob, not checkout bytes, is canonical for a clean tracked file.
+    This preserves inherited classification across EOL/smudge filters while
+    still treating staged branch differences as overlay input. Dirty and
+    untracked bytes are read exactly once and retained in the returned records.
+    """
+    visible_paths: Dict[str, Path] = {}
+    for path in _collect_file_index_v2_files_strict(root):
         try:
             rel_path = normalize_rel_path(path.relative_to(root))
-            content = path.read_bytes()
-        except (OSError, ValueError):
+        except ValueError as error:
+            raise RuntimeError("file-index-v2 source escaped project root") from error
+        if rel_path in visible_paths:
+            raise RuntimeError("file-index-v2 source contains duplicate normalized paths")
+        visible_paths[rel_path] = path
+
+    records_by_path: Dict[str, Dict[str, Any]] = {}
+    clean_paths: set[str] = set()
+    if git_snapshot is not None:
+        dirty_paths = _git_worktree_dirty_paths(root)
+        index_entries = {
+            rel_path: (blob_oid, size)
+            for rel_path, blob_oid, size in _git_index_blob_entries(root)
+            if rel_path in visible_paths and rel_path not in dirty_paths
+        }
+        entries_to_read: List[tuple[str, str, int]] = []
+        inherited_records = inherited_records or {}
+        for rel_path, (blob_oid, size) in sorted(index_entries.items()):
+            inherited = inherited_records.get(rel_path)
+            if inherited is not None and inherited.get("source_object") == f"git:{blob_oid}":
+                records_by_path[rel_path] = inherited
+                clean_paths.add(rel_path)
+            else:
+                entries_to_read.append((rel_path, blob_oid, size))
+        for batch in _bounded_blob_entry_batches(entries_to_read):
+            blobs = _git_cat_file_batch(root, batch)
+            if set(blobs) != {rel_path for rel_path, _, _ in batch}:
+                raise RuntimeError("git cat-file omitted a clean tracked source")
+            for rel_path, blob_oid, _ in batch:
+                record = _record_from_bytes(rel_path, blobs[rel_path])
+                if record is not None:
+                    record["source_object"] = f"git:{blob_oid}"
+                    records_by_path[rel_path] = record
+                clean_paths.add(rel_path)
+
+    for rel_path, path in sorted(visible_paths.items()):
+        if rel_path in clean_paths:
             continue
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError as error:
+            raise _FileIndexSourceSnapshotChanged(
+                f"file-index-v2 source changed during capture: {rel_path}"
+            ) from error
+        except OSError as error:
+            raise RuntimeError(
+                f"file-index-v2 source is unreadable: {rel_path}: {error}"
+            ) from error
         record = _record_from_bytes(rel_path, content)
         if record is not None:
-            records.append(record)
-    records.sort(key=lambda record: record["path"])
-    return records
+            records_by_path[rel_path] = record
+    return [records_by_path[path] for path in sorted(records_by_path)]
+
+
+def _capture_visible_file_records(
+    root: Path,
+    git_snapshot: Optional[Dict[str, Optional[str]]],
+    inherited_records: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    for _ in range(2):
+        try:
+            return _visible_file_records(root, git_snapshot, inherited_records)
+        except _FileIndexSourceSnapshotChanged:
+            continue
+    raise _FileIndexSourceSnapshotChanged(
+        "file-index-v2 source kept changing during fixed capture"
+    )
 
 
 def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] = None):
@@ -2271,6 +2418,87 @@ def _canonical_git_rel_path(raw_path: bytes, tree_prefix: str) -> str:
     ):
         raise RuntimeError("git tree path is unsafe for file-index-v2")
     return repo_rel_path
+
+
+def _git_worktree_dirty_paths(root: Path) -> set[str]:
+    completed = _git_command(
+        root, ["diff-files", "--name-only", "-z", "--relative", "--", "."]
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("git diff-files failed during source capture")
+    dirty = set()
+    for raw_path in completed.stdout.split(b"\0"):
+        if raw_path:
+            dirty.add(_canonical_git_rel_path(raw_path, ""))
+    return dirty
+
+
+def _git_index_blob_entries(root: Path) -> List[tuple[str, str, int]]:
+    completed = _git_command(root, ["ls-files", "--stage", "-z", "--", "."])
+    if completed.returncode != 0:
+        raise RuntimeError("git ls-files failed during source capture")
+    staged: List[tuple[str, str]] = []
+    normalized_paths = set()
+    for raw_entry in completed.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        if b"\t" not in raw_entry:
+            raise RuntimeError("git ls-files returned a malformed entry")
+        header, raw_path = raw_entry.split(b"\t", 1)
+        parts = header.split()
+        if len(parts) != 3:
+            raise RuntimeError("git ls-files returned a malformed header")
+        mode, raw_oid, raw_stage = parts
+        if raw_stage != b"0" or mode not in {b"100644", b"100755"}:
+            continue
+        try:
+            oid = raw_oid.decode("ascii", errors="strict").lower()
+        except UnicodeDecodeError as error:
+            raise RuntimeError("git index returned an invalid blob OID") from error
+        if len(oid) not in (40, 64) or any(
+            char not in "0123456789abcdef" for char in oid
+        ):
+            raise RuntimeError("git index returned an invalid blob OID")
+        rel_path = _canonical_git_rel_path(raw_path, "")
+        if rel_path in normalized_paths:
+            raise RuntimeError("git index contains duplicate normalized paths")
+        normalized_paths.add(rel_path)
+        staged.append((rel_path, oid))
+
+    if not staged:
+        return []
+    request = b"".join(oid.encode("ascii") + b"\n" for _, oid in staged)
+    checked = _git_command(
+        root,
+        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        input_bytes=request,
+    )
+    if checked.returncode != 0:
+        raise RuntimeError("git cat-file --batch-check failed for index blobs")
+    lines = checked.stdout.splitlines()
+    if len(lines) != len(staged):
+        raise RuntimeError("git cat-file --batch-check returned the wrong object count")
+    entries: List[tuple[str, str, int]] = []
+    for (rel_path, expected_oid), line in zip(staged, lines):
+        fields = line.split()
+        if len(fields) != 3 or fields[1] != b"blob":
+            raise RuntimeError("git index object is not a blob")
+        try:
+            actual_oid = fields[0].decode("ascii", errors="strict").lower()
+            size = int(fields[2])
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("git index returned invalid blob metadata") from error
+        if actual_oid != expected_oid or size < 0:
+            raise RuntimeError("git index blob metadata changed during capture")
+        if (
+            size <= MAX_FILE_SIZE
+            and Path(rel_path).suffix.lower() not in BINARY_EXTENSIONS
+            and not _policy_denies_path(rel_path)
+            and classify_file_bucket(rel_path) != "skip"
+        ):
+            entries.append((rel_path, expected_oid, size))
+    entries.sort(key=lambda item: item[0])
+    return entries
 
 
 def _git_tree_blob_entries(
@@ -2665,42 +2893,68 @@ def _count_incompatible_artifacts(
     return rejected
 
 
-def _overlay_snapshot_and_shadow_sets(
+def _file_index_record_identity(record: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """Return every field that can change a persisted file document."""
+    return (
+        record["path"],
+        record["source_digest"],
+        record["bucket"],
+        hashlib.sha256(record["document"].encode("utf-8")).hexdigest(),
+        _sha256_json(record["metadata"]),
+    )
+
+
+def _plan_file_index_v2_overlay(
     base_records: Sequence[Dict[str, Any]],
     visible_records: Sequence[Dict[str, Any]],
-    overlay_records: Sequence[Dict[str, Any]],
-) -> tuple[str, List[str], List[str], List[str]]:
+) -> Dict[str, Any]:
+    """Classify one immutable worktree snapshot against its pinned base.
+
+    Equality deliberately includes path, source bytes, scope, final payload,
+    and metadata. A source-digest-only diff would miss path-policy scope moves
+    and payload-builder changes, allowing the old base record to leak through.
+    """
     base_by_path = {record["path"]: record for record in base_records}
     visible_by_path = {record["path"]: record for record in visible_records}
-    files_shadow = set()
-    files_docs_shadow = set()
+    inherited: List[str] = []
+    upserts: List[Dict[str, Any]] = []
+    files_shadow: set[str] = set()
+    files_docs_shadow: set[str] = set()
 
     def add_shadow(record: Dict[str, Any]) -> None:
         target = files_shadow if record["bucket"] == "code" else files_docs_shadow
         target.add(record["path"])
 
-    for record in overlay_records:
+    for path in sorted(visible_by_path):
+        record = visible_by_path[path]
+        base_record = base_by_path.get(path)
+        if base_record is not None and _file_index_record_identity(
+            base_record
+        ) == _file_index_record_identity(record):
+            inherited.append(path)
+            continue
+        upserts.append(record)
         add_shadow(record)
-        inherited = base_by_path.get(record["path"])
-        if inherited is not None and inherited["bucket"] != record["bucket"]:
-            add_shadow(inherited)
+        if base_record is not None:
+            # Same-path scope movement shadows the old scope and upserts the
+            # new one in the same overlay/View publication.
+            add_shadow(base_record)
 
     tombstones = sorted(set(base_by_path) - set(visible_by_path))
     for path in tombstones:
         add_shadow(base_by_path[path])
 
     source_snapshot_id = _sha256_json(
-        [
-            [record["path"], record["source_digest"], record["bucket"]]
-            for record in visible_records
-        ]
+        [_file_index_record_identity(visible_by_path[path]) for path in sorted(visible_by_path)]
     )
-    return (
-        source_snapshot_id,
-        sorted(files_shadow),
-        sorted(files_docs_shadow),
-        tombstones,
-    )
+    return {
+        "source_snapshot_id": source_snapshot_id,
+        "inherited": inherited,
+        "upserts": upserts,
+        "tombstones": tombstones,
+        "files_shadow": sorted(files_shadow),
+        "files_docs_shadow": sorted(files_docs_shadow),
+    }
 
 
 def _manifest_entries_digest_from_file(path: Path) -> Optional[str]:
@@ -3003,6 +3257,673 @@ def _materialize_file_artifact_pair(
         finally:
             for client, _ in opened.values():
                 _close_chroma_client(client)
+
+
+_BASE_DESCRIPTOR_FIELDS = {
+    "schema_version",
+    "kind",
+    "base_generation_id",
+    "repo_hash",
+    "root_tree_oid",
+    "canonical_ref",
+    "compatibility",
+    "files_generation",
+    "files_docs_generation",
+    "manifest_digest",
+    "document_counts",
+    "build_state",
+    "created_at",
+    "verified_at",
+}
+_OVERLAY_DESCRIPTOR_FIELDS = {
+    "schema_version",
+    "kind",
+    "overlay_generation_id",
+    "repo_hash",
+    "worktree_hash",
+    "base_generation_id",
+    "source_snapshot_id",
+    "compatibility",
+    "files_generation",
+    "files_docs_generation",
+    "files_shadow",
+    "files_docs_shadow",
+    "tombstones",
+    "manifest_digest",
+    "build_state",
+    "created_at",
+    "verified_at",
+}
+_VIEW_DESCRIPTOR_FIELDS = {
+    "schema_version",
+    "view_id",
+    "repo_hash",
+    "worktree_hash",
+    "base_generation_id",
+    "overlay_generation_id",
+    "compatibility",
+    "visible_counts",
+    "source_snapshot_id",
+    "descriptor_checksum",
+    "verified_at",
+}
+_HEAD_FIELDS = {
+    "schema_version",
+    "active_view_id",
+    "previous_view_id",
+    "sequence",
+    "checksum",
+}
+_MANIFEST_ENTRY_FIELDS = {
+    "path",
+    "source_object",
+    "source_digest",
+    "payload_digest",
+    "metadata_digest",
+    "scope",
+    "cas_key",
+    "input_digest",
+    "vector_checksum",
+    "dimension",
+}
+
+
+def _is_safe_file_index_v2_id(value: Any) -> bool:
+    try:
+        return _safe_artifact_id(value) == value
+    except ValueError:
+        return False
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_exact_file_index_v2_compatibility(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != set(FILE_INDEX_V2_REQUIRED_FIELDS):
+        return False
+    document_contract = value.get("document_contract")
+    if not isinstance(document_contract, dict) or set(document_contract) != {
+        "payload_builder_version",
+        "decode",
+        "content_limit",
+    }:
+        return False
+    try:
+        _validated_file_index_descriptor(value)
+    except ValueError:
+        return False
+    return value.get("index_schema_version") == INDEX_SCHEMA_VERSION
+
+
+def _is_generation_reference(value: Any, collection: str) -> bool:
+    return value == {"store": "store", "collection": collection}
+
+
+def _is_sorted_unique_string_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and all(_is_safe_file_index_v2_logical_path(item) for item in value)
+        and value == sorted(set(value))
+    )
+
+
+def _is_safe_file_index_v2_logical_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
+        return False
+    parts = value.split("/")
+    return (
+        all(part not in {"", ".", ".."} for part in parts)
+        and all(ord(char) >= 32 and ord(char) != 127 for char in value)
+        and normalize_rel_path(Path(value)) == value
+    )
+
+
+def _validated_file_index_v2_manifest_scope_paths(
+    entries: Any,
+) -> Optional[Dict[str, set[str]]]:
+    if not isinstance(entries, list):
+        return None
+    scope_paths: Dict[str, set[str]] = {"files": set(), "files-docs": set()}
+    all_paths: set[str] = set()
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != _MANIFEST_ENTRY_FIELDS
+            or not _is_safe_file_index_v2_logical_path(entry.get("path"))
+            or not isinstance(entry.get("source_object"), str)
+            or not entry["source_object"]
+            or entry.get("scope") not in scope_paths
+            or any(
+                not _is_sha256(entry.get(field))
+                for field in (
+                    "source_digest",
+                    "payload_digest",
+                    "metadata_digest",
+                    "cas_key",
+                    "input_digest",
+                    "vector_checksum",
+                )
+            )
+            or not isinstance(entry.get("dimension"), int)
+            or isinstance(entry.get("dimension"), bool)
+            or entry["dimension"] <= 0
+            or entry["path"] in all_paths
+        ):
+            return None
+        all_paths.add(entry["path"])
+        scope_paths[entry["scope"]].add(entry["path"])
+    return scope_paths
+
+
+def _file_index_v2_artifact_generation_id(
+    descriptor: Dict[str, Any], entries: Sequence[Dict[str, Any]]
+) -> str:
+    records = [[entry["path"], entry["cas_key"]] for entry in entries]
+    identity = {
+        "compatibility": _semantic_file_index_contract(descriptor["compatibility"]),
+        "records": records,
+    }
+    if descriptor["kind"] == "base":
+        identity["root_tree_oid"] = descriptor["root_tree_oid"]
+    else:
+        identity["source_snapshot_id"] = descriptor["source_snapshot_id"]
+        identity["base_generation_id"] = descriptor["base_generation_id"]
+    return _sha256_json(identity)
+
+
+def _file_index_v2_manifest_record_identity(
+    entry: Dict[str, Any],
+) -> tuple[str, str, str, str, str]:
+    return (
+        entry["path"],
+        entry["source_digest"],
+        "code" if entry["scope"] == "files" else "docs",
+        entry["payload_digest"],
+        entry["metadata_digest"],
+    )
+
+
+def _load_verified_file_index_v2_artifact(
+    artifact_dir: Path, kind: str
+) -> Optional[tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, set[str]]]]:
+    descriptor = _read_artifact_descriptor(artifact_dir)
+    expected_fields = (
+        _BASE_DESCRIPTOR_FIELDS if kind == "base" else _OVERLAY_DESCRIPTOR_FIELDS
+    )
+    id_field = "base_generation_id" if kind == "base" else "overlay_generation_id"
+    if (
+        descriptor is None
+        or set(descriptor) != expected_fields
+        or descriptor.get("schema_version") != 1
+        or descriptor.get("kind") != kind
+        or descriptor.get("build_state") != "verified"
+        or descriptor.get(id_field) != artifact_dir.name
+        or not _is_safe_file_index_v2_id(descriptor.get(id_field))
+        or not _is_safe_file_index_v2_id(descriptor.get("repo_hash"))
+        or not _is_exact_file_index_v2_compatibility(
+            descriptor.get("compatibility")
+        )
+        or not _is_generation_reference(
+            descriptor.get("files_generation"), V2_FILES_CODE_COLLECTION
+        )
+        or not _is_generation_reference(
+            descriptor.get("files_docs_generation"), V2_FILES_DOCS_COLLECTION
+        )
+        or not _is_sha256(descriptor.get("manifest_digest"))
+        or not _is_file_index_timestamp(descriptor.get("created_at"))
+        or not _is_file_index_timestamp(descriptor.get("verified_at"))
+    ):
+        return None
+    if kind == "base":
+        root_tree_oid = descriptor.get("root_tree_oid")
+        canonical_ref = descriptor.get("canonical_ref")
+        counts = descriptor.get("document_counts")
+        if (
+            (root_tree_oid is not None and not _is_safe_file_index_v2_id(root_tree_oid))
+            or (canonical_ref is not None and not isinstance(canonical_ref, str))
+            or canonical_ref == ""
+            or not isinstance(counts, dict)
+            or set(counts) != {"files", "files-docs", "total"}
+            or any(
+                not isinstance(counts.get(scope), int)
+                or isinstance(counts.get(scope), bool)
+                or counts[scope] < 0
+                for scope in ("files", "files-docs", "total")
+            )
+            or counts["total"] != counts["files"] + counts["files-docs"]
+        ):
+            return None
+    else:
+        if (
+            not _is_safe_file_index_v2_id(descriptor.get("worktree_hash"))
+            or not _is_safe_file_index_v2_id(descriptor.get("base_generation_id"))
+            or not _is_safe_file_index_v2_id(descriptor.get("source_snapshot_id"))
+            or not all(
+                _is_sorted_unique_string_list(descriptor.get(field))
+                for field in ("files_shadow", "files_docs_shadow", "tombstones")
+            )
+        ):
+            return None
+
+    manifest_path = artifact_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "entries"}
+        or manifest.get("schema_version") != 1
+        or not isinstance(manifest.get("entries"), list)
+        or _manifest_entries_digest_from_file(manifest_path)
+        != descriptor["manifest_digest"]
+    ):
+        return None
+    entries = manifest["entries"]
+    scope_paths = _validated_file_index_v2_manifest_scope_paths(entries)
+    if scope_paths is None:
+        return None
+    if [entry["path"] for entry in entries] != sorted(
+        entry["path"] for entry in entries
+    ):
+        return None
+    if _file_index_v2_artifact_generation_id(descriptor, entries) != descriptor[id_field]:
+        return None
+
+    manifest_counts = {scope: len(paths) for scope, paths in scope_paths.items()}
+    if kind == "base" and any(
+        descriptor["document_counts"][scope] != manifest_counts[scope]
+        for scope in ("files", "files-docs")
+    ):
+        return None
+    for scope, collection_name in (
+        ("files", V2_FILES_CODE_COLLECTION),
+        ("files-docs", V2_FILES_DOCS_COLLECTION),
+    ):
+        try:
+            client, collection = _open_file_index_v2_collection(
+                artifact_dir / "store", collection_name
+            )
+            try:
+                if _safe_collection_count(collection) != manifest_counts[scope]:
+                    return None
+            finally:
+                _close_chroma_client(client)
+        except Exception:
+            return None
+    return descriptor, entries, scope_paths
+
+
+def _file_index_v2_view_identity(
+    repo_hash: str,
+    worktree_hash: str,
+    base_generation_id: str,
+    overlay_generation_id: str,
+    compatibility: Dict[str, Any],
+    visible_counts: Dict[str, int],
+    source_snapshot_id: str,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "repo_hash": repo_hash,
+        "worktree_hash": worktree_hash,
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "compatibility": _semantic_file_index_contract(compatibility),
+        "visible_counts": visible_counts,
+        "source_snapshot_id": source_snapshot_id,
+    }
+
+
+def _verify_file_index_v2_view(view_dir: Path) -> bool:
+    """Verify the complete Base/Overlay/View closure before publication."""
+    view_dir = Path(view_dir)
+    descriptor = _read_artifact_descriptor(view_dir)
+    if (
+        descriptor is None
+        or set(descriptor) != _VIEW_DESCRIPTOR_FIELDS
+        or descriptor.get("schema_version") != 1
+        or descriptor.get("view_id") != view_dir.name
+        or not all(
+            _is_safe_file_index_v2_id(descriptor.get(field))
+            for field in (
+                "view_id",
+                "repo_hash",
+                "worktree_hash",
+                "base_generation_id",
+                "overlay_generation_id",
+                "source_snapshot_id",
+            )
+        )
+        or not _is_exact_file_index_v2_compatibility(
+            descriptor.get("compatibility")
+        )
+        or not _is_file_index_timestamp(descriptor.get("verified_at"))
+        or not _is_sha256(descriptor.get("descriptor_checksum"))
+    ):
+        return False
+    visible_counts = descriptor.get("visible_counts")
+    if (
+        not isinstance(visible_counts, dict)
+        or set(visible_counts) != {"files", "files-docs"}
+        or any(
+            not isinstance(visible_counts.get(scope), int)
+            or isinstance(visible_counts.get(scope), bool)
+            or visible_counts[scope] < 0
+            for scope in ("files", "files-docs")
+        )
+    ):
+        return False
+    checksum_payload = {
+        key: value for key, value in descriptor.items() if key != "descriptor_checksum"
+    }
+    if _sha256_json(checksum_payload) != descriptor["descriptor_checksum"]:
+        return False
+    expected_view_id = _sha256_json(
+        _file_index_v2_view_identity(
+            descriptor["repo_hash"],
+            descriptor["worktree_hash"],
+            descriptor["base_generation_id"],
+            descriptor["overlay_generation_id"],
+            descriptor["compatibility"],
+            visible_counts,
+            descriptor["source_snapshot_id"],
+        )
+    )
+    if descriptor["view_id"] != expected_view_id:
+        return False
+
+    worktree_root = view_dir.parent.parent
+    v2_root = worktree_root.parent.parent
+    if (
+        view_dir.parent.name != "views"
+        or worktree_root.parent.name != "worktrees"
+        or v2_root.name != "file-index-v2"
+        or descriptor["worktree_hash"] != worktree_root.name
+        or descriptor["repo_hash"] != v2_root.parent.name
+    ):
+        return False
+    base_dir = v2_root / "bases" / descriptor["base_generation_id"]
+    overlay_dir = worktree_root / "overlays" / descriptor["overlay_generation_id"]
+    base_verified = _load_verified_file_index_v2_artifact(base_dir, "base")
+    overlay_verified = _load_verified_file_index_v2_artifact(overlay_dir, "overlay")
+    if base_verified is None or overlay_verified is None:
+        return False
+    base_descriptor, base_entries, base_paths = base_verified
+    overlay_descriptor, overlay_entries, overlay_paths = overlay_verified
+    if (
+        base_descriptor["repo_hash"] != descriptor["repo_hash"]
+        or overlay_descriptor["repo_hash"] != descriptor["repo_hash"]
+        or overlay_descriptor["worktree_hash"] != descriptor["worktree_hash"]
+        or overlay_descriptor["base_generation_id"]
+        != descriptor["base_generation_id"]
+        or overlay_descriptor["source_snapshot_id"]
+        != descriptor["source_snapshot_id"]
+        or not file_index_compatibility(
+            base_descriptor["compatibility"], descriptor["compatibility"]
+        )
+        or not file_index_compatibility(
+            overlay_descriptor["compatibility"], descriptor["compatibility"]
+        )
+    ):
+        return False
+
+    files_shadow = set(overlay_descriptor["files_shadow"])
+    files_docs_shadow = set(overlay_descriptor["files_docs_shadow"])
+    tombstones = set(overlay_descriptor["tombstones"])
+    base_all = base_paths["files"] | base_paths["files-docs"]
+    overlay_all = overlay_paths["files"] | overlay_paths["files-docs"]
+    changed_or_removed = overlay_all | tombstones
+    expected_files_shadow = overlay_paths["files"] | (
+        base_paths["files"] & changed_or_removed
+    )
+    expected_files_docs_shadow = overlay_paths["files-docs"] | (
+        base_paths["files-docs"] & changed_or_removed
+    )
+    if (
+        tombstones & overlay_all
+        or not tombstones.issubset(base_all)
+        or files_shadow != expected_files_shadow
+        or files_docs_shadow != expected_files_docs_shadow
+    ):
+        return False
+    expected_counts = {
+        "files": len(base_paths["files"] - files_shadow)
+        + len(overlay_paths["files"]),
+        "files-docs": len(base_paths["files-docs"] - files_docs_shadow)
+        + len(overlay_paths["files-docs"]),
+    }
+    if visible_counts != expected_counts:
+        return False
+    visible_entries: Dict[str, Dict[str, Any]] = {}
+    for entry in base_entries:
+        shadow = files_shadow if entry["scope"] == "files" else files_docs_shadow
+        if entry["path"] not in shadow:
+            visible_entries[entry["path"]] = entry
+    for entry in overlay_entries:
+        if entry["path"] in visible_entries:
+            return False
+        visible_entries[entry["path"]] = entry
+    expected_source_snapshot_id = _sha256_json(
+        [
+            _file_index_v2_manifest_record_identity(visible_entries[path])
+            for path in sorted(visible_entries)
+        ]
+    )
+    return expected_source_snapshot_id == descriptor["source_snapshot_id"]
+
+
+def _materialize_file_index_v2_view(
+    v2_root: Path,
+    repo_hash: str,
+    worktree_hash: str,
+    base_generation_id: str,
+    overlay_generation_id: str,
+    compatibility: Dict[str, Any],
+    visible_counts: Dict[str, int],
+    source_snapshot_id: str,
+) -> tuple[Path, str]:
+    identity = _file_index_v2_view_identity(
+        repo_hash,
+        worktree_hash,
+        base_generation_id,
+        overlay_generation_id,
+        compatibility,
+        visible_counts,
+        source_snapshot_id,
+    )
+    view_id = _sha256_json(identity)
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    view_dir = worktree_root / "views" / _safe_artifact_id(view_id)
+    lock_dir = worktree_root / ".locks" / f"view-{view_id}"
+    with acquire_lock(lock_dir, exclusive=True):
+        if view_dir.exists():
+            if not _verify_file_index_v2_view(view_dir):
+                raise RuntimeError("file-index-v2 existing View failed closure verification")
+            return view_dir, view_id
+        staging = view_dir.with_name(
+            f".{view_id}.staging-{time.time_ns()}-{os.getpid()}"
+        )
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            timestamp = _file_index_timestamp()
+            descriptor = {
+                "schema_version": 1,
+                "view_id": view_id,
+                "repo_hash": repo_hash,
+                "worktree_hash": worktree_hash,
+                "base_generation_id": base_generation_id,
+                "overlay_generation_id": overlay_generation_id,
+                "compatibility": compatibility,
+                "visible_counts": visible_counts,
+                "source_snapshot_id": source_snapshot_id,
+                "verified_at": timestamp,
+            }
+            descriptor["descriptor_checksum"] = _sha256_json(descriptor)
+            _write_json_atomic(staging / "descriptor.json", descriptor)
+            view_dir.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging, view_dir)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        if not _verify_file_index_v2_view(view_dir):
+            raise RuntimeError("file-index-v2 View closure verification failed")
+    return view_dir, view_id
+
+
+def _file_index_v2_head_is_valid(payload: Any) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _HEAD_FIELDS
+        or payload.get("schema_version") != 1
+        or not _is_safe_file_index_v2_id(payload.get("active_view_id"))
+        or (
+            payload.get("previous_view_id") is not None
+            and (
+                not _is_safe_file_index_v2_id(payload.get("previous_view_id"))
+                or payload["previous_view_id"] == payload.get("active_view_id")
+            )
+        )
+        or not isinstance(payload.get("sequence"), int)
+        or isinstance(payload.get("sequence"), bool)
+        or payload["sequence"] <= 0
+        or payload["sequence"] > (2**64 - 1)
+        or not _is_sha256(payload.get("checksum"))
+    ):
+        return False
+    canonical = {key: payload[key] for key in _HEAD_FIELDS if key != "checksum"}
+    return payload["checksum"] == _sha256_json(canonical)
+
+
+def _read_file_index_v2_head(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if _file_index_v2_head_is_valid(payload) else None
+
+
+def _write_file_index_v2_head_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    """Durably replace a flat head without unlinking the old Windows file."""
+    if not _file_index_v2_head_is_valid(payload):
+        raise ValueError("invalid file-index-v2 head payload")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("xb") as output:
+            output.write(_stable_json_bytes(payload))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(str(path.parent), flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+def _visible_file_index_v2_snapshot_id(
+    root: Path,
+    git_snapshot: Optional[Dict[str, Optional[str]]],
+    inherited_records: Dict[str, Dict[str, Any]],
+) -> str:
+    records = _capture_visible_file_records(root, git_snapshot, inherited_records)
+    by_path = {record["path"]: record for record in records}
+    return _sha256_json(
+        [_file_index_record_identity(by_path[path]) for path in sorted(by_path)]
+    )
+
+
+def _publish_file_index_v2_view(
+    root: Path,
+    v2_root: Path,
+    worktree_hash: str,
+    view_dir: Path,
+    view_id: str,
+    desired_root_tree_oid: Optional[str],
+    desired_source_snapshot_id: str,
+    inherited_records: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    head_path = worktree_root / "head.json"
+    head_lock = worktree_root / ".head-lock"
+    if not _verify_file_index_v2_view(view_dir):
+        return {
+            "ok": False,
+            "error_code": "BUILD_VERIFY_FAILED",
+            "error": "file-index-v2 View closure verification failed before publish",
+            "retryable": True,
+        }
+    with acquire_lock(head_lock, exclusive=True):
+        try:
+            current_canonical = _canonical_git_tree(root)
+            current_root_tree_oid = (
+                current_canonical.get("root_tree_oid") if current_canonical else None
+            )
+            current_source_snapshot_id = _visible_file_index_v2_snapshot_id(
+                root, current_canonical, inherited_records
+            )
+        except _FileIndexSourceSnapshotChanged:
+            return {"ok": True, "published": False, "superseded": True}
+        except (OSError, RuntimeError) as error:
+            return {
+                "ok": False,
+                "error_code": "BUILD_VERIFY_FAILED",
+                "error": f"file-index-v2 desired snapshot capture failed: {error}",
+                "retryable": True,
+            }
+        if (
+            current_root_tree_oid != desired_root_tree_oid
+            or current_source_snapshot_id != desired_source_snapshot_id
+        ):
+            return {"ok": True, "published": False, "superseded": True}
+        current = _read_file_index_v2_head(head_path)
+        if head_path.exists() and current is None:
+            return {
+                "ok": False,
+                "error_code": "PUBLISH_FAILED",
+                "error": "existing file-index-v2 head is invalid",
+                "retryable": True,
+            }
+        if current is not None and current["active_view_id"] == view_id:
+            return {
+                "ok": True,
+                "published": False,
+                "superseded": False,
+                "already_active": True,
+            }
+        if current is not None and current["sequence"] == 2**64 - 1:
+            return {
+                "ok": False,
+                "error_code": "PUBLISH_FAILED",
+                "error": "file-index-v2 View head sequence is exhausted",
+                "retryable": False,
+            }
+        canonical = {
+            "schema_version": 1,
+            "active_view_id": view_id,
+            "previous_view_id": (
+                current["active_view_id"] if current is not None else None
+            ),
+            "sequence": current["sequence"] + 1 if current is not None else 1,
+        }
+        head = {**canonical, "checksum": _sha256_json(canonical)}
+        try:
+            _write_file_index_v2_head_atomic(head_path, head)
+        except OSError as error:
+            return {
+                "ok": False,
+                "error_code": "PUBLISH_FAILED",
+                "error": f"failed to publish file-index-v2 View head: {error}",
+                "retryable": True,
+            }
+    return {"ok": True, "published": True, "superseded": False}
 
 
 # ---------------------------------------------------------------------
@@ -3321,30 +4242,21 @@ def _action_index_files_protocol_v2(
         scope,
         compatibility_descriptor,
     )
-    visible_records = _visible_file_records(root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
         base_records = _canonical_base_records(root, canonical)
     else:
         base_records = []
+    base_by_path = {record["path"]: record for record in base_records}
+    visible_records = _capture_visible_file_records(root, canonical, base_by_path)
     root_tree_oid = canonical.get("root_tree_oid") if canonical else None
 
-    base_by_path = {record["path"]: record for record in base_records}
-    overlay_records = [
-        record
-        for record in visible_records
-        if record["path"] not in base_by_path
-        or record["source_digest"]
-        != base_by_path[record["path"]]["source_digest"]
-    ]
-    (
-        source_snapshot_id,
-        files_shadow,
-        files_docs_shadow,
-        tombstones,
-    ) = _overlay_snapshot_and_shadow_sets(
-        base_records, visible_records, overlay_records
-    )
+    overlay_plan = _plan_file_index_v2_overlay(base_records, visible_records)
+    overlay_records = overlay_plan["upserts"]
+    source_snapshot_id = overlay_plan["source_snapshot_id"]
+    files_shadow = overlay_plan["files_shadow"]
+    files_docs_shadow = overlay_plan["files_docs_shadow"]
+    tombstones = overlay_plan["tombstones"]
     v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
     cas_root = v2_root / "cas"
     base_identities, base_manifest_plans = _plan_file_artifact(
@@ -3462,11 +4374,40 @@ def _action_index_files_protocol_v2(
     requested = len(base_records) + len(overlay_records)
     if requested != computed + cache_hits:
         raise RuntimeError("file-index-v2 CAS accounting invariant violated")
+    visible_counts = {
+        "files": sum(record["bucket"] == "code" for record in visible_records),
+        "files-docs": sum(record["bucket"] == "docs" for record in visible_records),
+    }
+    view_dir, view_id = _materialize_file_index_v2_view(
+        v2_root,
+        repo_hash,
+        worktree_hash,
+        base_generation_id,
+        overlay_generation_id,
+        descriptor,
+        visible_counts,
+        source_snapshot_id,
+    )
     visible_count = sum(
         record["bucket"] == ("code" if scope == "files" else "docs")
         for record in visible_records
     )
-    return {
+    # The publication recheck retains only Base records for the Git-object
+    # identity fast path. Release overlay/source planning structures before
+    # taking the worktree head lock.
+    del visible_records, overlay_records, base_identities, overlay_identities
+    del base_manifest_plans, overlay_manifest_plans
+    publication = _publish_file_index_v2_view(
+        root,
+        v2_root,
+        worktree_hash,
+        view_dir,
+        view_id,
+        root_tree_oid,
+        source_snapshot_id,
+        base_by_path,
+    )
+    result = {
         "ok": True,
         "scope": scope,
         "indexed": visible_count,
@@ -3479,7 +4420,12 @@ def _action_index_files_protocol_v2(
         "computed_embeddings": computed,
         "embedding_cache_hits": cache_hits,
         "compatibility_rejections": compatibility_rejections,
+        "view_id": view_id,
     }
+    if not publication.get("ok"):
+        return {**result, **publication, "ok": False}
+    result.update(publication)
+    return result
 
 
 def action_index_files_v2(

@@ -565,6 +565,32 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertLess(events.index("artifact:overlay:done"), events.index("head:replace"))
         self.assertLess(events.index("view:verified"), events.index("head:replace"))
 
+    def test_head_sequence_exhaustion_preserves_old_head_bytes(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        exhausted = self._head()
+        exhausted["sequence"] = 2**64 - 1
+        exhausted["checksum"] = self._expected_head_checksum(exhausted)
+        self._head_path().write_text(
+            json.dumps(exhausted, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        old_head = self._head_path().read_bytes()
+
+        (self.repo / "src" / "new-view.rs").write_text(
+            "fn new_view() {}\n", encoding="utf-8"
+        )
+        result = self._build()
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
+        self.assertFalse(result.get("retryable"), result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+
+        overflow = dict(exhausted, sequence=2**64)
+        overflow["checksum"] = self._expected_head_checksum(overflow)
+        self.assertFalse(runner._file_index_v2_head_is_valid(overflow))
+
     @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
     def test_head_writer_fsyncs_same_directory_temp_and_parent_around_replace(self):
         writer = getattr(runner, "_write_file_index_v2_head_atomic", None)
