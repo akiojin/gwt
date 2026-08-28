@@ -455,17 +455,15 @@ def collect_files(project_root: Path) -> List[Path]:
     return result
 
 
-def extract_description(file_path: Path) -> str:
-    """Extract a short description from a file's content."""
+def _extract_description_from_content(rel_path: str, content: str) -> str:
+    """Extract the same description from filesystem and immutable Git blobs."""
+    file_path = Path(rel_path)
     suffix = file_path.suffix.lower()
     name = file_path.name.lower()
-
     try:
-        content = file_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        lines = content.splitlines()
+    except (AttributeError, TypeError):
         return file_path.name
-
-    lines = content.splitlines()
     if not lines:
         return file_path.name
 
@@ -570,6 +568,15 @@ def extract_description(file_path: Path) -> str:
     return file_path.name
 
 
+def extract_description(file_path: Path) -> str:
+    """Extract a short description from a file's content."""
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return file_path.name
+    return _extract_description_from_content(file_path.name, content)
+
+
 def action_probe() -> dict:
     """Check if chromadb is available."""
     if importlib.util.find_spec("chromadb") is None:
@@ -581,6 +588,7 @@ def action_probe() -> dict:
         "ok": True,
         "chromadbVersion": chromadb.__version__,
         "pythonVersion": sys.version.split()[0],
+        "file_index_protocols": ["legacy", "v2"],
     }
 
 
@@ -1300,6 +1308,39 @@ V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
 V2_WORKS_COLLECTION = "works"
 
+FILE_INDEX_V2_LAYOUT_VERSION = 2
+FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2"
+FILE_INDEX_V2_MODEL_ID = "intfloat/multilingual-e5-base"
+FILE_INDEX_V2_MODEL_REVISION = "d128750597153bb5987e10b1c3493a34e5a4502a"
+FILE_INDEX_V2_COMPATIBILITY_FIELDS = (
+    "layout_version",
+    "index_schema_version",
+    "scope_set",
+    "model_id",
+    "model_revision",
+    "dimension",
+    "normalization",
+    "metric",
+    "query_prefix",
+    "passage_prefix",
+    "document_contract",
+    "path_policy_hash",
+    "writer_protocol",
+)
+FILE_EMBEDDING_CONTRACT_FIELDS = (
+    "model_id",
+    "revision",
+    "dimension",
+    "normalization",
+    "metric",
+    "query_prefix",
+    "passage_prefix",
+)
+FILE_INDEX_V2_REQUIRED_FIELDS = FILE_INDEX_V2_COMPATIBILITY_FIELDS + (
+    "runner_hash",
+)
+CANONICAL_BLOB_BATCH_BYTES = 8 * 1024 * 1024
+
 
 def gwt_index_root() -> Path:
     """Return the root directory for all gwt vector index data."""
@@ -1326,6 +1367,193 @@ def resolve_db_path(
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
+
+
+def resolve_file_index_v2_root(
+    repo_hash: str, db_root: Optional[Path] = None
+) -> Path:
+    """Return the additive repo-scoped Phase 71 file-index root."""
+    root = Path(db_root) if db_root is not None else gwt_index_root()
+    return root / _safe_artifact_id(repo_hash) / "file-index-v2"
+
+
+def _safe_artifact_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value
+    ):
+        raise ValueError(f"unsafe file-index-v2 artifact id: {value!r}")
+    return value
+
+
+def resolve_file_index_v2_base_dir(
+    repo_hash: str, generation_id: str, db_root: Optional[Path] = None
+) -> Path:
+    return resolve_file_index_v2_root(repo_hash, db_root=db_root) / "bases" / _safe_artifact_id(generation_id)
+
+
+def resolve_file_index_v2_overlay_dir(
+    repo_hash: str,
+    worktree_hash: str,
+    generation_id: str,
+    db_root: Optional[Path] = None,
+) -> Path:
+    return (
+        resolve_file_index_v2_root(repo_hash, db_root=db_root)
+        / "worktrees"
+        / _safe_artifact_id(worktree_hash)
+        / "overlays"
+        / _safe_artifact_id(generation_id)
+    )
+
+
+def _stable_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_stable_json_bytes(value)).hexdigest()
+
+
+def _path_policy_hash() -> str:
+    return _sha256_json(INDEX_PATH_POLICY)
+
+
+def default_file_index_compatibility() -> Dict[str, Any]:
+    """Pinned semantic contract for newly built v2 file artifacts."""
+    try:
+        runner_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        runner_hash = "unavailable"
+    return {
+        "layout_version": FILE_INDEX_V2_LAYOUT_VERSION,
+        "index_schema_version": INDEX_SCHEMA_VERSION,
+        "scope_set": ["files", "files-docs"],
+        "model_id": FILE_INDEX_V2_MODEL_ID,
+        "model_revision": FILE_INDEX_V2_MODEL_REVISION,
+        "dimension": 768,
+        "normalization": "none",
+        "metric": "cosine",
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+        "document_contract": {
+            "payload_builder_version": 1,
+            "decode": "utf-8-replace",
+            "content_limit": 2000,
+        },
+        "path_policy_hash": _path_policy_hash(),
+        "writer_protocol": FILE_INDEX_V2_WRITER_PROTOCOL,
+        "runner_hash": runner_hash,
+    }
+
+
+def _semantic_file_index_contract(descriptor: Dict[str, Any]) -> Dict[str, Any]:
+    return {field: descriptor.get(field) for field in FILE_INDEX_V2_COMPATIBILITY_FIELDS}
+
+
+def _file_index_descriptor_has_valid_shape(descriptor: Any) -> bool:
+    if not isinstance(descriptor, dict) or any(
+        field not in descriptor for field in FILE_INDEX_V2_REQUIRED_FIELDS
+    ):
+        return False
+    positive_int_fields = ("layout_version", "index_schema_version", "dimension")
+    if any(
+        not isinstance(descriptor.get(field), int)
+        or isinstance(descriptor.get(field), bool)
+        or descriptor[field] <= 0
+        for field in positive_int_fields
+    ):
+        return False
+    if descriptor.get("scope_set") != ["files", "files-docs"]:
+        return False
+    string_fields = (
+        "model_id",
+        "model_revision",
+        "normalization",
+        "metric",
+        "query_prefix",
+        "passage_prefix",
+        "path_policy_hash",
+        "writer_protocol",
+        "runner_hash",
+    )
+    if any(
+        not isinstance(descriptor.get(field), str) or not descriptor[field]
+        for field in string_fields
+    ):
+        return False
+    document_contract = descriptor.get("document_contract")
+    if not isinstance(document_contract, dict):
+        return False
+    if any(
+        not isinstance(document_contract.get(field), str)
+        or not document_contract[field]
+        for field in ("decode",)
+    ):
+        return False
+    payload_version = document_contract.get("payload_builder_version")
+    content_limit = document_contract.get("content_limit")
+    return (
+        isinstance(payload_version, int)
+        and not isinstance(payload_version, bool)
+        and payload_version > 0
+        and isinstance(content_limit, int)
+        and not isinstance(content_limit, bool)
+        and content_limit > 0
+    )
+
+
+def _validated_file_index_descriptor(descriptor: Any) -> Dict[str, Any]:
+    if not _file_index_descriptor_has_valid_shape(descriptor):
+        raise ValueError("invalid file-index-v2 compatibility descriptor")
+    if descriptor.get("layout_version") != FILE_INDEX_V2_LAYOUT_VERSION:
+        raise ValueError("unsupported file-index-v2 layout version")
+    if descriptor.get("writer_protocol") != FILE_INDEX_V2_WRITER_PROTOCOL:
+        raise ValueError("unsupported file-index-v2 writer protocol")
+    return descriptor
+
+
+def file_index_compatibility(
+    left: Dict[str, Any], right: Dict[str, Any]
+) -> bool:
+    """Return whether two artifact descriptors have the same semantics.
+
+    `runner_hash` is intentionally provenance-only; every field that can
+    change stored documents, vectors, or search distance remains semantic.
+    """
+    if not _file_index_descriptor_has_valid_shape(
+        left
+    ) or not _file_index_descriptor_has_valid_shape(right):
+        return False
+    return _semantic_file_index_contract(left) == _semantic_file_index_contract(right)
+
+
+def _embedding_contract(descriptor: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "model_id": descriptor.get("model_id"),
+        "revision": descriptor.get("model_revision"),
+        "dimension": descriptor.get("dimension"),
+        "normalization": descriptor.get("normalization"),
+        "metric": descriptor.get("metric"),
+        "query_prefix": descriptor.get("query_prefix"),
+        "passage_prefix": descriptor.get("passage_prefix"),
+    }
+
+
+def file_embedding_cas_key(
+    embedding_contract: Dict[str, Any], model_input: str
+) -> Dict[str, str]:
+    """Identify a vector by its pinned model contract and exact input bytes."""
+    normalized_contract = {
+        field: embedding_contract.get(field)
+        for field in FILE_EMBEDDING_CONTRACT_FIELDS
+    }
+    input_digest = hashlib.sha256(model_input.encode("utf-8")).hexdigest()
+    cas_key = hashlib.sha256(
+        _stable_json_bytes(normalized_contract) + b"\0" + bytes.fromhex(input_digest)
+    ).hexdigest()
+    return {"cas_key": cas_key, "input_digest": input_digest}
 
 
 # ---------------------------------------------------------------------
@@ -1426,25 +1654,31 @@ class _FakeEmbeddingModel:
 
 
 _MODEL_CACHE: Optional[Any] = None
+_MODEL_CACHE_REVISION: Optional[str] = None
 
 
-def _get_embedding_model() -> Any:
+def _get_embedding_model(revision: Optional[str] = None) -> Any:
     """Lazily load (and cache) the embedding model.
 
     Honors GWT_INDEX_FAKE_EMBEDDING=1 to substitute a deterministic
     hash-based fake. Otherwise loads ``intfloat/multilingual-e5-base``.
     """
-    global _MODEL_CACHE
-    if _MODEL_CACHE is not None:
+    global _MODEL_CACHE, _MODEL_CACHE_REVISION
+    if _MODEL_CACHE is not None and _MODEL_CACHE_REVISION == revision:
         return _MODEL_CACHE
 
     if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
         _MODEL_CACHE = _FakeEmbeddingModel()
+        _MODEL_CACHE_REVISION = revision
         return _MODEL_CACHE
 
     from sentence_transformers import SentenceTransformer  # type: ignore
 
-    _MODEL_CACHE = SentenceTransformer("intfloat/multilingual-e5-base")
+    if revision is None:
+        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+    else:
+        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+    _MODEL_CACHE_REVISION = revision
     return _MODEL_CACHE
 
 
@@ -1582,6 +1816,35 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
         collection = client.get_collection(
             name=collection_name,
             embedding_function=ef,
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
+
+
+def _make_file_index_v2_collection(db_path: Path, collection_name: str):
+    """Create a v2 collection without attaching the legacy floating model."""
+    import chromadb  # type: ignore
+
+    db_path.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(db_path))
+    return client, client.get_or_create_collection(
+        name=collection_name,
+        embedding_function=None,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def _open_file_index_v2_collection(db_path: Path, collection_name: str):
+    """Open a v2 collection; query vectors must be encoded explicitly."""
+    import chromadb  # type: ignore
+
+    client = chromadb.PersistentClient(path=str(db_path))
+    try:
+        collection = client.get_collection(
+            name=collection_name,
+            embedding_function=None,
         )
     except Exception:
         _close_chroma_client(client)
@@ -1813,6 +2076,674 @@ def build_embedding_document(
     if normalized_text:
         parts.append(normalized_text)
     return "\n".join(parts)
+
+
+def _record_from_bytes(rel_path: str, content_bytes: bytes) -> Optional[Dict[str, Any]]:
+    if len(content_bytes) > MAX_FILE_SIZE:
+        return None
+    suffix = Path(rel_path).suffix.lower()
+    if suffix in BINARY_EXTENSIONS or _policy_denies_path(rel_path):
+        return None
+    bucket = classify_file_bucket(rel_path)
+    if bucket == "skip":
+        return None
+    text = content_bytes.decode("utf-8", errors="replace")
+    description = _extract_description_from_content(rel_path, text)
+    document = build_embedding_document(
+        rel_path=rel_path,
+        description=description,
+        text=text[:2000],
+        bucket=bucket,
+        file_type=Path(rel_path).suffix.lstrip(".") or "unknown",
+    )
+    return {
+        "path": rel_path,
+        "bucket": bucket,
+        "document": document,
+        "source_digest": hashlib.sha256(content_bytes).hexdigest(),
+        "source_object": f"sha256:{hashlib.sha256(content_bytes).hexdigest()}",
+        "metadata": {
+            "path": rel_path,
+            "description": description,
+            "file_type": Path(rel_path).suffix.lstrip(".") or "unknown",
+            "size": len(content_bytes),
+            "bucket": bucket,
+        },
+    }
+
+
+def _visible_file_records(root: Path) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for path in collect_files(root):
+        try:
+            rel_path = normalize_rel_path(path.relative_to(root))
+            content = path.read_bytes()
+        except (OSError, ValueError):
+            continue
+        record = _record_from_bytes(rel_path, content)
+        if record is not None:
+            records.append(record)
+    records.sort(key=lambda record: record["path"])
+    return records
+
+
+def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] = None):
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            input=input_bytes,
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"git {' '.join(args)} failed: {error}") from error
+
+
+def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
+    """Pin the first available canonical local ref without fetching."""
+    repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
+    if repository_probe.returncode != 0:
+        if (root / ".git").exists():
+            raise RuntimeError("git repository metadata is present but unreadable")
+        return None
+    top_level = _git_command(root, ["rev-parse", "--show-toplevel"])
+    prefix_output = _git_command(root, ["rev-parse", "--show-prefix"])
+    if top_level.returncode != 0 or prefix_output.returncode != 0:
+        raise RuntimeError("git repository root boundary could not be resolved")
+    try:
+        top_level_path = Path(top_level.stdout.decode("utf-8", errors="strict").strip())
+        tree_prefix = prefix_output.stdout.decode("utf-8", errors="strict").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("git repository root boundary is not valid UTF-8") from error
+    if tree_prefix and not tree_prefix.endswith("/"):
+        raise RuntimeError("git repository prefix is malformed")
+    expected_root = top_level_path.joinpath(*tree_prefix.rstrip("/").split("/"))
+    if root.resolve() != expected_root.resolve():
+        raise RuntimeError("git project root does not match its repository prefix")
+    for reference in (
+        "origin/develop",
+        "origin/HEAD",
+        "origin/main",
+        "origin/master",
+        "HEAD",
+    ):
+        expression = f"{reference}^{{tree}}"
+        completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
+        if completed.returncode != 0:
+            continue
+        tree_oid = completed.stdout.decode("ascii", errors="ignore").strip().lower()
+        if len(tree_oid) in (40, 64) and all(char in "0123456789abcdef" for char in tree_oid):
+            return {
+                "reference": reference,
+                "root_tree_oid": tree_oid,
+                "tree_prefix": tree_prefix,
+            }
+        raise RuntimeError(f"git rev-parse returned an invalid tree OID for {expression}")
+    return {"reference": None, "root_tree_oid": None, "tree_prefix": tree_prefix}
+
+
+def _canonical_git_rel_path(raw_path: bytes, tree_prefix: str) -> str:
+    try:
+        repo_rel_path = raw_path.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("git tree path is not valid UTF-8") from error
+    if tree_prefix:
+        if not repo_rel_path.startswith(tree_prefix):
+            raise RuntimeError("git tree path escaped the project prefix")
+        repo_rel_path = repo_rel_path[len(tree_prefix) :]
+    parts = repo_rel_path.split("/")
+    if (
+        not repo_rel_path
+        or repo_rel_path.startswith("/")
+        or "\\" in repo_rel_path
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(ord(char) < 32 or ord(char) == 127 for char in repo_rel_path)
+    ):
+        raise RuntimeError("git tree path is unsafe for file-index-v2")
+    return repo_rel_path
+
+
+def _git_tree_blob_entries(
+    root: Path, tree_oid: str, tree_prefix: str
+) -> List[tuple[str, str, int]]:
+    pathspec = f"{tree_prefix}." if tree_prefix else "."
+    completed = _git_command(
+        root, ["ls-tree", "-rlz", "--full-tree", tree_oid, "--", pathspec]
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("git ls-tree failed for the pinned canonical tree")
+    entries: List[tuple[str, str, int]] = []
+    normalized_paths = set()
+    for raw_entry in completed.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        if b"\t" not in raw_entry:
+            raise RuntimeError("git ls-tree returned a malformed entry")
+        header, raw_path = raw_entry.split(b"\t", 1)
+        header_parts = header.split()
+        if len(header_parts) != 4:
+            raise RuntimeError("git ls-tree returned a malformed header")
+        if header_parts[1] != b"blob" or header_parts[0] not in {b"100644", b"100755"}:
+            continue
+        rel_path = _canonical_git_rel_path(raw_path, tree_prefix)
+        if rel_path in normalized_paths:
+            raise RuntimeError("git tree contains duplicate normalized paths")
+        normalized_paths.add(rel_path)
+        try:
+            oid = header_parts[2].decode("ascii", errors="strict").lower()
+            size = int(header_parts[3])
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("git ls-tree returned invalid blob identity") from error
+        if (
+            len(oid) not in (40, 64)
+            or any(char not in "0123456789abcdef" for char in oid)
+            or size < 0
+        ):
+            raise RuntimeError("git ls-tree returned invalid blob identity")
+        if (
+            size > MAX_FILE_SIZE
+            or Path(rel_path).suffix.lower() in BINARY_EXTENSIONS
+            or _policy_denies_path(rel_path)
+            or classify_file_bucket(rel_path) == "skip"
+        ):
+            continue
+        entries.append((rel_path, oid, size))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _git_cat_file_batch(
+    root: Path, entries: Sequence[tuple[str, str, int]]
+) -> Dict[str, bytes]:
+    if not entries:
+        return {}
+    request = b"".join(oid.encode("ascii") + b"\n" for _, oid, _ in entries)
+    completed = _git_command(root, ["cat-file", "--batch"], input_bytes=request)
+    if completed.returncode != 0:
+        raise RuntimeError("git cat-file --batch failed for the pinned canonical tree")
+    output = completed.stdout
+    cursor = 0
+    blobs: Dict[str, bytes] = {}
+    for rel_path, expected_oid, expected_size in entries:
+        line_end = output.find(b"\n", cursor)
+        if line_end < 0:
+            raise RuntimeError("git cat-file --batch truncated an object header")
+        header = output[cursor:line_end].decode("ascii", errors="replace").split()
+        cursor = line_end + 1
+        if len(header) != 3 or header[0].lower() != expected_oid or header[1] != "blob":
+            raise RuntimeError("git cat-file --batch returned an unexpected object")
+        try:
+            size = int(header[2])
+        except ValueError:
+            raise RuntimeError("git cat-file --batch returned an invalid object size")
+        if size != expected_size:
+            raise RuntimeError("git cat-file --batch returned an unexpected object size")
+        blob = output[cursor : cursor + size]
+        cursor += size
+        if output[cursor : cursor + 1] != b"\n":
+            raise RuntimeError("git cat-file --batch truncated object content")
+        cursor += 1
+        blobs[rel_path] = blob
+    return blobs
+
+
+def _bounded_blob_entry_batches(
+    entries: Sequence[tuple[str, str, int]],
+) -> Iterator[List[tuple[str, str, int]]]:
+    batch: List[tuple[str, str, int]] = []
+    batch_bytes = 0
+    for entry in entries:
+        if batch and batch_bytes + entry[2] > CANONICAL_BLOB_BATCH_BYTES:
+            yield batch
+            batch = []
+            batch_bytes = 0
+        batch.append(entry)
+        batch_bytes += entry[2]
+    if batch:
+        yield batch
+
+
+def _canonical_base_records(
+    root: Path, snapshot: Dict[str, Optional[str]]
+) -> List[Dict[str, Any]]:
+    tree_oid = snapshot.get("root_tree_oid")
+    if tree_oid is None:
+        return []
+    entries = _git_tree_blob_entries(root, tree_oid, snapshot.get("tree_prefix") or "")
+    records: List[Dict[str, Any]] = []
+    for entry_batch in _bounded_blob_entry_batches(entries):
+        blobs = _git_cat_file_batch(root, entry_batch)
+        if set(blobs) != {rel_path for rel_path, _, _ in entry_batch}:
+            raise RuntimeError("git cat-file did not return every pinned tree blob")
+        for rel_path, blob_oid, _ in entry_batch:
+            record = _record_from_bytes(rel_path, blobs[rel_path])
+            if record is None:
+                continue
+            record["source_object"] = f"git:{blob_oid}"
+            records.append(record)
+    records.sort(key=lambda record: record["path"])
+    return records
+
+
+def _final_passage_input(descriptor: Dict[str, Any], document: str) -> str:
+    prefix = str(descriptor.get("passage_prefix") or "passage: ")
+    return document if document.startswith(prefix) else f"{prefix}{document}"
+
+
+def _cas_entry_path(cas_root: Path, cas_key: str) -> Path:
+    safe_key = _safe_artifact_id(cas_key)
+    return cas_root / safe_key[:2] / f"{safe_key}.json"
+
+
+def _vector_checksum(vector: Sequence[Any]) -> str:
+    return hashlib.sha256(
+        _stable_json_bytes([float(value) for value in vector])
+    ).hexdigest()
+
+
+def _chroma_vector_matches_cas(
+    stored: Sequence[Any], expected: Sequence[Any]
+) -> bool:
+    """Allow only Chroma's float32 roundtrip drift at the storage boundary."""
+    if len(stored) != len(expected):
+        return False
+    try:
+        return all(
+            math.isfinite(float(left))
+            and math.isclose(
+                float(left),
+                float(right),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            for left, right in zip(stored, expected)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _file_index_timestamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _is_file_index_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _expected_file_index_vector_dimension(descriptor: Dict[str, Any]) -> int:
+    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+        return _FakeEmbeddingModel.DIM
+    return int(descriptor["dimension"])
+
+
+def _read_cas_vector(
+    cas_root: Path,
+    identity: Dict[str, str],
+    embedding_contract: Dict[str, Any],
+    expected_dimension: int,
+) -> Optional[List[float]]:
+    path = _cas_entry_path(cas_root, identity["cas_key"])
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        vector = [float(value) for value in payload["vector"]]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if (
+        not vector
+        or not all(math.isfinite(value) for value in vector)
+        or payload.get("schema_version") != 1
+        or payload.get("cas_key") != identity["cas_key"]
+        or payload.get("input_digest") != identity["input_digest"]
+        or payload.get("embedding_contract") != embedding_contract
+        or payload.get("dimension") != expected_dimension
+        or len(vector) != expected_dimension
+        or payload.get("vector_checksum") != _vector_checksum(vector)
+        or not _is_file_index_timestamp(payload.get("created_at"))
+        or not _is_file_index_timestamp(payload.get("last_verified_at"))
+    ):
+        return None
+    payload["last_verified_at"] = _file_index_timestamp()
+    _write_json_atomic(path, payload)
+    return vector
+
+
+def _write_cas_vector(
+    cas_root: Path,
+    identity: Dict[str, str],
+    embedding_contract: Dict[str, Any],
+    vector: Sequence[Any],
+    expected_dimension: int,
+) -> List[float]:
+    normalized = [float(value) for value in vector]
+    if (
+        len(normalized) != expected_dimension
+        or not all(math.isfinite(value) for value in normalized)
+    ):
+        raise ValueError("embedding CAS vector has invalid values or dimension")
+    path = _cas_entry_path(cas_root, identity["cas_key"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = _file_index_timestamp()
+    payload = {
+        "schema_version": 1,
+        "cas_key": identity["cas_key"],
+        "input_digest": identity["input_digest"],
+        "embedding_contract": embedding_contract,
+        "vector": normalized,
+        "vector_checksum": _vector_checksum(normalized),
+        "dimension": expected_dimension,
+        "created_at": timestamp,
+        "last_verified_at": timestamp,
+    }
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(_stable_json_bytes(payload))
+    os.replace(temporary, path)
+    return normalized
+
+
+def _resolve_record_vectors(
+    records: Sequence[Dict[str, Any]],
+    descriptor: Dict[str, Any],
+    cas_root: Path,
+) -> tuple[List[List[float]], List[Dict[str, str]], int, int]:
+    """Resolve exact-input vectors under one repo-wide single-flight lock."""
+    embedding_contract = _embedding_contract(descriptor)
+    expected_dimension = _expected_file_index_vector_dimension(descriptor)
+    inputs = [_final_passage_input(descriptor, record["document"]) for record in records]
+    identities = [
+        file_embedding_cas_key(embedding_contract, model_input)
+        for model_input in inputs
+    ]
+    vectors: List[Optional[List[float]]] = [None] * len(records)
+    hits = 0
+    computed = 0
+    populate_lock = cas_root / ".populate"
+    with acquire_lock(populate_lock, exclusive=True):
+        missing: List[int] = []
+        for index, identity in enumerate(identities):
+            cached = _read_cas_vector(
+                cas_root, identity, embedding_contract, expected_dimension
+            )
+            if cached is None:
+                missing.append(index)
+            else:
+                vectors[index] = cached
+                hits += 1
+        if missing:
+            model_inputs = [inputs[index] for index in missing]
+            encoded = _get_embedding_model(FILE_INDEX_V2_MODEL_REVISION).encode(
+                model_inputs
+            )
+            if len(encoded) != len(missing):
+                raise ValueError("embedding model returned the wrong vector count")
+            for index, vector in zip(missing, encoded):
+                vectors[index] = _write_cas_vector(
+                    cas_root,
+                    identities[index],
+                    embedding_contract,
+                    vector,
+                    expected_dimension,
+                )
+                computed += 1
+    return [vector or [] for vector in vectors], identities, computed, hits
+
+
+def _file_artifact_manifest(
+    records: Sequence[Dict[str, Any]],
+    identities: Sequence[Dict[str, str]],
+    vectors: Sequence[Sequence[float]],
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "path": record["path"],
+            "source_object": record["source_object"],
+            "source_digest": record["source_digest"],
+            "payload_digest": hashlib.sha256(
+                record["document"].encode("utf-8")
+            ).hexdigest(),
+            "metadata_digest": _sha256_json(record["metadata"]),
+            "scope": "files" if record["bucket"] == "code" else "files-docs",
+            "cas_key": identity["cas_key"],
+            "input_digest": identity["input_digest"],
+            "vector_checksum": _vector_checksum(vector),
+            "dimension": len(vector),
+        }
+        for record, identity, vector in zip(records, identities, vectors)
+    ]
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(_stable_json_bytes(payload))
+    os.replace(temporary, path)
+
+
+def _read_artifact_descriptor(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads((path / "descriptor.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _json_typed_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _json_typed_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_typed_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
+def _count_incompatible_artifacts(
+    artifacts_root: Path,
+    source_identity: str,
+    descriptor: Dict[str, Any],
+) -> int:
+    try:
+        artifacts = list(artifacts_root.iterdir())
+    except OSError:
+        return 0
+    rejected = 0
+    for artifact in artifacts:
+        existing = _read_artifact_descriptor(artifact)
+        if not existing or existing.get("source_identity") != source_identity:
+            continue
+        if not file_index_compatibility(existing.get("compatibility", {}), descriptor):
+            rejected += 1
+    return rejected
+
+
+def _artifact_pair_is_verified(
+    artifact_dir: Path,
+    records: Sequence[Dict[str, Any]],
+    vectors: Sequence[Sequence[float]],
+    manifest_entries: Sequence[Dict[str, Any]],
+    descriptor_payload: Dict[str, Any],
+) -> bool:
+    store = artifact_dir / "store"
+    existing_descriptor = _read_artifact_descriptor(artifact_dir)
+    immutable_fields = tuple(
+        field
+        for field in descriptor_payload
+        if field not in {"compatibility", "created_at", "verified_at"}
+    )
+    same_immutable_identity = (
+        existing_descriptor is not None
+        and set(existing_descriptor) == set(descriptor_payload)
+        and all(
+            field in existing_descriptor
+            and _json_typed_equal(
+                existing_descriptor[field], descriptor_payload[field]
+            )
+            for field in immutable_fields
+        )
+        and file_index_compatibility(
+            existing_descriptor.get("compatibility", {}),
+            descriptor_payload.get("compatibility", {}),
+        )
+        and _is_file_index_timestamp(existing_descriptor.get("created_at"))
+        and _is_file_index_timestamp(existing_descriptor.get("verified_at"))
+    )
+    if not same_immutable_identity or not (store / "chroma.sqlite3").is_file():
+        return False
+    try:
+        manifest_payload = json.loads(
+            (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        stored_entries = manifest_payload["entries"]
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    if (
+        manifest_payload.get("schema_version") != 1
+        or stored_entries != list(manifest_entries)
+        or _sha256_json(stored_entries) != descriptor_payload.get("manifest_digest")
+    ):
+        return False
+    manifest_by_path = {entry["path"]: entry for entry in stored_entries}
+    expected_vectors = {
+        record["path"]: vector for record, vector in zip(records, vectors)
+    }
+    for bucket, collection_name in (
+        ("code", V2_FILES_CODE_COLLECTION),
+        ("docs", V2_FILES_DOCS_COLLECTION),
+    ):
+        try:
+            client, collection = _open_file_index_v2_collection(
+                store, collection_name
+            )
+            try:
+                expected_paths = {
+                    record["path"] for record in records if record["bucket"] == bucket
+                }
+                stored = collection.get(
+                    include=["documents", "metadatas", "embeddings"]
+                )
+                ids = list(stored.get("ids") or [])
+                documents = list(stored.get("documents") or [])
+                metadatas = list(stored.get("metadatas") or [])
+                raw_embeddings = stored.get("embeddings")
+                embeddings = (
+                    list(raw_embeddings) if raw_embeddings is not None else []
+                )
+                if set(ids) != expected_paths or not (
+                    len(ids) == len(documents) == len(metadatas) == len(embeddings)
+                ):
+                    return False
+                for record_id, document, metadata, embedding in zip(
+                    ids, documents, metadatas, embeddings
+                ):
+                    manifest_entry = manifest_by_path.get(record_id)
+                    expected_vector = expected_vectors.get(record_id)
+                    if manifest_entry is None or expected_vector is None:
+                        return False
+                    if hashlib.sha256(str(document).encode("utf-8")).hexdigest() != manifest_entry.get(
+                        "payload_digest"
+                    ):
+                        return False
+                    if _sha256_json(metadata) != manifest_entry.get("metadata_digest"):
+                        return False
+                    if (
+                        len(expected_vector) != manifest_entry.get("dimension")
+                        or _vector_checksum(expected_vector)
+                        != manifest_entry.get("vector_checksum")
+                        or not _chroma_vector_matches_cas(
+                            embedding, expected_vector
+                        )
+                    ):
+                        return False
+            finally:
+                _close_chroma_client(client)
+        except Exception:
+            return False
+    return True
+
+
+def _materialize_file_artifact_pair(
+    artifact_dir: Path,
+    records: Sequence[Dict[str, Any]],
+    vectors: Sequence[Sequence[float]],
+    manifest_entries: Sequence[Dict[str, Any]],
+    descriptor_payload: Dict[str, Any],
+) -> None:
+    artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
+    with acquire_lock(lock_dir, exclusive=True):
+        if _artifact_pair_is_verified(
+            artifact_dir,
+            records,
+            vectors,
+            manifest_entries,
+            descriptor_payload,
+        ):
+            return
+        if artifact_dir.exists():
+            quarantine = artifact_dir.with_name(
+                f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+            )
+            os.replace(artifact_dir, quarantine)
+        staging = artifact_dir.with_name(
+            f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
+        )
+        shutil.rmtree(staging, ignore_errors=True)
+        store = staging / "store"
+        try:
+            for bucket, collection_name in (
+                ("code", V2_FILES_CODE_COLLECTION),
+                ("docs", V2_FILES_DOCS_COLLECTION),
+            ):
+                selected = [
+                    (record, vector)
+                    for record, vector in zip(records, vectors)
+                    if record["bucket"] == bucket
+                ]
+                client, collection = _make_file_index_v2_collection(
+                    store, collection_name
+                )
+                try:
+                    if selected:
+                        collection.upsert(
+                            ids=[record["path"] for record, _ in selected],
+                            embeddings=[list(vector) for _, vector in selected],
+                            documents=[record["document"] for record, _ in selected],
+                            metadatas=[record["metadata"] for record, _ in selected],
+                        )
+                    if _safe_collection_count(collection) != len(selected):
+                        raise RuntimeError(
+                            f"file-index-v2 {bucket} collection count mismatch"
+                        )
+                finally:
+                    _close_chroma_client(client)
+            _write_json_atomic(staging / "descriptor.json", descriptor_payload)
+            _write_json_atomic(
+                staging / "manifest.json",
+                {"schema_version": 1, "entries": list(manifest_entries)},
+            )
+            if not _artifact_pair_is_verified(
+                staging,
+                records,
+                vectors,
+                manifest_entries,
+                descriptor_payload,
+            ):
+                raise RuntimeError("file-index-v2 staging artifact verification failed")
+            os.replace(staging, artifact_dir)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
 
 # ---------------------------------------------------------------------
@@ -2076,6 +3007,185 @@ def _read_continuation(continuation_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _action_index_files_protocol_v2(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    scope: str,
+    compatibility_descriptor: Optional[Dict[str, Any]],
+) -> dict:
+    if scope not in {"files", "files-docs"}:
+        raise ValueError(f"file-index-v2 does not support scope {scope!r}")
+    root = Path(project_root).resolve()
+    descriptor = _validated_file_index_descriptor(
+        json.loads(
+            json.dumps(
+                compatibility_descriptor or default_file_index_compatibility()
+            )
+        )
+    )
+    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") != "1" and not file_index_compatibility(
+        descriptor, default_file_index_compatibility()
+    ):
+        raise ValueError(
+            "file-index-v2 descriptor does not match the pinned build contract"
+        )
+    visible_records = _visible_file_records(root)
+    canonical = _canonical_git_tree(root)
+    if canonical is None:
+        base_records = visible_records
+        base_source_identity = _sha256_json(
+            [[record["path"], record["source_digest"]] for record in base_records]
+        )
+    else:
+        base_records = _canonical_base_records(root, canonical)
+        base_source_identity = canonical["root_tree_oid"] or "empty-tree"
+
+    base_by_path = {record["path"]: record for record in base_records}
+    overlay_records = [
+        record
+        for record in visible_records
+        if record["path"] not in base_by_path
+        or record["source_digest"]
+        != base_by_path[record["path"]]["source_digest"]
+    ]
+    v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
+    cas_root = v2_root / "cas"
+    base_vectors, base_identities, base_computed, base_hits = _resolve_record_vectors(
+        base_records, descriptor, cas_root
+    )
+    overlay_vectors, overlay_identities, overlay_computed, overlay_hits = (
+        _resolve_record_vectors(overlay_records, descriptor, cas_root)
+    )
+    base_manifest = _file_artifact_manifest(
+        base_records, base_identities, base_vectors
+    )
+    overlay_manifest = _file_artifact_manifest(
+        overlay_records, overlay_identities, overlay_vectors
+    )
+
+    semantic_contract = _semantic_file_index_contract(descriptor)
+    base_generation_id = _sha256_json(
+        {
+            "source_identity": base_source_identity,
+            "compatibility": semantic_contract,
+            "records": [
+                [record["path"], identity["cas_key"]]
+                for record, identity in zip(base_records, base_identities)
+            ],
+        }
+    )
+    overlay_source_identity = _sha256_json(
+        [[record["path"], record["source_digest"]] for record in overlay_records]
+    )
+    overlay_generation_id = _sha256_json(
+        {
+            "source_identity": overlay_source_identity,
+            "base_generation_id": base_generation_id,
+            "compatibility": semantic_contract,
+            "records": [
+                [record["path"], identity["cas_key"]]
+                for record, identity in zip(overlay_records, overlay_identities)
+            ],
+        }
+    )
+
+    bases_root = v2_root / "bases"
+    overlays_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash) / "overlays"
+    compatibility_rejections = _count_incompatible_artifacts(
+        bases_root, base_source_identity, descriptor
+    )
+    compatibility_rejections += _count_incompatible_artifacts(
+        overlays_root, overlay_source_identity, descriptor
+    )
+    base_dir = resolve_file_index_v2_base_dir(
+        repo_hash, base_generation_id, db_root=db_root
+    )
+    overlay_dir = resolve_file_index_v2_overlay_dir(
+        repo_hash, worktree_hash, overlay_generation_id, db_root=db_root
+    )
+    base_document_counts = {
+        "files": sum(record["bucket"] == "code" for record in base_records),
+        "files-docs": sum(record["bucket"] == "docs" for record in base_records),
+    }
+    overlay_document_counts = {
+        "files": sum(record["bucket"] == "code" for record in overlay_records),
+        "files-docs": sum(record["bucket"] == "docs" for record in overlay_records),
+    }
+    collection_refs = {
+        "files": V2_FILES_CODE_COLLECTION,
+        "files-docs": V2_FILES_DOCS_COLLECTION,
+    }
+    base_timestamp = _file_index_timestamp()
+    _materialize_file_artifact_pair(
+        base_dir,
+        base_records,
+        base_vectors,
+        base_manifest,
+        {
+            "schema_version": 1,
+            "kind": "base",
+            "repo_hash": repo_hash,
+            "source_identity": base_source_identity,
+            "root_tree_oid": canonical.get("root_tree_oid") if canonical else None,
+            "canonical_ref": canonical.get("reference") if canonical else None,
+            "compatibility": descriptor,
+            "generation_id": base_generation_id,
+            "manifest_digest": _sha256_json(base_manifest),
+            "store": "store",
+            "collections": collection_refs,
+            "document_counts": base_document_counts,
+            "build_state": "verified",
+            "created_at": base_timestamp,
+            "verified_at": base_timestamp,
+        },
+    )
+    overlay_timestamp = _file_index_timestamp()
+    _materialize_file_artifact_pair(
+        overlay_dir,
+        overlay_records,
+        overlay_vectors,
+        overlay_manifest,
+        {
+            "schema_version": 1,
+            "kind": "overlay",
+            "repo_hash": repo_hash,
+            "worktree_hash": worktree_hash,
+            "source_identity": overlay_source_identity,
+            "base_generation_id": base_generation_id,
+            "compatibility": descriptor,
+            "generation_id": overlay_generation_id,
+            "manifest_digest": _sha256_json(overlay_manifest),
+            "store": "store",
+            "collections": collection_refs,
+            "document_counts": overlay_document_counts,
+            "build_state": "verified",
+            "created_at": overlay_timestamp,
+            "verified_at": overlay_timestamp,
+        },
+    )
+    computed = base_computed + overlay_computed
+    cache_hits = base_hits + overlay_hits
+    visible_count = sum(
+        record["bucket"] == ("code" if scope == "files" else "docs")
+        for record in visible_records
+    )
+    return {
+        "ok": True,
+        "scope": scope,
+        "indexed": visible_count,
+        "total": visible_count,
+        "base_document_count": base_document_counts[scope],
+        "overlay_document_count": overlay_document_counts[scope],
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "computed_embeddings": computed,
+        "embedding_cache_hits": cache_hits,
+        "compatibility_rejections": compatibility_rejections,
+    }
+
+
 def action_index_files_v2(
     project_root: str,
     repo_hash: str,
@@ -2084,6 +3194,8 @@ def action_index_files_v2(
     db_root: Optional[Path] = None,
     scope: str = "files",
     qos: str = "background",
+    file_index_protocol: str = "legacy",
+    compatibility_descriptor: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Index project files into ChromaDB under the v2 layout.
 
@@ -2093,6 +3205,18 @@ def action_index_files_v2(
     background build yields at 16-document checkpoints when a
     higher-priority claimant is pending on the heavy lease.
     """
+    if file_index_protocol == "v2":
+        return _action_index_files_protocol_v2(
+            project_root=project_root,
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash,
+            db_root=db_root,
+            scope=scope,
+            compatibility_descriptor=compatibility_descriptor,
+        )
+    if file_index_protocol != "legacy":
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+
     root = Path(project_root).resolve()
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
@@ -5488,6 +6612,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-root", dest="db_root", default="")
     # Phase 70 AS-13: batch all-worktree status in one process.
     parser.add_argument("--worktree-hashes", dest="worktree_hashes", default="")
+    parser.add_argument(
+        "--file-index-protocol",
+        dest="file_index_protocol",
+        default="legacy",
+        choices=["legacy", "v2"],
+    )
     return parser.parse_args()
 
 
@@ -5542,6 +6672,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     scope=scope,
                     qos=args.qos or default_qos_for_action(action),
                     db_root=db_root,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0

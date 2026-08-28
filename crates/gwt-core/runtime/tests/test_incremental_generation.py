@@ -420,6 +420,62 @@ class IncrementalGenerationTests(_IncrementalFixture):
         )
         self.assertEqual(counting.encode.call_count, 0)
 
+    def test_nested_project_root_uses_project_relative_base_record_ids(self):
+        canonical_repo = self._make_canonical_repo()
+        nested_project = canonical_repo / "src"
+
+        result = self._build_protocol_v2(
+            nested_project,
+            "0000000000000201",
+            repo_hash="abc1234567890201",
+        )
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("base_document_count"), 8, result)
+        self.assertEqual(
+            result.get("overlay_document_count"),
+            0,
+            "canonical and visible records must use the same project-relative IDs",
+        )
+
+    def test_canonical_builder_filters_oversized_blobs_before_cat_file(self):
+        canonical_repo = self._make_canonical_repo()
+        oversized = canonical_repo / "src" / "oversized.txt"
+        oversized.write_bytes(b"x" * (runner.MAX_FILE_SIZE + 1))
+        self._run_git("-C", str(canonical_repo), "add", "src/oversized.txt")
+        self._run_git(
+            "-C",
+            str(canonical_repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "add oversized fixture",
+        )
+
+        original_cat_file = runner._git_cat_file_batch
+        requested_paths = []
+
+        def guarded_cat_file(root, entries):
+            requested_paths.extend(entry[0] for entry in entries)
+            self.assertNotIn("src/oversized.txt", requested_paths)
+            return original_cat_file(root, entries)
+
+        with mock.patch.object(
+            runner, "_git_cat_file_batch", side_effect=guarded_cat_file
+        ):
+            result = self._build_protocol_v2(
+                canonical_repo,
+                "0000000000000202",
+                repo_hash="abc1234567890202",
+            )
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertNotIn("src/oversized.txt", requested_paths)
+
     def test_same_repo_reuse_survives_a_fresh_runner_process(self):
         second_project = self._make_worktree_project("fresh-process-project")
 

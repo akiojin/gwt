@@ -14,6 +14,73 @@ use std::{
 
 use gwt_core::{GwtError, Result};
 
+/// A network-free canonical source snapshot pinned to an immutable Git tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalRootTree {
+    pub reference: String,
+    pub root_tree_oid: String,
+}
+
+/// Resolve the first locally available canonical ref to its immutable root
+/// tree OID. No fetch is attempted: refresh admission must pin a snapshot of
+/// the refs already present on disk.
+///
+/// An unborn/empty repository returns `Ok(None)` so callers can use the empty
+/// base contract and classify every visible record as overlay content.
+pub fn resolve_canonical_root_tree(repo_path: &Path) -> Result<Option<CanonicalRootTree>> {
+    const CANDIDATES: [&str; 5] = [
+        "origin/develop",
+        "origin/HEAD",
+        "origin/main",
+        "origin/master",
+        "HEAD",
+    ];
+
+    let repo_path = effective_refs_root(repo_path);
+    let repository_probe = gwt_core::process::run_git_logged(
+        &["rev-parse", "--is-inside-work-tree"],
+        Some(&repo_path),
+    )
+    .map_err(|error| GwtError::Git(format!("rev-parse repository probe: {error}")))?;
+    if !repository_probe.status.success() {
+        if repo_path.join(".git").exists() {
+            let stderr = String::from_utf8_lossy(&repository_probe.stderr)
+                .trim()
+                .to_string();
+            return Err(GwtError::Git(format!(
+                "repository metadata is present but unreadable: {stderr}"
+            )));
+        }
+        return Ok(None);
+    }
+    for reference in CANDIDATES {
+        let tree_expression = format!("{reference}^{{tree}}");
+        let output = gwt_core::process::run_git_logged(
+            &["rev-parse", "--verify", "--quiet", &tree_expression],
+            Some(&repo_path),
+        )
+        .map_err(|error| GwtError::Git(format!("rev-parse {tree_expression}: {error}")))?;
+        if !output.status.success() {
+            continue;
+        }
+        let root_tree_oid = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_ascii_lowercase();
+        let valid_oid = matches!(root_tree_oid.len(), 40 | 64)
+            && root_tree_oid.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !valid_oid {
+            return Err(GwtError::Git(format!(
+                "rev-parse {tree_expression}: invalid tree oid {root_tree_oid:?}"
+            )));
+        }
+        return Ok(Some(CanonicalRootTree {
+            reference: reference.to_string(),
+            root_tree_oid,
+        }));
+    }
+    Ok(None)
+}
+
 /// Issue #3629 AC-4: the bulk snapshot helpers are handed a *project root*,
 /// which for the workspace-home layout is not a git work tree. Resolve the
 /// directory the ref enumeration should actually run in — without spawning
@@ -218,6 +285,61 @@ mod tests {
         run(gwt_core::process::hidden_command("git")
             .args(["update-ref", refname, "HEAD"])
             .current_dir(repo));
+    }
+
+    fn root_tree(repo: &Path, reference: &str) -> String {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", &format!("{reference}^{{tree}}")])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn canonical_root_tree_prefers_local_origin_develop_without_fetching() {
+        let dir = init_repo();
+        let repo = dir.path();
+        std::fs::write(repo.join("source.txt"), "main\n").unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "source.txt"])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "main tree"])
+            .current_dir(repo));
+        create_remote_tracking_ref(repo, "refs/remotes/origin/main");
+
+        std::fs::write(repo.join("source.txt"), "develop\n").unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-am", "develop tree"])
+            .current_dir(repo));
+        create_remote_tracking_ref(repo, "refs/remotes/origin/develop");
+
+        let snapshot = resolve_canonical_root_tree(repo).unwrap().unwrap();
+        assert_eq!(snapshot.reference, "origin/develop");
+        assert_eq!(snapshot.root_tree_oid, root_tree(repo, "origin/develop"));
+        assert_ne!(
+            snapshot.root_tree_oid,
+            root_tree(repo, "origin/main"),
+            "precedence must select the develop tree already present locally"
+        );
+    }
+
+    #[test]
+    fn canonical_root_tree_returns_none_for_unborn_repository() {
+        let dir = TempDir::new().unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(dir.path()));
+        assert_eq!(resolve_canonical_root_tree(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_root_tree_rejects_corrupt_repository_metadata() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".git"), "not a gitdir").unwrap();
+        assert!(resolve_canonical_root_tree(dir.path()).is_err());
     }
 
     /// Issue #3629 AC-4: a workspace-home layout root is not a git work tree.
