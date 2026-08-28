@@ -25,7 +25,7 @@ use std::{
 };
 
 use gwt::index_search::{IndexSearchError, INDEX_NOT_READY_EXIT_CODE};
-use gwt::protocol::{IndexSearchMatchMode, IndexSearchScope};
+use gwt::protocol::{IndexSearchMatchMode, IndexSearchScope, IndexSearchTarget};
 use gwt_core::test_support::ScopedEnvVar;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -260,6 +260,59 @@ fn default_eight_scope_search_uses_one_batch_runner_process() {
     assert!(
         call.contains("--worktree-hash"),
         "file scopes require the worktree hash in the batch request: {call}"
+    );
+}
+
+#[test]
+fn mixed_batch_selects_file_view_and_preserves_public_result_shape() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = setup_search_fixture(
+        r#"{"ok": true, "scopes": {"issues": {"state": "fresh"}, "files": {"state": "fresh"}}, "scope_results": {"issues": {"issueResults": []}, "files": {"results": [{"path": "src/z_overlay.rs", "description": "authoritative overlay", "fileType": "rs", "distance": 0.1234, "match_mode": "all_terms", "matched_terms": ["alpha", "beta"], "missing_terms": []}, {"path": "src/a_base.rs", "description": "visible base", "fileType": "rs", "distance": 0.1234, "match_mode": "all_terms", "matched_terms": ["alpha", "beta"], "missing_terms": []}]}}}"#,
+    );
+
+    let outcome = gwt::search_project_index(
+        &fixture.repo,
+        "alpha beta",
+        &[IndexSearchScope::Issues, IndexSearchScope::Files],
+        None,
+        IndexSearchMatchMode::AllTerms,
+        true,
+    )
+    .expect("verified file View results must decode through the public entrypoint");
+
+    assert_eq!(
+        outcome
+            .results
+            .iter()
+            .map(|result| result.title.as_str())
+            .collect::<Vec<_>>(),
+        ["src/z_overlay.rs", "src/a_base.rs"],
+        "equal wire-rounded distances must preserve the runner's raw-distance rank"
+    );
+    let overlay = &outcome.results[0];
+    assert_eq!(overlay.scope, IndexSearchScope::Files);
+    assert_eq!(overlay.subtitle, "rs");
+    assert_eq!(overlay.preview, "authoritative overlay");
+    assert_eq!(overlay.distance, Some(0.1234));
+    assert_eq!(overlay.match_mode, Some(IndexSearchMatchMode::AllTerms));
+    assert_eq!(overlay.matched_terms, ["alpha", "beta"]);
+    assert!(overlay.missing_terms.is_empty());
+    assert_eq!(
+        overlay.target,
+        IndexSearchTarget::File {
+            path: "src/z_overlay.rs".to_string()
+        }
+    );
+
+    let invocations = search_invocations(&fixture.runner_log);
+    assert_eq!(invocations.len(), 1, "file search must stay single-process");
+    assert!(
+        invocations[0].contains("--file-index-protocol v2"),
+        "a file scope must select the atomic Worktree View protocol at the \
+         production runner boundary: {}",
+        invocations[0]
     );
 }
 
