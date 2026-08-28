@@ -11,6 +11,7 @@ only GC target.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -332,6 +333,408 @@ class GenerationStoreTests(unittest.TestCase):
         )
         active = json.loads(pointer.read_text(encoding="utf-8"))
         self.assertTrue((generations_root / active["generation"]).exists())
+
+
+class Phase71WorktreeViewPublicationTests(unittest.TestCase):
+    """AS-23/AS-25: publish a verified two-scope view, never a partial pair."""
+
+    def setUp(self):
+        runner._MODEL_CACHE = None
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.db_root = self.base / "index"
+        self.coordinator = self.base / "coordinator"
+        self.coordinator.mkdir()
+        self._env = mock.patch.dict(
+            os.environ,
+            {
+                "GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator),
+                "GWT_INDEX_FAKE_EMBEDDING": "1",
+            },
+            clear=False,
+        )
+        self._env.start()
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        self._git("init", "--quiet", str(self.repo))
+        self._git("-C", str(self.repo), "symbolic-ref", "HEAD", "refs/heads/develop")
+        (self.repo / "src").mkdir()
+        (self.repo / "docs").mkdir()
+        (self.repo / "src" / "feature.rs").write_text(
+            "//! feature v1\nfn feature() {}\n", encoding="utf-8"
+        )
+        (self.repo / "docs" / "guide.md").write_text(
+            "# Guide v1\n", encoding="utf-8"
+        )
+        self._commit("canonical v1")
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+        runner._MODEL_CACHE = None
+
+    def _git(self, *args: str) -> None:
+        env = os.environ.copy()
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_ATTR_NOSYSTEM"] = "1"
+        for key in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_PREFIX",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_SYSTEM",
+        ):
+            env.pop(key, None)
+        for key in list(env):
+            if (
+                key == "GIT_CONFIG_COUNT"
+                or key.startswith("GIT_CONFIG_KEY_")
+                or key.startswith("GIT_CONFIG_VALUE_")
+            ):
+                env.pop(key)
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as error:
+            self.fail(f"git fixture command timed out: {error}")
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"git {' '.join(args)} failed\n{completed.stderr}",
+        )
+
+    def _commit(self, message: str) -> None:
+        self._git("-C", str(self.repo), "add", "-A")
+        self._git(
+            "-C",
+            str(self.repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        )
+
+    def _build(self) -> dict:
+        return runner.action_index_files_v2(
+            project_root=str(self.repo),
+            repo_hash=REPO_HASH,
+            worktree_hash=WORKTREE_HASH,
+            mode="full",
+            db_root=self.db_root,
+            scope="files",
+            file_index_protocol="v2",
+        )
+
+    def _worktree_root(self) -> Path:
+        return (
+            runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+            / "worktrees"
+            / WORKTREE_HASH
+        )
+
+    def _head_path(self) -> Path:
+        return self._worktree_root() / "head.json"
+
+    def _head(self) -> dict:
+        path = self._head_path()
+        self.assertTrue(path.is_file(), "v2 build must publish a Worktree View head")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _view_descriptor(self, view_id: str) -> dict:
+        path = self._worktree_root() / "views" / view_id / "descriptor.json"
+        self.assertTrue(path.is_file(), f"view {view_id} is not materialized")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _expected_head_checksum(self, head: dict) -> str:
+        canonical = {
+            "schema_version": head["schema_version"],
+            "active_view_id": head["active_view_id"],
+            "previous_view_id": head["previous_view_id"],
+            "sequence": head["sequence"],
+        }
+        return hashlib.sha256(
+            json.dumps(
+                canonical,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def test_verified_view_publish_rotates_active_and_previous_atomically(self):
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        first_head = self._head()
+        first_active = first_head.get("active_view_id")
+        self.assertIsInstance(first_active, str, first_head)
+        self.assertEqual(first_head.get("sequence"), 1, first_head)
+        self.assertIsNone(first_head.get("previous_view_id"), first_head)
+        self.assertEqual(first_head.get("checksum"), self._expected_head_checksum(first_head))
+        first_head_bytes = self._head_path().read_bytes()
+
+        repeated = self._build()
+        self.assertTrue(repeated.get("ok"), repeated)
+        self.assertEqual(
+            self._head_path().read_bytes(),
+            first_head_bytes,
+            "publishing the same immutable pair must be an idempotent no-op",
+        )
+
+        (self.repo / "src" / "overlay.rs").write_text(
+            "//! overlay\nfn overlay() {}\n", encoding="utf-8"
+        )
+        second = self._build()
+        self.assertTrue(second.get("ok"), second)
+        second_head = self._head()
+
+        self.assertEqual(
+            second_head.get("previous_view_id"),
+            first_active,
+            "head rotation must retain the exact previously active view",
+        )
+        self.assertNotEqual(second_head.get("active_view_id"), first_active)
+        self.assertEqual(
+            second_head.get("checksum"), self._expected_head_checksum(second_head)
+        )
+        active_id = second_head["active_view_id"]
+        descriptor = self._view_descriptor(active_id)
+        self.assertEqual(descriptor["view_id"], active_id)
+        self.assertEqual(descriptor["base_generation_id"], second["base_generation_id"])
+        self.assertEqual(
+            descriptor["overlay_generation_id"], second["overlay_generation_id"]
+        )
+        self.assertEqual(descriptor["visible_counts"], {"files": 2, "files-docs": 1})
+
+    def test_head_replace_runs_only_after_base_and_overlay_artifacts_finish(self):
+        events = []
+        real_materialize = runner._materialize_file_artifact_pair
+        real_replace = os.replace
+
+        def record_materialize(*args, **kwargs):
+            result = real_materialize(*args, **kwargs)
+            events.append(f"artifact:{args[4]['kind']}:done")
+            return result
+
+        def record_replace(src, dst, *args, **kwargs):
+            if Path(dst) == self._head_path():
+                candidate_head = json.loads(Path(src).read_text(encoding="utf-8"))
+                candidate_view = (
+                    self._worktree_root()
+                    / "views"
+                    / candidate_head["active_view_id"]
+                )
+                self.assertTrue(
+                    (candidate_view / "descriptor.json").is_file(),
+                    "a head must never point at an unmaterialized View",
+                )
+                verify = getattr(runner, "_verify_file_index_v2_view", None)
+                self.assertTrue(callable(verify), "head publish requires closure verification")
+                self.assertTrue(
+                    verify(candidate_view),
+                    "the complete View closure must verify before head replace",
+                )
+                events.append("view:verified")
+                events.append("head:replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with mock.patch.object(
+            runner, "_materialize_file_artifact_pair", side_effect=record_materialize
+        ):
+            with mock.patch("os.replace", side_effect=record_replace):
+                result = self._build()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertIn("head:replace", events, events)
+        self.assertLess(events.index("artifact:base:done"), events.index("head:replace"))
+        self.assertLess(events.index("artifact:overlay:done"), events.index("head:replace"))
+        self.assertLess(events.index("view:verified"), events.index("head:replace"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
+    def test_head_writer_fsyncs_same_directory_temp_and_parent_around_replace(self):
+        writer = getattr(runner, "_write_file_index_v2_head_atomic", None)
+        self.assertTrue(
+            callable(writer),
+            "T-IDX-427 requires a durable same-directory Worktree View head writer",
+        )
+        head_path = self._head_path()
+        head_path.parent.mkdir(parents=True)
+        head_path.write_bytes(b'{"old":true}')
+        events = []
+        replacements = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def record_fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def record_replace(src, dst, *args, **kwargs):
+            events.append("replace")
+            replacements.append((Path(src), Path(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        payload = {
+            "schema_version": 1,
+            "active_view_id": "view-a",
+            "previous_view_id": None,
+            "sequence": 1,
+        }
+        payload["checksum"] = self._expected_head_checksum(payload)
+        with mock.patch("os.fsync", side_effect=record_fsync):
+            with mock.patch("os.replace", side_effect=record_replace):
+                writer(head_path, payload)
+
+        self.assertEqual(len(replacements), 1, replacements)
+        source, destination = replacements[0]
+        self.assertEqual(destination, head_path)
+        self.assertEqual(source.parent, head_path.parent)
+        replace_index = events.index("replace")
+        self.assertIn("fsync", events[:replace_index], events)
+        self.assertIn("fsync", events[replace_index + 1 :], events)
+        self.assertEqual(json.loads(head_path.read_text(encoding="utf-8")), payload)
+
+    def test_overlay_failure_after_new_base_keeps_old_pinned_view(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        self._head()
+        old_head = self._head_path().read_bytes()
+        old_views = set((self._worktree_root() / "views").iterdir())
+
+        (self.repo / "src" / "feature.rs").write_text(
+            "//! feature v2\nfn feature_v2() {}\n", encoding="utf-8"
+        )
+        self._commit("canonical v2")
+        real_materialize = runner._materialize_file_artifact_pair
+        published_bases = []
+
+        def fail_after_base(*args, **kwargs):
+            descriptor = args[4]
+            result = real_materialize(*args, **kwargs)
+            if descriptor.get("kind") == "base":
+                published_bases.append(Path(args[0]))
+                return result
+            raise RuntimeError("injected overlay failure after base publish")
+
+        with mock.patch.object(
+            runner, "_materialize_file_artifact_pair", side_effect=fail_after_base
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected overlay failure"):
+                self._build()
+
+        self.assertTrue(published_bases and published_bases[-1].is_dir())
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+        old_active = json.loads(old_head)["active_view_id"]
+        old_view = self._view_descriptor(old_active)
+        self.assertEqual(
+            old_view["base_generation_id"], baseline["base_generation_id"]
+        )
+        self.assertEqual(
+            set((self._worktree_root() / "views").iterdir()),
+            old_views,
+            "base-only or overlay-only state must never create a partial view",
+        )
+
+    def test_source_superseded_during_build_retains_artifacts_without_head_switch(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        self._head()
+        old_head = self._head_path().read_bytes()
+        old_overlay_dirs = set((self._worktree_root() / "overlays").iterdir())
+        source = self.repo / "src" / "feature.rs"
+        staged_bytes = b"//! dirty v2\nfn dirty_v2() {}\n"
+        source.write_bytes(staged_bytes)
+        real_materialize = runner._materialize_file_artifact_pair
+        mutated = False
+
+        def mutate_after_overlay(*args, **kwargs):
+            nonlocal mutated
+            result = real_materialize(*args, **kwargs)
+            if args[4].get("kind") == "overlay" and not mutated:
+                source.write_text(
+                    "//! dirty v3 arrived during build\nfn dirty_v3() {}\n",
+                    encoding="utf-8",
+                )
+                mutated = True
+            return result
+
+        with mock.patch.object(
+            runner, "_materialize_file_artifact_pair", side_effect=mutate_after_overlay
+        ):
+            result = self._build()
+
+        self.assertTrue(mutated, "fixture must supersede the immutable source snapshot")
+        self.assertTrue(result.get("ok"), result)
+        self.assertIs(result.get("superseded"), True, result)
+        self.assertIs(result.get("published"), False, result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+        self.assertGreater(
+            len(set((self._worktree_root() / "overlays").iterdir())),
+            len(old_overlay_dirs),
+            "verified immutable artifacts and CAS work remain reusable for the follow-up",
+        )
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            result["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        manifest = json.loads(
+            (overlay_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        feature = next(
+            entry for entry in manifest["entries"] if entry["path"] == "src/feature.rs"
+        )
+        self.assertEqual(feature["source_digest"], hashlib.sha256(staged_bytes).hexdigest())
+        cas_path = (
+            runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+            / "cas"
+            / feature["cas_key"][:2]
+            / f"{feature['cas_key']}.json"
+        )
+        self.assertTrue(cas_path.is_file(), "superseded snapshot CAS must be retained")
+
+    def test_head_replace_permission_error_preserves_old_head_bytes(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        self._head()
+        old_head = self._head_path().read_bytes()
+        (self.repo / "src" / "overlay.rs").write_text(
+            "//! second view\nfn second_view() {}\n", encoding="utf-8"
+        )
+        real_replace = os.replace
+
+        def deny_head_replace(src, dst, *args, **kwargs):
+            if Path(dst) == self._head_path():
+                self.assertEqual(
+                    self._head_path().read_bytes(),
+                    old_head,
+                    "head publication must not unlink or rename the old head before replace",
+                )
+                raise PermissionError(13, "simulated Windows open-handle denial")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with mock.patch("os.replace", side_effect=deny_head_replace):
+            result = self._build()
+
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
 
 
 if __name__ == "__main__":

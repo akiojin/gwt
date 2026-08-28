@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -300,6 +301,194 @@ class SearchMultiContractTests(unittest.TestCase):
                 payload.get("issueResults"),
                 f"stale scopes still serve verified results (FR-387): {payload}",
             )
+
+    def test_v2_view_verifier_rejects_checksum_descriptor_manifest_and_count_mismatch(self):
+        """FR-409/FR-412: prepublish closure verification rejects mixed pairs.
+
+        This deliberately stops at view selection. Overlay/base query merge,
+        ranking, and bounded backfill are owned by T-IDX-428; active/previous/
+        legacy fallback and classification are owned by T-IDX-430.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            project = base / "project"
+            (project / "src").mkdir(parents=True)
+            (project / "docs").mkdir()
+            (project / "src" / "alpha.rs").write_text(
+                "//! alpha implementation\nfn alpha() {}\n", encoding="utf-8"
+            )
+            (project / "docs" / "guide.md").write_text(
+                "# Alpha guide\n", encoding="utf-8"
+            )
+            git_env = os.environ.copy()
+            git_env["GIT_CONFIG_NOSYSTEM"] = "1"
+            git_env["GIT_CONFIG_GLOBAL"] = os.devnull
+            git_env["GIT_ATTR_NOSYSTEM"] = "1"
+            for key in (
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_NAMESPACE",
+                "GIT_PREFIX",
+                "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_SYSTEM",
+            ):
+                git_env.pop(key, None)
+            for key in list(git_env):
+                if (
+                    key == "GIT_CONFIG_COUNT"
+                    or key.startswith("GIT_CONFIG_KEY_")
+                    or key.startswith("GIT_CONFIG_VALUE_")
+                ):
+                    git_env.pop(key)
+            git_commands = (
+                ["git", "init", "--quiet", str(project)],
+                [
+                    "git",
+                    "-C",
+                    str(project),
+                    "symbolic-ref",
+                    "HEAD",
+                    "refs/heads/develop",
+                ],
+                ["git", "-C", str(project), "add", "."],
+                [
+                    "git",
+                    "-C",
+                    str(project),
+                    "-c",
+                    "user.name=gwt tests",
+                    "-c",
+                    "user.email=gwt-tests@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "canonical view fixture",
+                ],
+            )
+            for command in git_commands:
+                try:
+                    completed = subprocess.run(
+                        command,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env=git_env,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    self.fail(f"git fixture command timed out: {error}")
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    f"{' '.join(command)} failed\n{completed.stderr}",
+                )
+            result = runner.action_index_files_v2(
+                project_root=str(project),
+                repo_hash=REPO_HASH,
+                worktree_hash=WORKTREE_HASH,
+                mode="full",
+                db_root=db_root,
+                scope="files",
+                file_index_protocol="v2",
+            )
+            self.assertTrue(result.get("ok"), result)
+
+            v2_root = runner.resolve_file_index_v2_root(REPO_HASH, db_root=db_root)
+            worktree_root = v2_root / "worktrees" / WORKTREE_HASH
+            head_path = worktree_root / "head.json"
+            self.assertTrue(head_path.is_file(), "v2 build must publish a view head")
+            head = json.loads(head_path.read_text(encoding="utf-8"))
+            view_id = head.get("active_view_id")
+            self.assertIsInstance(view_id, str, head)
+            head_payload = {
+                "schema_version": head["schema_version"],
+                "active_view_id": head["active_view_id"],
+                "previous_view_id": head["previous_view_id"],
+                "sequence": head["sequence"],
+            }
+            expected_head_checksum = runner._sha256_json(head_payload)
+            self.assertEqual(head.get("checksum"), expected_head_checksum)
+            view_dir = worktree_root / "views" / view_id
+            view_descriptor_path = view_dir / "descriptor.json"
+            view = json.loads(view_descriptor_path.read_text(encoding="utf-8"))
+            self.assertRegex(view.get("descriptor_checksum") or "", r"^[0-9a-f]{64}$")
+            base_dir = runner.resolve_file_index_v2_base_dir(
+                REPO_HASH, view["base_generation_id"], db_root=db_root
+            )
+            overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+                REPO_HASH,
+                WORKTREE_HASH,
+                view["overlay_generation_id"],
+                db_root=db_root,
+            )
+            verify = getattr(runner, "_verify_file_index_v2_view", None)
+            self.assertTrue(
+                callable(verify),
+                "T-IDX-427 requires a prepublish Worktree View closure verifier",
+            )
+            self.assertTrue(
+                verify(view_dir),
+                "the freshly published active view must verify before mutation",
+            )
+
+            mutation_cases = {
+                "view descriptor checksum": (
+                    view_descriptor_path,
+                    lambda payload: payload.update(
+                        {"overlay_generation_id": "different-overlay"}
+                    ),
+                ),
+                "overlay descriptor pair": (
+                    overlay_dir / "descriptor.json",
+                    lambda payload: payload.update(
+                        {"base_generation_id": "different-base"}
+                    ),
+                ),
+                "base manifest digest": (
+                    base_dir / "manifest.json",
+                    lambda payload: payload["entries"].append(
+                        dict(payload["entries"][0], path="src/phantom.rs")
+                    ),
+                ),
+                "overlay manifest digest": (
+                    overlay_dir / "manifest.json",
+                    lambda payload: payload["entries"].append(
+                        {"path": "src/overlay-phantom.rs"}
+                    ),
+                ),
+                "base physical count": (
+                    base_dir / "descriptor.json",
+                    lambda payload: payload["document_counts"].update(
+                        {"files": payload["document_counts"]["files"] + 1}
+                    ),
+                ),
+            }
+            for label, (path, mutate) in mutation_cases.items():
+                with self.subTest(label=label):
+                    original = path.read_bytes()
+                    try:
+                        payload = json.loads(original.decode("utf-8"))
+                        mutate(payload)
+                        path.write_text(
+                            json.dumps(
+                                payload,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                ensure_ascii=True,
+                            ),
+                            encoding="utf-8",
+                        )
+                        self.assertFalse(
+                            verify(view_dir),
+                            f"{label} mismatch must reject the complete view",
+                        )
+                    finally:
+                        path.write_bytes(original)
 
 
 if __name__ == "__main__":
