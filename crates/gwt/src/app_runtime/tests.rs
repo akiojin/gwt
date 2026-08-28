@@ -3445,12 +3445,10 @@ fn insert_exited_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str, ex
     );
     runtime.runtimes.insert(
         window_id.to_string(),
-        WindowRuntime {
-            incarnation: super::next_window_runtime_incarnation(),
-            pane: Arc::new(Mutex::new(pane)),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::new(Mutex::new(pane)),
+        ),
     );
 }
 
@@ -3514,15 +3512,9 @@ fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
         .expect("test child pid");
     let child_started_at =
         gwt::process::host_process_start_time(child_pid).expect("test child process start time");
-    runtime.runtimes.insert(
-        window_id.to_string(),
-        WindowRuntime {
-            incarnation,
-            pane,
-            output_thread: None,
-            status_thread: None,
-        },
-    );
+    runtime
+        .runtimes
+        .insert(window_id.to_string(), WindowRuntime::new(incarnation, pane));
     if let Some(session_id) = runtime
         .active_agent_sessions
         .get(window_id)
@@ -3915,19 +3907,14 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     for window_id in &window_ids {
         let pane = Arc::new(Mutex::new(long_running_test_pane(window_id)));
-        runtime.runtimes.insert(
-            window_id.clone(),
-            WindowRuntime {
-                incarnation: super::next_window_runtime_incarnation(),
-                pane,
-                output_thread: Some(thread::spawn(|| loop {
-                    thread::park();
-                })),
-                status_thread: Some(thread::spawn(|| loop {
-                    thread::park();
-                })),
-            },
-        );
+        let mut window_runtime = WindowRuntime::new(super::next_window_runtime_incarnation(), pane);
+        window_runtime.output_thread = Some(thread::spawn(|| loop {
+            thread::park();
+        }));
+        window_runtime.status_thread = Some(thread::spawn(|| loop {
+            thread::park();
+        }));
+        runtime.runtimes.insert(window_id.clone(), window_runtime);
     }
     let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
 
@@ -3971,6 +3958,421 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
         elapsed < Duration::from_millis(400),
         "four live-PTY closes plus pane.list blocked the agent route for {elapsed:?}"
     );
+}
+
+/// Issue #3755 AC-1/AC-2: one pane whose output/status worker currently owns
+/// the Pane mutex must not hold the Tao event loop hostage. The authenticated
+/// read sync still has to return an unrelated launch-error pane and finish the
+/// request with an explicit availability receipt.
+#[test]
+fn agent_pane_sync_skips_a_contended_runtime_without_hiding_error_panes() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab(
+        "tab-project",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent, WindowPreset::Agent],
+    );
+    let raw_window_ids = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(raw_window_ids.len(), 2);
+    let busy_window_id = combined_window_id("tab-project", &raw_window_ids[0]);
+    let error_window_id = combined_window_id("tab-project", &raw_window_ids[1]);
+    assert!(tab
+        .workspace
+        .set_status(&raw_window_ids[1], WindowProcessStatus::Error));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let busy_pane = Arc::new(Mutex::new(long_running_test_pane(&busy_window_id)));
+    runtime.runtimes.insert(
+        busy_window_id.clone(),
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::clone(&busy_pane),
+        ),
+    );
+    runtime.launch_error_terminal_details.insert(
+        error_window_id.clone(),
+        "agent bootstrap failed before PTY start".to_string(),
+    );
+    let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
+        .expect("authenticated principal");
+    let (locked_tx, locked_rx) = mpsc::sync_channel(1);
+    let holder_pane = Arc::clone(&busy_pane);
+    let holder = thread::spawn(move || {
+        let _guard = holder_pane.lock().expect("hold pane mutex");
+        locked_tx.send(()).expect("signal held mutex");
+        thread::sleep(Duration::from_millis(800));
+    });
+    locked_rx.recv().expect("pane mutex acquired");
+
+    let mut events = None;
+    let mut elapsed = Duration::MAX;
+    let logs = capture_tracing_events(|| {
+        let started = Instant::now();
+        events = Some(runtime.handle_agent_frontend_event(
+            "pane-client".to_string(),
+            principal,
+            AgentFrontendRequest::Ready,
+        ));
+        elapsed = started.elapsed();
+    });
+    let events = events.expect("pane sync events");
+    holder.join().expect("pane mutex holder");
+
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "pane.read sync waited {elapsed:?} for an unrelated pane mutex"
+    );
+    assert!(
+        events.iter().any(|outbound| matches!(
+            &outbound.event,
+            BackendEvent::TerminalSnapshot { id, .. } if id == &error_window_id
+        )),
+        "the launch-error pane must remain readable while another pane is busy: {events:?}"
+    );
+    assert!(
+        events.iter().any(|outbound| {
+            serde_json::to_value(&outbound.event)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("pane_sync_complete")
+        }),
+        "pane.read needs an explicit completion receipt: {events:?}"
+    );
+    assert!(events.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::PaneSyncComplete {
+            busy_window_ids,
+            empty_window_ids,
+            unavailable_window_ids,
+            failed_window_ids,
+        } if busy_window_ids == &vec![busy_window_id.clone()]
+            && empty_window_ids.is_empty()
+            && unavailable_window_ids.is_empty()
+            && failed_window_ids.is_empty()
+    )));
+    let busy_log = logs
+        .iter()
+        .find(|event| {
+            event.target == "gwt.pane.sync"
+                && event.fields.get("window_id").map(String::as_str)
+                    == Some(busy_window_id.as_str())
+                && event.fields.get("stage").map(String::as_str) == Some("pane_snapshot_try_lock")
+        })
+        .expect("busy snapshot diagnostic");
+    assert_eq!(
+        busy_log.fields.get("outcome").map(String::as_str),
+        Some("busy")
+    );
+    assert!(busy_log.fields.contains_key("elapsed_ms"));
+}
+
+/// Issue #3755 AC-2: completion outcomes are disjoint. A blank live terminal
+/// still has a replayable vt100 snapshot, a missing runtime is unavailable,
+/// and a poisoned parser mutex is an internal failure rather than busy.
+#[test]
+fn agent_pane_sync_completion_distinguishes_snapshot_unavailable_and_poisoned() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab(
+        "tab-project",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+        ],
+    );
+    let window_ids = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| combined_window_id("tab-project", &window.id))
+        .collect::<Vec<_>>();
+    let empty_window_id = window_ids[0].clone();
+    let unavailable_window_id = window_ids[1].clone();
+    let failed_window_id = window_ids[2].clone();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    runtime.window_lookup.remove(&unavailable_window_id);
+    let empty_pane = Arc::new(Mutex::new(long_running_test_pane(&empty_window_id)));
+    runtime.runtimes.insert(
+        empty_window_id.clone(),
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::clone(&empty_pane),
+        ),
+    );
+    let failed_pane = Arc::new(Mutex::new(long_running_test_pane(&failed_window_id)));
+    runtime.runtimes.insert(
+        failed_window_id.clone(),
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::clone(&failed_pane),
+        ),
+    );
+    let poison_pane = Arc::clone(&failed_pane);
+    let _ = thread::spawn(move || {
+        let _guard = poison_pane.lock().expect("poison target pane");
+        panic!("intentional pane mutex poison");
+    })
+    .join();
+    let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
+        .expect("authenticated principal");
+
+    let mut events = None;
+    let logs = capture_tracing_events(|| {
+        events = Some(runtime.handle_agent_frontend_event(
+            "pane-client".to_string(),
+            principal,
+            AgentFrontendRequest::Ready,
+        ));
+    });
+    let events = events.expect("pane sync events");
+
+    assert!(events.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::TerminalSnapshot { id, .. } if id == &empty_window_id
+    )));
+    assert!(events.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::PaneSyncComplete {
+            empty_window_ids,
+            busy_window_ids,
+            unavailable_window_ids,
+            failed_window_ids,
+        } if empty_window_ids.is_empty()
+            && busy_window_ids.is_empty()
+            && unavailable_window_ids == &vec![unavailable_window_id.clone()]
+            && failed_window_ids == &vec![failed_window_id.clone()]
+    )));
+    let failed_log = logs
+        .iter()
+        .find(|event| {
+            event.target == "gwt.pane.sync"
+                && event.fields.get("window_id").map(String::as_str)
+                    == Some(failed_window_id.as_str())
+                && event.fields.get("stage").map(String::as_str) == Some("pane_snapshot_try_lock")
+        })
+        .expect("poisoned snapshot diagnostic");
+    assert_eq!(
+        failed_log.fields.get("outcome").map(String::as_str),
+        Some("poisoned")
+    );
+    assert!(failed_log.fields.contains_key("elapsed_ms"));
+}
+
+/// Issue #3755 AC-3: removing mutex waits must not hide a new multi-pane
+/// serialization stall. Four panes at the replay cap still finish as one
+/// bounded GUI dispatch on the debug build used by regression tests.
+#[test]
+fn agent_pane_sync_with_full_scrollback_stays_bounded() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab(
+        "tab-project",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+            WindowPreset::Agent,
+        ],
+    );
+    let window_ids = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| combined_window_id("tab-project", &window.id))
+        .collect::<Vec<_>>();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let replay = (0..5_000)
+        .map(|line| format!("snapshot-line-{line:04}\n"))
+        .collect::<String>();
+    for window_id in &window_ids {
+        let mut pane = long_running_test_pane(window_id);
+        pane.process_bytes(replay.as_bytes());
+        runtime.runtimes.insert(
+            window_id.clone(),
+            WindowRuntime::new(
+                super::next_window_runtime_incarnation(),
+                Arc::new(Mutex::new(pane)),
+            ),
+        );
+    }
+    let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
+        .expect("authenticated principal");
+
+    let started = Instant::now();
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::Ready,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "four full-scrollback snapshots blocked the GUI dispatch for {elapsed:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|outbound| matches!(outbound.event, BackendEvent::TerminalSnapshot { .. }))
+            .count(),
+        window_ids.len()
+    );
+    assert!(events
+        .iter()
+        .any(|outbound| matches!(outbound.event, BackendEvent::PaneSyncComplete { .. })));
+}
+
+/// Issue #3755 AC-2/AC-3: close removes the runtime and window synchronously,
+/// but a contended Pane mutex is cleanup work and must never be awaited by the
+/// GUI event loop.
+#[test]
+fn agent_pane_close_bypasses_a_contended_pane_lock() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-holder".to_string())));
+    let window_id = "tab-project::agent-project".to_string();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let holder_identity = install_manual_launch_holder(
+        &mut runtime,
+        &project,
+        "session-holder",
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    install_manual_holder_capability(&mut runtime, &project, &window_id, &holder_identity);
+    let exact_runtime = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("exact holder runtime");
+    let busy_pane = exact_runtime.pane.clone();
+    let pty = exact_runtime.pty.clone();
+    let incarnation = exact_runtime.incarnation;
+    let runtime_path =
+        gwt_agent::runtime_state_path(&runtime.sessions_dir, &holder_identity.session_id);
+    let principal = AgentSessionPrincipal::for_test(&project, "session-closer")
+        .expect("authenticated principal");
+    let (locked_tx, locked_rx) = mpsc::sync_channel(1);
+    let holder_pane = Arc::clone(&busy_pane);
+    let holder = thread::spawn(move || {
+        let _guard = holder_pane.lock().expect("hold pane mutex");
+        locked_tx.send(()).expect("signal held mutex");
+        thread::sleep(Duration::from_millis(800));
+    });
+    locked_rx.recv().expect("pane mutex acquired");
+
+    let mut events = None;
+    let mut elapsed = Duration::MAX;
+    let logs = capture_tracing_events(|| {
+        let started = Instant::now();
+        events = Some(runtime.handle_agent_frontend_event(
+            "pane-client".to_string(),
+            principal,
+            AgentFrontendRequest::CloseWindow {
+                id: window_id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        ));
+        elapsed = started.elapsed();
+    });
+    let events = events.expect("pane close events");
+    holder.join().expect("pane mutex holder");
+
+    let proof_deadline = Instant::now() + Duration::from_secs(5);
+    let terminal_proof = loop {
+        let child_exited = pty
+            .try_wait()
+            .expect("probe exact holder child exit")
+            .is_some();
+        let proof = gwt_agent::SessionRuntimeState::load(&runtime_path).ok();
+        if child_exited
+            && proof
+                .as_ref()
+                .is_some_and(|proof| proof.status == gwt_agent::AgentStatus::Stopped)
+        {
+            break proof.expect("terminal runtime proof");
+        }
+        assert!(
+            Instant::now() < proof_deadline,
+            "exact holder child exit and terminal proof were not observed before the deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "pane.close waited {elapsed:?} for the pane mutex"
+    );
+    assert!(matches!(
+        events.first(),
+        Some(OutboundEvent {
+            event: BackendEvent::PaneCloseResult { ok: true, .. },
+            ..
+        })
+    ));
+    assert!(!runtime.runtimes.contains_key(&window_id));
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+    let kill_log = logs
+        .iter()
+        .find(|event| {
+            event.target == "gwt.pane.teardown"
+                && event.fields.get("stage").map(String::as_str) == Some("pty_kill")
+                && event.fields.get("outcome").map(String::as_str) == Some("completed")
+        })
+        .expect("pty_kill teardown diagnostic");
+    assert_eq!(
+        kill_log.fields.get("window_id").map(String::as_str),
+        Some(window_id.as_str())
+    );
+    assert!(kill_log.fields.contains_key("elapsed_ms"));
+    assert_eq!(kill_log.fields.get("ok").map(String::as_str), Some("true"));
+    assert_eq!(
+        terminal_proof.execution_identity.as_ref(),
+        Some(&holder_identity)
+    );
+    assert_eq!(terminal_proof.runtime_incarnation, Some(incarnation));
 }
 
 /// Issue #3629 AC-12: an uncorrelated self-close stays refused, but the
@@ -4342,12 +4744,7 @@ fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
     let pane = Arc::new(Mutex::new(pane));
     runtime.runtimes.insert(
         window_id.to_string(),
-        WindowRuntime {
-            incarnation: super::next_window_runtime_incarnation(),
-            pane: pane.clone(),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(super::next_window_runtime_incarnation(), pane.clone()),
     );
     let principal =
         AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
@@ -7888,12 +8285,10 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
     pane.process_bytes(b"hello from frontend ready\n");
     runtime.runtimes.insert(
         window_id.clone(),
-        WindowRuntime {
-            incarnation: super::next_window_runtime_incarnation(),
-            pane: Arc::new(Mutex::new(pane)),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::new(Mutex::new(pane)),
+        ),
     );
 
     let events =
@@ -7956,12 +8351,10 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
 
     runtime.runtimes.insert(
         window_id.clone(),
-        WindowRuntime {
-            incarnation: super::next_window_runtime_incarnation(),
-            pane: Arc::new(Mutex::new(pane)),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::new(Mutex::new(pane)),
+        ),
     );
 
     let events =
@@ -8039,12 +8432,10 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
 
     runtime.runtimes.insert(
         window_id.clone(),
-        WindowRuntime {
-            incarnation: super::next_window_runtime_incarnation(),
-            pane: Arc::new(Mutex::new(pane)),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(
+            super::next_window_runtime_incarnation(),
+            Arc::new(Mutex::new(pane)),
+        ),
     );
 
     let events =
@@ -8104,12 +8495,10 @@ fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
         .expect("pane");
         runtime.runtimes.insert(
             window_id.clone(),
-            WindowRuntime {
-                incarnation: super::next_window_runtime_incarnation(),
-                pane: Arc::new(Mutex::new(pane)),
-                output_thread: None,
-                status_thread: None,
-            },
+            WindowRuntime::new(
+                super::next_window_runtime_incarnation(),
+                Arc::new(Mutex::new(pane)),
+            ),
         );
     }
 
@@ -26477,12 +26866,10 @@ fn stale_runtime_events_cannot_mutate_same_window_successor() {
     let predecessor_incarnation = super::next_window_runtime_incarnation();
     runtime.runtimes.insert(
         window_id.clone(),
-        WindowRuntime {
-            incarnation: predecessor_incarnation,
-            pane: Arc::new(Mutex::new(long_running_test_pane(&window_id))),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(
+            predecessor_incarnation,
+            Arc::new(Mutex::new(long_running_test_pane(&window_id))),
+        ),
     );
     runtime.stop_window_runtime(&window_id);
 
@@ -26493,12 +26880,10 @@ fn stale_runtime_events_cannot_mutate_same_window_successor() {
     );
     runtime.runtimes.insert(
         window_id.clone(),
-        WindowRuntime {
-            incarnation: successor_incarnation,
-            pane: Arc::new(Mutex::new(long_running_test_pane(&window_id))),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(
+            successor_incarnation,
+            Arc::new(Mutex::new(long_running_test_pane(&window_id))),
+        ),
     );
     runtime
         .window_pty_statuses
@@ -26956,15 +27341,9 @@ fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit(
     let host_started_at =
         gwt::process::host_process_start_time(std::process::id()).expect("Host process start time");
     let incarnation = super::next_window_runtime_incarnation();
-    runtime.runtimes.insert(
-        window_id.clone(),
-        WindowRuntime {
-            incarnation,
-            pane,
-            output_thread: None,
-            status_thread: None,
-        },
-    );
+    runtime
+        .runtimes
+        .insert(window_id.clone(), WindowRuntime::new(incarnation, pane));
     gwt_agent::persist_session_running_state_if_execution_identity_matches(
         &runtime.sessions_dir,
         &identity,
@@ -28188,12 +28567,7 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     let pane = Arc::new(Mutex::new(pane));
     runtime.runtimes.insert(
         window_id.clone(),
-        WindowRuntime {
-            incarnation: super::next_window_runtime_incarnation(),
-            pane: pane.clone(),
-            output_thread: None,
-            status_thread: None,
-        },
+        WindowRuntime::new(super::next_window_runtime_incarnation(), pane.clone()),
     );
 
     // Pump the pty into the vt100 parser the way the production output thread
