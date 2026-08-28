@@ -2,6 +2,371 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.83.5] - 2026-08-27
+
+### Bug Fixes
+
+- **workspace:** 同一 container duplicate Work への二重 attach を遮断し ensure を self-heal 化 (#3684)
+- **daemon:** Respect subscribed project scope
+- Requeue 後の stale retry 復活を防止
+- **verify:** Persist bounded failure output tails
+- **pane:** GUIイベントループのPTY待機を解消する
+- **daemon:** Fence保持デーモンのendpoint descriptor消失をself-healで復旧 (#3766)
+- **daemon:** Descriptor self-healの同期I/Oをspawn_blockingへ退避 (#3766)
+
+### Miscellaneous Tasks
+
+- **ci:** Base 誤り PR #3687 close 後の CI 再実行トリガー (#3684)
+- **ci:** Test (Rust) の 105 分ハングを再トリガーで解消する (#3684)
+- **ci:** Build job の 60 分ハングを再トリガーで解消する (#3684)
+- **work:** Issue 3757 の完了状態を記録
+- **work:** Issue 3757 の開始記録を補完
+- **work:** Record issue 3596 delivery state
+- **work:** Settle issue 3596 delivery
+- **work:** Issue 3765 の実行イベント記録を追加 (#3765)
+
+
+## [9.83.4] - 2026-08-25
+
+### Bug Fixes
+
+- Reset autonomous attempts when requeueing failures
+- 起動時に stale generation を安全に回収する
+
+## [9.83.3] - 2026-08-25
+
+### Bug Fixes
+
+- **pane:** Keep pane operations answering after live PTY closes
+- **gwtd:** Issue.monitor.* の応答に着地した project store を明示する
+- **launch:** 滞留 Active generation の自己回復と owner-kind 正準化で脱出不能動線を解消する
+- **launch:** Owner-kind heal を activation まで通し、自己回復の権限安全性を強化する
+- **test:** Windows で unix 限定 import が -D warnings を落とす問題を修正
+- **test:** Trusted-store のパス比較を Windows 短縮名に対応させる
+- **execution:** Terminal Work の PR ゲート拒否に到達可能な脱出路を示す
+- **test:** Unix 限定 fixture の無条件定義が Windows の -D warnings を落とす問題を修正
+- **ci:** Wait out dpkg lock on Ubuntu apt steps
+- **launch:** 死んだ session が保持する generation を fresh launch が supersede できるようにする
+- **launch:** Completed generation を持つ owner の fresh launch を successor 経路へ通す
+- **lint:** Scrollback の clear を fill(None) に置き換える
+- **test:** Quota-hold テストの reset 時刻を実時刻からの相対値にする
+
+### Miscellaneous Tasks
+
+- **lint:** Windows でだけ落ちる clippy 指摘 4 件を解消する
+- **work:** Record #3426 work events
+- **work:** Record #3426 PR handoff work event
+- **work:** Record #3426 work events
+- **work:** Record #3426 work events
+- **work:** Issue #3472 の no-action 終端を記録
+- **work:** Issue #3472 の Work イベントを記録する
+- **work:** Issue #3472 の terminal Work update を記録する
+- **work:** Issue #3472 の Work イベント shard を記録
+- **work:** Issue #3472 の Work イベント shard を記録する
+- **work:** Issue #3472 の完了 Work イベント shard を記録する
+
+### Testing
+
+- **daemon:** Tolerate tight local readiness retry budgets
+- **daemon:** Readiness deadline の試行回数 assert を負荷耐性にする
+- **index:** Git context 比較テストを env_test_lock で直列化する
+- **launch:** Completed predecessor が Ready 前も current のまま残ることを pin する
+
+## [9.83.2] - 2026-08-19
+
+### Bug Fixes
+
+- **windows:** PTY start gate を console subsystem の gwtd で実行する
+- **test:** Gh 依存テストの実 GitHub API 到達を遮断する unsandboxed-gh guard を導入
+- **pane:** PM セッションから残置 agent pane を close / stop できるようにする
+- **test:** 新規 pane close テストに gwt home の所有を強制する
+
+### Miscellaneous Tasks
+
+- **lint:** Windows 専用テストの result_large_err を許可する
+- **work:** Issue #3631 の start event を記録する
+- **work:** Work event shard を追記 (#3675 done 終端)
+- **work:** Work event shard を追跡へ追加
+- **work:** Work event shard を追跡へ追加
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+- **work:** #3552 の Work イベントを記録する
+
+### Testing
+
+- **windows:** Agent launch E2E の marker 待ちを飽和耐性の予算と診断に変更 (#3656)
+- **launch:** PTY start gate の sibling 解決テストを POSIX host でも成立させる
+- **pane:** #3503 / #3552 の受け入れ条件を回帰ロックとして固定する
+
+
+## [9.83.1] - 2026-08-18
+
+### Bug Fixes
+
+- **verify:** Derive を CI gate の package 絞り込みへ統一し未検証 target を塞ぐ
+- **coordination:** Agent の blocked を PM へ届く経路に配線する
+- **execution:** Settle 済み session の pane 観測を接続時 409 で拒否しない (#3667)
+- **issue-monitor:** Resume が launch_profile を無視して未認証 provider へ再束縛するのを防ぐ
+- **pane:** Gwtd pane.close を全 window で機能させ close 結果を明示応答にする
+
+### Miscellaneous Tasks
+
+- **work:** #3640 の終端 Work event shard を追加
+- **work:** Issue #3655 の Work event を記録する
+- **work:** Issue #3655 の terminal Work event を記録する
+- **work:** Issue #3667 の Work event を記録する
+- **work:** Issue #3676 の Work event を記録する
+- **work:** Issue #3676 の done 遷移 Work event を記録する
+- Cargo fmt を適用する
+- **work:** Issue #3629 の Work event を記録する
+
+### Performance
+
+- **git:** Workspace-home layout の解決を fs 判定にして失敗確定 spawn を根絶する
+
+
+## [9.83.0] - 2026-08-18
+
+### Bug Fixes
+
+- **test:** Daemon scan marker の待機を固定 2 秒から子プロセスの状態観測へ置き換える
+- **launch:** Provider の quota 枯渇を終端扱いせず hold として扱う
+- **launch:** Quota 枯渇を live pane でも検出し provider 跨ぎで閉じる
+- **launch:** Rustdoc の HTML タグ誤認と timezone 依存テストを修正
+- **agent:** エージェント PTY の終了を exit code / signal / 終了時刻付きで記録する
+- Initialize Grok quick-start issue lineage
+
+### Features
+
+- Grok Build エージェント対応を追加
+- Configure Grok models and PM launch profiles
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3641 の Work event を記録する
+- **work:** #3659 の Work event shard を記帳する
+- **work:** #3659 の Work event shard を追記する
+- **work:** Issue #3616 の Work receipt を settle する
+- **work:** Issue #3341 の Work event を記録する
+- **work:** Issue #3341 の verification event を記録する
+- **work:** Issue #3341 の完了 Work event を記録する
+- **work:** Issue #3608 の完了 event を記録する
+
+### Security
+
+- **test:** Playwright ブラウザ実体化を phase 分離と timeout/retry/cache で耐障害化する
+
+### Styling
+
+- **launch:** コンフリクト解決後の pub use を rustfmt 正準形に戻す
+
+### Testing
+
+- Grok Build の live E2E を安定化
+- Grok Build 選択の backend 反映を待機
+- **launch:** 実 PTY で quota notice から Waiting までを検証する
+
+## [9.82.0] - 2026-08-18
+
+### Bug Fixes
+
+- **test:** Claim driver defer テストの fixture を thread-local gwt home に固定する
+- **pm:** PM の一意性を project store ではなくリポジトリ単位で判定する
+- **pm:** 常駐ループ gate の呼び出し元 Session を dispatcher から注入する
+- **github:** GraphQL レート制限を識別可能にし枯渇時の無駄な発行を止める
+- **test:** App_runtime の共有 runtime fixture から process-global HOME 解決を除去し機械検出を追加する
+- **test:** Intake session テストの Start Work 予約ディレクトリを自テストの home へ固定する
+- **issue-monitor:** Canvas から消えた agent window のスロットを回収する
+- **workspace:** Detached HEAD の worktree で workspace.update の失敗理由と次アクションを伝える
+- **pm:** Pm.message.send が送達成功を失敗と誤報告する問題を修正
+- **cli:** Avoid terminal snapshots in pane list
+- **gwtd:** 失敗した JSON operation を ok:false envelope で返す
+- **cli:** Pane.list を旧backendへフォールバックさせる
+- **cli:** Pane 応答待ちの budget を GUI stall に合わせる
+- **daemon:** 長い runtime path で Unix socket が bind できない問題を修正
+- **execution:** Terminal Work でも settlement receipt 要求で完了できなくする閉ループを解消
+- **work:** Workイベントをimmutable shardへ分割する
+- **work:** Shard移行後の回帰契約を修正する
+- **work:** Work event shard intakeをbucket化する
+- **pm:** 変化の無い周回で PM が digest を報告しないようにする
+- **test:** AppRuntime を組み立てる bin gwt テスト 184 件に gwt home の所有を強制する
+- **test:** Tempdir を作る bin gwt テスト 231 件に gwt home の所有を強制する
+- **test:** Lock 無しの ScopedEnvVar を排除し crate 全体で env 直列化を機械検証する
+- **test:** Env lock の poison 復帰を crate 全体へ広げ cascade で真因が隠れるのを止める
+- **daemon:** GUI front door が daemon endpoint スロットへ sentinel を書き込むのをやめる
+- **test:** Develop 取り込みで増えた tempdir テスト 24 件に gwt home の所有を強制する
+- **workspace:** 同一ブランチの別 worktree が execution container 統合で失われるのを防ぐ
+- **workspace:** 分裂 project store の移行を復活させ writer 排他と eventless Work 欠落を修正する
+- **workspace:** Store_consolidate の apply authority と dry-run 審査ゲートを塞ぐ
+- **pane:** 無応答 backend を timeout ではなく識別可能な条件として返す
+- **windows:** Tray 起動失敗の診断をプロジェクトログへ確実に残す
+- **workspace:** 登録済み PM の detached worktree から Work を更新できるようにする
+- **workspace:** #3491 の typed branch identity と PM の branchless authority を統合する
+- **hooks:** 本ブランチが持ち込んだ .codex/hooks.json の machine-local パスを戻す
+- **daemon:** GUI を runtime daemon の起動・監視主体にする
+- **issue-monitor:** 手動復旧後の failure hold を operator が解除できるようにする
+
+### Features
+
+- **pm:** Pm.stop で孤児 PM を CLI から停止・登録解除できるようにする
+
+### Miscellaneous Tasks
+
+- **work:** #3607 の Work event ログを記録する
+- **work:** Issue #3611 の Work event を settle する
+- **work:** #3604 の Work イベントを記録する
+- **work:** #3604 の終端 Work イベントを記録する
+- **work:** Work イベントログを更新
+- **work:** Issue #3491 の Work lifecycle event を記録する
+- **work:** Issue #3608 の Work event を記録する
+- **work:** Issue #3608 の resume event を記録する
+- **work:** Record issue 3510 completion
+- **work:** Record issue 3510 work events
+- **work:** Record issue 3510 verification and completion events
+- **work:** Record issue 3510 verification events
+- **work:** Issue #3476 の Work event を記録する
+- **work:** Work event を同期する
+- **work:** Terminal Work event を記録する
+- CI の Rust テストを再実行する
+- **work:** Issue #3476 の完了状態を記録する
+- **work:** #3560 引き継ぎ時点の Work event を記録する
+- **work:** #3560 再開時点の Work event を記録する
+- **work:** #3560 Ready 化時点の Work event を記録する
+- **work:** Issue #3632 の Work event を記録する
+- **work:** Issue #2338 の Work event を記録する
+- **work:** Issue #2338 の Work を done で終端する
+- **work:** #3607 の Work 完了イベントを記録する
+- **work:** #3606 の作業 Work event を記録
+- **work:** #3606 の完了 Work event を記録
+- **work:** #1764 の Work event ledger を更新する
+- **work:** #1764 の Work を done として記帳する
+- **work:** Issue #3477 の作業イベントと managed hook 更新を記録
+- **work:** Issue #3477 の作業イベントを記録
+- **work:** Issue #3477 の完了 Work event を記録
+- **work:** Issue #3633 の Work イベントを記録する
+- **work:** Issue #3633 の Work 完了状態を記録する
+- **work:** Issue #3645 の Work event を記録する
+
+### Performance
+
+- **gui:** Work/branch scan の同期 git 実行を projection から除去する
+
+### Testing
+
+- **gui:** #3611 の projection テスト 2 件を 1 件へ統合する
+- **work:** App runtimeのshard回帰契約を更新する
+- **work:** Workspace CLIのshard回帰契約を更新する
+- **work:** Bucket shardのapp runtime回帰契約を修正する
+- **work:** Symlink 拒否契約の digest bucket ケースを実行可能にする
+- **work:** Bucket shardの配布契約とCLI回帰契約を追随させる
+- **work:** Develop の受領テストを shard delivery に追随させる
+- **workspace:** 再起動を跨いだ store 解決の安定性と PM worktree の identity を固定する
+- **gwt:** Env lock guard を poison 耐性にし 1 件の flake が 7 件の失敗に化けるのを止める
+- **daemon:** Daemon の終了理由抽出にテストを足す
+
+## [9.81.0] - 2026-08-15
+
+### Bug Fixes
+
+- **workspace:** Project store identity の曖昧性を拒否する
+- **issue-monitor:** 単一 PR の merge で Issue を終端 merged 扱いしない
+- **test:** Fake docker の ETXTBSY spawn を再試行する
+
+### Features
+
+- **workspace:** Project store を repository identity へ収束させ分裂 store を移行する
+- **pane:** Surface agent approval waits
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3466 の完了 Work event を記録
+- **work:** #3466 の検証準備を記録する
+
+## [9.80.0] - 2026-08-15
+
+### Bug Fixes
+
+- **verify:** Lease control dir の掃除で生きた holder を消さないようにする
+- Enable Windows PM immediate monitor scans
+- **launch:** Readiness SessionStart の bounded retry と daemon fan-out nonce 欠落を解消する
+- **execution:** Stranded lifecycle の回復誘導を整合させる
+- **pr:** Work receipt の前提を撤去
+
+### Features
+
+- **verify:** 重量級検証をホスト単位 lease で直列化する
+
+### Miscellaneous Tasks
+
+- **work:** Record #3576 work events and lockfile refresh
+- **work:** Record #3576 PR handoff receipt
+- Update Issue 3569 verification state
+- **work:** Record Issue 3569 continuation
+- **work:** Issue 3587 の検証証跡を記録する
+- **work:** #3581 の handoff receipt を記録
+
+### Testing
+
+- **ci:** Cover Windows launch_now control path
+- **ci:** Enforce authenticated Windows monitor wake
+- **ci:** Cover Windows launch_now dispatch
+
+## [9.79.1] - 2026-08-15
+
+### Bug Fixes
+
+- **test:** Stabilize issue monitor daemon synchronization
+- **test:** Observe issue monitor scan ownership directly
+- **execution:** Recover blocked build aborts
+- **execution:** Harden blocked abort reconciliation
+- **execution:** Bound blocked abort diagnostics
+
+### Miscellaneous Tasks
+
+- Refresh lockfile for v9.79.0
+- Record issue monitor verification
+- Record issue monitor PR handoff
+- Settle issue monitor work handoff
+- **work:** Record issue monitor PR handoff receipt
+
+
+## [9.79.0] - 2026-08-14
+
+### Bug Fixes
+
+- Recover manual launches from terminal generations
+- **launch:** Stabilize segmented wizard commits
+- **test:** Stabilize Windows agent launch E2E
+- **test:** Warm Windows metadata probe in E2E
+- **test:** Isolate manual launch authority fixtures
+
+### Features
+
+- **launch:** Harden manual successor handoff
+
+### Miscellaneous Tasks
+
+- Record issue 3547 verification status
+
+### Testing
+
+- **launch:** Fence live wizard state cleanup
+- **playwright:** Isolate logs preset from launch wizard
+
+## [9.78.3] - 2026-08-14
+
+### Bug Fixes
+
+- **pm:** Guarantee verified pane message delivery
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger release checks for v9.78.2
+- **work:** Record issue 3550 completion
+- **ci:** Retrigger checks for PR #3565
+
+
 ## [9.78.2] - 2026-08-14
 
 ### Bug Fixes

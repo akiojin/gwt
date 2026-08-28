@@ -14,8 +14,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 ## Why gwt
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
-  `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`, and custom
-  agents from a shared canvas.
+  `Grok Build`, `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`,
+  and custom agents from a shared canvas.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
   and `question` posts.
@@ -103,10 +103,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 
   Gemini CLI remains available in gwt as a legacy option for eligible
   Standard/Enterprise or API-key workflows.
+
+  Grok Build is provided by xAI's official `grok` command. Install it with
+  `npm install -g @xai-official/grok`, then authenticate on first launch or set
+  `XAI_API_KEY` for API-key workflows.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+  - `XAI_API_KEY`
 - Python 3.9+ when gwt needs to bootstrap or repair the shared project index runtime
 
 Linux desktop builds also require WebKitGTK-related system packages. See
@@ -367,6 +372,11 @@ unchanged.
 - Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
   from the CLI; every other agent session must use the GUI. Merges are
   unaffected — the strong automated gate above still decides every merge.
+- There is one PM per **repository**, not per project store, so a repository
+  whose state resolved into two stores still gets exactly one. JSON operation
+  `pm.status` lists every registration in the repository, and `pm.stop` retires
+  one from the CLI — a registered PM can retire an orphan or stand down itself
+  without a GUI click.
 
 The design lives in SPEC
 [#3431](https://github.com/akiojin/gwt/issues/3431).
@@ -781,6 +791,44 @@ cargo bundle -p gwt --format osx
 ```bash
 cargo test -p gwt-core -p gwt --all-features
 ```
+
+### Serializing heavy verification
+
+Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
+Playwright, `verify.run`) contends for host CPU. Running two of them at once
+on the same machine makes wall-clock fixtures fail for no reason and pollutes
+coverage numbers, so gwt serializes them behind a host-wide lease — one
+holder per machine, across every repository and worktree.
+
+Take the lease before the heavy command and release it afterwards:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
+JSON
+```
+
+The answer is immediate. `verification lease: granted` returns a `lease_id`
+to release with; `verification lease: unavailable` returns the current holder
+and its remaining TTL, so nothing has to watch another process:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.status","params":{}}
+JSON
+```
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
+JSON
+```
+
+Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
+TTL. The default TTL is 45 minutes; a lease that lapses is released
+automatically, and a holder that is killed releases immediately. Lease
+transitions are recorded in
+`~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
 ### Releasing
 

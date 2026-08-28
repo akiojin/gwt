@@ -3,11 +3,14 @@
 use std::{
     collections::{HashMap, VecDeque},
     io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -51,6 +54,127 @@ pub struct SpawnConfig {
     pub cwd: Option<PathBuf>,
 }
 
+const START_GATE_ENDPOINT_ENV: &str = "GWT_INTERNAL_PTY_GATE_ENDPOINT";
+const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
+const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
+const START_GATE_HELLO: u8 = 1;
+const START_GATE_RELEASE: u8 = 2;
+/// `CSI 1 ; 1 R` — the reply Windows ConPTY waits for before it lets a console
+/// client finish attaching.
+#[cfg(windows)]
+const CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
+
+/// A PTY child that has completed its private start-gate handshake but whose
+/// real target has not begun executing.
+pub struct PendingPty {
+    handle: Option<PtyHandle>,
+    gate: Option<TcpStream>,
+}
+
+impl PendingPty {
+    /// Return the gate helper's process id. The helper preserves this identity
+    /// when it replaces itself with the target on Unix.
+    pub fn process_id(&self) -> Option<u32> {
+        self.handle.as_ref().and_then(PtyHandle::process_id)
+    }
+
+    /// Release the helper to execute the target and return the live PTY.
+    pub fn release(mut self) -> Result<PtyHandle, TerminalError> {
+        let mut gate = self.gate.take().ok_or_else(|| TerminalError::PtyIoError {
+            details: "PTY start gate is unavailable".to_string(),
+        })?;
+        if let Err(error) = gate
+            .write_all(&[START_GATE_RELEASE])
+            .and_then(|()| gate.flush())
+        {
+            let _ = self.abort_inner();
+            return Err(TerminalError::PtyIoError {
+                details: format!("release PTY start gate: {error}"),
+            });
+        }
+        drop(gate);
+        Ok(self.handle.take().expect("pending PTY owns its handle"))
+    }
+
+    /// Abort the pending launch without allowing the target to execute.
+    pub fn abort(mut self) -> Result<(), TerminalError> {
+        self.abort_inner()
+    }
+
+    fn abort_inner(&mut self) -> Result<(), TerminalError> {
+        if let Some(gate) = self.gate.take() {
+            let _ = gate.shutdown(Shutdown::Both);
+        }
+        self.handle.take().map_or(Ok(()), |handle| handle.kill())
+    }
+}
+
+impl Drop for PendingPty {
+    fn drop(&mut self) {
+        let _ = self.abort_inner();
+    }
+}
+
+struct SpawnedChildGuard {
+    child: Option<Box<dyn portable_pty::Child + Send>>,
+    process_group: Option<ProcessGroup>,
+}
+
+impl SpawnedChildGuard {
+    fn new(child: Box<dyn portable_pty::Child + Send>) -> Self {
+        Self {
+            child: Some(child),
+            process_group: None,
+        }
+    }
+
+    fn terminate(&mut self) {
+        if let Some(group) = self.process_group.as_mut() {
+            group.terminate();
+        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            reap_child_in_background(Arc::new(Mutex::new(child)));
+        }
+    }
+
+    fn into_parts(mut self) -> (Box<dyn portable_pty::Child + Send>, ProcessGroup) {
+        (
+            self.child.take().expect("spawn guard owns its child"),
+            self.process_group.take().unwrap_or_default(),
+        )
+    }
+}
+
+impl Drop for SpawnedChildGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpawnTestFailure {
+    None,
+    TakeWriter,
+    ProcessGroupAttach,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpawnDiagnostic {
     path_entry_count: usize,
@@ -84,6 +208,147 @@ impl PtyHandle {
     /// Spawn a child process with a PTY.
     #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
+        Self::spawn_inner(config, SpawnTestFailure::None, None)
+    }
+
+    /// Spawn a trusted gate helper in the PTY and wait until it proves that it
+    /// is blocking before returning. `gate_args_prefix` precedes the private
+    /// environment-carried gate parameters, allowing binaries and test
+    /// harnesses to select their hidden helper entrypoint.
+    pub fn spawn_pending(
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+    ) -> Result<PendingPty, TerminalError> {
+        let config =
+            normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: reason.to_string(),
+            })?;
+        let nonce = nonce.into();
+        if nonce.is_empty() {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "PTY start-gate nonce must not be empty".to_string(),
+            });
+        }
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|error| {
+            TerminalError::PtyCreationFailed {
+                reason: format!("bind PTY start gate: {error}"),
+            }
+        })?;
+        listener
+            .set_nonblocking(false)
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("configure PTY start gate: {error}"),
+            })?;
+        let endpoint = listener
+            .local_addr()
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("resolve PTY start-gate endpoint: {error}"),
+            })?;
+        let target = encode_start_gate_target(&config.command, &config.args);
+        let mut gate_config = SpawnConfig {
+            command: gate_program.to_string_lossy().into_owned(),
+            args: gate_args_prefix,
+            cols: config.cols,
+            rows: config.rows,
+            env: config.env,
+            remove_env: config.remove_env,
+            cwd: config.cwd,
+        };
+        gate_config
+            .env
+            .insert(START_GATE_ENDPOINT_ENV.to_string(), endpoint.to_string());
+        gate_config
+            .env
+            .insert(START_GATE_NONCE_ENV.to_string(), nonce.clone());
+        gate_config
+            .env
+            .insert(START_GATE_TARGET_ENV.to_string(), target);
+
+        let handle = Self::spawn(gate_config)?;
+        // Windows ConPTY parks a freshly attached console client inside its
+        // startup handshake until the terminal answers the cursor-position
+        // query the pseudoconsole emitted on creation. A gated launch only
+        // installs its pane — and therefore its frontend terminal — after
+        // release, so the gate helper would never reach the handshake below.
+        // Answering here is what a real terminal does anyway; conhost consumes
+        // the report instead of forwarding it to the released target.
+        #[cfg(windows)]
+        let _ = handle.write_input(CURSOR_POSITION_REPORT);
+        if handle.process_id().is_none() {
+            return Err(pending_spawn_error(
+                handle,
+                "PTY start-gate helper has no process id".to_string(),
+            ));
+        }
+        if let Err(error) = listener.set_nonblocking(true) {
+            return Err(pending_spawn_error(
+                handle,
+                format!("configure accept: {error}"),
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut handle = Some(handle);
+        loop {
+            match listener.accept() {
+                Ok((mut gate, peer)) if peer.ip().is_loopback() => {
+                    gate.set_read_timeout(Some(Duration::from_secs(2)))
+                        .map_err(|error| {
+                            pending_spawn_error(
+                                handle.take().expect("pending handle"),
+                                format!("configure handshake: {error}"),
+                            )
+                        })?;
+                    let mut hello = vec![0_u8; 1 + nonce.len()];
+                    if let Err(error) = gate.read_exact(&mut hello) {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            format!("read PTY start-gate handshake: {error}"),
+                        ));
+                    }
+                    if hello[0] != START_GATE_HELLO || hello[1..] != *nonce.as_bytes() {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            "PTY start-gate nonce mismatch".to_string(),
+                        ));
+                    }
+                    gate.set_read_timeout(None).map_err(|error| {
+                        pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            format!("finalize handshake: {error}"),
+                        )
+                    })?;
+                    return Ok(PendingPty {
+                        handle,
+                        gate: Some(gate),
+                    });
+                }
+                Ok((_gate, _)) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(pending_spawn_error(
+                            handle.take().expect("pending handle"),
+                            "PTY start-gate handshake timed out".to_string(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    return Err(pending_spawn_error(
+                        handle.take().expect("pending handle"),
+                        format!("accept PTY start-gate handshake: {error}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn spawn_inner(
+        config: SpawnConfig,
+        failure: SpawnTestFailure,
+        observe_pid: Option<&mut dyn FnMut(u32)>,
+    ) -> Result<Self, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
                 reason: reason.to_string(),
@@ -137,17 +402,38 @@ impl PtyHandle {
             }
         };
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| TerminalError::PtyCreationFailed {
+        let mut child = SpawnedChildGuard::new(child);
+        let child_pid = child.child.as_ref().and_then(|child| child.process_id());
+        if let (Some(pid), Some(observe)) = (child_pid, observe_pid) {
+            observe(pid);
+        }
+        if failure == SpawnTestFailure::TakeWriter {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "take_writer: injected test failure".to_string(),
+            });
+        }
+        if failure == SpawnTestFailure::ProcessGroupAttach {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "process group attach: injected test failure".to_string(),
+            });
+        }
+        let process_group = match child_pid {
+            Some(pid) => Some(ProcessGroup::attach(pid).map_err(|reason| {
+                child.terminate();
+                TerminalError::PtyCreationFailed {
+                    reason: format!("process group attach: {reason}"),
+                }
+            })?),
+            None => None,
+        };
+        child.process_group = process_group;
+        let writer = pair.master.take_writer().map_err(|e| {
+            child.terminate();
+            TerminalError::PtyCreationFailed {
                 reason: format!("take_writer: {e}"),
-            })?;
-
-        let process_group = child
-            .process_id()
-            .map(ProcessGroup::attach)
-            .unwrap_or_default();
+            }
+        })?;
+        let (child, process_group) = child.into_parts();
 
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
@@ -157,6 +443,18 @@ impl PtyHandle {
             generation_active: AtomicBool::new(true),
             process_group: Mutex::new(process_group),
         })
+    }
+
+    // Only the unix reaping tests inject a spawn failure; gating on `test`
+    // alone left this dead on Windows, where `-D warnings` then failed a lint
+    // CI never runs (its clippy job is Linux-only).
+    #[cfg(all(test, unix))]
+    fn spawn_with_test_failure(
+        config: SpawnConfig,
+        failure: SpawnTestFailure,
+        mut observe_pid: impl FnMut(u32),
+    ) -> Result<Self, TerminalError> {
+        Self::spawn_inner(config, failure, Some(&mut observe_pid))
     }
 
     /// Send bytes to the PTY stdin.
@@ -368,15 +666,12 @@ impl PtyHandle {
     /// open the master reader does not observe EOF, which would otherwise
     /// strand the reader thread (and its `Arc<Mutex<Pane>>`) and prevent the
     /// Drop chain from running.
+    ///
+    /// This must not wait for the child to reap. `portable-pty`'s Unix
+    /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
+    /// run on the GUI event loop and freeze every `pane.*` operation during
+    /// consecutive live-PTY closes (Issue #3705).
     pub fn kill(&self) -> Result<(), TerminalError> {
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        let kill_result = child.kill();
-        drop(child);
-
-        // Always sweep descendants, even if the direct kill failed: the group
-        // terminate is idempotent and uses an independent kernel path.
         let mut group = match self.process_group.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -384,9 +679,42 @@ impl PtyHandle {
         group.terminate();
         drop(group);
 
-        kill_result.map_err(|e| TerminalError::PtyIoError {
-            details: e.to_string(),
-        })
+        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
+            details: format!("lock poisoned: {e}"),
+        })?;
+        if child
+            .try_wait()
+            .map_err(|e| TerminalError::PtyIoError {
+                details: e.to_string(),
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        let reaped = child.try_wait().ok().flatten().is_some();
+        drop(child);
+        if !reaped {
+            // Reap off the caller thread. Immediate try_wait after SIGKILL
+            // often misses the exit, and a zombie still looks alive to
+            // `kill(pid, 0)` (Issue #3705 / pty lifecycle tests).
+            reap_child_in_background(Arc::clone(&self.child));
+        }
+        Ok(())
     }
 
     /// Returns the OS process id of the spawned child, if available.
@@ -419,6 +747,168 @@ impl PtyHandle {
             details: e.to_string(),
         })
     }
+}
+
+fn reap_child_in_background(child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match child.lock() {
+                Ok(mut guard) => {
+                    if guard.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
+fn pending_spawn_error(handle: PtyHandle, reason: String) -> TerminalError {
+    let _ = handle.kill();
+    TerminalError::PtyCreationFailed { reason }
+}
+
+/// Run the trusted side of a PTY start gate configured by
+/// [`PtyHandle::spawn_pending`]. The helper connects and proves it is blocked,
+/// then executes the target only after the owning process sends release.
+/// Closing the connection before release exits successfully without starting
+/// the target.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the parent already normalized the target before encoding it; Unix must use CommandExt::exec to preserve the gated PID"
+)]
+pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
+    let endpoint = std::env::var(START_GATE_ENDPOINT_ENV).map_err(|error| {
+        TerminalError::PtyCreationFailed {
+            reason: format!("missing PTY start-gate endpoint: {error}"),
+        }
+    })?;
+    let nonce =
+        std::env::var(START_GATE_NONCE_ENV).map_err(|error| TerminalError::PtyCreationFailed {
+            reason: format!("missing PTY start-gate nonce: {error}"),
+        })?;
+    let target =
+        std::env::var(START_GATE_TARGET_ENV).map_err(|error| TerminalError::PtyCreationFailed {
+            reason: format!("missing PTY start-gate target: {error}"),
+        })?;
+    let (command, args) = decode_start_gate_target(&target)?;
+    if command.is_empty() || nonce.is_empty() {
+        return Err(TerminalError::PtyCreationFailed {
+            reason: "PTY start-gate target and nonce must not be empty".to_string(),
+        });
+    }
+
+    let mut gate =
+        TcpStream::connect(&endpoint).map_err(|error| TerminalError::PtyCreationFailed {
+            reason: format!("connect PTY start gate at {endpoint}: {error}"),
+        })?;
+    let mut hello = Vec::with_capacity(1 + nonce.len());
+    hello.push(START_GATE_HELLO);
+    hello.extend_from_slice(nonce.as_bytes());
+    gate.write_all(&hello)
+        .and_then(|()| gate.flush())
+        .map_err(|error| TerminalError::PtyIoError {
+            details: format!("send PTY start-gate handshake: {error}"),
+        })?;
+    let mut release = [0_u8; 1];
+    match gate.read_exact(&mut release) {
+        Ok(()) if release[0] == START_GATE_RELEASE => {}
+        Ok(()) => {
+            return Err(TerminalError::PtyIoError {
+                details: "invalid PTY start-gate release".to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(0),
+        Err(error) => {
+            return Err(TerminalError::PtyIoError {
+                details: format!("wait for PTY start-gate release: {error}"),
+            })
+        }
+    }
+    drop(gate);
+
+    let mut target = Command::new(command);
+    target.args(args);
+    for key in [
+        START_GATE_ENDPOINT_ENV,
+        START_GATE_NONCE_ENV,
+        START_GATE_TARGET_ENV,
+    ] {
+        target.env_remove(key);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        let error = target.exec();
+        Err(TerminalError::PtyCreationFailed {
+            reason: format!("execute released PTY target: {error}"),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let status = target
+            .status()
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("execute released PTY target: {error}"),
+            })?;
+        Ok(status.code().unwrap_or(1))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let status = target
+            .status()
+            .map_err(|error| TerminalError::PtyCreationFailed {
+                reason: format!("execute released PTY target: {error}"),
+            })?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+fn encode_start_gate_target(command: &str, args: &[String]) -> String {
+    let mut encoded = String::new();
+    for component in std::iter::once(command).chain(args.iter().map(String::as_str)) {
+        encoded.push_str(&component.len().to_string());
+        encoded.push(':');
+        encoded.push_str(component);
+    }
+    encoded
+}
+
+fn decode_start_gate_target(encoded: &str) -> Result<(String, Vec<String>), TerminalError> {
+    let mut remaining = encoded;
+    let mut components = Vec::new();
+    while !remaining.is_empty() {
+        let separator = remaining
+            .find(':')
+            .ok_or_else(|| TerminalError::PtyCreationFailed {
+                reason: "invalid PTY start-gate target length".to_string(),
+            })?;
+        let length = remaining[..separator].parse::<usize>().map_err(|error| {
+            TerminalError::PtyCreationFailed {
+                reason: format!("invalid PTY start-gate target length: {error}"),
+            }
+        })?;
+        remaining = &remaining[separator + 1..];
+        if length > remaining.len() || !remaining.is_char_boundary(length) {
+            return Err(TerminalError::PtyCreationFailed {
+                reason: "invalid PTY start-gate target component".to_string(),
+            });
+        }
+        components.push(remaining[..length].to_string());
+        remaining = &remaining[length..];
+    }
+    let mut components = components.into_iter();
+    let command = components
+        .next()
+        .ok_or_else(|| TerminalError::PtyCreationFailed {
+            reason: "PTY start-gate target is empty".to_string(),
+        })?;
+    Ok((command, components.collect()))
 }
 
 /// Owned guard for a protected input sequence that may cross a worker delay.
@@ -628,29 +1118,11 @@ fn is_executable_file(path: &Path) -> bool {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         // Best-effort termination: must never panic from Drop and must not
-        // block the caller for long. Tolerate poisoned mutexes.
-        let mut guard = match self.child.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let _ = guard.kill();
-
-        // Short reap loop so subsequent try_wait callers observe the exit.
-        // Capped at ~500ms so Drop never stalls the UI thread.
-        for _ in 0..20 {
-            match guard.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            }
-        }
-        drop(guard);
-
-        // Belt-and-suspenders: explicitly terminate the group in case `kill`
-        // was never called (e.g. the handle was dropped without going through
-        // stop_window_runtime). ProcessGroup::terminate is idempotent.
-        if let Ok(mut group) = self.process_group.lock() {
-            group.terminate();
-        }
+        // block the caller. Issue #3705: the previous reap loop slept up to
+        // 500ms on the GUI event loop when a live PTY was dropped during
+        // pane.close. Reuse `kill` so a child whose pgid is not its pid still
+        // receives a direct SIGKILL.
+        let _ = self.kill();
     }
 }
 
@@ -658,7 +1130,7 @@ impl Drop for PtyHandle {
 mod tests {
     use std::{
         sync::{Arc, Mutex},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -772,6 +1244,63 @@ mod tests {
 
     fn sleep_config(secs: &str) -> SpawnConfig {
         command_config(sleep_command(secs))
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: u32) -> bool {
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn take_writer_failure_reaps_the_spawned_child() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _pty_guard = lock_pty_test();
+        let observed_pid = Arc::new(AtomicU32::new(0));
+        let pid = Arc::clone(&observed_pid);
+        let error = match PtyHandle::spawn_with_test_failure(
+            sleep_config("60"),
+            SpawnTestFailure::TakeWriter,
+            move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+        ) {
+            Ok(_) => panic!("injected writer failure must fail spawn"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("take_writer"));
+
+        let pid = observed_pid.load(Ordering::SeqCst);
+        assert!(pid > 0, "spawned child pid was not observed");
+        assert!(wait_for_process_exit(pid), "writer failure orphaned {pid}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_attach_failure_reaps_the_spawned_child() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _pty_guard = lock_pty_test();
+        let observed_pid = Arc::new(AtomicU32::new(0));
+        let pid = Arc::clone(&observed_pid);
+        let error = match PtyHandle::spawn_with_test_failure(
+            sleep_config("60"),
+            SpawnTestFailure::ProcessGroupAttach,
+            move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+        ) {
+            Ok(_) => panic!("injected attach failure must fail spawn"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("process group"));
+
+        let pid = observed_pid.load(Ordering::SeqCst);
+        assert!(pid > 0, "spawned child pid was not observed");
+        assert!(wait_for_process_exit(pid), "attach failure orphaned {pid}");
     }
 
     #[test]
@@ -961,6 +1490,48 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(exited, "Process should have exited after kill");
+    }
+
+    /// Issue #3705 AC-2: `portable-pty` waits up to ~200ms after SIGHUP before
+    /// SIGKILL. A TUI that installs a SIGHUP handler (Codex at a usage-limit
+    /// prompt) made that wait land on the GUI event loop and freeze pane.*.
+    #[cfg(unix)]
+    #[test]
+    fn kill_of_sighup_resistant_child_returns_without_blocking() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "trap '' HUP; exec /bin/sleep 60".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn failed");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        handle.kill().expect("kill should succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "PtyHandle::kill blocked for {elapsed:?}; live PTY close must not wait for SIGHUP reap"
+        );
+        let mut exited = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            exited,
+            "SIGHUP-resistant child must still be reaped after non-blocking kill"
+        );
     }
 
     #[test]

@@ -18,13 +18,21 @@ pub fn close_window_from_workspace(
     window_details: &mut HashMap<String, String>,
     id: &str,
 ) -> bool {
-    let Some(address) = window_lookup.get(id).cloned() else {
-        return false;
-    };
-    let Some(tab) = tabs.iter_mut().find(|tab| tab.id == address.tab_id) else {
-        return false;
-    };
-    if !tab.workspace.close_window(&address.raw_id) {
+    let removed_via_lookup = window_lookup.get(id).cloned().is_some_and(|address| {
+        tabs.iter_mut()
+            .find(|tab| tab.id == address.tab_id)
+            .is_some_and(|tab| tab.workspace.close_window(&address.raw_id))
+    });
+    // Issue #3629 AC-9: a window restored from an older app generation can
+    // survive in a tab's workspace without a lookup entry (or with a stale
+    // one). Resolve the combined `{tab_id}::{raw_id}` against the tabs
+    // directly so close still lands instead of no-opping forever.
+    let removed = removed_via_lookup
+        || tabs.iter_mut().any(|tab| {
+            id.strip_prefix(&format!("{}::", tab.id))
+                .is_some_and(|raw_id| tab.workspace.close_window(raw_id))
+        });
+    if !removed {
         return false;
     }
     window_lookup.remove(id);
@@ -820,6 +828,7 @@ mod tests {
     #[test]
     fn intake_hook_config_disposable_only_for_present_generated_configs() {
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
         let worktree = dir.path();
 
         // Unrelated path → never handled here.
@@ -1001,6 +1010,7 @@ mod tests {
         // SPEC-1934 US-6 / FR-019: Normal Git layout must propagate the
         // migration flag so the GUI can show the confirmation modal at startup.
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
@@ -1017,6 +1027,7 @@ mod tests {
     #[test]
     fn resolve_project_target_does_not_request_migration_for_worktree_marker() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let bare = tmp.path().join("repo.git");
         let worktree = tmp.path().join("feature");
         std::fs::create_dir_all(bare.join("worktrees").join("feature")).unwrap();
@@ -1047,6 +1058,7 @@ mod tests {
     #[test]
     fn resolve_project_target_for_bare_layout_does_not_request_migration() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let bare = tmp.path().join("repo.git");
         gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare.to_str().unwrap()])
@@ -1088,6 +1100,7 @@ mod tests {
         // `develop` worktree が存在しても auto-select せず、workspace_home を
         // project_root として返す。これにより Workspace Overview が hub になる。
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let bare_dir = tmp.path().join("repo.git");
         gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare_dir.to_str().unwrap()])
@@ -1111,6 +1124,7 @@ mod tests {
         // SC-035: user が worktree dir を直接 Open Project で指定した場合は、
         // workspace_home に rebasing せずその worktree を開く。
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let bare_dir = tmp.path().join("repo.git");
         gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare_dir.to_str().unwrap()])
@@ -1135,6 +1149,7 @@ mod tests {
         // workspace_home を Git project として返す。empty state は Workspace
         // Overview 側で描画する。
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let bare_dir = tmp.path().join("repo.git");
         gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare_dir.to_str().unwrap()])
@@ -1157,6 +1172,7 @@ mod tests {
         // SC-037: develop worktree が削除された状態でも auto-repair / auto-create
         // しない。bare layout のまま workspace_home を返す。
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let bare_dir = tmp.path().join("repo.git");
         gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare_dir.to_str().unwrap()])
@@ -1361,6 +1377,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn branch_worktree_path_resolves_linked_worktree_for_target_branch() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
         run_git(&repo, &["init", "--initial-branch=main"]);
@@ -1391,6 +1408,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn branch_worktree_path_returns_none_for_unknown_branch() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
         run_git(&repo, &["init", "--initial-branch=main"]);
@@ -1452,6 +1470,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn normalize_recent_project_path_returns_workspace_home_for_bare_worktree() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         make_bare_workspace_with_worktrees(tmp.path(), &["develop"]);
         let worktree = tmp.path().join("develop");
 
@@ -1468,6 +1487,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn normalize_recent_project_path_keeps_workspace_home_for_bare_layout() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         make_bare_workspace_with_worktrees(tmp.path(), &["develop"]);
 
         let normalized = super::normalize_recent_project_path(tmp.path());
@@ -1483,6 +1503,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn normalize_recent_project_path_returns_repo_root_for_normal_repo() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         run_git(&repo, &["init"]);
@@ -1501,6 +1522,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn normalize_recent_project_path_returns_input_for_non_repo() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let plain = tmp.path().join("plain");
         std::fs::create_dir_all(&plain).expect("plain dir");
 
@@ -1515,6 +1537,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
     #[test]
     fn normalize_recent_projects_collapses_worktrees_into_single_workspace_home() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         make_bare_workspace_with_worktrees(tmp.path(), &["develop", "work/20260518"]);
 
         let entries = vec![
@@ -1558,6 +1581,7 @@ upstream\tgit@github.com:anthropics/example.git (push)
         // through `git branch --show-current`; the WorktreeManager list now
         // owns the resolution alone.
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
         run_git(&repo, &["init", "--initial-branch=main"]);

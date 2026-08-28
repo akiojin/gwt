@@ -372,6 +372,14 @@ pub enum FrontendEvent {
         window_id: String,
         text: String,
     },
+    /// SPEC-3431 FR-124: narrow request accepted only on the authenticated
+    /// agent listener. Project identity is supplied by the server-side
+    /// capability principal, never by this payload.
+    AgentIssueMonitorScanNow {
+        /// Non-secret guard that binds the caller's persisted prefs target to
+        /// the server-derived capability scope. It is never routing authority.
+        expected_project_scope: String,
+    },
     PasteImage {
         id: String,
         data_base64: String,
@@ -1639,6 +1647,15 @@ pub enum BackendEvent {
         id: String,
         data_base64: String,
     },
+    /// Origin-client completion receipt for one authenticated pane snapshot
+    /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
+    /// sets explain every authorized pane that produced no frame.
+    PaneSyncComplete {
+        empty_window_ids: Vec<String>,
+        busy_window_ids: Vec<String>,
+        unavailable_window_ids: Vec<String>,
+        failed_window_ids: Vec<String>,
+    },
     TerminalStatus {
         id: String,
         status: WindowProcessStatus,
@@ -1653,11 +1670,22 @@ pub enum BackendEvent {
     },
     /// Origin-connection-only terminal result for one privileged PM message.
     /// `queued` is reserved for a future durable payload queue; this slice
-    /// emits only `delivered` after exact acknowledgement or `failed`.
+    /// emits `delivered` after exact acknowledgement, `unverified` when the
+    /// prompt reached the pane but no acknowledgement arrived inside the
+    /// operation's budget, and `failed` when the input never committed.
+    /// `unverified` is deliberately not folded into `failed` (Issue #3608):
+    /// the two demand opposite responses from the caller.
     PmMessageSendResult {
         operation_id: String,
         status: String,
         window_id: Option<String>,
+        reason: Option<String>,
+    },
+    /// Origin-client-only acknowledgement for one authenticated Monitor scan
+    /// request. `accepted` means one new project worker was enqueued; it does
+    /// not claim that a candidate was found or launched.
+    IssueMonitorScanRequestResult {
+        accepted: bool,
         reason: Option<String>,
     },
     /// Direct, origin-connection-only acceptance for an authenticated
@@ -1665,6 +1693,15 @@ pub enum BackendEvent {
     PaneCloseAccepted {
         request_id: String,
         window_id: String,
+    },
+    /// Client-scoped reply to a peer-pane `close_window` request on the agent
+    /// pane route (Issue #3629 AC-10/AC-12): every close outcome — success,
+    /// refusal, or a window record that could not be removed — answers
+    /// explicitly instead of silently producing no events.
+    PaneCloseResult {
+        ok: bool,
+        window_id: String,
+        reason: Option<String>,
     },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
@@ -1677,7 +1714,10 @@ pub enum BackendEvent {
         auto_start: bool,
         configured_agent_id: String,
         configured_model: Option<String>,
+        configured_reasoning: Option<String>,
         running_agent_id: Option<String>,
+        running_model: Option<String>,
+        running_reasoning: Option<String>,
         is_running: bool,
         agent_options: Vec<PmAgentOption>,
     },
@@ -2406,6 +2446,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pane_sync_complete",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "terminal_status",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2421,9 +2466,19 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_scan_request_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
     // the newest one matters.
@@ -2861,10 +2916,15 @@ impl BackendEvent {
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
+            BackendEvent::IssueMonitorScanRequestResult { .. } => {
+                "issue_monitor_scan_request_result"
+            }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
+            BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
@@ -3079,6 +3139,20 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #3755 AC-2: the final availability receipt is origin-client
+    /// state and must survive outbound pressure like the pane snapshot itself.
+    #[test]
+    fn pane_sync_completion_has_client_scoped_snapshot_policy() {
+        let policy =
+            backend_event_policy("pane_sync_complete").expect("pane_sync_complete delivery policy");
+
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,
@@ -4890,6 +4964,39 @@ mod tests {
         let value = serde_json::to_value(&action).expect("serialize goto_step");
         assert_eq!(value["kind"], "goto_step");
         assert_eq!(value["phase"], "confirm");
+    }
+
+    #[test]
+    fn launch_wizard_holder_decision_actions_round_trip() {
+        use crate::launch_wizard::LaunchWizardAction;
+
+        let actions = [
+            (
+                LaunchWizardAction::StopAndStartSuccessor {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:successor".to_string(),
+                },
+                "stop_and_start_successor",
+            ),
+            (
+                LaunchWizardAction::MoveExistingPane {
+                    fingerprint: "repo:/tmp/gwt:work/issue-3547".to_string(),
+                    window_id: "tab-1:destination".to_string(),
+                },
+                "move_existing_pane",
+            ),
+        ];
+
+        for (action, expected_kind) in actions {
+            let value = serde_json::to_value(&action).expect("serialize holder decision action");
+            assert_eq!(value["kind"], expected_kind);
+            assert_eq!(value["fingerprint"], "repo:/tmp/gwt:work/issue-3547");
+            assert!(value["window_id"].as_str().is_some());
+
+            let round_tripped: LaunchWizardAction =
+                serde_json::from_value(value).expect("deserialize holder decision action");
+            assert_eq!(round_tripped, action);
+        }
     }
 
     #[test]
