@@ -1340,6 +1340,7 @@ FILE_INDEX_V2_REQUIRED_FIELDS = FILE_INDEX_V2_COMPATIBILITY_FIELDS + (
     "runner_hash",
 )
 CANONICAL_BLOB_BATCH_BYTES = 8 * 1024 * 1024
+FILE_INDEX_V2_VECTOR_BATCH = 16
 
 
 def gwt_index_root() -> Path:
@@ -2128,12 +2129,27 @@ def _visible_file_records(root: Path) -> List[Dict[str, Any]]:
 
 
 def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] = None):
+    environment = os.environ.copy()
+    for override in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_NAMESPACE",
+        "GIT_COMMON_DIR",
+    ):
+        environment.pop(override, None)
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
             input=input_bytes,
             check=False,
             capture_output=True,
+            env=environment,
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -2161,17 +2177,65 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     expected_root = top_level_path.joinpath(*tree_prefix.rstrip("/").split("/"))
     if root.resolve() != expected_root.resolve():
         raise RuntimeError("git project root does not match its repository prefix")
-    for reference in (
-        "origin/develop",
-        "origin/HEAD",
-        "origin/main",
-        "origin/master",
-        "HEAD",
-    ):
+    candidates = (
+        ("origin/develop", "refs/remotes/origin/develop"),
+        ("origin/HEAD", "refs/remotes/origin/HEAD"),
+        ("origin/main", "refs/remotes/origin/main"),
+        ("origin/master", "refs/remotes/origin/master"),
+    )
+    ref_listing = _git_command(
+        root,
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            *(refname for _, refname in candidates),
+            "refs/heads/",
+        ],
+    )
+    if ref_listing.returncode != 0:
+        raise RuntimeError("git canonical ref existence probe failed")
+    try:
+        existing_refs = {
+            line
+            for line in ref_listing.stdout.decode("utf-8", errors="strict").splitlines()
+            if line
+        }
+    except UnicodeDecodeError as error:
+        raise RuntimeError("git canonical ref listing is not valid UTF-8") from error
+    head_probe = _git_command(
+        root, ["rev-parse", "--symbolic-full-name", "--verify", "--quiet", "HEAD"]
+    )
+    if head_probe.returncode == 0:
+        head_exists = True
+    else:
+        symbolic_head = _git_command(root, ["symbolic-ref", "--quiet", "HEAD"])
+        if symbolic_head.returncode == 0:
+            try:
+                head_target = symbolic_head.stdout.decode(
+                    "utf-8", errors="strict"
+                ).strip()
+            except UnicodeDecodeError as error:
+                raise RuntimeError("git symbolic HEAD is not valid UTF-8") from error
+            head_exists = head_target in existing_refs
+        else:
+            # A valid repository always has HEAD. A non-symbolic HEAD that
+            # cannot resolve is detached on a missing/corrupt object.
+            head_exists = True
+    candidate_presence = [
+        (reference, refname in existing_refs) for reference, refname in candidates
+    ]
+    candidate_presence.append(("HEAD", head_exists))
+
+    for reference, exists in candidate_presence:
+        if not exists:
+            continue
         expression = f"{reference}^{{tree}}"
         completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
         if completed.returncode != 0:
-            continue
+            stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"git canonical ref {expression} exists but could not be peeled: {stderr}"
+            )
         tree_oid = completed.stdout.decode("ascii", errors="ignore").strip().lower()
         if len(tree_oid) in (40, 64) and all(char in "0123456789abcdef" for char in tree_oid):
             return {
@@ -2227,9 +2291,6 @@ def _git_tree_blob_entries(
         if header_parts[1] != b"blob" or header_parts[0] not in {b"100644", b"100755"}:
             continue
         rel_path = _canonical_git_rel_path(raw_path, tree_prefix)
-        if rel_path in normalized_paths:
-            raise RuntimeError("git tree contains duplicate normalized paths")
-        normalized_paths.add(rel_path)
         try:
             oid = header_parts[2].decode("ascii", errors="strict").lower()
             size = int(header_parts[3])
@@ -2241,6 +2302,9 @@ def _git_tree_blob_entries(
             or size < 0
         ):
             raise RuntimeError("git ls-tree returned invalid blob identity")
+        if rel_path in normalized_paths:
+            raise RuntimeError("git tree contains duplicate normalized paths")
+        normalized_paths.add(rel_path)
         if (
             size > MAX_FILE_SIZE
             or Path(rel_path).suffix.lower() in BINARY_EXTENSIONS
@@ -2409,9 +2473,22 @@ def _read_cas_vector(
         or not _is_file_index_timestamp(payload.get("last_verified_at"))
     ):
         return None
-    payload["last_verified_at"] = _file_index_timestamp()
-    _write_json_atomic(path, payload)
     return vector
+
+
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 
 
 def _write_cas_vector(
@@ -2441,24 +2518,52 @@ def _write_cas_vector(
         "created_at": timestamp,
         "last_verified_at": timestamp,
     }
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_bytes(_stable_json_bytes(payload))
-    os.replace(temporary, path)
+    _write_bytes_atomic(path, _stable_json_bytes(payload))
     return normalized
 
 
-def _resolve_record_vectors(
+def _plan_file_artifact(
     records: Sequence[Dict[str, Any]],
     descriptor: Dict[str, Any],
+) -> tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
+    """Plan stable identities and manifest fields without retaining model inputs."""
+    embedding_contract = _embedding_contract(descriptor)
+    identities: List[Dict[str, str]] = []
+    manifest_plans: List[Dict[str, Any]] = []
+    for record in records:
+        model_input = _final_passage_input(descriptor, record["document"])
+        identity = file_embedding_cas_key(embedding_contract, model_input)
+        identities.append(identity)
+        manifest_plans.append(
+            {
+                "path": record["path"],
+                "source_object": record["source_object"],
+                "source_digest": record["source_digest"],
+                "payload_digest": hashlib.sha256(
+                    record["document"].encode("utf-8")
+                ).hexdigest(),
+                "metadata_digest": _sha256_json(record["metadata"]),
+                "scope": "files" if record["bucket"] == "code" else "files-docs",
+                "cas_key": identity["cas_key"],
+                "input_digest": identity["input_digest"],
+            }
+        )
+    return identities, manifest_plans
+
+
+def _resolve_record_vector_batch(
+    records: Sequence[Dict[str, Any]],
+    identities: Sequence[Dict[str, str]],
+    descriptor: Dict[str, Any],
     cas_root: Path,
-) -> tuple[List[List[float]], List[Dict[str, str]], int, int]:
-    """Resolve exact-input vectors under one repo-wide single-flight lock."""
+) -> tuple[List[List[float]], int, int]:
+    """Resolve at most one bounded batch under the repo-wide CAS lock."""
+    if len(records) != len(identities) or len(records) > FILE_INDEX_V2_VECTOR_BATCH:
+        raise ValueError("file-index-v2 vector batch violates the bounded contract")
     embedding_contract = _embedding_contract(descriptor)
     expected_dimension = _expected_file_index_vector_dimension(descriptor)
-    inputs = [_final_passage_input(descriptor, record["document"]) for record in records]
-    identities = [
-        file_embedding_cas_key(embedding_contract, model_input)
-        for model_input in inputs
+    inputs = [
+        _final_passage_input(descriptor, record["document"]) for record in records
     ]
     vectors: List[Optional[List[float]]] = [None] * len(records)
     hits = 0
@@ -2491,38 +2596,21 @@ def _resolve_record_vectors(
                     expected_dimension,
                 )
                 computed += 1
-    return [vector or [] for vector in vectors], identities, computed, hits
+    return [vector or [] for vector in vectors], computed, hits
 
 
-def _file_artifact_manifest(
-    records: Sequence[Dict[str, Any]],
-    identities: Sequence[Dict[str, str]],
-    vectors: Sequence[Sequence[float]],
-) -> List[Dict[str, Any]]:
-    return [
-        {
-            "path": record["path"],
-            "source_object": record["source_object"],
-            "source_digest": record["source_digest"],
-            "payload_digest": hashlib.sha256(
-                record["document"].encode("utf-8")
-            ).hexdigest(),
-            "metadata_digest": _sha256_json(record["metadata"]),
-            "scope": "files" if record["bucket"] == "code" else "files-docs",
-            "cas_key": identity["cas_key"],
-            "input_digest": identity["input_digest"],
-            "vector_checksum": _vector_checksum(vector),
-            "dimension": len(vector),
-        }
-        for record, identity, vector in zip(records, identities, vectors)
-    ]
+def _manifest_entry_with_vector(
+    manifest_plan: Dict[str, Any], vector: Sequence[Any]
+) -> Dict[str, Any]:
+    return {
+        **manifest_plan,
+        "vector_checksum": _vector_checksum(vector),
+        "dimension": len(vector),
+    }
 
 
 def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_bytes(_stable_json_bytes(payload))
-    os.replace(temporary, path)
+    _write_bytes_atomic(path, _stable_json_bytes(payload))
 
 
 def _read_artifact_descriptor(path: Path) -> Optional[Dict[str, Any]]:
@@ -2610,56 +2698,72 @@ def _overlay_snapshot_and_shadow_sets(
     )
 
 
-def _artifact_pair_is_verified(
+def _manifest_entries_digest_from_file(path: Path) -> Optional[str]:
+    """Hash canonical manifest entries with constant auxiliary memory."""
+    prefix = b'{"entries":'
+    suffix = b',"schema_version":1}'
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            if source.read(len(prefix)) != prefix:
+                return None
+            tail = b""
+            while True:
+                chunk = source.read(64 * 1024)
+                if not chunk:
+                    break
+                combined = tail + chunk
+                if len(combined) <= len(suffix):
+                    tail = combined
+                    continue
+                split_at = len(combined) - len(suffix)
+                digest.update(combined[:split_at])
+                tail = combined[split_at:]
+    except OSError:
+        return None
+    return digest.hexdigest() if tail == suffix else None
+
+
+def _artifact_pair_metadata_is_verified(
     artifact_dir: Path,
     records: Sequence[Dict[str, Any]],
-    vectors: Sequence[Sequence[float]],
-    manifest_entries: Sequence[Dict[str, Any]],
-    descriptor_payload: Dict[str, Any],
+    descriptor_identity: Dict[str, Any],
 ) -> bool:
     store = artifact_dir / "store"
     existing_descriptor = _read_artifact_descriptor(artifact_dir)
+    dynamic_fields = {"manifest_digest", "created_at", "verified_at"}
+    expected_fields = set(descriptor_identity) | dynamic_fields
     immutable_fields = tuple(
-        field
-        for field in descriptor_payload
-        if field not in {"compatibility", "created_at", "verified_at"}
+        field for field in descriptor_identity if field != "compatibility"
     )
     same_immutable_identity = (
         existing_descriptor is not None
-        and set(existing_descriptor) == set(descriptor_payload)
+        and set(existing_descriptor) == expected_fields
         and all(
-            field in existing_descriptor
-            and _json_typed_equal(
-                existing_descriptor[field], descriptor_payload[field]
+            _json_typed_equal(
+                existing_descriptor[field], descriptor_identity[field]
             )
             for field in immutable_fields
         )
         and file_index_compatibility(
             existing_descriptor.get("compatibility", {}),
-            descriptor_payload.get("compatibility", {}),
+            descriptor_identity.get("compatibility", {}),
         )
         and _is_file_index_timestamp(existing_descriptor.get("created_at"))
         and _is_file_index_timestamp(existing_descriptor.get("verified_at"))
     )
     if not same_immutable_identity or not (store / "chroma.sqlite3").is_file():
         return False
-    try:
-        manifest_payload = json.loads(
-            (artifact_dir / "manifest.json").read_text(encoding="utf-8")
-        )
-        stored_entries = manifest_payload["entries"]
-    except (OSError, ValueError, TypeError, KeyError):
-        return False
-    if (
-        manifest_payload.get("schema_version") != 1
-        or stored_entries != list(manifest_entries)
-        or _sha256_json(stored_entries) != descriptor_payload.get("manifest_digest")
+    manifest_digest = existing_descriptor.get("manifest_digest")
+    if not isinstance(manifest_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", manifest_digest
     ):
         return False
-    manifest_by_path = {entry["path"]: entry for entry in stored_entries}
-    expected_vectors = {
-        record["path"]: vector for record, vector in zip(records, vectors)
-    }
+    if (
+        _manifest_entries_digest_from_file(artifact_dir / "manifest.json")
+        != manifest_digest
+    ):
+        return False
     for bucket, collection_name in (
         ("code", V2_FILES_CODE_COLLECTION),
         ("docs", V2_FILES_DOCS_COLLECTION),
@@ -2669,45 +2773,11 @@ def _artifact_pair_is_verified(
                 store, collection_name
             )
             try:
-                expected_paths = {
-                    record["path"] for record in records if record["bucket"] == bucket
-                }
-                stored = collection.get(
-                    include=["documents", "metadatas", "embeddings"]
+                expected_count = sum(
+                    record["bucket"] == bucket for record in records
                 )
-                ids = list(stored.get("ids") or [])
-                documents = list(stored.get("documents") or [])
-                metadatas = list(stored.get("metadatas") or [])
-                raw_embeddings = stored.get("embeddings")
-                embeddings = (
-                    list(raw_embeddings) if raw_embeddings is not None else []
-                )
-                if set(ids) != expected_paths or not (
-                    len(ids) == len(documents) == len(metadatas) == len(embeddings)
-                ):
+                if _safe_collection_count(collection) != expected_count:
                     return False
-                for record_id, document, metadata, embedding in zip(
-                    ids, documents, metadatas, embeddings
-                ):
-                    manifest_entry = manifest_by_path.get(record_id)
-                    expected_vector = expected_vectors.get(record_id)
-                    if manifest_entry is None or expected_vector is None:
-                        return False
-                    if hashlib.sha256(str(document).encode("utf-8")).hexdigest() != manifest_entry.get(
-                        "payload_digest"
-                    ):
-                        return False
-                    if _sha256_json(metadata) != manifest_entry.get("metadata_digest"):
-                        return False
-                    if (
-                        len(expected_vector) != manifest_entry.get("dimension")
-                        or _vector_checksum(expected_vector)
-                        != manifest_entry.get("vector_checksum")
-                        or not _chroma_vector_matches_cas(
-                            embedding, expected_vector
-                        )
-                    ):
-                        return False
             finally:
                 _close_chroma_client(client)
         except Exception:
@@ -2715,24 +2785,129 @@ def _artifact_pair_is_verified(
     return True
 
 
+def _staged_artifact_vectors_are_verified(
+    artifact_dir: Path,
+    records: Sequence[Dict[str, Any]],
+    identities: Sequence[Dict[str, str]],
+    manifest_entries: Sequence[Dict[str, Any]],
+    descriptor_identity: Dict[str, Any],
+    cas_root: Path,
+) -> bool:
+    if not (
+        len(records) == len(identities) == len(manifest_entries)
+        and _artifact_pair_metadata_is_verified(
+            artifact_dir, records, descriptor_identity
+        )
+    ):
+        return False
+    store = artifact_dir / "store"
+    embedding_contract = _embedding_contract(descriptor_identity["compatibility"])
+    expected_dimension = _expected_file_index_vector_dimension(
+        descriptor_identity["compatibility"]
+    )
+    opened: Dict[str, tuple[Any, Any]] = {}
+    try:
+        for bucket, collection_name in (
+            ("code", V2_FILES_CODE_COLLECTION),
+            ("docs", V2_FILES_DOCS_COLLECTION),
+        ):
+            opened[bucket] = _open_file_index_v2_collection(store, collection_name)
+        for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
+            stop = start + FILE_INDEX_V2_VECTOR_BATCH
+            indexes = range(start, min(stop, len(records)))
+            for bucket in ("code", "docs"):
+                selected = [
+                    index for index in indexes if records[index]["bucket"] == bucket
+                ]
+                if not selected:
+                    continue
+                expected_vectors = []
+                for index in selected:
+                    vector = _read_cas_vector(
+                        cas_root,
+                        identities[index],
+                        embedding_contract,
+                        expected_dimension,
+                    )
+                    if vector is None:
+                        return False
+                    expected_vectors.append(vector)
+                collection = opened[bucket][1]
+                stored = collection.get(
+                    ids=[records[index]["path"] for index in selected],
+                    include=["documents", "metadatas", "embeddings"],
+                )
+                stored_ids = list(stored.get("ids") or [])
+                documents = list(stored.get("documents") or [])
+                metadatas = list(stored.get("metadatas") or [])
+                raw_embeddings = stored.get("embeddings")
+                embeddings = list(raw_embeddings) if raw_embeddings is not None else []
+                if not (
+                    len(stored_ids)
+                    == len(documents)
+                    == len(metadatas)
+                    == len(embeddings)
+                    == len(selected)
+                ):
+                    return False
+                stored_by_id = {
+                    record_id: (document, metadata, embedding)
+                    for record_id, document, metadata, embedding in zip(
+                        stored_ids, documents, metadatas, embeddings
+                    )
+                }
+                if len(stored_by_id) != len(selected):
+                    return False
+                for index, expected_vector in zip(selected, expected_vectors):
+                    record = records[index]
+                    manifest_entry = manifest_entries[index]
+                    stored_record = stored_by_id.get(record["path"])
+                    if stored_record is None:
+                        return False
+                    document, metadata, embedding = stored_record
+                    if (
+                        hashlib.sha256(str(document).encode("utf-8")).hexdigest()
+                        != manifest_entry.get("payload_digest")
+                        or _sha256_json(metadata)
+                        != manifest_entry.get("metadata_digest")
+                        or len(expected_vector) != manifest_entry.get("dimension")
+                        or _vector_checksum(expected_vector)
+                        != manifest_entry.get("vector_checksum")
+                        or not _chroma_vector_matches_cas(
+                            embedding, expected_vector
+                        )
+                    ):
+                        return False
+    except Exception:
+        return False
+    finally:
+        for client, _ in opened.values():
+            _close_chroma_client(client)
+    return True
+
+
 def _materialize_file_artifact_pair(
     artifact_dir: Path,
     records: Sequence[Dict[str, Any]],
-    vectors: Sequence[Sequence[float]],
-    manifest_entries: Sequence[Dict[str, Any]],
-    descriptor_payload: Dict[str, Any],
-) -> None:
+    identities: Sequence[Dict[str, str]],
+    manifest_plans: Sequence[Dict[str, Any]],
+    descriptor_identity: Dict[str, Any],
+    descriptor: Dict[str, Any],
+    cas_root: Path,
+) -> tuple[int, int]:
+    if _artifact_pair_metadata_is_verified(
+        artifact_dir, records, descriptor_identity
+    ):
+        return 0, len(records)
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
     with acquire_lock(lock_dir, exclusive=True):
-        if _artifact_pair_is_verified(
-            artifact_dir,
-            records,
-            vectors,
-            manifest_entries,
-            descriptor_payload,
+        if _artifact_pair_metadata_is_verified(
+            artifact_dir, records, descriptor_identity
         ):
-            return
+            return 0, len(records)
+        if not (len(records) == len(identities) == len(manifest_plans)):
+            raise ValueError("file-index-v2 artifact plan length mismatch")
         if artifact_dir.exists():
             quarantine = artifact_dir.with_name(
                 f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
@@ -2743,50 +2918,86 @@ def _materialize_file_artifact_pair(
         )
         shutil.rmtree(staging, ignore_errors=True)
         store = staging / "store"
+        manifest_entries: List[Dict[str, Any]] = []
+        computed = 0
+        hits = 0
+        opened: Dict[str, tuple[Any, Any]] = {}
         try:
             for bucket, collection_name in (
                 ("code", V2_FILES_CODE_COLLECTION),
                 ("docs", V2_FILES_DOCS_COLLECTION),
             ):
-                selected = [
-                    (record, vector)
-                    for record, vector in zip(records, vectors)
-                    if record["bucket"] == bucket
-                ]
-                client, collection = _make_file_index_v2_collection(
+                opened[bucket] = _make_file_index_v2_collection(
                     store, collection_name
                 )
-                try:
-                    if selected:
-                        collection.upsert(
-                            ids=[record["path"] for record, _ in selected],
-                            embeddings=[list(vector) for _, vector in selected],
-                            documents=[record["document"] for record, _ in selected],
-                            metadatas=[record["metadata"] for record, _ in selected],
-                        )
-                    if _safe_collection_count(collection) != len(selected):
-                        raise RuntimeError(
-                            f"file-index-v2 {bucket} collection count mismatch"
-                        )
-                finally:
-                    _close_chroma_client(client)
-            _write_json_atomic(staging / "descriptor.json", descriptor_payload)
+            for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
+                stop = min(start + FILE_INDEX_V2_VECTOR_BATCH, len(records))
+                batch_records = records[start:stop]
+                batch_identities = identities[start:stop]
+                vectors, batch_computed, batch_hits = _resolve_record_vector_batch(
+                    batch_records, batch_identities, descriptor, cas_root
+                )
+                computed += batch_computed
+                hits += batch_hits
+                manifest_entries.extend(
+                    _manifest_entry_with_vector(plan, vector)
+                    for plan, vector in zip(manifest_plans[start:stop], vectors)
+                )
+                for bucket in ("code", "docs"):
+                    selected = [
+                        (record, vector)
+                        for record, vector in zip(batch_records, vectors)
+                        if record["bucket"] == bucket
+                    ]
+                    if not selected:
+                        continue
+                    opened[bucket][1].upsert(
+                        ids=[record["path"] for record, _ in selected],
+                        embeddings=[list(vector) for _, vector in selected],
+                        documents=[record["document"] for record, _ in selected],
+                        metadatas=[record["metadata"] for record, _ in selected],
+                    )
+            for bucket in ("code", "docs"):
+                expected_count = sum(
+                    record["bucket"] == bucket for record in records
+                )
+                if _safe_collection_count(opened[bucket][1]) != expected_count:
+                    raise RuntimeError(
+                        f"file-index-v2 {bucket} collection count mismatch"
+                    )
+            for client, _ in opened.values():
+                _close_chroma_client(client)
+            opened.clear()
+            manifest_digest = _sha256_json(manifest_entries)
+            timestamp = _file_index_timestamp()
+            descriptor_payload = {
+                **descriptor_identity,
+                "manifest_digest": manifest_digest,
+                "created_at": timestamp,
+                "verified_at": timestamp,
+            }
             _write_json_atomic(
                 staging / "manifest.json",
                 {"schema_version": 1, "entries": list(manifest_entries)},
             )
-            if not _artifact_pair_is_verified(
+            _write_json_atomic(staging / "descriptor.json", descriptor_payload)
+            if not _staged_artifact_vectors_are_verified(
                 staging,
                 records,
-                vectors,
+                identities,
                 manifest_entries,
-                descriptor_payload,
+                descriptor_identity,
+                cas_root,
             ):
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
             os.replace(staging, artifact_dir)
+            return computed, hits
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        finally:
+            for client, _ in opened.values():
+                _close_chroma_client(client)
 
 
 # ---------------------------------------------------------------------
@@ -3050,6 +3261,46 @@ def _read_continuation(continuation_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _validated_file_index_v2_action_inputs(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: str,
+    scope: str,
+    compatibility_descriptor: Optional[Dict[str, Any]],
+) -> tuple[Path, Dict[str, Any]]:
+    """Validate every externally supplied path/identity before source access."""
+    _safe_artifact_id(repo_hash)
+    _safe_artifact_id(worktree_hash)
+    if scope not in {"files", "files-docs"}:
+        raise ValueError(f"file-index-v2 does not support scope {scope!r}")
+    if (
+        not isinstance(project_root, str)
+        or not project_root
+        or any(ord(char) < 32 or ord(char) == 127 for char in project_root)
+    ):
+        raise ValueError("file-index-v2 project root is invalid")
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        raise ValueError("file-index-v2 project root must be an existing directory")
+    try:
+        descriptor_input = (
+            default_file_index_compatibility()
+            if compatibility_descriptor is None
+            else compatibility_descriptor
+        )
+        raw_descriptor = json.loads(json.dumps(descriptor_input))
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid file-index-v2 compatibility descriptor") from error
+    descriptor = _validated_file_index_descriptor(raw_descriptor)
+    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") != "1" and not file_index_compatibility(
+        descriptor, default_file_index_compatibility()
+    ):
+        raise ValueError(
+            "file-index-v2 descriptor does not match the pinned build contract"
+        )
+    return root, descriptor
+
+
 def _action_index_files_protocol_v2(
     project_root: str,
     repo_hash: str,
@@ -3058,22 +3309,13 @@ def _action_index_files_protocol_v2(
     scope: str,
     compatibility_descriptor: Optional[Dict[str, Any]],
 ) -> dict:
-    if scope not in {"files", "files-docs"}:
-        raise ValueError(f"file-index-v2 does not support scope {scope!r}")
-    root = Path(project_root).resolve()
-    descriptor = _validated_file_index_descriptor(
-        json.loads(
-            json.dumps(
-                compatibility_descriptor or default_file_index_compatibility()
-            )
-        )
+    root, descriptor = _validated_file_index_v2_action_inputs(
+        project_root,
+        repo_hash,
+        worktree_hash,
+        scope,
+        compatibility_descriptor,
     )
-    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") != "1" and not file_index_compatibility(
-        descriptor, default_file_index_compatibility()
-    ):
-        raise ValueError(
-            "file-index-v2 descriptor does not match the pinned build contract"
-        )
     visible_records = _visible_file_records(root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
@@ -3100,17 +3342,11 @@ def _action_index_files_protocol_v2(
     )
     v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
     cas_root = v2_root / "cas"
-    base_vectors, base_identities, base_computed, base_hits = _resolve_record_vectors(
-        base_records, descriptor, cas_root
+    base_identities, base_manifest_plans = _plan_file_artifact(
+        base_records, descriptor
     )
-    overlay_vectors, overlay_identities, overlay_computed, overlay_hits = (
-        _resolve_record_vectors(overlay_records, descriptor, cas_root)
-    )
-    base_manifest = _file_artifact_manifest(
-        base_records, base_identities, base_vectors
-    )
-    overlay_manifest = _file_artifact_manifest(
-        overlay_records, overlay_identities, overlay_vectors
+    overlay_identities, overlay_manifest_plans = _plan_file_artifact(
+        overlay_records, descriptor
     )
 
     semantic_contract = _semantic_file_index_contract(descriptor)
@@ -3169,54 +3405,52 @@ def _action_index_files_protocol_v2(
         "store": "store",
         "collection": V2_FILES_DOCS_COLLECTION,
     }
-    base_timestamp = _file_index_timestamp()
-    _materialize_file_artifact_pair(
+    base_descriptor_identity = {
+        "schema_version": 1,
+        "kind": "base",
+        "base_generation_id": base_generation_id,
+        "repo_hash": repo_hash,
+        "root_tree_oid": root_tree_oid,
+        "canonical_ref": canonical.get("reference") if canonical else None,
+        "compatibility": descriptor,
+        "files_generation": files_generation,
+        "files_docs_generation": files_docs_generation,
+        "document_counts": base_document_counts,
+        "build_state": "verified",
+    }
+    base_computed, base_hits = _materialize_file_artifact_pair(
         base_dir,
         base_records,
-        base_vectors,
-        base_manifest,
-        {
-            "schema_version": 1,
-            "kind": "base",
-            "base_generation_id": base_generation_id,
-            "repo_hash": repo_hash,
-            "root_tree_oid": root_tree_oid,
-            "canonical_ref": canonical.get("reference") if canonical else None,
-            "compatibility": descriptor,
-            "files_generation": files_generation,
-            "files_docs_generation": files_docs_generation,
-            "manifest_digest": _sha256_json(base_manifest),
-            "document_counts": base_document_counts,
-            "build_state": "verified",
-            "created_at": base_timestamp,
-            "verified_at": base_timestamp,
-        },
+        base_identities,
+        base_manifest_plans,
+        base_descriptor_identity,
+        descriptor,
+        cas_root,
     )
-    overlay_timestamp = _file_index_timestamp()
-    _materialize_file_artifact_pair(
+    overlay_descriptor_identity = {
+        "schema_version": 1,
+        "kind": "overlay",
+        "overlay_generation_id": overlay_generation_id,
+        "repo_hash": repo_hash,
+        "worktree_hash": worktree_hash,
+        "base_generation_id": base_generation_id,
+        "source_snapshot_id": source_snapshot_id,
+        "compatibility": descriptor,
+        "files_generation": files_generation,
+        "files_docs_generation": files_docs_generation,
+        "files_shadow": files_shadow,
+        "files_docs_shadow": files_docs_shadow,
+        "tombstones": tombstones,
+        "build_state": "verified",
+    }
+    overlay_computed, overlay_hits = _materialize_file_artifact_pair(
         overlay_dir,
         overlay_records,
-        overlay_vectors,
-        overlay_manifest,
-        {
-            "schema_version": 1,
-            "kind": "overlay",
-            "overlay_generation_id": overlay_generation_id,
-            "repo_hash": repo_hash,
-            "worktree_hash": worktree_hash,
-            "base_generation_id": base_generation_id,
-            "source_snapshot_id": source_snapshot_id,
-            "compatibility": descriptor,
-            "files_generation": files_generation,
-            "files_docs_generation": files_docs_generation,
-            "files_shadow": files_shadow,
-            "files_docs_shadow": files_docs_shadow,
-            "tombstones": tombstones,
-            "manifest_digest": _sha256_json(overlay_manifest),
-            "build_state": "verified",
-            "created_at": overlay_timestamp,
-            "verified_at": overlay_timestamp,
-        },
+        overlay_identities,
+        overlay_manifest_plans,
+        overlay_descriptor_identity,
+        descriptor,
+        cas_root,
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -6850,6 +7084,9 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             return 0
 
         emit({"ok": False, "error_code": "BAD_ARGS", "error": f"unknown v2 action {action}"})
+        return 2
+    except ValueError as exc:
+        emit({"ok": False, "error_code": "BAD_ARGS", "error": str(exc)})
         return 2
     except Exception as exc:
         emit({"ok": False, "error_code": "RUNTIME_ERROR", "error": str(exc)})

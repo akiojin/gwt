@@ -305,6 +305,40 @@ class CliArgumentTests(unittest.TestCase):
                 )
             self.assertEqual(args.file_index_protocol, "v2")
 
+    def test_invalid_explicit_v2_identity_is_bad_args_before_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            with mock.patch.object(
+                runner.sys,
+                "argv",
+                [
+                    "chroma_index_runner.py",
+                    "--action",
+                    "index-files",
+                    "--repo-hash",
+                    "../unsafe",
+                    "--worktree-hash",
+                    "111122223333ffff",
+                    "--project-root",
+                    str(project),
+                    "--file-index-protocol",
+                    "v2",
+                ],
+            ):
+                args = runner.parse_args()
+
+            with mock.patch.object(runner, "emit") as emit:
+                with mock.patch.object(
+                    runner, "_visible_file_records", return_value=[]
+                ) as scan:
+                    exit_code = runner._dispatch_v2(args.action, args)
+
+        self.assertEqual(exit_code, 2)
+        scan.assert_not_called()
+        payload = emit.call_args.args[0]
+        self.assertEqual(payload.get("error_code"), "BAD_ARGS", payload)
+
 
 class ProtocolLayoutIntegrationTests(unittest.TestCase):
     def _tree_digest(self, root: Path) -> dict:

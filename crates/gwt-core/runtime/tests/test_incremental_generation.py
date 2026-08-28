@@ -11,6 +11,7 @@ publish and the active pointer stays on the previous generation.
 from __future__ import annotations
 
 import copy
+import contextlib
 import hashlib
 import json
 import os
@@ -388,6 +389,266 @@ class _IncrementalFixture(unittest.TestCase):
 
 
 class IncrementalGenerationTests(_IncrementalFixture):
+    def test_large_v2_corpus_uses_bounded_batches_and_metadata_only_warm_reuse(self):
+        large_project = self.base / "large-project"
+        large_src = large_project / "src"
+        large_src.mkdir(parents=True)
+        for index in range(130):
+            (large_src / f"module_{index:03}.rs").write_text(
+                f"//! large module {index}\nfn feature_{index}() {{}}\n",
+                encoding="utf-8",
+            )
+
+        real_model = runner._FakeEmbeddingModel()
+        encoded_batch_sizes = []
+
+        def bounded_encode(texts, **kwargs):
+            encoded_batch_sizes.append(len(texts))
+            return real_model.encode(texts, **kwargs)
+
+        model = mock.MagicMock()
+        model.encode.side_effect = bounded_encode
+        original_open = runner._open_file_index_v2_collection
+        embedding_get_batch_sizes = []
+
+        class ObservedCollection:
+            def __init__(self, collection):
+                self._collection = collection
+
+            def __getattr__(self, name):
+                return getattr(self._collection, name)
+
+            def get(self, *args, **kwargs):
+                include = kwargs.get("include") or []
+                if "embeddings" in include:
+                    ids = kwargs.get("ids")
+                    embedding_get_batch_sizes.append(None if ids is None else len(ids))
+                return self._collection.get(*args, **kwargs)
+
+        def observed_open(*args, **kwargs):
+            client, collection = original_open(*args, **kwargs)
+            return client, ObservedCollection(collection)
+
+        with mock.patch.object(runner, "_get_embedding_model", return_value=model):
+            with mock.patch.object(
+                runner,
+                "_open_file_index_v2_collection",
+                side_effect=observed_open,
+            ):
+                cold = self._build_protocol_v2(
+                    large_project,
+                    "0000000000000401",
+                    repo_hash="abc1234567890401",
+                )
+
+        self.assertTrue(cold.get("ok"), cold)
+        self.assertEqual(cold.get("requested_embeddings"), 130, cold)
+        self.assertEqual(cold.get("computed_embeddings"), 130, cold)
+        self.assertEqual(cold.get("embedding_cache_hits"), 0, cold)
+        self.assertTrue(encoded_batch_sizes, cold)
+        self.assertLessEqual(max(encoded_batch_sizes), 16, encoded_batch_sizes)
+        self.assertEqual(sum(encoded_batch_sizes), 130, encoded_batch_sizes)
+        self.assertTrue(embedding_get_batch_sizes, cold)
+        self.assertNotIn(None, embedding_get_batch_sizes)
+        self.assertLessEqual(max(embedding_get_batch_sizes), 16)
+
+        class CountOnlyCollection:
+            def __init__(self, collection):
+                self._collection = collection
+
+            def __getattr__(self, name):
+                return getattr(self._collection, name)
+
+            def get(self, *args, **kwargs):
+                raise AssertionError("warm verified reuse must not fetch collection rows")
+
+        def count_only_open(*args, **kwargs):
+            client, collection = original_open(*args, **kwargs)
+            return client, CountOnlyCollection(collection)
+
+        with mock.patch.object(
+            runner,
+            "_read_cas_vector",
+            side_effect=AssertionError("warm verified reuse must not read CAS vectors"),
+        ) as cas_read:
+            with mock.patch.object(
+                runner,
+                "_get_embedding_model",
+                side_effect=AssertionError("warm verified reuse must not load the model"),
+            ) as model_load:
+                with mock.patch.object(
+                    runner,
+                    "_open_file_index_v2_collection",
+                    side_effect=count_only_open,
+                ):
+                    warm = self._build_protocol_v2(
+                        large_project,
+                        "0000000000000401",
+                        repo_hash="abc1234567890401",
+                    )
+
+        self.assertTrue(warm.get("ok"), warm)
+        self.assertEqual(warm.get("base_generation_id"), cold["base_generation_id"])
+        self.assertEqual(
+            warm.get("overlay_generation_id"), cold["overlay_generation_id"]
+        )
+        self.assertEqual(warm.get("requested_embeddings"), 130, warm)
+        self.assertEqual(warm.get("computed_embeddings"), 0, warm)
+        self.assertEqual(warm.get("embedding_cache_hits"), 130, warm)
+        cas_read.assert_not_called()
+        model_load.assert_not_called()
+
+    def test_v2_action_rejects_bad_arguments_before_source_or_store_access(self):
+        invalid_descriptor = self._compatibility_descriptor()
+        invalid_descriptor.pop("path_policy_hash")
+        cases = (
+            {"repo_hash": "../unsafe"},
+            {"worktree_hash": "../unsafe"},
+            {"project_root": str(self.base / "missing-project")},
+            {"scope": "issues"},
+            {"compatibility_descriptor": {}},
+            {"compatibility_descriptor": invalid_descriptor},
+        )
+
+        for overrides in cases:
+            arguments = {
+                "project_root": str(self.project),
+                "repo_hash": "abc1234567890402",
+                "worktree_hash": "0000000000000402",
+                "mode": "full",
+                "db_root": self.db_root,
+                "scope": "files",
+                "file_index_protocol": "v2",
+            }
+            arguments.update(overrides)
+            with self.subTest(overrides=overrides):
+                with mock.patch.object(
+                    runner, "_visible_file_records", return_value=[]
+                ) as scan:
+                    with mock.patch.object(
+                        runner, "_canonical_git_tree", return_value=None
+                    ) as git_probe:
+                        with mock.patch.object(
+                            runner, "_materialize_file_artifact_pair"
+                        ) as materialize:
+                            with self.assertRaises(ValueError):
+                                runner.action_index_files_v2(**arguments)
+                scan.assert_not_called()
+                git_probe.assert_not_called()
+                materialize.assert_not_called()
+
+    def test_canonical_ref_peel_failure_does_not_fallback_to_lower_ref(self):
+        repo = self._make_canonical_repo()
+        self._run_git(
+            "-C",
+            str(repo),
+            "update-ref",
+            "refs/remotes/origin/main",
+            "HEAD",
+        )
+        (repo / "src" / "module_00.rs").write_text(
+            "//! corrupt develop\nfn changed() {}\n", encoding="utf-8"
+        )
+        self._run_git("-C", str(repo), "add", "src/module_00.rs")
+        self._run_git(
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=gwt tests",
+            "-c",
+            "user.email=gwt-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "develop tip",
+        )
+        self._run_git(
+            "-C",
+            str(repo),
+            "update-ref",
+            "refs/remotes/origin/develop",
+            "HEAD",
+        )
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        commit_oid = completed.stdout.strip()
+        object_path = repo / ".git" / "objects" / commit_oid[:2] / commit_oid[2:]
+        object_path.rename(object_path.with_name(f"{object_path.name}.missing"))
+
+        with self.assertRaisesRegex(RuntimeError, "origin/develop"):
+            runner._canonical_git_tree(repo)
+
+    def test_canonical_git_commands_disable_lazy_fetch_and_prompts(self):
+        completed = subprocess.CompletedProcess(
+            args=["git"], returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"GIT_DIR": "/wrong/repository", "GIT_WORK_TREE": "/wrong/worktree"},
+        ):
+            with mock.patch.object(
+                runner.subprocess, "run", return_value=completed
+            ) as run:
+                runner._git_command(self.project, ["rev-parse", "HEAD"])
+
+        environment = run.call_args.kwargs.get("env")
+        self.assertIsNotNone(environment)
+        self.assertEqual(environment.get("GIT_NO_LAZY_FETCH"), "1")
+        self.assertEqual(environment.get("GIT_TERMINAL_PROMPT"), "0")
+        self.assertNotIn("GIT_DIR", environment)
+        self.assertNotIn("GIT_WORK_TREE", environment)
+
+    def test_cas_reads_are_pure_and_atomic_writers_cleanup_failed_temps(self):
+        result = self._build_protocol_v2(
+            self.project,
+            "0000000000000403",
+            repo_hash="abc1234567890403",
+        )
+        self.assertTrue(result.get("ok"), result)
+        cas_root = runner.resolve_file_index_v2_root(
+            "abc1234567890403", db_root=self.db_root
+        ) / "cas"
+        cas_entry = next(cas_root.glob("*/*.json"))
+        payload = json.loads(cas_entry.read_text(encoding="utf-8"))
+        identity = {
+            "cas_key": payload["cas_key"],
+            "input_digest": payload["input_digest"],
+        }
+        before = cas_entry.read_bytes()
+        with mock.patch.object(runner, "_write_json_atomic") as rewrite:
+            vector = runner._read_cas_vector(
+                cas_root,
+                identity,
+                payload["embedding_contract"],
+                payload["dimension"],
+            )
+        self.assertIsNotNone(vector)
+        rewrite.assert_not_called()
+        self.assertEqual(cas_entry.read_bytes(), before)
+
+        failed_json = self.base / "atomic" / "payload.json"
+        with mock.patch.object(runner.os, "replace", side_effect=OSError("publish")):
+            with self.assertRaises(OSError):
+                runner._write_json_atomic(failed_json, {"value": 1})
+        self.assertEqual(list(failed_json.parent.glob(".*.tmp")), [])
+
+        failed_cas_root = self.base / "failed-cas"
+        failed_identity = {"cas_key": "a" * 64, "input_digest": "b" * 64}
+        with mock.patch.object(runner.os, "replace", side_effect=OSError("publish")):
+            with self.assertRaises(OSError):
+                runner._write_cas_vector(
+                    failed_cas_root,
+                    failed_identity,
+                    payload["embedding_contract"],
+                    [0.0] * payload["dimension"],
+                    payload["dimension"],
+                )
+        self.assertEqual(list(failed_cas_root.rglob("*.tmp")), [])
+
     def test_non_git_and_unborn_sources_use_empty_base_and_full_overlay(self):
         non_git = self._build_protocol_v2(self.project, WORKTREE_HASH)
 
@@ -665,10 +926,10 @@ class IncrementalGenerationTests(_IncrementalFixture):
             sys.path.insert(0, os.environ["GWT_TEST_RUNNER_DIR"])
             import chroma_index_runner as runner
 
-            original_resolve = runner._resolve_record_vectors
+            original_resolve = runner._resolve_record_vector_batch
             first_resolve = True
 
-            def synchronized_resolve(records, descriptor, cas_root):
+            def synchronized_resolve(*args, **kwargs):
                 global first_resolve
                 if first_resolve:
                     first_resolve = False
@@ -679,7 +940,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
                         if time.monotonic() >= deadline:
                             raise TimeoutError("file-index-v2 cold-miss barrier timed out")
                         time.sleep(0.01)
-                return original_resolve(records, descriptor, cas_root)
+                return original_resolve(*args, **kwargs)
 
             original_encode = runner._FakeEmbeddingModel.encode
 
@@ -687,8 +948,12 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 time.sleep(0.3)
                 return original_encode(self, texts, **kwargs)
 
-            runner._resolve_record_vectors = synchronized_resolve
+            runner._resolve_record_vector_batch = synchronized_resolve
             runner._FakeEmbeddingModel.encode = slow_encode
+            descriptor = runner.default_file_index_compatibility()
+            descriptor["document_contract"]["payload_builder_version"] = int(
+                os.environ["GWT_TEST_DOCUMENT_CONTRACT_VERSION"]
+            )
             result = runner.action_index_files_v2(
                 project_root=os.environ["GWT_TEST_PROJECT_ROOT"],
                 repo_hash=os.environ["GWT_TEST_REPO_HASH"],
@@ -697,12 +962,13 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 db_root=Path(os.environ["GWT_TEST_DB_ROOT"]),
                 scope="files",
                 file_index_protocol="v2",
+                compatibility_descriptor=descriptor,
             )
             print(json.dumps(result, sort_keys=True))
             """
         )
         processes = []
-        for project, worktree_hash in worktrees:
+        for contract_version, (project, worktree_hash) in enumerate(worktrees, start=1):
             environment = os.environ.copy()
             environment.update(
                 {
@@ -712,6 +978,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
                     "GWT_TEST_REPO_HASH": "abc1234567890303",
                     "GWT_TEST_WORKTREE_HASH": worktree_hash,
                     "GWT_TEST_DB_ROOT": str(self.db_root),
+                    "GWT_TEST_DOCUMENT_CONTRACT_VERSION": str(contract_version),
                 }
             )
             processes.append(
@@ -724,22 +991,29 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 )
             )
         results = []
-        for process in processes:
-            try:
+        communicated = set()
+        try:
+            for process in processes:
                 stdout, stderr = process.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate(timeout=5)
-                self.fail(
-                    "concurrent file-index-v2 subprocess timed out\n"
-                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                communicated.add(process)
+                self.assertEqual(
+                    process.returncode,
+                    0,
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}",
                 )
-            self.assertEqual(
-                process.returncode,
-                0,
-                f"stdout:\n{stdout}\nstderr:\n{stderr}",
-            )
-            results.append(json.loads(stdout.splitlines()[-1]))
+                results.append(json.loads(stdout.splitlines()[-1]))
+        except subprocess.TimeoutExpired as error:
+            self.fail(f"concurrent file-index-v2 subprocess timed out: {error}")
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                if process not in communicated:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.communicate(timeout=5)
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
 
         for result in results:
             self.assertTrue(result.get("ok"), result)
@@ -758,8 +1032,8 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 result,
             )
         self.assertEqual(
-            {result["base_generation_id"] for result in results},
-            {results[0]["base_generation_id"]},
+            len({result["base_generation_id"] for result in results}),
+            2,
         )
         self.assertEqual(
             len({result["overlay_generation_id"] for result in results}),
@@ -771,12 +1045,17 @@ class IncrementalGenerationTests(_IncrementalFixture):
         )
         self.assertFalse(list(v2_root.rglob("*.staging-*")))
         self.assertFalse(list(v2_root.rglob("*.quarantine-*")))
-        base_dir = runner.resolve_file_index_v2_base_dir(
-            "abc1234567890303",
-            results[0]["base_generation_id"],
-            db_root=self.db_root,
-        )
-        artifact_counts = [(base_dir, 8)]
+        artifact_counts = [
+            (
+                runner.resolve_file_index_v2_base_dir(
+                    "abc1234567890303",
+                    result["base_generation_id"],
+                    db_root=self.db_root,
+                ),
+                8,
+            )
+            for result in results
+        ]
         artifact_counts.extend(
             (
                 runner.resolve_file_index_v2_overlay_dir(
@@ -793,6 +1072,143 @@ class IncrementalGenerationTests(_IncrementalFixture):
             self.assertTrue((artifact_dir / "descriptor.json").is_file())
             self.assertTrue((artifact_dir / "manifest.json").is_file())
             self.assertTrue((artifact_dir / "store" / "chroma.sqlite3").is_file())
+            descriptor = json.loads(
+                (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(descriptor["build_state"], "verified")
+            self.assertEqual(
+                descriptor["manifest_digest"],
+                runner._sha256_json(manifest["entries"]),
+            )
+            self.assertEqual(len(manifest["entries"]), expected_count)
+
+    def test_same_target_concurrent_publish_converges_on_one_verified_artifact(self):
+        canonical_repo = self._make_canonical_repo()
+        project = self.base / "same-target-concurrent-worktree"
+        self._run_git("clone", "--quiet", str(canonical_repo), str(project))
+        barrier_root = self.base / "same-target-publish-barrier"
+        barrier_root.mkdir()
+        driver = textwrap.dedent(
+            """
+            import json
+            import os
+            import sys
+            import time
+            from pathlib import Path
+
+            sys.path.insert(0, os.environ["GWT_TEST_RUNNER_DIR"])
+            import chroma_index_runner as runner
+
+            original_materialize = runner._materialize_file_artifact_pair
+            first_materialize = True
+
+            def synchronized_materialize(*args, **kwargs):
+                global first_materialize
+                if first_materialize:
+                    first_materialize = False
+                    barrier = Path(os.environ["GWT_TEST_BARRIER_ROOT"])
+                    (barrier / f"{os.getpid()}.ready").write_text("ready")
+                    deadline = time.monotonic() + 10
+                    while len(list(barrier.glob("*.ready"))) < 2:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("file-index-v2 publish barrier timed out")
+                        time.sleep(0.01)
+                return original_materialize(*args, **kwargs)
+
+            original_encode = runner._FakeEmbeddingModel.encode
+
+            def slow_encode(self, texts, **kwargs):
+                time.sleep(0.3)
+                return original_encode(self, texts, **kwargs)
+
+            runner._materialize_file_artifact_pair = synchronized_materialize
+            runner._FakeEmbeddingModel.encode = slow_encode
+            result = runner.action_index_files_v2(
+                project_root=os.environ["GWT_TEST_PROJECT_ROOT"],
+                repo_hash=os.environ["GWT_TEST_REPO_HASH"],
+                worktree_hash=os.environ["GWT_TEST_WORKTREE_HASH"],
+                mode="full",
+                db_root=Path(os.environ["GWT_TEST_DB_ROOT"]),
+                scope="files",
+                file_index_protocol="v2",
+            )
+            print(json.dumps(result, sort_keys=True))
+            """
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GWT_TEST_RUNNER_DIR": str(Path(runner.__file__).resolve().parent),
+                "GWT_TEST_BARRIER_ROOT": str(barrier_root),
+                "GWT_TEST_PROJECT_ROOT": str(project),
+                "GWT_TEST_REPO_HASH": "abc1234567890305",
+                "GWT_TEST_WORKTREE_HASH": "0000000000000305",
+                "GWT_TEST_DB_ROOT": str(self.db_root),
+            }
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", driver],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            for _ in range(2)
+        ]
+        results = []
+        communicated = set()
+        try:
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=30)
+                communicated.add(process)
+                self.assertEqual(
+                    process.returncode,
+                    0,
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}",
+                )
+                results.append(json.loads(stdout.splitlines()[-1]))
+        except subprocess.TimeoutExpired as error:
+            self.fail(f"same-target file-index-v2 subprocess timed out: {error}")
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                if process not in communicated:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.communicate(timeout=5)
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len({item["base_generation_id"] for item in results}), 1)
+        self.assertEqual(len({item["overlay_generation_id"] for item in results}), 1)
+        self.assertEqual(sum(item["requested_embeddings"] for item in results), 16)
+        self.assertEqual(sum(item["computed_embeddings"] for item in results), 8)
+        self.assertEqual(sum(item["embedding_cache_hits"] for item in results), 8)
+        self.assertEqual(len(list(barrier_root.glob("*.ready"))), 2)
+
+        v2_root = runner.resolve_file_index_v2_root(
+            "abc1234567890305", db_root=self.db_root
+        )
+        self.assertFalse(list(v2_root.rglob("*.staging-*")))
+        self.assertFalse(list(v2_root.rglob("*.quarantine-*")))
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            "abc1234567890305",
+            results[0]["base_generation_id"],
+            db_root=self.db_root,
+        )
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            "abc1234567890305",
+            "0000000000000305",
+            results[0]["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        for artifact_dir, expected_count in ((base_dir, 8), (overlay_dir, 0)):
             descriptor = json.loads(
                 (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
             )

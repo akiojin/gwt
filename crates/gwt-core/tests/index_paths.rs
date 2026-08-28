@@ -1,10 +1,11 @@
 //! Phase 8: integration tests for `gwt_core::index::paths`.
 
-use std::fs;
-
 use gwt_core::{
-    index::paths::{gwt_index_db_path, gwt_index_repo_dir, gwt_index_root, Scope},
-    process::{resolved_command, ProcessPlanRequest},
+    index::paths::{
+        gwt_file_index_v2_base_dir, gwt_file_index_v2_cas_dir, gwt_file_index_v2_head_path,
+        gwt_file_index_v2_overlay_dir, gwt_file_index_v2_root, gwt_file_index_v2_view_dir,
+        gwt_index_db_path, gwt_index_repo_dir, gwt_index_root, gwt_index_worktree_dir, Scope,
+    },
     repo_hash::compute_repo_hash,
     worktree_hash::compute_worktree_hash,
 };
@@ -121,53 +122,39 @@ fn gwt_index_repo_dir_layout() {
 #[test]
 fn file_index_v2_path_helpers_enforce_additive_layout_and_safe_artifact_ids() {
     let fixture = tempfile::tempdir().unwrap();
-    fs::create_dir(fixture.path().join("src")).unwrap();
-    let source_path = fixture.path().join("src/main.rs");
-    fs::write(
-        &source_path,
-        r#"
-use gwt_core::{
-    index::paths::{
-        gwt_file_index_v2_base_dir, gwt_file_index_v2_cas_dir,
-        gwt_file_index_v2_head_path, gwt_file_index_v2_overlay_dir,
-        gwt_file_index_v2_root, gwt_file_index_v2_view_dir,
-        gwt_index_worktree_dir,
-    },
-    repo_hash::compute_repo_hash,
-    worktree_hash::compute_worktree_hash,
-};
-
-fn main() {
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
-    let current_dir = std::env::current_dir().unwrap();
-    let worktree = compute_worktree_hash(&current_dir).unwrap();
+    let worktree = compute_worktree_hash(fixture.path()).unwrap();
     let legacy_worktree = gwt_index_worktree_dir(&repo, &worktree);
     let root = gwt_file_index_v2_root(&repo);
 
     assert!(root.ends_with(format!("{}/file-index-v2", repo.as_str())));
-    assert_eq!(root.parent(), legacy_worktree.parent().and_then(|p| p.parent()));
+    assert_eq!(
+        root.parent(),
+        legacy_worktree.parent().and_then(|p| p.parent())
+    );
     assert!(!root.starts_with(legacy_worktree.parent().unwrap()));
 
     let base = gwt_file_index_v2_base_dir(&repo, "base-123").unwrap();
     let cas = gwt_file_index_v2_cas_dir(&repo);
-    let overlay =
-        gwt_file_index_v2_overlay_dir(&repo, &worktree, "overlay-123").unwrap();
+    let overlay = gwt_file_index_v2_overlay_dir(&repo, &worktree, "overlay-123").unwrap();
     let view = gwt_file_index_v2_view_dir(&repo, &worktree, "view-123").unwrap();
     let head = gwt_file_index_v2_head_path(&repo, &worktree);
 
     assert!(base.starts_with(&root));
     assert!(base.ends_with("base-123"));
     assert!(cas.starts_with(&root));
-    assert!(!base.components().any(|part| part.as_os_str() == worktree.as_str()));
-    assert!(!cas.components().any(|part| part.as_os_str() == worktree.as_str()));
+    assert!(!base
+        .components()
+        .any(|part| part.as_os_str() == worktree.as_str()));
+    assert!(!cas
+        .components()
+        .any(|part| part.as_os_str() == worktree.as_str()));
 
     for worktree_path in [&overlay, &view, &head] {
         assert!(worktree_path.starts_with(&root));
-        assert!(
-            worktree_path
-                .components()
-                .any(|part| part.as_os_str() == worktree.as_str())
-        );
+        assert!(worktree_path
+            .components()
+            .any(|part| part.as_os_str() == worktree.as_str()));
     }
     assert!(overlay.ends_with("overlay-123"));
     assert!(view.ends_with("view-123"));
@@ -191,92 +178,4 @@ fn main() {
         assert!(gwt_file_index_v2_overlay_dir(&repo, &worktree, invalid).is_err());
         assert!(gwt_file_index_v2_view_dir(&repo, &worktree, invalid).is_err());
     }
-}
-"#,
-    )
-    .unwrap();
-
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .canonicalize()
-        .unwrap();
-    let repo_root = manifest_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .unwrap();
-    fs::write(
-        fixture.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "file-index-v2-path-contract"
-version = "0.0.0"
-edition = "2021"
-
-[workspace]
-
-[dependencies]
-gwt-core = {{ path = {manifest_dir:?} }}
-"#
-        ),
-    )
-    .unwrap();
-    fs::copy(
-        repo_root.join("Cargo.lock"),
-        fixture.path().join("Cargo.lock"),
-    )
-    .unwrap();
-
-    let current_exe = std::env::current_exe().unwrap();
-    let profile_output = current_exe
-        .parent()
-        .and_then(|path| path.parent())
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        .unwrap();
-    let cargo_profile = if profile_output == "debug" {
-        "dev"
-    } else {
-        profile_output
-    };
-    let target_root = match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(configured) => {
-            let configured = std::path::PathBuf::from(configured);
-            if configured.is_absolute() {
-                configured
-            } else {
-                std::env::current_dir().unwrap().join(configured)
-            }
-        }
-        None => current_exe
-            .ancestors()
-            .find(|path| path.join("CACHEDIR.TAG").is_file())
-            .expect("cargo target root must contain CACHEDIR.TAG")
-            .to_path_buf(),
-    };
-
-    let lock_request = ProcessPlanRequest::new(env!("CARGO"))
-        .args(["generate-lockfile", "--offline", "--manifest-path"])
-        .arg(fixture.path().join("Cargo.toml"));
-    let lock_output = resolved_command(lock_request).unwrap().output().unwrap();
-    assert!(
-        lock_output.status.success(),
-        "failed to derive the isolated contract lock from the repository lock\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&lock_output.stdout),
-        String::from_utf8_lossy(&lock_output.stderr),
-    );
-
-    let run_request = ProcessPlanRequest::new(env!("CARGO"))
-        .args(["run", "--quiet", "--locked", "--offline", "--profile"])
-        .arg(cargo_profile)
-        .arg("--manifest-path")
-        .arg(fixture.path().join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(target_root);
-    let output = resolved_command(run_request).unwrap().output().unwrap();
-
-    assert!(
-        output.status.success(),
-        "Phase 71 v2 path API is missing or violates the additive layout contract\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
 }
