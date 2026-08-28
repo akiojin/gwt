@@ -6583,7 +6583,7 @@ def _format_memory_results(
                     "title": title,
                     "heading": meta.get("heading", ""),
                     "chunk_idx": int(meta.get("chunk_idx", 0)),
-                    "distance": it.get("distance"),
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -6620,7 +6620,7 @@ def _format_discussion_results(
                     "promoted_to": _split_csv_meta(meta.get("promoted_to", "")),
                     "heading": meta.get("heading", ""),
                     "chunk_idx": int(meta.get("chunk_idx", 0)),
-                    "distance": it.get("distance"),
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -7189,10 +7189,15 @@ def _search_collection_v2(
                     "id": doc_id,
                     "metadata": meta,
                     "document": results["documents"][0][idx] if results.get("documents") else "",
-                    "distance": round(distance, 4) if distance is not None else None,
+                    "distance": float(distance) if distance is not None else None,
                 }
             )
     return items
+
+
+def _wire_distance(value: Any) -> Optional[float]:
+    """Round only while formatting the public wire payload."""
+    return round(float(value), 4) if value is not None else None
 
 
 def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -7203,7 +7208,7 @@ def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 {
                     "path": (it["metadata"] or {}).get("path", it["id"]),
                     "description": (it["metadata"] or {}).get("description", ""),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                     "fileType": (it["metadata"] or {}).get("file_type", ""),
                     "size": (it["metadata"] or {}).get("size", 0),
                 },
@@ -7235,7 +7240,7 @@ def _format_spec_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "status": meta.get("status", ""),
                     "phase": meta.get("phase", ""),
                     "dir_name": meta.get("dir_name", ""),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                     "matched_section": meta.get("chunk_heading", ""),
                 },
                 it,
@@ -7258,7 +7263,7 @@ def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "url": meta.get("url", ""),
                     "state": meta.get("state", ""),
                     "labels": labels,
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -7291,7 +7296,7 @@ def _format_board_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "audience": _split_csv_meta(meta.get("audience", "")),
                     "related_topics": _split_csv_meta(meta.get("related_topics", "")),
                     "related_owners": _split_csv_meta(meta.get("related_owners", "")),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -7324,7 +7329,7 @@ def _format_work_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "owner": meta.get("owner", ""),
                     "branches": _split_csv_meta(meta.get("branches", "")),
                     "pr_numbers": _split_csv_meta(meta.get("pr_numbers", "")),
-                    "distance": it["distance"],
+                    "distance": _wire_distance(it.get("distance")),
                 },
                 it,
             )
@@ -7580,6 +7585,181 @@ def _classify_scope_for_search(
     return "fresh", health
 
 
+def _pin_active_file_index_v2_view(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+) -> tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
+    """Pin and verify the active immutable View once for a search batch."""
+    v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    head_path = worktree_root / "head.json"
+    if not head_path.is_file():
+        return None, "missing", {"reason": "view_head_missing"}
+    head = _read_file_index_v2_head(head_path)
+    if head is None:
+        return None, "corrupt", {"reason": "view_head_invalid"}
+    view_dir = worktree_root / "views" / head["active_view_id"]
+    if not _verify_file_index_v2_view(view_dir):
+        return None, "corrupt", {"reason": "view_closure_invalid"}
+    view_descriptor = _read_artifact_descriptor(view_dir)
+    if view_descriptor is None:
+        return None, "corrupt", {"reason": "view_descriptor_missing"}
+    base_dir = v2_root / "bases" / view_descriptor["base_generation_id"]
+    overlay_dir = (
+        worktree_root / "overlays" / view_descriptor["overlay_generation_id"]
+    )
+    overlay_descriptor = _read_artifact_descriptor(overlay_dir)
+    if overlay_descriptor is None:
+        return None, "corrupt", {"reason": "overlay_descriptor_missing"}
+    return (
+        {
+            "view_id": view_descriptor["view_id"],
+            "compatibility": view_descriptor["compatibility"],
+            "base_store": base_dir / "store",
+            "overlay_store": overlay_dir / "store",
+            "files_shadow": frozenset(overlay_descriptor["files_shadow"]),
+            "files_docs_shadow": frozenset(
+                overlay_descriptor["files_docs_shadow"]
+            ),
+            "tombstones": frozenset(overlay_descriptor["tombstones"]),
+        },
+        "fresh",
+        {"reason": "ready"},
+    )
+
+
+def _encode_file_index_v2_query(
+    pinned_view: Dict[str, Any], query: str
+) -> List[float]:
+    """Encode once with the exact embedding contract verified for the View."""
+    compatibility = pinned_view["compatibility"]
+    query_prefix = compatibility["query_prefix"]
+    model_input = query if query.startswith(query_prefix) else f"{query_prefix}{query}"
+    encoded = _get_embedding_model(compatibility["model_revision"]).encode(
+        [model_input]
+    )
+    vectors = E5EmbeddingFunction._native_finite_query_vectors(encoded)
+    if len(vectors) != 1:
+        raise ValueError("file-index-v2 query model returned the wrong vector count")
+    vector = vectors[0]
+    if len(vector) != compatibility["dimension"]:
+        raise ValueError("file-index-v2 query model returned the wrong vector dimension")
+    return vector
+
+
+def _file_index_v2_item_path(item: Dict[str, Any]) -> str:
+    metadata = item.get("metadata") or {}
+    return str(metadata.get("path") or item.get("id") or "")
+
+
+def _file_index_v2_raw_distance(item: Dict[str, Any]) -> float:
+    value = item.get("distance")
+    return float(value) if value is not None else math.inf
+
+
+def _rank_file_index_v2_candidates(
+    base_items: Sequence[Dict[str, Any]],
+    overlay_items: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Deduplicate by logical path with Overlay authority, then raw-rank."""
+    by_path: Dict[str, Dict[str, Any]] = {}
+    for item in overlay_items:
+        by_path[_file_index_v2_item_path(item)] = item
+    for item in base_items:
+        by_path.setdefault(_file_index_v2_item_path(item), item)
+    return sorted(by_path.values(), key=_file_index_v2_raw_distance)
+
+
+def _search_file_index_v2_scope(
+    pinned_view: Dict[str, Any],
+    scope: str,
+    query: str,
+    n_results: int,
+    match_mode: str,
+    query_embedding: List[float],
+) -> Dict[str, Any]:
+    """Query one scope from a pinned Base/Overlay pair and merge raw hits."""
+    collection_name = (
+        V2_FILES_CODE_COLLECTION
+        if scope == "files"
+        else V2_FILES_DOCS_COLLECTION
+    )
+    shadow_field = "files_shadow" if scope == "files" else "files_docs_shadow"
+    shadowed_paths = set(pinned_view[shadow_field]) | set(
+        pinned_view["tombstones"]
+    )
+    target = max(1, _search_fetch_count(scope, n_results, match_mode))
+    overlay_client = None
+    base_client = None
+    try:
+        overlay_client, overlay_collection = _open_file_index_v2_collection(
+            pinned_view["overlay_store"], collection_name
+        )
+        base_client, base_collection = _open_file_index_v2_collection(
+            pinned_view["base_store"], collection_name
+        )
+        # The pinned closure was verified moments ago. A new count failure is
+        # a query failure, never an empty result or a legacy-health fallback.
+        int(overlay_collection.count())
+        base_count = int(base_collection.count())
+        overlay_items = _search_collection_v2(
+            overlay_collection,
+            query,
+            target,
+            query_embedding=query_embedding,
+        )
+        base_fetch = target
+        ranked: List[Dict[str, Any]] = list(overlay_items)
+        while True:
+            base_items = _search_collection_v2(
+                base_collection,
+                query,
+                base_fetch,
+                query_embedding=query_embedding,
+            )
+            visible_base = [
+                item
+                for item in base_items
+                if _file_index_v2_item_path(item) not in shadowed_paths
+            ]
+            ranked = _rank_file_index_v2_candidates(visible_base, overlay_items)
+            if base_fetch >= base_count or len(base_items) < base_fetch:
+                break
+            boundary = (
+                _file_index_v2_raw_distance(base_items[-1])
+                if base_items
+                else math.inf
+            )
+            kth_distance = (
+                _file_index_v2_raw_distance(ranked[target - 1])
+                if len(ranked) >= target
+                else math.inf
+            )
+            if len(ranked) >= target and kth_distance <= boundary:
+                break
+            next_fetch = min(base_count, max(base_fetch + 1, base_fetch * 2))
+            if next_fetch <= base_fetch:
+                break
+            base_fetch = next_fetch
+    finally:
+        if base_client is not None:
+            _close_chroma_client(base_client)
+        if overlay_client is not None:
+            _close_chroma_client(overlay_client)
+
+    strict_items, suggestion_items = _apply_match_mode(ranked, query, match_mode)
+    payload = {
+        "results": _format_scope_results(scope, strict_items, n_results),
+        "view_id": pinned_view["view_id"],
+    }
+    if match_mode == "all_terms":
+        payload["suggestions"] = _format_scope_results(
+            scope, suggestion_items, n_results
+        )
+    return payload
+
+
 def _search_scope_collection(
     repo_hash: str,
     worktree_hash: Optional[str],
@@ -7639,6 +7819,7 @@ def action_search_multi_v2(
     scopes: Sequence[str],
     db_root: Optional[Path] = None,
     match_mode: str = "semantic",
+    file_index_protocol: str = "legacy",
 ) -> Dict[str, Any]:
     """Versioned batch search across v2 scopes (Phase 70 FR-384).
 
@@ -7659,6 +7840,26 @@ def action_search_multi_v2(
         "files",
         "files-docs",
     }
+    if file_index_protocol not in {"legacy", "v2"}:
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+    v2_file_scopes = [
+        scope for scope in scopes if scope in {"files", "files-docs"}
+    ]
+    pinned_file_view: Optional[Dict[str, Any]] = None
+    pinned_file_state = "missing"
+    pinned_file_health: Dict[str, Any] = {"reason": "view_head_missing"}
+    if file_index_protocol == "v2" and v2_file_scopes:
+        if not worktree_hash:
+            raise ValueError("file-index-v2 search requires worktree_hash")
+        (
+            pinned_file_view,
+            pinned_file_state,
+            pinned_file_health,
+        ) = _pin_active_file_index_v2_view(
+            repo_hash,
+            worktree_hash,
+            db_root,
+        )
     payload: Dict[str, Any] = {"ok": True}
     scope_states: Dict[str, Dict[str, Any]] = {}
     scope_results: Dict[str, Any] = {}
@@ -7672,9 +7873,15 @@ def action_search_multi_v2(
                 "error": f"unsupported search scope {scope}",
             }
         scope_worktree = worktree_hash if scope in WORKTREE_SCOPED else None
-        state, health = _classify_scope_for_search(
-            repo_hash, scope_worktree, scope, db_root=db_root
+        is_v2_file_scope = (
+            file_index_protocol == "v2" and scope in {"files", "files-docs"}
         )
+        if is_v2_file_scope:
+            state, health = pinned_file_state, pinned_file_health
+        else:
+            state, health = _classify_scope_for_search(
+                repo_hash, scope_worktree, scope, db_root=db_root
+            )
         if state in ("missing", "corrupt"):
             scope_states[scope] = {
                 "state": state,
@@ -7683,7 +7890,12 @@ def action_search_multi_v2(
             continue
         if query_embedding is None:
             try:
-                query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+                if pinned_file_view is not None:
+                    query_embedding = _encode_file_index_v2_query(
+                        pinned_file_view, query
+                    )
+                else:
+                    query_embedding = E5EmbeddingFunction().embed_query([query])[0]
             except Exception as error:
                 affected_scopes = [
                     candidate for candidate in scopes if candidate in valid_scopes
@@ -7694,17 +7906,31 @@ def action_search_multi_v2(
                     error,
                 )
         try:
-            result = _search_scope_collection(
-                repo_hash,
-                scope_worktree,
-                scope,
-                query,
-                n_results,
-                match_mode,
-                db_root,
-                query_embedding,
-            )
+            if is_v2_file_scope:
+                if pinned_file_view is None:  # pragma: no cover - state guard
+                    raise RuntimeError("file-index-v2 pinned View is unavailable")
+                result = _search_file_index_v2_scope(
+                    pinned_file_view,
+                    scope,
+                    query,
+                    n_results,
+                    match_mode,
+                    query_embedding,
+                )
+            else:
+                result = _search_scope_collection(
+                    repo_hash,
+                    scope_worktree,
+                    scope,
+                    query,
+                    n_results,
+                    match_mode,
+                    db_root,
+                    query_embedding,
+                )
         except Exception as error:
+            if is_v2_file_scope:
+                return _search_failed_payload([scope], "query", error)
             # Phase 70a FR-400: query-contract failures (for example an
             # unsupported embedding scalar type) do not prove the verified
             # store is corrupt. Re-check the same canonical health source used
@@ -7723,6 +7949,8 @@ def action_search_multi_v2(
                 continue
             return _search_failed_payload([scope], "query", error)
         scope_states[scope] = {"state": state}
+        if is_v2_file_scope and pinned_file_view is not None:
+            scope_states[scope]["view_id"] = pinned_file_view["view_id"]
         if state == "stale":
             stale_scopes.append(scope)
         scope_results[scope] = result
@@ -8002,6 +8230,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     scopes=scopes,
                     match_mode=args.match_mode,
                     db_root=db_root,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0

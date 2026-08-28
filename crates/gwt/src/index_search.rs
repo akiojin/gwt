@@ -991,6 +991,10 @@ fn batch_scope_search_command_args(
         args.push(OsString::from("--worktree-hash"));
         args.push(OsString::from(hash));
     }
+    if scopes.iter().any(|scope| is_file_scope(*scope)) {
+        args.push(OsString::from("--file-index-protocol"));
+        args.push(OsString::from("v2"));
+    }
     args
 }
 
