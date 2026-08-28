@@ -1647,6 +1647,15 @@ pub enum BackendEvent {
         id: String,
         data_base64: String,
     },
+    /// Origin-client completion receipt for one authenticated pane snapshot
+    /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
+    /// sets explain every authorized pane that produced no frame.
+    PaneSyncComplete {
+        empty_window_ids: Vec<String>,
+        busy_window_ids: Vec<String>,
+        unavailable_window_ids: Vec<String>,
+        failed_window_ids: Vec<String>,
+    },
     TerminalStatus {
         id: String,
         status: WindowProcessStatus,
@@ -2437,6 +2446,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pane_sync_complete",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "terminal_status",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2902,6 +2916,7 @@ impl BackendEvent {
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
@@ -3124,6 +3139,20 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #3755 AC-2: the final availability receipt is origin-client
+    /// state and must survive outbound pressure like the pane snapshot itself.
+    #[test]
+    fn pane_sync_completion_has_client_scoped_snapshot_policy() {
+        let policy =
+            backend_event_policy("pane_sync_complete").expect("pane_sync_complete delivery policy");
+
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,
