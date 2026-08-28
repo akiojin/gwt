@@ -867,6 +867,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
         let worktree = dir.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gwt_skills::generate_codex_hooks_for_mode(
