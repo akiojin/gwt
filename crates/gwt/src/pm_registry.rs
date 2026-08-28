@@ -3150,8 +3150,7 @@ fn refresh_pm_worktree_at_locked(
                     let (git_root_head, git_root_inspect_error) =
                         git_sha_observation(git_root, "HEAD");
                     local_head = git_root_head;
-                    local_head_inspect_error =
-                        git_root_inspect_error.or(local_head_inspect_error);
+                    local_head_inspect_error = git_root_inspect_error.or(local_head_inspect_error);
                 }
                 let materialization_sha = cached_target.as_deref().or(local_head.as_deref());
                 let Some(materialization_sha) = materialization_sha else {

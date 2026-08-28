@@ -51628,11 +51628,8 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-
-    let own_pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
-    fs::create_dir_all(&own_pm_worktree).expect("own PM worktree");
+    init_git_clone_with_origin(&repo);
+    let own_pm_worktree = create_detached_pm_worktree_fixture(&repo);
 
     let mut persisted = empty_workspace_state();
     let mut agent_window =
@@ -52370,7 +52367,10 @@ fn bare_layout_remote_unavailable_materializes_bare_head_for_fresh_spawn() {
         outcome.freshness.failure_stage,
         Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Fetch)
     );
-    assert_eq!(outcome.freshness.head_sha.as_deref(), Some(local_head.as_str()));
+    assert_eq!(
+        outcome.freshness.head_sha.as_deref(),
+        Some(local_head.as_str())
+    );
     assert_eq!(outcome.freshness.target_sha, None);
 }
 
