@@ -10,6 +10,7 @@ publish and the active pointer stays on the previous generation.
 
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import unittest
@@ -20,6 +21,84 @@ import chroma_index_runner as runner
 
 REPO_HASH = "abc1234567890def"
 WORKTREE_HASH = "111122223333ffff"
+SECOND_WORKTREE_HASH = "aaaabbbbccccdddd"
+
+
+class CompatibilityDescriptorTests(unittest.TestCase):
+    def _descriptor(self) -> dict:
+        return {
+            "layout_version": 2,
+            "index_schema_version": 1,
+            "scope_set": ["files", "files-docs"],
+            "model_id": "intfloat/multilingual-e5-base",
+            "model_revision": "model-revision-a",
+            "dimension": 768,
+            "normalization": "none",
+            "metric": "cosine",
+            "query_prefix": "query: ",
+            "passage_prefix": "passage: ",
+            "document_contract": {
+                "payload_builder_version": 1,
+                "decode": "utf-8-replace",
+                "content_limit": 2000,
+            },
+            "path_policy_hash": "path-policy-a",
+            "writer_protocol": "file-index-v2",
+            "runner_hash": "runner-a",
+        }
+
+    def _compatibility(self, left: dict, right: dict) -> bool:
+        compatibility = getattr(runner, "file_index_compatibility", None)
+        self.assertIsNotNone(
+            compatibility,
+            "Phase 71 requires pure file_index_compatibility descriptor checking",
+        )
+        return compatibility(left, right)
+
+    def test_semantic_descriptor_mismatches_are_incompatible(self):
+        self.assertTrue(
+            callable(getattr(runner, "file_index_compatibility", None)),
+            "Phase 71 requires pure file_index_compatibility descriptor checking",
+        )
+        changes = {
+            "layout_version": 3,
+            "index_schema_version": 2,
+            "scope_set": ["files"],
+            "model_id": "different-model",
+            "model_revision": "model-revision-b",
+            "dimension": 384,
+            "normalization": "l2",
+            "metric": "dot",
+            "query_prefix": "search: ",
+            "passage_prefix": "document: ",
+            "document_contract": {
+                "payload_builder_version": 2,
+                "decode": "utf-8-replace",
+                "content_limit": 2000,
+            },
+            "path_policy_hash": "path-policy-b",
+            "writer_protocol": "file-index-v3",
+        }
+        baseline = self._descriptor()
+
+        for field, replacement in changes.items():
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(baseline)
+                candidate[field] = replacement
+                self.assertFalse(
+                    self._compatibility(baseline, candidate),
+                    f"{field} mismatch must reject artifact reuse",
+                )
+
+    def test_runner_hash_alone_does_not_invalidate_compatibility(self):
+        baseline = self._descriptor()
+        candidate = copy.deepcopy(baseline)
+        candidate["runner_hash"] = "runner-b"
+
+        self.assertTrue(
+            self._compatibility(baseline, candidate),
+            "runner_hash is provenance, not a semantic compatibility key",
+        )
 
 
 class _IncrementalFixture(unittest.TestCase):
@@ -82,6 +161,73 @@ class _IncrementalFixture(unittest.TestCase):
 
 
 class IncrementalGenerationTests(_IncrementalFixture):
+    def test_same_repo_second_worktree_reuses_all_v2_embeddings(self):
+        second_project = self.base / "second-project"
+        second_src = second_project / "src"
+        second_src.mkdir(parents=True)
+        for index in range(8):
+            (second_src / f"module_{index:02}.rs").write_text(
+                f"//! module {index}\nfn feature_{index}() {{}}\n",
+                encoding="utf-8",
+            )
+
+        try:
+            baseline = runner.action_index_files_v2(
+                project_root=str(self.project),
+                repo_hash=REPO_HASH,
+                worktree_hash=WORKTREE_HASH,
+                mode="full",
+                db_root=self.db_root,
+                scope="files",
+                file_index_protocol="v2",
+            )
+        except TypeError as error:
+            self.fail(
+                "Phase 71 explicit v2 file index protocol is not implemented: "
+                f"{error}"
+            )
+        self.assertTrue(baseline.get("ok"), baseline)
+        self.assertEqual(baseline.get("indexed"), 8, baseline)
+
+        real_model = runner._FakeEmbeddingModel()
+        counting = mock.MagicMock()
+        encoded_batches = []
+
+        def record_encode(texts):
+            encoded_batches.append(list(texts))
+            return real_model.encode(texts)
+
+        counting.encode.side_effect = record_encode
+        try:
+            with mock.patch.object(
+                runner, "_get_embedding_model", return_value=counting
+            ):
+                result = runner.action_index_files_v2(
+                    project_root=str(second_project),
+                    repo_hash=REPO_HASH,
+                    worktree_hash=SECOND_WORKTREE_HASH,
+                    mode="full",
+                    db_root=self.db_root,
+                    scope="files",
+                    file_index_protocol="v2",
+                )
+        except TypeError as error:
+            self.fail(
+                "Phase 71 explicit v2 file index protocol is not implemented: "
+                f"{error}"
+            )
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("indexed"), 8, result)
+        self.assertEqual(result.get("computed_embeddings"), 0, result)
+        self.assertEqual(result.get("embedding_cache_hits"), 8, result)
+        self.assertEqual(
+            sum(len(batch) for batch in encoded_batches),
+            0,
+            f"the second identical worktree must not encode: {encoded_batches}",
+        )
+        self.assertEqual(counting.encode.call_count, 0)
+
     def test_rebuild_reuses_unchanged_embeddings_and_encodes_only_changes(self):
         baseline = self._build()
         self.assertTrue(baseline.get("ok"), baseline)

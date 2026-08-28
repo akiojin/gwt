@@ -6,6 +6,7 @@ The runner must transparently inject these prefixes via a custom EmbeddingFuncti
 
 from __future__ import annotations
 
+import hashlib
 import math
 import unittest
 from unittest import mock
@@ -13,6 +14,96 @@ from unittest import mock
 import numpy
 
 import chroma_index_runner as runner
+
+
+class EmbeddingCasKeyTests(unittest.TestCase):
+    def _embedding_contract(self) -> dict:
+        return {
+            "model_id": "intfloat/multilingual-e5-base",
+            "revision": "model-revision-a",
+            "dimension": 768,
+            "normalization": "none",
+            "metric": "cosine",
+            "query_prefix": "query: ",
+            "passage_prefix": "passage: ",
+        }
+
+    def _model_input(
+        self,
+        rel_path: str = "src/lib.rs",
+        text: str = "pub fn shared_document() { 1 }",
+    ) -> str:
+        document = runner.build_embedding_document(
+            rel_path=rel_path,
+            description="shared index document",
+            text=text,
+            bucket="code",
+            file_type="rs",
+        )
+        return f"passage: {document}"
+
+    def _cas_identity(self, contract: dict, model_input: str) -> dict:
+        key_builder = getattr(runner, "file_embedding_cas_key", None)
+        self.assertIsNotNone(
+            key_builder,
+            "Phase 71 requires file_embedding_cas_key for exact model inputs",
+        )
+        return key_builder(contract, model_input)
+
+    def test_cas_identity_uses_full_sha256_of_final_model_input(self):
+        model_input = self._model_input()
+        identity = self._cas_identity(self._embedding_contract(), model_input)
+        expected_input_digest = hashlib.sha256(model_input.encode("utf-8")).hexdigest()
+
+        self.assertEqual(identity.get("input_digest"), expected_input_digest)
+        self.assertRegex(identity.get("cas_key", ""), r"^[0-9a-f]{64}$")
+
+    def test_cas_key_changes_when_model_revision_changes(self):
+        baseline = self._embedding_contract()
+        changed = dict(baseline)
+        changed["revision"] = "model-revision-b"
+        model_input = self._model_input()
+        baseline_identity = self._cas_identity(baseline, model_input)
+        changed_identity = self._cas_identity(changed, model_input)
+
+        self.assertEqual(
+            baseline_identity.get("input_digest"),
+            changed_identity.get("input_digest"),
+        )
+        self.assertNotEqual(
+            baseline_identity.get("cas_key"),
+            changed_identity.get("cas_key"),
+        )
+
+    def test_cas_key_changes_with_path_aware_structured_document(self):
+        contract = self._embedding_contract()
+        original = self._cas_identity(contract, self._model_input("src/lib.rs"))
+        renamed = self._cas_identity(contract, self._model_input("src/renamed.rs"))
+
+        self.assertNotEqual(
+            original.get("input_digest"),
+            renamed.get("input_digest"),
+            "a rename changes the exact passage input and must miss the CAS",
+        )
+        self.assertNotEqual(original.get("cas_key"), renamed.get("cas_key"))
+
+    def test_cas_identity_changes_when_body_differs_by_one_byte(self):
+        contract = self._embedding_contract()
+        first_input = self._model_input(text="pub fn shared_document() { 1 }")
+        second_input = self._model_input(text="pub fn shared_document() { 2 }")
+        first_bytes = first_input.encode("utf-8")
+        second_bytes = second_input.encode("utf-8")
+        self.assertEqual(len(first_bytes), len(second_bytes))
+        self.assertEqual(
+            sum(left != right for left, right in zip(first_bytes, second_bytes)),
+            1,
+            "the fixture must change exactly one final-input byte",
+        )
+
+        first = self._cas_identity(contract, first_input)
+        second = self._cas_identity(contract, second_input)
+        self.assertNotEqual(first.get("input_digest"), second.get("input_digest"))
+        self.assertNotEqual(first.get("cas_key"), second.get("cas_key"))
 
 
 class E5PrefixTests(unittest.TestCase):
