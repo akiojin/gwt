@@ -2,9 +2,8 @@
 // extracted from app.js. Owns the latest provider usage snapshot, the
 // usage formatter/render helpers, the consolidated status-strip hover
 // popover (window.__gwtShowUsageHover / window.__gwtHideUsageHover), and
-// the Settings "Usage & Limits" panel. Pure movement from app.js: the
-// behavior, DOM output, and WS protocol are unchanged; the moved code keeps
-// its original app.js indentation.
+// the Settings "Usage & Limits" panel. The WS protocol remains owned by
+// app.js; presentation follow-ups stay within this extracted surface.
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -88,15 +87,16 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         );
       }
 
-      function buildUsageBar(percent) {
+      function buildUsageBar(percent, limitReached = false) {
         const wrap = document.createElement("div");
         wrap.className = "op-usage-bar";
         const fill = document.createElement("div");
         fill.className = "op-usage-bar__fill";
-        const pct = Math.max(0, Math.min(100, Math.round(percent)));
-        fill.style.width = `${pct}%`;
-        if (pct >= 90) fill.dataset.level = "high";
-        else if (pct >= 70) fill.dataset.level = "mid";
+        const boundedPercent = Math.max(0, Math.min(100, percent));
+        fill.style.width = `${Math.round(boundedPercent)}%`;
+        if (limitReached || boundedPercent >= 95) fill.dataset.severity = "danger";
+        else if (boundedPercent >= 80) fill.dataset.severity = "warning";
+        else fill.dataset.severity = "normal";
         wrap.appendChild(fill);
         return wrap;
       }
@@ -149,7 +149,7 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
           pct.className = "op-usage-window__pct";
           pct.textContent = `${Math.round(w.used_percent)}%`;
           line.appendChild(label);
-          line.appendChild(buildUsageBar(w.used_percent));
+          line.appendChild(buildUsageBar(w.used_percent, account.limit_reached));
           line.appendChild(pct);
           if (w.resets_at) {
             const reset = document.createElement("span");
@@ -213,13 +213,13 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
       }
 
       // One rate-limit window as an aligned row: label · bar · % · reset.
-      function buildUsageWindowRow(w) {
+      function buildUsageWindowRow(w, limitReached = false) {
         const row = document.createElement("div");
         row.className = "op-usage-win";
         const lbl = document.createElement("span");
         lbl.className = "op-usage-win__lbl";
         lbl.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
-        const bar = buildUsageBar(w.used_percent);
+        const bar = buildUsageBar(w.used_percent, limitReached);
         bar.classList.add("op-usage-win__bar");
         const pct = document.createElement("span");
         pct.className = "op-usage-win__pct";
@@ -287,6 +287,12 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
           plan.textContent = account.plan;
           head.appendChild(plan);
         }
+        if (account.limit_reached) {
+          const limit = document.createElement("span");
+          limit.className = "op-usage-card__limit";
+          limit.textContent = "Limit reached";
+          head.appendChild(limit);
+        }
         card.appendChild(head);
 
         if (account.account_label) {
@@ -300,7 +306,9 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         if (windows.length) {
           const wins = document.createElement("div");
           wins.className = "op-usage-wins";
-          for (const w of windows) wins.appendChild(buildUsageWindowRow(w));
+          for (const w of windows) {
+            wins.appendChild(buildUsageWindowRow(w, account.limit_reached));
+          }
           card.appendChild(wins);
         } else {
           const reason = usageStateReason(account.state);
@@ -389,24 +397,53 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
 
       function refreshUsageHoverIfOpen() {
         if (!usageHoverEl || usageHoverEl.hidden) return;
+        const restoreKeyboardFocus = usageHoverEl.contains(document.activeElement);
         while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
         usageHoverEl.appendChild(buildUsageHoverBody());
         positionUsageHover();
+        if (restoreKeyboardFocus) {
+          requestAnimationFrame(() => usageHoverEl?.focus());
+        }
       }
 
       window.__gwtShowUsageHover = (anchor) => {
         cancelUsageHoverHide();
+        if (usageHoverAnchor && usageHoverAnchor !== anchor) {
+          usageHoverAnchor.setAttribute("aria-expanded", "false");
+        }
         usageHoverAnchor = anchor || usageHoverAnchor;
         if (!usageHoverEl) {
           usageHoverEl = document.createElement("div");
           usageHoverEl.className = "op-usage-hover";
+          usageHoverEl.id = "provider-usage-popover";
+          usageHoverEl.setAttribute("role", "region");
+          usageHoverEl.setAttribute("aria-label", "Usage & Limits");
+          usageHoverEl.setAttribute("tabindex", "0");
           usageHoverEl.addEventListener("mouseenter", cancelUsageHoverHide);
           usageHoverEl.addEventListener("mouseleave", () => window.__gwtHideUsageHover());
+          usageHoverEl.addEventListener("focusin", cancelUsageHoverHide);
+          usageHoverEl.addEventListener("focusout", (event) => {
+            if (
+              usageHoverEl?.contains(event.relatedTarget) ||
+              event.relatedTarget === usageHoverAnchor
+            ) {
+              return;
+            }
+            window.__gwtHideUsageHover();
+          });
+          usageHoverEl.addEventListener("keydown", (event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            const anchor = usageHoverAnchor;
+            anchor?.focus();
+            window.__gwtHideUsageHover({ immediate: true });
+          });
           document.body.appendChild(usageHoverEl);
         }
         while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
         usageHoverEl.appendChild(buildUsageHoverBody());
         usageHoverEl.hidden = false;
+        usageHoverAnchor?.setAttribute("aria-expanded", "true");
         usageHoverEl.style.visibility = "hidden";
         requestAnimationFrame(() => {
           positionUsageHover();
@@ -414,10 +451,19 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         });
       };
 
-      window.__gwtHideUsageHover = () => {
+      window.__gwtUsageHoverContains = (node) => Boolean(node && usageHoverEl?.contains(node));
+      window.__gwtFocusUsageHover = () => usageHoverEl?.focus();
+      window.__gwtHideUsageHover = (options = {}) => {
         cancelUsageHoverHide();
+        if (options.immediate) {
+          if (usageHoverEl) usageHoverEl.hidden = true;
+          usageHoverAnchor?.setAttribute("aria-expanded", "false");
+          usageHoverAnchor = null;
+          return;
+        }
         usageHoverHideTimer = setTimeout(() => {
           if (usageHoverEl) usageHoverEl.hidden = true;
+          usageHoverAnchor?.setAttribute("aria-expanded", "false");
           usageHoverHideTimer = null;
         }, 180);
       };
