@@ -286,8 +286,20 @@ Hard limits, no exceptions:
   verdict, and never alter acceptance-criteria snapshots. The merge gate
   decides merges on its own and is not yours to influence.
 
+## PM scratch storage
+
+- `$GWT_PM_SCRATCH_DIR` is the only storage location for PM session
+  notes and checklists. Never write scratch files inside the PM worktree.
+  In particular, do not use the legacy paths `tasks/todo.md`,
+  `tasks/pm-notes.md`, or root `pm-notes.md`.
+
 ## Resident loop (unattended)
 
+- Every resident cycle begins by reading `pm.status` worktree freshness.
+  A state of `stale` or `unknown` is reported immediately and not batched
+  into a digest. Until freshness is `fresh`, the PM must not claim it is
+  observing current code or the current specification; all code-derived
+  claims are degraded.
 - Periodic wakeups (FR-108): if your harness has a native scheduler
   (Claude Code exposes a wakeup-scheduling tool), register a periodic
   wakeup job for your loop interval at the start of residency, and
@@ -380,9 +392,11 @@ and urgency.
   an implementation agent launched, a PR opened, a merge landed, a
   `needs_human` escalation, the first detection of a new `waiting`
   episode, and a fatal failure. Collapse a run of milestones into one
-  digest instead of narrating each one.
-- `needs_human` and fatal failures are always presented immediately and
-  are never held for a digest.
+  digest instead of narrating each one. The immediate-reporting
+  conditions below are exceptions to this rule.
+- `needs_human`, fatal failures, and `stale` or `unknown` worktree
+  freshness are always presented immediately and are never held for a
+  digest.
 - The first detection of a new `waiting` episode must be reported
   immediately under the one-report-per-episode rule above and is never
   held for a digest. Continued observations of that episode stay
@@ -462,6 +476,29 @@ mod tests {
 
     fn body() -> String {
         unwrapped(SKILL_BODY_EN)
+    }
+
+    fn markdown_bullets(section: &str) -> Vec<String> {
+        let mut bullets = Vec::new();
+        let mut current = None::<String>;
+        for line in section.lines() {
+            if let Some(first_line) = line.strip_prefix("- ") {
+                if let Some(previous) = current.replace(first_line.to_string()) {
+                    bullets.push(unwrapped(&previous));
+                }
+            } else if line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+                if let Some(current) = current.as_mut() {
+                    current.push(' ');
+                    current.push_str(line.trim());
+                }
+            } else if let Some(previous) = current.take() {
+                bullets.push(unwrapped(&previous));
+            }
+        }
+        if let Some(last) = current {
+            bullets.push(unwrapped(&last));
+        }
+        bullets
     }
 
     /// Canonical phrases the PM contract must always carry (FR anchors).
@@ -572,6 +609,19 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // T248: session notes live outside the disposable PM worktree.
+            "`$GWT_PM_SCRATCH_DIR` is the only storage location for PM session notes and checklists",
+            "Never write scratch files inside the PM worktree",
+            "`tasks/todo.md`",
+            "`tasks/pm-notes.md`",
+            "root `pm-notes.md`",
+            // T248: every resident cycle is gated by PM worktree freshness.
+            "Every resident cycle begins by reading `pm.status` worktree freshness",
+            "`stale` or `unknown` is reported immediately",
+            "not batched into a digest",
+            "Until freshness is `fresh`",
+            "must not claim it is observing current code or the current specification",
+            "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
             "`issue.monitor.questions`",
@@ -616,6 +666,47 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    #[test]
+    fn reporting_cadence_reports_non_fresh_worktrees_immediately() {
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence section must be followed by another section");
+        let bullets = markdown_bullets(reporting);
+        assert!(
+            bullets.iter().any(|bullet| {
+                bullet.contains("stale")
+                    && bullet.contains("unknown")
+                    && bullet.contains("immediately")
+                    && (bullet.contains("never held for a digest")
+                        || bullet.contains("not batched into a digest"))
+            }),
+            "one Reporting cadence bullet must relate stale/unknown freshness to immediate, non-digest reporting; bullets: {bullets:?}"
+        );
+    }
+
+    #[test]
+    fn reporting_cadence_milestone_rule_acknowledges_freshness_exception() {
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence section must be followed by another section");
+        let milestone_rule = markdown_bullets(reporting)
+            .into_iter()
+            .find(|bullet| bullet.contains("only at milestones"))
+            .expect("Reporting cadence must retain its milestone reporting rule");
+        let points_to_exception =
+            milestone_rule.contains("except") && milestone_rule.contains("below");
+        let names_freshness_exception =
+            milestone_rule.contains("stale") && milestone_rule.contains("unknown");
+        assert!(
+            points_to_exception || names_freshness_exception,
+            "the milestone rule must acknowledge its stale/unknown freshness exception: {milestone_rule}"
+        );
+    }
+
     /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
     /// nothing to report ends without saying anything. The cadence already
     /// described milestone-only reporting, but never stated the quiet case, so
@@ -648,6 +739,19 @@ mod tests {
             body.contains("silence is about the report, not about the cycle"),
             "省略してよいのは出力であって周回ではない（FR-3）"
         );
+    }
+
+    #[test]
+    fn markdown_bullet_parser_does_not_absorb_unindented_paragraphs() {
+        let fixture = "- worktree freshness is stale or unknown\n\
+This paragraph says it is reported immediately and never held for a digest.\n\
+- another bullet";
+        let bullets = markdown_bullets(fixture);
+        assert_eq!(
+            bullets,
+            ["worktree freshness is stale or unknown", "another bullet"]
+        );
+        assert!(bullets.iter().all(|bullet| !bullet.contains("immediately")));
     }
 
     #[test]
