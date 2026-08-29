@@ -3,6 +3,8 @@
 //! - `mod.rs` (this file): argv parsing + dispatch + status reporting.
 //! - `server.rs`: tokio-based IPC listener (Unix domain socket today;
 //!   Windows named-pipe support is a follow-up).
+//! - `subscribe_resolver.rs`: exact-first, read-only endpoint selection for
+//!   bounded Unix subscriptions from linked worktrees.
 //!
 //! The contract layer (`gwt_core::daemon::*`) defines the on-disk endpoint
 //! file, handshake protocol, and `DaemonBootstrapAction`. `Start` honours
@@ -18,8 +20,10 @@ pub(crate) mod broadcast;
 pub mod client;
 #[cfg(unix)]
 pub(crate) mod server;
+#[cfg(unix)]
+mod subscribe_resolver;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -72,6 +76,7 @@ pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
             }
             Ok(DaemonCommand::Subscribe {
                 channels,
+                project_root: None,
                 timeout_seconds,
             })
         }
@@ -97,8 +102,9 @@ pub(super) fn run<E: CliEnv>(
         DaemonCommand::Status => report_status(env, out),
         DaemonCommand::Subscribe {
             channels,
+            project_root,
             timeout_seconds,
-        } => subscribe_command(env, channels, timeout_seconds, out),
+        } => subscribe_command(env, project_root.as_deref(), channels, timeout_seconds, out),
     }
 }
 
@@ -110,6 +116,35 @@ fn resolve_scope(env: &impl CliEnv) -> Result<RuntimeScope, SpecOpsError> {
     let project_root = canonical_project_root(env.repo_path().to_path_buf());
     RuntimeScope::from_project_root(&project_root, RuntimeTarget::Host)
         .map_err(|err| config_error(format!("daemon scope resolution failed: {err}")))
+}
+
+/// Resolve the authority requested by `daemon.subscribe`.
+///
+/// An explicit root is an authorization boundary: it must exist and be a
+/// directory, and it must never degrade to the caller's cwd. Omitting the
+/// root retains the pre-#3596 cwd-derived scope unchanged.
+fn resolve_subscribe_scope(
+    env: &impl CliEnv,
+    project_root: Option<&Path>,
+) -> Result<RuntimeScope, SpecOpsError> {
+    let Some(requested) = project_root else {
+        return resolve_scope(env);
+    };
+    let canonical = dunce::canonicalize(requested).map_err(|error| {
+        config_error(format!(
+            "daemon subscribe project_root {} is unavailable: {error}",
+            requested.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(config_error(format!(
+            "daemon subscribe project_root {} is not a directory",
+            requested.display()
+        )));
+    }
+    let project_root = gwt_core::paths::resolve_current_worktree_root(&canonical);
+    RuntimeScope::from_project_root(&project_root, RuntimeTarget::Host)
+        .map_err(|err| config_error(format!("daemon subscribe scope resolution failed: {err}")))
 }
 
 fn canonical_project_root(path: PathBuf) -> PathBuf {
@@ -199,35 +234,32 @@ fn probe_daemon_endpoint(
 #[cfg(unix)]
 fn subscribe_command<E: CliEnv>(
     env: &mut E,
+    project_root: Option<&Path>,
     channels: Vec<String>,
     timeout_seconds: Option<u64>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let scope = resolve_scope(env)?;
+    let scope = resolve_subscribe_scope(env, project_root)?;
     let gwt_home = gwt_core::paths::gwt_home();
-    let action = resolve_bootstrap_action(
-        &gwt_home,
-        &scope,
-        DAEMON_PROTOCOL_VERSION,
-        is_process_alive_pid,
-    )
-    .map_err(|err| config_error(err.to_string()))?;
-
-    let endpoint = match action {
-        DaemonBootstrapAction::Reuse(endpoint) => endpoint,
-        DaemonBootstrapAction::Spawn { endpoint_path } => {
-            out.push_str(&format!(
-                "gwtd daemon subscribe: no daemon registered (endpoint={})\n",
-                endpoint_path.display()
-            ));
-            return Ok(2);
-        }
-    };
-
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| config_error(format!("tokio runtime build failed: {err}")))?;
+    let resolved = match runtime.block_on(subscribe_resolver::resolve(
+        &gwt_home,
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        is_process_alive_pid,
+    )) {
+        Ok(resolved) => resolved,
+        Err(failure) => {
+            out.push_str(&failure.to_string());
+            out.push('\n');
+            return Ok(2);
+        }
+    };
+    let endpoint = resolved;
+
     runtime.block_on(async {
         let mut client = client::DaemonClient::connect(&endpoint)
             .await
@@ -296,6 +328,7 @@ fn subscribe_command<E: CliEnv>(
 #[cfg(not(unix))]
 fn subscribe_command<E: CliEnv>(
     _env: &mut E,
+    _project_root: Option<&Path>,
     _channels: Vec<String>,
     _timeout_seconds: Option<u64>,
     out: &mut String,
@@ -370,9 +403,8 @@ fn start_daemon<E: CliEnv>(_env: &mut E, out: &mut String) -> Result<i32, SpecOp
 
 // Liveness probe lives in `crate::process::is_process_alive` so the
 // three daemon-related callers (this file, daemon_publisher, main)
-// share one definition. The narrow `|pid| pid == self.pid` predicate
-// used by `prepare_daemon_front_door_for_path` is intentionally NOT
-// the same function; see Issue #2338.
+// share one definition. Issue #2338 removed the last divergent copy
+// along with the GUI front door's endpoint-slot handling.
 use crate::process::is_process_alive as is_process_alive_pid;
 
 #[cfg(test)]
@@ -381,6 +413,103 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    #[cfg(unix)]
+    fn spawn_fake_subscribe_daemon(
+        listener: std::os::unix::net::UnixListener,
+        endpoint: DaemonEndpoint,
+        expected_probe_connections: usize,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<usize>) {
+        use std::{
+            io::{BufRead, BufReader, ErrorKind, Write},
+            sync::mpsc,
+            thread,
+            time::Instant,
+        };
+
+        listener
+            .set_nonblocking(true)
+            .expect("set fake daemon nonblocking");
+        let (release_server, await_command_exit) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut connection_count = 0;
+            let expected_connection_count = expected_probe_connections + 1;
+            for connection_index in 0..expected_connection_count {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match await_command_exit.try_recv() {
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                            return connection_count;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return connection_count;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("accept subscriber: {err}"),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("restore subscriber blocking mode");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("set subscriber read timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .expect("set subscriber write timeout");
+                connection_count += 1;
+
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read handshake");
+                let handshake: gwt_core::daemon::IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end()).expect("parse handshake");
+                assert_eq!(handshake.scope, endpoint.scope);
+                assert_eq!(handshake.auth_token, endpoint.auth_token);
+                let response = gwt_core::daemon::IpcHandshakeResponse {
+                    protocol_version: endpoint.protocol_version,
+                    daemon_version: endpoint.daemon_version.clone(),
+                    accepted: true,
+                    rejection_reason: None,
+                };
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).expect("serialize response")
+                )
+                .expect("write handshake response");
+                stream.flush().expect("flush handshake response");
+
+                if connection_index < expected_probe_connections {
+                    continue;
+                }
+                line.clear();
+                reader.read_line(&mut line).expect("read subscribe");
+                assert!(matches!(
+                    serde_json::from_str::<ClientFrame>(line.trim_end()).expect("parse subscribe"),
+                    ClientFrame::Subscribe { .. }
+                ));
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&DaemonFrame::Ack).expect("serialize ack")
+                )
+                .expect("write ack");
+                stream.flush().expect("flush ack");
+                await_command_exit
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("command must finish before server closes subscriber");
+            }
+            connection_count
+        });
+        (release_server, server)
     }
 
     #[test]
@@ -408,6 +537,7 @@ mod tests {
             cmd,
             DaemonCommand::Subscribe {
                 channels: vec!["board".to_string(), "runtime-status".to_string()],
+                project_root: None,
                 timeout_seconds: None,
             }
         );
@@ -431,6 +561,7 @@ mod tests {
             cmd,
             DaemonCommand::Subscribe {
                 channels: vec!["board".to_string()],
+                project_root: None,
                 timeout_seconds: Some(30),
             }
         );
@@ -506,5 +637,233 @@ mod tests {
         assert_eq!(formatted, "ok uptime=12s channels=2 connections=1");
         #[cfg(not(unix))]
         assert_eq!(formatted, "ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_command_reaches_unique_same_repo_sibling_daemon() {
+        use std::os::unix::net::UnixListener;
+
+        use gwt_core::{
+            daemon::{persist_endpoint, RuntimeTarget},
+            test_support::ScopedGwtHome,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let caller_root = temp.path().join("caller");
+        let sibling_root = temp.path().join("sibling");
+        std::fs::create_dir_all(&caller_root).expect("caller root");
+        std::fs::create_dir_all(&sibling_root).expect("sibling root");
+        let mut env = crate::cli::TestEnv::new(caller_root.clone());
+        env.repo_path = caller_root;
+        let caller_scope = resolve_scope(&env).expect("caller scope");
+        let sibling_scope = RuntimeScope::new(
+            caller_scope.repo_hash.clone(),
+            "sibling-worktree",
+            sibling_root,
+            RuntimeTarget::Host,
+        )
+        .expect("sibling scope");
+        let socket_path = temp.path().join("sibling.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind sibling socket");
+        let endpoint = DaemonEndpoint::new(
+            sibling_scope.clone(),
+            std::process::id(),
+            socket_path.display().to_string(),
+            "sibling-secret".to_string(),
+            "test-daemon".to_string(),
+        );
+        persist_endpoint(
+            &sibling_scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .expect("persist sibling endpoint");
+
+        let (release_server, server) = spawn_fake_subscribe_daemon(listener, endpoint, 1);
+
+        let mut output = String::new();
+        let exit = run(
+            &mut env,
+            DaemonCommand::Subscribe {
+                channels: vec!["issue-monitor".to_string()],
+                project_root: None,
+                timeout_seconds: Some(1),
+            },
+            &mut output,
+        )
+        .expect("subscribe command");
+
+        assert_eq!(exit, 0);
+        assert!(output.is_empty());
+        release_server.send(()).expect("release server");
+        assert_eq!(server.join().expect("server thread"), 2);
+    }
+
+    /// Issue #3596: JSON dispatch may originate outside the requested
+    /// project. The explicit root must select that project's exact endpoint,
+    /// never the process cwd's daemon scope.
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_run_uses_explicit_project_root_instead_of_env_cwd() {
+        use std::os::unix::net::UnixListener;
+
+        use gwt_core::{
+            daemon::{persist_endpoint, RuntimeTarget},
+            test_support::ScopedGwtHome,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let cwd_root = temp.path().join("cwd-project");
+        let explicit_root = temp.path().join("explicit-project");
+        std::fs::create_dir_all(&cwd_root).expect("cwd root");
+        std::fs::create_dir_all(&explicit_root).expect("explicit root");
+        let mut env = crate::cli::TestEnv::new(cwd_root.clone());
+        env.repo_path = cwd_root.clone();
+
+        let cwd_scope =
+            RuntimeScope::from_project_root(&cwd_root, RuntimeTarget::Host).expect("cwd scope");
+        let explicit_scope = RuntimeScope::from_project_root(&explicit_root, RuntimeTarget::Host)
+            .expect("explicit scope");
+        let cwd_socket_path = temp.path().join("cwd.sock");
+        let explicit_socket_path = temp.path().join("explicit.sock");
+        let cwd_listener = UnixListener::bind(&cwd_socket_path).expect("bind cwd socket");
+        let explicit_listener =
+            UnixListener::bind(&explicit_socket_path).expect("bind explicit socket");
+        let cwd_endpoint = DaemonEndpoint::new(
+            cwd_scope.clone(),
+            std::process::id(),
+            cwd_socket_path.display().to_string(),
+            "cwd-secret".to_string(),
+            "test-daemon".to_string(),
+        );
+        let explicit_endpoint = DaemonEndpoint::new(
+            explicit_scope.clone(),
+            std::process::id(),
+            explicit_socket_path.display().to_string(),
+            "explicit-secret".to_string(),
+            "test-daemon".to_string(),
+        );
+        persist_endpoint(
+            &cwd_scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &cwd_endpoint,
+        )
+        .expect("persist cwd endpoint");
+        persist_endpoint(
+            &explicit_scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &explicit_endpoint,
+        )
+        .expect("persist explicit endpoint");
+        let (release_cwd_server, cwd_server) =
+            spawn_fake_subscribe_daemon(cwd_listener, cwd_endpoint, 0);
+        let (release_explicit_server, explicit_server) =
+            spawn_fake_subscribe_daemon(explicit_listener, explicit_endpoint, 0);
+
+        let mut output = String::new();
+        let result = run(
+            &mut env,
+            DaemonCommand::Subscribe {
+                channels: vec!["issue-monitor".to_string()],
+                project_root: Some(explicit_root),
+                timeout_seconds: Some(1),
+            },
+            &mut output,
+        );
+
+        let _ = release_cwd_server.send(());
+        let _ = release_explicit_server.send(());
+        let cwd_connection_count = cwd_server.join().expect("cwd server thread");
+        let explicit_connection_count = explicit_server.join().expect("explicit server thread");
+        assert_eq!(result.expect("explicit subscribe command"), 0);
+        assert!(output.is_empty(), "unexpected output: {output}");
+        assert_eq!(
+            (explicit_connection_count, cwd_connection_count),
+            (1, 0),
+            "explicit project_root must select only the explicit endpoint"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_invalid_explicit_project_root_is_rejected(case: &str) {
+        use std::os::unix::net::UnixListener;
+
+        use gwt_core::{
+            daemon::{persist_endpoint, RuntimeTarget},
+            test_support::ScopedGwtHome,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let cwd_root = temp.path().join("cwd-project");
+        std::fs::create_dir_all(&cwd_root).expect("cwd root");
+        let mut env = crate::cli::TestEnv::new(cwd_root.clone());
+        env.repo_path = cwd_root.clone();
+        let cwd_scope =
+            RuntimeScope::from_project_root(&cwd_root, RuntimeTarget::Host).expect("cwd scope");
+        let project_root = temp.path().join(format!("invalid-{case}"));
+        if case == "file" {
+            std::fs::write(&project_root, "not a project").expect("write file root");
+        }
+
+        let cwd_socket_path = temp.path().join(format!("cwd-{case}.sock"));
+        let cwd_listener = UnixListener::bind(&cwd_socket_path).expect("bind cwd socket");
+        let cwd_endpoint = DaemonEndpoint::new(
+            cwd_scope.clone(),
+            std::process::id(),
+            cwd_socket_path.display().to_string(),
+            format!("cwd-{case}-secret"),
+            "test-daemon".to_string(),
+        );
+        persist_endpoint(
+            &cwd_scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &cwd_endpoint,
+        )
+        .expect("persist cwd endpoint");
+        let (release_cwd_server, cwd_server) =
+            spawn_fake_subscribe_daemon(cwd_listener, cwd_endpoint, 0);
+        let mut output = String::new();
+        let result = run(
+            &mut env,
+            DaemonCommand::Subscribe {
+                channels: vec!["issue-monitor".to_string()],
+                project_root: Some(project_root.clone()),
+                timeout_seconds: Some(1),
+            },
+            &mut output,
+        );
+
+        let _ = release_cwd_server.send(());
+        let cwd_connection_count = cwd_server.join().expect("cwd server thread");
+        assert!(
+            result.is_err() && cwd_connection_count == 0,
+            "invalid explicit root {} must fail before contacting the cwd endpoint; result={result:?}, cwd_connections={cwd_connection_count}, output={output}",
+            project_root.display(),
+        );
+    }
+
+    /// Issue #3596: a nonexistent explicit root is a caller error and must
+    /// not silently fall back to a valid daemon associated with process cwd.
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_run_rejects_nonexistent_project_root_without_contacting_cwd() {
+        assert_invalid_explicit_project_root_is_rejected("missing");
+    }
+
+    /// Issue #3596: a file cannot identify a project root and must not
+    /// silently fall back to a valid daemon associated with process cwd.
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_run_rejects_file_project_root_without_contacting_cwd() {
+        assert_invalid_explicit_project_root_is_rejected("file");
     }
 }

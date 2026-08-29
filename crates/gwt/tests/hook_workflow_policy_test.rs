@@ -993,6 +993,9 @@ fn direct_stop_terminates_stalled_lazy_auth_and_persists_timeout() {
         )
         .expect("compose PATH");
         let _path = ScopedEnvVar::set("PATH", path);
+        // Issue #3675: mark the stalled fake as installed so the
+        // unsandboxed-gh spawn guard lets the auth spawn reach it.
+        let _sandbox = ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
         let _mode = ScopedEnvVar::unset("GWT_OWNER_GITHUB_TEST_MODE");
         let _rest = ScopedEnvVar::unset("GWT_OWNER_GITHUB_REST_BASE");
         let _graphql = ScopedEnvVar::unset("GWT_OWNER_GITHUB_GRAPHQL_URL");

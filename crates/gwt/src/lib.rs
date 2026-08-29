@@ -17,6 +17,7 @@ pub mod daemon_publisher;
 pub mod daemon_runtime;
 #[cfg(unix)]
 pub mod daemon_subscriber;
+pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod file_content;
 pub mod file_tree;
@@ -42,6 +43,7 @@ pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
+pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
@@ -52,6 +54,9 @@ pub mod work_notes;
 pub mod worktree_form;
 pub mod worktree_inventory;
 
+#[cfg(any(test, feature = "test-gh-guard"))]
+mod test_guard;
+
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
@@ -60,17 +65,19 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 #[doc(hidden)]
 pub use agent_project_state::{
     apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
+    apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
     continue_authenticated_execution, observe_agent_runtime, prepare_resume_producing_authority,
     probe_authenticated_execution_binding, probe_authenticated_prepared_execution_binding,
-    AgentExecutionBindingProbeReceipt, AgentExecutionBindingProbeRequest,
-    AgentExecutionContinuationOutcome, AgentExecutionContinuationReceipt,
-    AgentExecutionContinuationRequest, AgentRuntimeObservation, AgentWorkTerminalKind,
-    AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
+    AgentBuildAbortTerminalizationRequest, AgentExecutionBindingProbeReceipt,
+    AgentExecutionBindingProbeRequest, AgentExecutionContinuationOutcome,
+    AgentExecutionContinuationReceipt, AgentExecutionContinuationRequest, AgentRuntimeObservation,
+    AgentWorkTerminalKind, AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
     AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
     AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
-    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
-    AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+    AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION, AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+    AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+    AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
@@ -109,26 +116,36 @@ pub use index_worker::{
     ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
-    clear_issue_monitor_authority_fence, establish_issue_monitor_authority_fence,
-    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
-    issue_monitor_authority_fence_path, issue_monitor_launch_plan,
-    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
+    acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
+    bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
+    establish_issue_monitor_authority_fence, is_auto_improve_candidate,
+    is_legacy_git_launch_failure_for_project, issue_monitor_authority_fence_path,
+    issue_monitor_launch_plan, issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
     issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
-    load_issue_monitor_prefs, mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
+    load_issue_monitor_prefs, mark_autonomous_handoff_delivered_from_prefs,
+    mark_autonomous_handoff_delivery_ambiguous_from_prefs, mutate_issue_monitor_prefs,
+    mutate_issue_monitor_prefs_recovering, pending_autonomous_handoff_resumption_from_prefs,
     persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
-    record_autonomous_question_handoff, save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    prepare_autonomous_handoff_delivery_from_prefs,
+    preserve_answered_handoff_resume_strategy_from_prefs,
+    record_autonomous_handoff_delivery_failure_from_prefs, record_autonomous_question_handoff,
+    save_issue_monitor_prefs, scan_issue_monitor_candidates,
     scan_issue_monitor_candidates_with_provenance, take_autonomous_resume_prompt_from_prefs,
     try_acquire_issue_monitor_local_fallback_lease, try_mutate_issue_monitor_prefs,
-    try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousHandoffResumption,
-    AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase, AutonomousReviewDispatch,
-    EligibilityDecision, FailureClass, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
-    IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
-    IssueMonitorFailoverOutcome, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource,
-    IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
-    IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
+    try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousHandoffDeliveryAttempt,
+    AutonomousHandoffDeliveryFailureOutcome, AutonomousHandoffDeliveryPreparation,
+    AutonomousHandoffResumption, AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase,
+    AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAgentStatus,
+    IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
+    IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,
+    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorFailure,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchPlan,
+    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest,
+    IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
+    IssueMonitorPrefs, IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness,
+    IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
+    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
     IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
     IssueMonitorStopTarget, MonitorInboxState, PendingIssueMonitorEffect,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
@@ -144,13 +161,14 @@ pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     has_gwt_spec_label, knowledge_launch_target_branch_name, load_agent_options, AgentOption,
     DockerWizardContext, LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion,
-    LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
-    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
-    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
-    LaunchWizardQuickStartView, LaunchWizardStartMethodKind, LaunchWizardStartMethodView,
-    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
-    LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
-    ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
+    LaunchWizardContext, LaunchWizardHolderDecisionView, LaunchWizardHydration,
+    LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardLiveSessionView,
+    LaunchWizardMode, LaunchWizardOptionView, LaunchWizardPreviousProfile,
+    LaunchWizardPreviousProfiles, LaunchWizardProgressStepView, LaunchWizardQuickStartView,
+    LaunchWizardStartMethodKind, LaunchWizardStartMethodView, LaunchWizardState, LaunchWizardStep,
+    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
+    QuickStartLaunchMode, ResumableAgentLifecycleStatus, ResumableAgentResumeKind,
+    ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,

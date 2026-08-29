@@ -74,6 +74,28 @@ fn xterm_css() -> &'static str {
     static_asset_text("/assets/xterm/xterm.css")
 }
 
+#[test]
+fn embedded_web_registers_the_browser_favicon_as_a_binary_asset() {
+    let asset = static_assets()
+        .iter()
+        .find(|asset| asset.route == "/favicon.ico")
+        .expect("favicon must be served by the embedded asset manifest");
+
+    assert!(
+        matches!(asset.body, AssetBody::Bytes(bytes) if !bytes.is_empty()),
+        "favicon must embed the packaged application icon",
+    );
+
+    let response = static_asset_response(asset);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/x-icon"),
+    );
+}
+
 fn frontend_bundle_source() -> &'static str {
     concat!(
         include_str!("../web/index.html"),
@@ -1235,6 +1257,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
     let expected: &[(&str, &str, Option<&str>)] = &[
         ("/", "text/html; charset=utf-8", MUTABLE),
         ("/app.js", JS, MUTABLE),
+        ("/favicon.ico", "image/x-icon", IMMUTABLE),
         ("/assets/xterm/xterm.mjs", JS, None),
         ("/assets/xterm/addon-fit.mjs", JS, None),
         ("/assets/xterm/xterm.css", CSS, None),
@@ -3002,7 +3025,7 @@ fn embedded_web_add_window_modal_offers_improvement_inbox() {
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
     let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action\)\s*\{\s*send\(\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\}\);\s*\}"#,
+            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\};"#,
         )
         .expect("valid regex");
     let footer_close_control = regex::Regex::new(
@@ -3103,7 +3126,7 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     // delegate. A null tombstone must not clear an open-error modal
     // during reconnect.
     let wizard_state = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(!event\.wizard\?\.launch_materialization_pending\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_state_delegate = regex::Regex::new(
@@ -3319,7 +3342,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // receive() case arms are thin delegates into them. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(!event\.wizard\?\.launch_materialization_pending\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_event_delegate = regex::Regex::new(

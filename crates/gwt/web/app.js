@@ -18,7 +18,10 @@
         findTitlebarDockTarget,
         resolveDragReleasePoint,
       } from "/window-docking.js";
-      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import {
+        createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
+        mergeActiveWorkProjectionPatch,
+      } from "/workspace-kanban-surface.js";
       import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -869,9 +872,10 @@
       function send(message) {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify(message));
-          return;
+          return "sent";
         }
         pendingMessages.push(message);
+        return "queued";
       }
 
       function sendKnowledgeSemanticSearchNow(message) {
@@ -1116,6 +1120,7 @@
 
       function setConnectionState(connected) {
         connectionOverlay.setConnected(connected);
+        handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -1505,6 +1510,10 @@
         "claude code": "Claude Code",
         claude_code: "Claude Code",
         codex: "Codex",
+        grok: "Grok Build",
+        "grok-build": "Grok Build",
+        "grok build": "Grok Build",
+        grok_build: "Grok Build",
         agy: "Antigravity CLI",
         antigravity: "Antigravity CLI",
         "antigravity-cli": "Antigravity CLI",
@@ -4498,12 +4507,25 @@
         });
       }
 
-      function sendWizardAction(action) {
-        send({
+      function sendWizardAction(action, { queueIfDisconnected = true } = {}) {
+        const message = {
           kind: "launch_wizard_action",
           action,
           bounds: visibleBounds(),
-        });
+        };
+        if (queueIfDisconnected) {
+          return send(message);
+        }
+        const activeSocket = socket;
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+          return "unavailable";
+        }
+        try {
+          activeSocket.send(JSON.stringify(message));
+          return "sent";
+        } catch {
+          return "unavailable";
+        }
       }
 
       // SPEC-2359 US-80: debounced Start Work duplicate-work advisory query.
@@ -4694,6 +4716,7 @@
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
       } = createLaunchWizardSurface({
@@ -5720,6 +5743,24 @@
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+            );
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
+            workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
+            recomputeOperatorTelemetry();
+            break;
+          case "active_work_projection_patch":
+            activeWorkProjection = mergeActiveWorkProjectionPatch(
+              activeWorkProjection,
+              event.projection || null,
+            );
             cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
             syncCurrentProjectWorkspaceIds(
               deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),

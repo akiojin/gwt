@@ -24,8 +24,13 @@ use gwt::{
     LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
     LaunchWizardState, LaunchWizardView, LinkedIssueKind, WindowGeometry,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::continuation::{
+    provider_conversation_availability, provider_conversation_availability_with_grok_home,
+    session_matches_project_state, ProviderConversationAvailability,
+};
 use crate::{ShellLaunchConfig, UserEvent};
 
 /// `Pr => None` because Launch Agent is not exposed for PR bridges
@@ -64,6 +69,57 @@ fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<Outboun
     vec![launch_wizard_open_error(client_id, "Intake", message)]
 }
 
+fn manual_holder_fingerprint(
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    runtime_incarnation: Option<u64>,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        owner.kind.as_str(),
+        owner.number,
+        identity.execution_binding.identity.generation_id,
+        identity.execution_binding.identity.binding_id,
+        identity.session_id,
+        identity.execution_binding.capability_generation,
+        runtime_incarnation.map_or_else(|| "remote".to_string(), |value| value.to_string()),
+    )
+}
+
+fn manual_generation_operation_id(
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    binding: &gwt_agent::ExecutionBindingIdentity,
+    predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+) -> String {
+    manual_holder_operation_id(
+        &format!(
+            "{}:{}:{}:{}",
+            owner.kind.as_str(),
+            owner.number,
+            binding.generation_id,
+            binding.ledger_head_hash
+        ),
+        predecessor_kind,
+    )
+}
+
+fn manual_successor_stable_component(prefix: &str, operation_id: &str) -> String {
+    let digest = Sha256::digest(operation_id.as_bytes());
+    format!("{prefix}-{}", hex::encode(digest))
+}
+
+fn manual_holder_operation_id(
+    fingerprint: &str,
+    predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+) -> String {
+    let kind = match predecessor_kind {
+        gwt_agent::ManualLaunchSuccessorPredecessor::Blocked => "blocked",
+        gwt_agent::ManualLaunchSuccessorPredecessor::Completed => "completed",
+        gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive => "active-terminal",
+    };
+    format!("manual-launch-successor:{kind}:{fingerprint}")
+}
+
 fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     let offset = ((index % 8) as f64) * 24.0;
     WindowGeometry {
@@ -72,6 +128,15 @@ fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
         width: 860.0,
         height: 520.0,
     }
+}
+
+struct SilentIssueMonitorLaunchRequest {
+    issue_number: u64,
+    linked_issue_kind: gwt::LinkedIssueKind,
+    review_prompt: Option<String>,
+    review_model: Option<String>,
+    delivery_id: Option<String>,
+    launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
 }
 
 /// SPEC #3200 Option A: build the independent-review agent's prompt from a
@@ -100,20 +165,20 @@ use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
-    resolve_shell_launch_worktree, save_shell_work_projection, session_exact_resume_materializable,
-    synthetic_branch_entry, workspace_projection_for_current_resume,
-    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
-    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
-    workspace_resume_context_from_projection, workspace_resume_owner_issue_number,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DispatchTarget,
-    IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext, LaunchFeedbackContext,
-    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus,
-    WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    resolve_launch_worktree, resolve_shell_launch_worktree, save_shell_work_projection,
+    session_exact_resume_materializable, synthetic_branch_entry,
+    workspace_projection_for_current_resume, workspace_resume_branch_exists,
+    workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
+    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
+    workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
+    BackendEvent, DispatchTarget, IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
 impl AppRuntime {
-    fn launch_wizard_view_for_session(session: &LaunchWizardSession) -> LaunchWizardView {
+    fn launch_wizard_view_for_session(&self, session: &LaunchWizardSession) -> LaunchWizardView {
         let mut view = session.wizard.view();
         if session.issue_monitor_profile_save.is_some() {
             view.title = "Configure Issue Monitor".to_string();
@@ -131,7 +196,7 @@ impl AppRuntime {
             wizard: self
                 .launch_wizard
                 .as_ref()
-                .map(|wizard| Box::new(Self::launch_wizard_view_for_session(wizard))),
+                .map(|wizard| Box::new(self.launch_wizard_view_for_session(wizard))),
         })
     }
 
@@ -268,6 +333,11 @@ impl AppRuntime {
         wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
         wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
+        let origin = if workspace_resume_context.is_some() {
+            super::LaunchWizardOrigin::WorkspaceResume
+        } else {
+            super::LaunchWizardOrigin::ManualLaunchAgent
+        };
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
@@ -277,6 +347,8 @@ impl AppRuntime {
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+            origin,
+            manual_holder_intent: None,
         });
 
         Ok(())
@@ -331,6 +403,23 @@ impl AppRuntime {
         linked_issue_kind: LinkedIssueKind,
         previous_profiles: gwt::LaunchWizardPreviousProfiles,
     ) -> LaunchWizardSession {
+        // #3426: the unified Issue surface preset collapses SPEC entries to
+        // LinkedIssueKind::Issue, so re-canonicalize the kind from the cached
+        // label evidence before it seeds the Work owner label. Absent evidence
+        // keeps the caller-declared kind. This stays scoped to the owner label:
+        // `linked_issue_kind` also drives `show_linked_issue` and the manual
+        // branch suffix, and flipping those from a cache label would hide the
+        // wizard's Linked issue section and seed `spec-N` instead of the
+        // unified `issue-N` branch convention.
+        let canonical_owner_kind =
+            match gwt::cli::execution_state::detect_owner_kind_evidence(project_root, issue_number)
+            {
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Spec) => LinkedIssueKind::Spec,
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Issue) => {
+                    LinkedIssueKind::Issue
+                }
+                None => linked_issue_kind,
+            };
         let base_branch_name = normalize_branch_name(base_branch_name);
         let target_branch_name =
             knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
@@ -344,7 +433,7 @@ impl AppRuntime {
         // SPEC #3431 FR-070: this must be the spelling the durable execution
         // binding produces, not a display label. `workspace.ensure` compares
         // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
-        let owner_label = match linked_issue_kind {
+        let owner_label = match canonical_owner_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
             LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };
@@ -386,6 +475,8 @@ impl AppRuntime {
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+            origin: super::LaunchWizardOrigin::Knowledge,
+            manual_holder_intent: None,
         }
     }
 
@@ -1423,6 +1514,8 @@ impl AppRuntime {
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+            origin: super::LaunchWizardOrigin::StartWork,
+            manual_holder_intent: None,
         });
 
         // SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
@@ -1634,6 +1727,7 @@ impl AppRuntime {
             Ok(()) => {
                 if let Some(session) = self.launch_wizard.as_mut() {
                     session.issue_monitor_launch_issue_number = Some(issue_number);
+                    session.origin = super::LaunchWizardOrigin::IssueMonitor;
                     session
                         .wizard
                         .apply(gwt::LaunchWizardAction::SetInitialPrompt {
@@ -1832,6 +1926,8 @@ impl AppRuntime {
                 issue_number: None,
             }),
             issue_monitor_launch_issue_number: None,
+            origin: super::LaunchWizardOrigin::IssueMonitor,
+            manual_holder_intent: None,
         });
 
         vec![
@@ -1877,6 +1973,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         )
     }
 
@@ -1886,6 +1983,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
         let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
             return self.issue_monitor_launch_failed_delivery_events(
@@ -1900,6 +1998,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             delivery_id,
+            launch_session_strategy,
         )
     }
 
@@ -1909,6 +2008,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
         let mut recovery_events = Vec::new();
         if let Some(delivery_id) = delivery_id.as_deref() {
@@ -1953,12 +2053,16 @@ impl AppRuntime {
                         Some(delivery_id),
                     );
                 }
-                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message }) => {
-                    return self.issue_monitor_launch_failed_delivery_events(
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+                    message,
+                    session_mode,
+                }) => {
+                    return self.issue_monitor_launch_failed_delivery_events_with_mode(
                         Some(project_root),
                         issue_number,
                         &message,
                         Some(delivery_id),
+                        session_mode,
                     );
                 }
                 None => {}
@@ -1985,8 +2089,19 @@ impl AppRuntime {
                     }
                 }
                 if !was_materialized {
-                    recovery_events
-                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                    let exact_live_holder = self.active_agent_sessions.contains_key(&window_id)
+                        && self.runtimes.contains_key(&window_id)
+                        && self.window_status(&window_id).is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        });
+                    if !exact_live_holder {
+                        recovery_events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
                 } else {
                     let Some((window_id, materialized, workspace_durable)) = self
                         .existing_issue_monitor_delivery_window(
@@ -2017,11 +2132,14 @@ impl AppRuntime {
         }
         match self.silent_issue_monitor_launch_events_for_project(
             project_root,
-            issue_number,
-            linked_issue_kind,
-            None,
-            None,
-            delivery_id.clone(),
+            SilentIssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+                review_prompt: None,
+                review_model: None,
+                delivery_id: delivery_id.clone(),
+                launch_session_strategy,
+            },
         ) {
             Ok(Some(events)) => {
                 recovery_events.extend(events);
@@ -2057,12 +2175,73 @@ impl AppRuntime {
                 recovery_events
             }
             Err(error) => {
-                recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
-                    Some(project_root),
-                    issue_number,
-                    &error,
-                    delivery_id.as_deref(),
-                ));
+                let answered_handoff_pending = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .ok()
+                .is_some_and(|prefs| {
+                    prefs.autonomous_handoffs.iter().any(|handoff| {
+                        handoff.issue_number == issue_number
+                            && handoff.answer.is_some()
+                            && handoff.delivered_at.is_none()
+                    })
+                });
+                if answered_handoff_pending {
+                    if let Some(delivery_id) = delivery_id.as_deref() {
+                        self.issue_monitor_launch_deliveries.remove(delivery_id);
+                    }
+                    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let settlement = gwt::prepare_autonomous_handoff_delivery_from_prefs(
+                        &prefs_path,
+                        issue_number,
+                        &now,
+                    )
+                    .and_then(|prepared| match prepared {
+                        Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(prepared)) => {
+                            gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                                &prefs_path,
+                                &prepared.handoff_id,
+                                &prepared.session_id,
+                                prepared.attempt,
+                                &error,
+                                &now,
+                            )
+                            .map(Some)
+                        }
+                        _ => Ok(None),
+                    });
+                    let disposition = match settlement {
+                        Ok(Some(gwt::AutonomousHandoffDeliveryFailureOutcome::Retry {
+                            retry_not_before,
+                            ..
+                        })) => format!(" exact-session retry after {retry_not_before}"),
+                        Ok(Some(gwt::AutonomousHandoffDeliveryFailureOutcome::Escalated {
+                            ..
+                        })) => " parked for human review after bounded retries".to_string(),
+                        Ok(Some(gwt::AutonomousHandoffDeliveryFailureOutcome::Rejected))
+                        | Ok(None) => " kept in its existing durable delivery state".to_string(),
+                        Err(settlement_error) => {
+                            format!(" could not persist its delivery failure: {settlement_error}")
+                        }
+                    };
+                    recovery_events.push(OutboundEvent::broadcast(
+                        BackendEvent::IssueMonitorToast {
+                            level: "error".to_string(),
+                            message: format!(
+                                "Issue Monitor could not continue the exact answered session;{disposition}: {error}"
+                            ),
+                            issue_number: Some(issue_number),
+                        },
+                    ));
+                } else {
+                    recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
+                        Some(project_root),
+                        issue_number,
+                        &error,
+                        delivery_id.as_deref(),
+                    ));
+                }
                 recovery_events
             }
         }
@@ -2131,11 +2310,14 @@ impl AppRuntime {
         .and_then(|prefs| prefs.autonomous_tuning.review_model);
         match self.silent_issue_monitor_launch_events_for_project(
             project_root,
-            dispatch.issue_number,
-            dispatch.linked_issue_kind,
-            Some(prompt),
-            review_model,
-            None,
+            SilentIssueMonitorLaunchRequest {
+                issue_number: dispatch.issue_number,
+                linked_issue_kind: dispatch.linked_issue_kind,
+                review_prompt: Some(prompt),
+                review_model,
+                delivery_id: None,
+                launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            },
         ) {
             Ok(Some(events)) => events,
             Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
@@ -2157,12 +2339,16 @@ impl AppRuntime {
     fn silent_issue_monitor_launch_events_for_project(
         &mut self,
         requested_project_root: &Path,
-        issue_number: u64,
-        linked_issue_kind: gwt::LinkedIssueKind,
-        review_prompt: Option<String>,
-        review_model: Option<String>,
-        delivery_id: Option<String>,
+        request: SilentIssueMonitorLaunchRequest,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
+        let SilentIssueMonitorLaunchRequest {
+            issue_number,
+            linked_issue_kind,
+            review_prompt,
+            review_model,
+            delivery_id,
+            launch_session_strategy,
+        } = request;
         let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
         else {
             return Err("Project tab not found".to_string());
@@ -2211,8 +2397,22 @@ impl AppRuntime {
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
-        if previous_profiles.preferred_profile().is_none() {
+        let Some(profile_agent_id) = previous_profiles
+            .preferred_profile()
+            .map(|profile| profile.agent_id.clone())
+        else {
             return Ok(None);
+        };
+        // Issue #3676 AC-2: refuse before any terminal is spawned when the
+        // profile provider's CLI is definitively unauthenticated. The error
+        // funnels through the normal launch-failed path, so the active slot
+        // is released instead of burning on a provider login screen.
+        if (self.issue_monitor_provider_auth_probe)(&profile_agent_id)
+            == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+        {
+            return Err(gwt::issue_monitor::provider_unauthenticated_message(
+                &profile_agent_id,
+            ));
         }
         // SPEC #3200 FR-015: for the independent review, force a different model
         // than the implementer's (when configured) so the verdict is not a
@@ -2225,6 +2425,13 @@ impl AppRuntime {
             review_model.as_deref(),
         );
         let launch_profiles = previous_profiles.clone();
+        let answered_handoff_pending = review_prompt.is_none()
+            && gwt::preserve_answered_handoff_resume_strategy_from_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+                issue_number,
+            )
+            .ok()
+            .unwrap_or(false);
 
         // FR-022: an Issue whose agent window was previously closed without a
         // merge keeps a resumable session. Re-engage by resuming that session
@@ -2233,17 +2440,25 @@ impl AppRuntime {
         // (no shared context with the implementation agent), so the review path
         // skips resume and always launches a new agent.
         let target_branch = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
-        if review_prompt.is_none() {
-            if let Some(events) = self.silent_issue_monitor_resume_events(
+        let resume_holder_window_id = if review_prompt.is_none()
+            && (launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+                || answered_handoff_pending)
+        {
+            let (events, holder_window_id) = self.silent_issue_monitor_resume_events(
                 &tab_id,
                 &project_root,
                 &target_branch,
                 issue_number,
                 delivery_id.clone(),
-            )? {
+                &profile_agent_id,
+            )?;
+            if let Some(events) = events {
                 return Ok(Some(events));
             }
-        }
+            holder_window_id
+        } else {
+            None
+        };
 
         let mut session = self.build_knowledge_launch_wizard_session(
             &tab_id,
@@ -2271,6 +2486,14 @@ impl AppRuntime {
             &project_root,
             launch_profiles,
         )?;
+        // Any path that reaches this point is a raw fresh launch: either the
+        // durable policy requires it, the exact-resume preflight failed closed,
+        // no candidate exists, or this is an independent review. Preserve the
+        // current saved provider profile while clearing conversation identity.
+        if let LaunchWizardLaunchRequest::Agent(config) = &mut launch_request {
+            config.session_mode = gwt_agent::SessionMode::Normal;
+            config.resume_session_id = None;
+        }
         // SPEC #3200 T-040/FR-006: in unattended autonomous mode the
         // monitor-launched implementation agent must not stall on a permission
         // prompt. Default OFF leaves the SPEC #3165 human-gated launch untouched.
@@ -2310,12 +2533,19 @@ impl AppRuntime {
             })
             .unwrap_or(0);
         let geometry = issue_monitor_auto_launch_geometry(launch_index);
+        let issue_monitor_session_mode = match &launch_request {
+            LaunchWizardLaunchRequest::Agent(config) => Some(config.session_mode),
+            LaunchWizardLaunchRequest::Shell(_) => None,
+        };
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.clone()),
+            issue_monitor_session_mode,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -2330,6 +2560,15 @@ impl AppRuntime {
                 return Err("Issue Monitor automatic launch requires an agent target".to_string());
             }
         };
+        if let Some(holder_window_id) = resume_holder_window_id {
+            events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                level: "warn".to_string(),
+                message: format!(
+                    "Issue Monitor started a fresh session because native conversation is already held by window {holder_window_id}"
+                ),
+                issue_number: Some(issue_number),
+            }));
+        }
         let message = if review_prompt.is_some() {
             "Issue Monitor independent review launched".to_string()
         } else {
@@ -2353,32 +2592,305 @@ impl AppRuntime {
         target_branch: &str,
         issue_number: u64,
         delivery_id: Option<String>,
-    ) -> Result<Option<Vec<OutboundEvent>>, String> {
-        let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
-        else {
-            return Ok(None);
+        profile_agent_id: &str,
+    ) -> Result<(Option<Vec<OutboundEvent>>, Option<String>), String> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let autonomous_handoff =
+            gwt::pending_autonomous_handoff_resumption_from_prefs(&prefs_path, issue_number)
+                .map_err(|error| {
+                    format!("failed to read the autonomous handoff answer: {error}")
+                })?;
+        let session = if let Some(handoff) = autonomous_handoff.as_ref() {
+            let session = self
+                .issue_monitor_session_by_id(&handoff.session_id)
+                .ok_or_else(|| {
+                    format!(
+                        "answered autonomous handoff {} references unavailable gwt Session {}",
+                        handoff.handoff_id, handoff.session_id
+                    )
+                })?;
+            if session.linked_issue_number != Some(issue_number)
+                || normalize_branch_name(&session.branch) != normalize_branch_name(target_branch)
+                || !session_matches_project_state(&session, project_root)
+            {
+                return Err(format!(
+                    "answered autonomous handoff {} does not match Issue #{issue_number}'s exact Session",
+                    handoff.handoff_id
+                ));
+            }
+            session
+        } else {
+            let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
+            else {
+                return Ok((None, None));
+            };
+            session
         };
+        // Issue #3676 AC-1: a stored session only qualifies for resume when
+        // its provider matches the Monitor's current launch profile. A
+        // mismatched provider must fall through to a fresh launch on the
+        // profile provider instead of re-binding the slot to the old CLI.
+        if !session
+            .agent_id
+            .command()
+            .eq_ignore_ascii_case(profile_agent_id.trim())
+        {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff provider does not match the Monitor profile"
+                        .to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
         if !session_exact_resume_materializable(project_root, &session) {
-            return Ok(None);
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff Session can no longer be materialized".to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
+        let provider_availability = if session.agent_id == gwt_agent::AgentId::GrokBuild {
+            let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+                &self.profile_config_path()?,
+                session.runtime_target,
+            )?
+            .into_parts();
+            let grok_home =
+                gwt_core::usage::grok::grok_home_from_env(&effective_env, &session.worktree_path);
+            provider_conversation_availability_with_grok_home(&session, grok_home.as_deref())
+        } else {
+            provider_conversation_availability(&session)
+        };
+        if provider_availability != ProviderConversationAvailability::Present {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff native conversation is unavailable or foreign"
+                        .to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
+        if let Some(holder_window_id) = self.issue_monitor_native_conversation_holder(&session) {
+            let Some(handoff) = autonomous_handoff.as_ref() else {
+                return Ok((None, Some(holder_window_id)));
+            };
+            if !self.active_agent_sessions.contains_key(&holder_window_id) {
+                // A materializing window reserves the native writer identity
+                // but is not yet a conversation that can accept an answer.
+                return Ok((Some(Vec::new()), None));
+            }
+            let Some(pane) = self
+                .runtimes
+                .get(&holder_window_id)
+                .map(|runtime| runtime.pane.clone())
+            else {
+                // The exact conversation is known to be owned or currently
+                // materializing, but there is no writable live pane yet. Keep
+                // the durable delivery pending instead of launching a second
+                // writer or consuming the answer.
+                return Ok((Some(Vec::new()), None));
+            };
+            let local_delivery_key = delivery_id
+                .clone()
+                .unwrap_or_else(|| format!("handoff:{}", handoff.handoff_id));
+            if matches!(
+                self.issue_monitor_launch_deliveries.get(&local_delivery_key),
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+                    if window_id == &holder_window_id
+            ) {
+                return Ok((Some(Vec::new()), None));
+            }
+            if let Some(delivery_id) = delivery_id.as_deref() {
+                match self.claim_issue_monitor_launch_delivery(
+                    project_root,
+                    issue_number,
+                    delivery_id,
+                    &holder_window_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok((Some(Vec::new()), None)),
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to bind the autonomous answer delivery to live window \
+                             {holder_window_id}: {error}"
+                        ));
+                    }
+                }
+            }
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let prepared = match gwt::prepare_autonomous_handoff_delivery_from_prefs(
+                &prefs_path,
+                issue_number,
+                &now,
+            )
+            .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?
+            {
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(prepared)) => prepared,
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Backoff {
+                    retry_not_before,
+                    ..
+                }) => {
+                    return Err(format!(
+                        "answered autonomous handoff delivery is in backoff until {retry_not_before}"
+                    ));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::InFlight { .. }) => {
+                    return Ok((Some(Vec::new()), None));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ambiguous { reason, .. }) => {
+                    return Err(reason);
+                }
+                None => return Ok((Some(Vec::new()), None)),
+            };
+            let record_pre_submit_failure =
+                |message: &str| match gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                    &prefs_path,
+                    &prepared.handoff_id,
+                    &prepared.session_id,
+                    prepared.attempt,
+                    message,
+                    &now,
+                ) {
+                    Ok(_) => message.to_string(),
+                    Err(error) => {
+                        format!("{message}; failed to record bounded retry: {error}")
+                    }
+                };
+            let target = match super::autonomous_handoff_delivery_target_for_session(
+                &session,
+                issue_number,
+                &holder_window_id,
+                delivery_id.as_deref(),
+                &self.issue_monitor_materializer_id,
+            ) {
+                Ok(target) => target,
+                Err(error) => return Err(record_pre_submit_failure(&error)),
+            };
+            let bound = match gwt::bind_autonomous_handoff_delivery_target_from_prefs(
+                &prefs_path,
+                &prepared.handoff_id,
+                &prepared.session_id,
+                prepared.attempt,
+                &target,
+            ) {
+                Ok(bound) => bound,
+                Err(error) => {
+                    let error = format!("failed to bind the autonomous answer target: {error}");
+                    return Err(record_pre_submit_failure(&error));
+                }
+            };
+            if !bound {
+                let error = "autonomous answer target no longer matches its durable attempt";
+                return Err(record_pre_submit_failure(error));
+            }
+            self.issue_monitor_launch_deliveries.insert(
+                local_delivery_key.clone(),
+                super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id: holder_window_id.clone(),
+                    started_at: std::time::Instant::now(),
+                },
+            );
+            let proxy = self.proxy.clone();
+            let project_root = project_root.to_path_buf();
+            let worker_holder_window_id = holder_window_id.clone();
+            let worker_delivery_id = delivery_id.clone();
+            let worker_local_delivery_key = local_delivery_key.clone();
+            let handoff_id = prepared.handoff_id.clone();
+            let handoff_session_id = prepared.session_id.clone();
+            let attempt = prepared.attempt;
+            let prompt = format!("{}\r", prepared.prompt);
+            if let Err(error) = self.blocking_tasks.try_spawn(move || {
+                let result = super::pty_io::write_pane_input_and_submit_blocking(&pane, &prompt);
+                proxy.send(UserEvent::IssueMonitorAnswerDeliveryComplete(
+                    super::IssueMonitorAnswerDelivery {
+                        project_root,
+                        issue_number,
+                        holder_window_id: worker_holder_window_id,
+                        delivery_id: worker_delivery_id,
+                        local_delivery_key: worker_local_delivery_key,
+                        handoff_id,
+                        session_id: handoff_session_id,
+                        attempt,
+                        result,
+                    },
+                ));
+            }) {
+                self.issue_monitor_launch_deliveries
+                    .remove(&local_delivery_key);
+                let _ = gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                    &prefs_path,
+                    &prepared.handoff_id,
+                    &prepared.session_id,
+                    prepared.attempt,
+                    &error,
+                    &now,
+                );
+                return Err(format!(
+                    "failed to schedule the autonomous answer delivery to live window \
+                     {holder_window_id}: {error}"
+                ));
+            }
+            return Ok((Some(Vec::new()), None));
         }
         let mut config = super::launch_config_from_persisted_session(&session);
         if !session.worktree_path.as_path().exists() {
             config.working_dir = None;
         }
         if config.session_mode != gwt_agent::SessionMode::Resume {
-            return Ok(None);
+            return Ok((None, None));
         }
-        // Issue #3478 (AC-5): a parked question that a human answered resumes
-        // this exact session with the answer as its first prompt, so the work
-        // continues with the decision context it was parked on. Taken once —
-        // a later resume of the same session must not replay a stale answer.
-        if let Some(prompt) = gwt::take_autonomous_resume_prompt_from_prefs(
+        let autonomous_mode = gwt::load_issue_monitor_prefs(
             &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
-            issue_number,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        ) {
-            config.args.push(prompt);
+        )
+        .map(|prefs| prefs.autonomous_mode)
+        .unwrap_or(false);
+        if autonomous_mode {
+            config.env_vars.insert(
+                gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV.to_string(),
+                "1".to_string(),
+            );
+            config.env_vars.insert(
+                gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV.to_string(),
+                issue_number.to_string(),
+            );
         }
+        // Write-ahead before the exact Resume is scheduled. The protected
+        // prompt is consumed only by this launch; UserPromptSubmit supplies
+        // the semantic receipt that marks it delivered.
+        let autonomous_delivery_attempt = if autonomous_handoff.is_some() {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            match gwt::prepare_autonomous_handoff_delivery_from_prefs(
+                &prefs_path,
+                issue_number,
+                &now,
+            )
+            .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?
+            {
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(prepared)) => {
+                    config.args.push(prepared.prompt.clone());
+                    Some(prepared)
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Backoff {
+                    retry_not_before,
+                    ..
+                }) => {
+                    return Err(format!(
+                        "answered autonomous handoff delivery is in backoff until {retry_not_before}"
+                    ));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::InFlight { .. }) => {
+                    return Ok((Some(Vec::new()), None));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ambiguous { reason, .. }) => {
+                    return Err(reason);
+                }
+                None => return Ok((Some(Vec::new()), None)),
+            }
+        } else {
+            None
+        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
             project_root,
             Some(session.branch.as_str()),
@@ -2402,20 +2914,101 @@ impl AppRuntime {
             issue_monitor_issue_number: Some(issue_number),
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.to_path_buf()),
+            issue_monitor_session_mode: Some(config.session_mode),
+            issue_monitor_autonomous_handoff: autonomous_delivery_attempt.clone(),
+            issue_monitor_autonomous_submit_started: false,
         };
-        let mut events = self.spawn_agent_window_with_feedback_at_geometry(
+        let launch = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
             config,
             geometry,
             workspace_resume_context,
             feedback,
-        )?;
+        );
+        let mut events = match launch {
+            Ok(events) => events,
+            Err(error) => {
+                if let Some(prepared) = autonomous_delivery_attempt {
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let _ = gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                        &prefs_path,
+                        &prepared.handoff_id,
+                        &prepared.session_id,
+                        prepared.attempt,
+                        &error,
+                        &now,
+                    );
+                }
+                return Err(error);
+            }
+        };
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "info".to_string(),
             message: "Issue Monitor resumed existing session".to_string(),
             issue_number: Some(issue_number),
         }));
-        Ok(Some(events))
+        Ok((Some(events), None))
+    }
+
+    fn issue_monitor_native_conversation_holder(
+        &self,
+        candidate: &gwt_agent::Session,
+    ) -> Option<String> {
+        self.issue_monitor_native_conversation_holder_excluding(candidate, None)
+    }
+
+    pub(super) fn issue_monitor_native_conversation_holder_excluding(
+        &self,
+        candidate: &gwt_agent::Session,
+        excluded_window_id: Option<&str>,
+    ) -> Option<String> {
+        let candidate_conversation_id = candidate.exact_resume_session_id()?;
+        let matches_candidate = |source_session_id: &str| {
+            self.issue_monitor_session_by_id(source_session_id)
+                .is_some_and(|source| {
+                    source.agent_id == candidate.agent_id
+                        && source.exact_resume_session_id() == Some(candidate_conversation_id)
+                })
+        };
+        self.active_agent_sessions
+            .iter()
+            .find_map(|(window_id, active)| {
+                (excluded_window_id != Some(window_id.as_str())
+                    && self.window_lookup.contains_key(window_id.as_str())
+                    && self
+                        .window_status(window_id.as_str())
+                        .is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        })
+                    && matches_candidate(&active.session_id))
+                .then(|| window_id.clone())
+            })
+            .or_else(|| {
+                self.pending_auto_resume_sources.iter().find_map(
+                    |(window_id, source_session_id)| {
+                        (excluded_window_id != Some(window_id.as_str())
+                            && self.window_lookup.contains_key(window_id.as_str())
+                            && self
+                                .inflight_launches
+                                .values()
+                                .any(|(pending_window_id, _)| pending_window_id == window_id)
+                            && matches_candidate(source_session_id))
+                        .then(|| window_id.clone())
+                    },
+                )
+            })
+    }
+
+    pub(super) fn issue_monitor_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Option<gwt_agent::Session> {
+        gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+            .ok()
+            .or_else(|| self.launch_wizard_cache.session_by_id(session_id).cloned())
     }
 
     fn resolve_silent_issue_monitor_launch_request(
@@ -2441,6 +3034,11 @@ impl AppRuntime {
                     branch_name,
                     self.launch_wizard_cache.clone(),
                 )?;
+                // A silent fresh fallback must use the current saved Monitor
+                // profile, not a target-branch Quick Start Session. Leaving
+                // these entries populated lets the predecessor conversation
+                // overwrite the selected provider/model during hydration.
+                hydration.quick_start_entries.clear();
                 hydration.previous_profiles = Some(previous_profiles);
                 session.wizard.apply_runtime_context(hydration);
                 if let Some(agent_id) = preferred_agent_id {
@@ -2540,6 +3138,343 @@ impl AppRuntime {
         self.handle_launch_wizard_action_for_client(None, action, bounds)
     }
 
+    fn manual_launch_generation_disposition(
+        &self,
+        session: &LaunchWizardSession,
+        config: &gwt_agent::LaunchConfig,
+    ) -> Result<super::ManualLaunchGenerationDisposition, String> {
+        if session.origin != super::LaunchWizardOrigin::ManualLaunchAgent
+            || config.session_mode != gwt_agent::SessionMode::Normal
+            || config.is_ephemeral
+            || config.suppress_execution_control
+            || !matches!(
+                config.execution_intent,
+                gwt_agent::ExecutionLaunchIntent::Automatic
+            )
+        {
+            return Ok(super::ManualLaunchGenerationDisposition::NotApplicable);
+        }
+        let Some(owner_number) = config.linked_issue_number else {
+            return Ok(super::ManualLaunchGenerationDisposition::Genesis);
+        };
+        let Some(worktree) = config.working_dir.as_deref().or(session
+            .wizard
+            .context
+            .worktree_path
+            .as_deref())
+        else {
+            return Ok(super::ManualLaunchGenerationDisposition::Genesis);
+        };
+        let owner = match gwt::cli::execution_state::current_generation_owner(worktree) {
+            Ok(Some(owner)) => owner,
+            Ok(None) => match gwt::cli::execution_state::recovery_generation_owner(worktree) {
+                Ok(Some(_)) => {
+                    return Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                        "Execution authority has an interrupted pointer commit; reconcile it before manual launch"
+                            .to_string(),
+                    ))
+                }
+                Ok(None) => return Ok(super::ManualLaunchGenerationDisposition::Genesis),
+                Err(error) => {
+                    return Ok(super::ManualLaunchGenerationDisposition::Unknown(format!(
+                        "Execution authority is incomplete: {error}"
+                    )))
+                }
+            },
+            Err(error) => {
+                return Ok(super::ManualLaunchGenerationDisposition::Unknown(format!(
+                    "Execution authority is unreadable: {error}"
+                )))
+            }
+        };
+        if owner.number != owner_number {
+            return Ok(super::ManualLaunchGenerationDisposition::Conflict(
+                "The linked execution owner changed before manual launch".to_string(),
+            ));
+        }
+        let Some(ledger) = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                "The current execution owner ledger is missing".to_string(),
+            ));
+        };
+        let status = ledger.current_effective_status().ok_or_else(|| {
+            "The current execution generation has no effective status".to_string()
+        })?;
+        let current = gwt::cli::execution_state::current_execution_binding(worktree, owner)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "The current execution generation has no canonical binding".to_string()
+            })?;
+        if let Some(existing) =
+            gwt::cli::execution_state::prepared_owner_launch_successor_for_predecessor(
+                worktree, owner, &current,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            let candidate_session_id = existing.request.initial_session_id.as_str();
+            let candidate_path = self
+                .sessions_dir
+                .join(format!("{candidate_session_id}.toml"));
+            match gwt_agent::inspect_session_path(&candidate_path) {
+                gwt_agent::SessionPathState::Missing => {
+                    let predecessor_kind = match existing.predecessor_status {
+                        gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked => {
+                            gwt_agent::ManualLaunchSuccessorPredecessor::Blocked
+                        }
+                        gwt::cli::execution_state::SuccessorPredecessorStatus::Completed => {
+                            gwt_agent::ManualLaunchSuccessorPredecessor::Completed
+                        }
+                        gwt::cli::execution_state::SuccessorPredecessorStatus::Active => {
+                            return Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                                "A legacy Active successor requires reconciliation".to_string(),
+                            ));
+                        }
+                    };
+                    return Ok(super::ManualLaunchGenerationDisposition::Prepare(
+                        super::ManualLaunchPreparation {
+                            owner,
+                            operation_id: existing.request.operation_id,
+                            expected_binding: current,
+                            expected_session: None,
+                            expected_runtime: None,
+                            predecessor_kind,
+                        },
+                    ));
+                }
+                gwt_agent::SessionPathState::Present(candidate) => {
+                    if let Some(window_id) =
+                        self.active_agent_sessions
+                            .iter()
+                            .find_map(|(window_id, active)| {
+                                (active.session_id == candidate_session_id
+                                    && self.window_lookup.contains_key(window_id))
+                                .then(|| window_id.clone())
+                            })
+                    {
+                        return Ok(
+                            super::ManualLaunchGenerationDisposition::ExistingSuccessorWindow(
+                                window_id,
+                            ),
+                        );
+                    }
+                    let exact_candidate =
+                        gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+                            .map_err(|error| error.to_string())?;
+                    let recovery_identity =
+                        super::continuation::durable_launch_recovery_session_identity(
+                            &self.sessions_dir,
+                            candidate_session_id,
+                        )?;
+                    if exact_candidate.is_some() && exact_candidate == recovery_identity {
+                        let predecessor_kind = match existing.predecessor_status {
+                            gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked => {
+                                gwt_agent::ManualLaunchSuccessorPredecessor::Blocked
+                            }
+                            gwt::cli::execution_state::SuccessorPredecessorStatus::Completed => {
+                                gwt_agent::ManualLaunchSuccessorPredecessor::Completed
+                            }
+                            gwt::cli::execution_state::SuccessorPredecessorStatus::Active => {
+                                return Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                                    "A legacy Active successor requires reconciliation".to_string(),
+                                ));
+                            }
+                        };
+                        return Ok(super::ManualLaunchGenerationDisposition::Prepare(
+                            super::ManualLaunchPreparation {
+                                owner,
+                                operation_id: existing.request.operation_id,
+                                expected_binding: current,
+                                expected_session: None,
+                                expected_runtime: None,
+                                predecessor_kind,
+                            },
+                        ));
+                    }
+                    return Ok(super::ManualLaunchGenerationDisposition::Conflict(
+                        "A Prepared successor Session already exists outside this window; reconcile it before launching again"
+                            .to_string(),
+                    ));
+                }
+                gwt_agent::SessionPathState::Error(error) => {
+                    return Ok(super::ManualLaunchGenerationDisposition::Unknown(format!(
+                        "The Prepared successor Session is unreadable: {error}"
+                    )))
+                }
+            }
+        }
+        let predecessor_kind = match status {
+            gwt::cli::execution_state::ExecutionControlStatus::Blocked => {
+                gwt_agent::ManualLaunchSuccessorPredecessor::Blocked
+            }
+            gwt::cli::execution_state::ExecutionControlStatus::Completed => {
+                gwt_agent::ManualLaunchSuccessorPredecessor::Completed
+            }
+            gwt::cli::execution_state::ExecutionControlStatus::Active => {
+                gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive
+            }
+        };
+        if status != gwt::cli::execution_state::ExecutionControlStatus::Active {
+            return Ok(super::ManualLaunchGenerationDisposition::Prepare(
+                super::ManualLaunchPreparation {
+                    owner,
+                    operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+                    expected_binding: current,
+                    expected_session: None,
+                    expected_runtime: None,
+                    predecessor_kind,
+                },
+            ));
+        }
+        let record = gwt::cli::execution_state::load(worktree)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "The current execution generation has no projection".to_string())?;
+        let holder_path = self
+            .sessions_dir
+            .join(format!("{}.toml", record.primary_session_id));
+        let holder = match gwt_agent::inspect_session_path(&holder_path) {
+            gwt_agent::SessionPathState::Present(holder) => *holder,
+            gwt_agent::SessionPathState::Missing => {
+                return Err("The current execution holder Session is missing".to_string())
+            }
+            gwt_agent::SessionPathState::Error(error) => {
+                return Err(format!(
+                    "The current execution holder Session is unreadable: {error}"
+                ))
+            }
+        };
+        let predecessor = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+            .map_err(|error| error.to_string())?
+            .filter(|identity| identity.execution_binding.identity == current)
+            .ok_or_else(|| {
+                "The current execution holder Session binding is not exact".to_string()
+            })?;
+        let local_runtime = self
+            .active_agent_sessions
+            .iter()
+            .find_map(|(window_id, active)| {
+                let runtime_incarnation = self
+                    .runtimes
+                    .get(window_id)
+                    .map(|runtime| runtime.incarnation);
+                (active.session_id == predecessor.session_id
+                    && crate::runtime_support::same_worktree_path(
+                        &active.worktree_path,
+                        &predecessor.worktree_path,
+                    )
+                    && self.window_lookup.contains_key(window_id)
+                    && runtime_incarnation.is_some()
+                    && self.window_status(window_id).is_some_and(|status| {
+                        !matches!(
+                            status,
+                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                        )
+                    }))
+                .then(|| {
+                    (
+                        window_id.clone(),
+                        runtime_incarnation.expect("checked above"),
+                    )
+                })
+            });
+        let (local_window_id, local_runtime_incarnation) = local_runtime
+            .map(|(window_id, incarnation)| (Some(window_id), Some(incarnation)))
+            .unwrap_or((None, None));
+        let runtime_disposition = if local_runtime_incarnation.is_some() {
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live
+        } else {
+            gwt::cli::execution_state::classify_exact_session_runtime(
+                &self.sessions_dir,
+                &predecessor,
+            )
+            .map_err(|error| error.to_string())?
+        };
+        let runtime_proof = match runtime_disposition {
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof)
+            | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(proof) => {
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof))
+            }
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live => {
+                local_runtime_incarnation.map(|runtime_incarnation| {
+                    gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                        gwt_agent::ManualLaunchRuntimeProof {
+                            host_pid: std::process::id(),
+                            runtime_incarnation,
+                        },
+                    )
+                })
+            }
+            // Issue #3457: absence is exact evidence, not a missing proof.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
+            }
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
+        };
+        let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
+        let intent = super::ManualLaunchHolderIntent {
+            operation_id: manual_generation_operation_id(owner, &current, predecessor_kind),
+            fingerprint,
+            owner,
+            predecessor,
+            predecessor_kind,
+            local_window_id,
+            local_runtime_incarnation,
+            runtime_proof,
+        };
+        match runtime_disposition {
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live => Ok(
+                super::ManualLaunchGenerationDisposition::ConfirmLive(intent),
+            ),
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(_) => {
+                if !matches!(
+                    holder.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                ) {
+                    return Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                        "The exact runtime is terminal but the holder Session is not durably stopped"
+                            .to_string(),
+                    ));
+                }
+                Ok(super::ManualLaunchGenerationDisposition::Prepare(
+                    intent.preparation(),
+                ))
+            }
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(_) => Ok(
+                super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
+            ),
+            // Issue #3457: the holder published no sidecar in any namespace,
+            // so no Host is running it and no proof can ever appear. Unlike a
+            // Terminal holder there is no exit record to cross-check against
+            // the durable status, so a `.toml` a crashed Host left behind as
+            // Running must still be recoverable here.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
+                super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
+            ),
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {
+                Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                    "The holder has no exact runtime exit proof or liveness proof".to_string(),
+                ))
+            }
+        }
+    }
+
+    fn manual_holder_durable_identity_is_exact(
+        &self,
+        intent: &super::ManualLaunchHolderIntent,
+    ) -> bool {
+        gwt_agent::Session::load(
+            &self
+                .sessions_dir
+                .join(format!("{}.toml", intent.predecessor.session_id)),
+        )
+        .ok()
+        .and_then(|session| gwt_agent::SessionExecutionIdentity::from_session(&session).ok())
+        .flatten()
+        .as_ref()
+            == Some(&intent.predecessor)
+    }
+
     pub(crate) fn handle_launch_wizard_action_for_client(
         &mut self,
         client_id: Option<&str>,
@@ -2555,7 +3490,316 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetAgent { agent_id } => Some(agent_id.clone()),
             _ => None,
         };
-        session.wizard.apply(action);
+        if session.wizard.holder_decision.is_some()
+            && !matches!(
+                action,
+                gwt::LaunchWizardAction::Cancel
+                    | gwt::LaunchWizardAction::MoveExistingPane { .. }
+                    | gwt::LaunchWizardAction::StopAndStartSuccessor { .. }
+            )
+        {
+            let error =
+                "Resolve or cancel the current holder decision before changing launch settings"
+                    .to_string();
+            Self::log_launch_wizard_error(
+                &session,
+                action_stage,
+                action_label,
+                requested_agent_id.as_deref(),
+                &error,
+            );
+            session.wizard.error = Some(error);
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        }
+        let mut apply_action = true;
+        match &action {
+            gwt::LaunchWizardAction::MoveExistingPane {
+                fingerprint,
+                window_id,
+            } => {
+                let exact = session.manual_holder_intent.as_ref().is_some_and(|intent| {
+                    intent.fingerprint == *fingerprint
+                        && self.manual_holder_durable_identity_is_exact(intent)
+                        && intent.local_window_id.as_deref() == Some(window_id.as_str())
+                        && intent.local_runtime_incarnation.is_some_and(|incarnation| {
+                            self.runtimes
+                                .get(window_id)
+                                .is_some_and(|runtime| runtime.incarnation == incarnation)
+                        })
+                        && self
+                            .active_agent_sessions
+                            .get(window_id)
+                            .is_some_and(|active| {
+                                active.session_id == intent.predecessor.session_id
+                                    && self.window_lookup.contains_key(window_id)
+                                    && self.window_status(window_id).is_some_and(|status| {
+                                        !matches!(
+                                            status,
+                                            WindowProcessStatus::Stopped
+                                                | WindowProcessStatus::Error
+                                        )
+                                    })
+                            })
+                });
+                if !exact {
+                    let error = "The current holder changed; review the refreshed launch decision."
+                        .to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                }
+                let mut events = self.focus_existing_live_work_agent_events(window_id, bounds);
+                events.push(self.launch_wizard_state_broadcast(None));
+                return events;
+            }
+            gwt::LaunchWizardAction::StopAndStartSuccessor {
+                fingerprint,
+                window_id,
+            } => {
+                if bounds.is_none() {
+                    let error = "Viewport bounds are required before stopping the current holder"
+                        .to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                }
+                let mut fixed_wizard = session.wizard.clone();
+                fixed_wizard.holder_decision = None;
+                fixed_wizard.error = None;
+                fixed_wizard.apply(gwt::LaunchWizardAction::Submit);
+                let Some(LaunchWizardCompletion::Launch(fixed_request)) =
+                    fixed_wizard.completion.take()
+                else {
+                    let error = "The fixed successor launch configuration is no longer available"
+                        .to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                let LaunchWizardLaunchRequest::Agent(mut fixed_config) = *fixed_request else {
+                    let error =
+                        "Manual holder handoff requires a fixed Agent launch target".to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                let Some(intent) = session.manual_holder_intent.clone().filter(|intent| {
+                    intent.fingerprint == *fingerprint
+                        && self.manual_holder_durable_identity_is_exact(intent)
+                        && intent.local_window_id.as_deref() == Some(window_id.as_str())
+                        && intent.local_runtime_incarnation.is_some_and(|incarnation| {
+                            self.runtimes
+                                .get(window_id)
+                                .is_some_and(|runtime| runtime.incarnation == incarnation)
+                        })
+                        && self
+                            .active_agent_sessions
+                            .get(window_id)
+                            .is_some_and(|active| {
+                                active.session_id == intent.predecessor.session_id
+                                    && self.window_lookup.contains_key(window_id)
+                                    && self.window_status(window_id).is_some_and(|status| {
+                                        !matches!(
+                                            status,
+                                            WindowProcessStatus::Stopped
+                                                | WindowProcessStatus::Error
+                                        )
+                                    })
+                            })
+                }) else {
+                    let error = "The current holder changed; review the refreshed launch decision."
+                        .to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                let Some(runtime_incarnation) = intent.local_runtime_incarnation else {
+                    let error =
+                        "The exact holder runtime incarnation is unavailable; no successor was started."
+                            .to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                if let Err(error) = self.stop_exact_manual_holder_runtime(
+                    window_id,
+                    runtime_incarnation,
+                    &intent.predecessor,
+                    true,
+                ) {
+                    let error = format!(
+                        "The holder could not be proven stopped; no successor was started: {error}"
+                    );
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                }
+                let stopped = gwt_agent::Session::load(
+                    &self
+                        .sessions_dir
+                        .join(format!("{}.toml", intent.predecessor.session_id)),
+                )
+                .ok()
+                .and_then(|session| {
+                    gwt_agent::SessionExecutionIdentity::from_session(&session).ok()
+                })
+                .flatten()
+                .is_some_and(|identity| {
+                    identity == intent.predecessor
+                        && matches!(
+                            gwt_agent::Session::load(
+                                &self
+                                    .sessions_dir
+                                    .join(format!("{}.toml", identity.session_id))
+                            )
+                            .map(|session| session.status),
+                            Ok(gwt_agent::AgentStatus::Stopped
+                                | gwt_agent::AgentStatus::Interrupted)
+                        )
+                });
+                if !stopped {
+                    let error = "The holder could not be proven stopped; no successor was started."
+                        .to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        action_stage,
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                }
+                fixed_config.execution_intent = gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                    operation_id: intent.operation_id,
+                    expected_binding: intent.predecessor.execution_binding.identity.clone(),
+                    expected_predecessor: Some(Box::new(intent.predecessor)),
+                    expected_runtime: intent.runtime_proof,
+                    predecessor_kind: intent.predecessor_kind,
+                };
+                session.wizard.holder_decision = None;
+                session.wizard.error = None;
+                session.wizard.completion = Some(LaunchWizardCompletion::Launch(Box::new(
+                    LaunchWizardLaunchRequest::Agent(fixed_config),
+                )));
+                apply_action = false;
+            }
+            _ => {}
+        }
+        if apply_action {
+            session.wizard.apply(action);
+        }
+        let automatic_agent_launch = match session.wizard.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config)
+                    if matches!(
+                        config.execution_intent,
+                        gwt_agent::ExecutionLaunchIntent::Automatic
+                    ) =>
+                {
+                    Some(config.as_ref().clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(automatic_agent_launch) = automatic_agent_launch {
+            match self.manual_launch_generation_disposition(&session, &automatic_agent_launch) {
+                Ok(super::ManualLaunchGenerationDisposition::NotApplicable)
+                | Ok(super::ManualLaunchGenerationDisposition::Genesis) => {}
+                Ok(super::ManualLaunchGenerationDisposition::Prepare(preparation)) => {
+                    if let Some(LaunchWizardCompletion::Launch(request)) =
+                        session.wizard.completion.as_mut()
+                    {
+                        if let LaunchWizardLaunchRequest::Agent(config) = request.as_mut() {
+                            config.execution_intent =
+                                gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                    operation_id: preparation.operation_id,
+                                    expected_binding: preparation.expected_binding,
+                                    expected_predecessor: preparation
+                                        .expected_session
+                                        .map(Box::new),
+                                    expected_runtime: preparation.expected_runtime,
+                                    predecessor_kind: preparation.predecessor_kind,
+                                };
+                        }
+                    }
+                }
+                Ok(super::ManualLaunchGenerationDisposition::ExistingSuccessorWindow(
+                    window_id,
+                )) => {
+                    session.wizard.completion =
+                        Some(LaunchWizardCompletion::FocusWindow { window_id });
+                }
+                Ok(super::ManualLaunchGenerationDisposition::ConfirmLive(intent)) => {
+                    let summary = format!(
+                        "{} · Session {}",
+                        intent.predecessor.agent_id.display_name(),
+                        intent.predecessor.session_id
+                    );
+                    session.wizard.holder_decision = Some(intent.decision_view(summary));
+                    session.manual_holder_intent = Some(intent);
+                    session.wizard.completion = None;
+                }
+                Ok(super::ManualLaunchGenerationDisposition::Conflict(error))
+                | Ok(super::ManualLaunchGenerationDisposition::Unknown(error))
+                | Err(error) => {
+                    session.wizard.error = Some(error);
+                    session.wizard.completion = None;
+                }
+            }
+        }
         if let Some(error) = session.wizard.error.as_deref() {
             Self::log_launch_wizard_error(
                 &session,
@@ -2686,6 +3930,8 @@ impl AppRuntime {
                 session
                     .wizard
                     .mark_launch_materialization_pending("Preparing worktree...");
+                self.pending_launch_wizard_materializations
+                    .insert(session.wizard_id.clone(), session.clone());
                 self.proxy
                     .send(UserEvent::LaunchWizardLaunchMaterializationRequested {
                         wizard_id: session.wizard_id.clone(),
@@ -2710,82 +3956,84 @@ impl AppRuntime {
         config: LaunchWizardLaunchRequest,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(mut session) = self.launch_wizard.take() else {
+        let Some(pending_session) = self
+            .pending_launch_wizard_materializations
+            .remove(&wizard_id)
+        else {
             return Vec::new();
         };
-        if session.wizard_id != wizard_id {
-            self.launch_wizard = Some(session);
-            return Vec::new();
-        }
+        let owns_visible_slot = self
+            .launch_wizard
+            .as_ref()
+            .is_some_and(|session| session.wizard_id == wizard_id);
+        let mut session = if owns_visible_slot {
+            self.launch_wizard
+                .take()
+                .expect("matching visible launch wizard")
+        } else {
+            pending_session
+        };
         let issue_monitor_project_root = session
             .issue_monitor_launch_issue_number
             .and_then(|_| self.tab(&session.tab_id))
             .map(|tab| tab.project_root.clone());
 
         match config {
-            LaunchWizardLaunchRequest::Agent(config) => {
-                let requested_agent_id = config.agent_id.command().to_string();
-                let workspace_resume_context = session.workspace_resume_context.clone();
-                let launch_feedback_context = client_id.map(|client_id| LaunchFeedbackContext {
-                    client_id,
-                    title: if session.wizard.wizard_mode == gwt::LaunchWizardMode::StartWork {
-                        "Start Work".to_string()
+            LaunchWizardLaunchRequest::Agent(config) => self.materialize_launch_wizard_agent_with(
+                session,
+                owns_visible_slot,
+                config,
+                move |runtime, session, config| {
+                    let workspace_resume_context = session.workspace_resume_context.clone();
+                    let launch_feedback_context =
+                        client_id.map(|client_id| LaunchFeedbackContext {
+                            client_id,
+                            title: if session.wizard.wizard_mode == gwt::LaunchWizardMode::StartWork
+                            {
+                                "Start Work".to_string()
+                            } else {
+                                "Launch Agent".to_string()
+                            },
+                            issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+                            issue_monitor_delivery_id: None,
+                            issue_monitor_project_root: issue_monitor_project_root.clone(),
+                            issue_monitor_session_mode: Some(config.session_mode),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
+                        });
+                    if let Some(target) = session.agent_kanban_target.clone() {
+                        runtime.spawn_agent_window_in_agent_kanban(
+                            &session.tab_id,
+                            *config,
+                            bounds,
+                            workspace_resume_context,
+                            launch_feedback_context,
+                            target,
+                        )
+                    } else if let Some(launch_feedback_context) = launch_feedback_context {
+                        runtime.spawn_agent_window_with_feedback(
+                            &session.tab_id,
+                            *config,
+                            bounds,
+                            workspace_resume_context,
+                            launch_feedback_context,
+                        )
                     } else {
-                        "Launch Agent".to_string()
-                    },
-                    issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
-                    issue_monitor_delivery_id: None,
-                    issue_monitor_project_root: issue_monitor_project_root.clone(),
-                });
-                let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
-                    self.spawn_agent_window_in_agent_kanban(
-                        &session.tab_id,
-                        *config,
-                        bounds,
-                        workspace_resume_context,
-                        launch_feedback_context,
-                        target,
-                    )
-                } else if let Some(launch_feedback_context) = launch_feedback_context {
-                    self.spawn_agent_window_with_feedback(
-                        &session.tab_id,
-                        *config,
-                        bounds,
-                        workspace_resume_context,
-                        launch_feedback_context,
-                    )
-                } else {
-                    self.spawn_agent_window(
-                        &session.tab_id,
-                        *config,
-                        bounds,
-                        workspace_resume_context,
-                    )
-                };
-                match spawn_result {
-                    Ok(mut events) => {
-                        events.insert(0, self.launch_wizard_state_broadcast(None));
-                        events
+                        runtime.spawn_agent_window(
+                            &session.tab_id,
+                            *config,
+                            bounds,
+                            workspace_resume_context,
+                        )
                     }
-                    Err(error) => {
-                        Self::log_launch_wizard_error(
-                            &session,
-                            "spawn_agent_window",
-                            "submit",
-                            Some(requested_agent_id.as_str()),
-                            &error,
-                        );
-                        session.wizard.clear_launch_materialization_pending();
-                        session.wizard.error = Some(error);
-                        self.launch_wizard = Some(session);
-                        vec![self.launch_wizard_state_outbound()]
-                    }
-                }
-            }
+                },
+            ),
             LaunchWizardLaunchRequest::Shell(config) => {
                 match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
                     Ok(mut events) => {
-                        events.insert(0, self.launch_wizard_state_broadcast(None));
+                        if owns_visible_slot {
+                            events.insert(0, self.launch_wizard_state_broadcast(None));
+                        }
                         events
                     }
                     Err(error) => {
@@ -2798,12 +4046,285 @@ impl AppRuntime {
                         );
                         session.wizard.clear_launch_materialization_pending();
                         session.wizard.error = Some(error);
-                        self.launch_wizard = Some(session);
-                        vec![self.launch_wizard_state_outbound()]
+                        if owns_visible_slot {
+                            self.launch_wizard = Some(session);
+                            vec![self.launch_wizard_state_outbound()]
+                        } else {
+                            Vec::new()
+                        }
                     }
                 }
             }
         }
+    }
+
+    pub(super) fn materialize_launch_wizard_agent_with<F>(
+        &mut self,
+        mut session: LaunchWizardSession,
+        owns_visible_slot: bool,
+        mut config: Box<gwt_agent::LaunchConfig>,
+        spawn: F,
+    ) -> Vec<OutboundEvent>
+    where
+        F: FnOnce(
+            &mut Self,
+            &LaunchWizardSession,
+            Box<gwt_agent::LaunchConfig>,
+        ) -> Result<Vec<OutboundEvent>, String>,
+    {
+        let manual_project_root = self
+            .tab(&session.tab_id)
+            .map(|tab| tab.project_root.clone())
+            .ok_or_else(|| "Project tab not found".to_string());
+        if let Err(error) = manual_project_root.and_then(|project_root| {
+            self.prepare_manual_successor_before_pane(&project_root, &mut config)
+        }) {
+            Self::log_launch_wizard_error(
+                &session,
+                "manual_successor_preflight",
+                "submit",
+                Some(config.agent_id.command()),
+                &error,
+            );
+            session.wizard.clear_launch_materialization_pending();
+            session.wizard.error = Some(error);
+            return if owns_visible_slot {
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
+            } else {
+                Vec::new()
+            };
+        }
+        let requested_agent_id = config.agent_id.command().to_string();
+        let spawn_result = spawn(self, &session, config);
+        self.finish_launch_wizard_agent_spawn(
+            session,
+            owns_visible_slot,
+            requested_agent_id.as_str(),
+            spawn_result,
+        )
+    }
+
+    pub(super) fn finish_launch_wizard_agent_spawn(
+        &mut self,
+        mut session: LaunchWizardSession,
+        owns_visible_slot: bool,
+        requested_agent_id: &str,
+        spawn_result: Result<Vec<OutboundEvent>, String>,
+    ) -> Vec<OutboundEvent> {
+        match spawn_result {
+            Ok(mut events) => {
+                if owns_visible_slot {
+                    events.insert(0, self.launch_wizard_state_broadcast(None));
+                }
+                events
+            }
+            Err(error) => {
+                Self::log_launch_wizard_error(
+                    &session,
+                    "spawn_agent_window",
+                    "submit",
+                    Some(requested_agent_id),
+                    &error,
+                );
+                session.wizard.clear_launch_materialization_pending();
+                session.wizard.error = Some(error);
+                if owns_visible_slot {
+                    self.launch_wizard = Some(session);
+                    vec![self.launch_wizard_state_outbound()]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    pub(crate) fn prepare_manual_successor_before_pane(
+        &self,
+        project_root: &Path,
+        config: &mut Box<gwt_agent::LaunchConfig>,
+    ) -> Result<(), String> {
+        let gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+            operation_id,
+            expected_binding,
+            expected_predecessor,
+            expected_runtime,
+            predecessor_kind,
+        } = config.execution_intent.clone()
+        else {
+            return Ok(());
+        };
+        resolve_launch_worktree(project_root, config.as_mut())?;
+        let worktree = config
+            .working_dir
+            .clone()
+            .ok_or_else(|| "Manual successor preflight did not resolve a worktree".to_string())?;
+        let owner_number = config
+            .linked_issue_number
+            .ok_or_else(|| "Manual successor preflight requires a linked owner".to_string())?;
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::detect_owner_kind(&worktree, owner_number),
+            number: owner_number,
+        };
+        if expected_predecessor.as_deref().is_some_and(|identity| {
+            identity.execution_binding.owner_kind != owner.kind.as_str()
+                || identity.execution_binding.owner_number != owner.number
+                || identity.execution_binding.identity != expected_binding
+        }) {
+            return Err("Manual successor predecessor changed before preflight".to_string());
+        }
+        let issuer = self.agent_capability_issuer.as_ref().ok_or_else(|| {
+            "Manual successor preflight is missing its Host capability issuer".to_string()
+        })?;
+        let reservation = if predecessor_kind
+            == gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive
+        {
+            let predecessor = expected_predecessor.as_deref().ok_or_else(|| {
+                "Active manual successor requires an exact predecessor Session".to_string()
+            })?;
+            Some(issuer.reserve_manual_execution_handoff(&predecessor.execution_binding)?)
+        } else {
+            None
+        };
+        let result = (|| {
+            let candidate_session_id =
+                manual_successor_stable_component("manual-successor", &operation_id);
+            let source = match predecessor_kind {
+                gwt_agent::ManualLaunchSuccessorPredecessor::Completed => {
+                    gwt::cli::execution_state::MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+                }
+                gwt_agent::ManualLaunchSuccessorPredecessor::Blocked
+                | gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive => {
+                    gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE
+                }
+            };
+            let predecessor_status = match predecessor_kind {
+                gwt_agent::ManualLaunchSuccessorPredecessor::Completed => {
+                    gwt::cli::execution_state::SuccessorPredecessorStatus::Completed
+                }
+                gwt_agent::ManualLaunchSuccessorPredecessor::Blocked => {
+                    gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked
+                }
+                gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive => {
+                    gwt::cli::execution_state::SuccessorPredecessorStatus::Active
+                }
+            };
+            let existing = gwt::cli::execution_state::continuation_attempt_for_operation(
+                &worktree,
+                owner,
+                &operation_id,
+            )
+            .map_err(|error| error.to_string())?;
+            let requested_at = gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+                .map_err(|error| error.to_string())?
+                .and_then(|ledger| {
+                    ledger
+                        .current_generation()
+                        .map(|generation| generation.identity.activated_at)
+                })
+                .ok_or_else(|| {
+                    "Manual successor predecessor generation is unavailable".to_string()
+                })?;
+            let request = existing.map(|attempt| attempt.request).unwrap_or_else(|| {
+                gwt::cli::execution_state::SuccessorRequest {
+                    operation_id: operation_id.clone(),
+                    principal_id: "gwt-host-manual-launch".to_string(),
+                    work_id: None,
+                    source: source.to_string(),
+                    session_binding_id: manual_successor_stable_component(
+                        "manual-binding",
+                        &operation_id,
+                    ),
+                    initial_session_id: candidate_session_id.clone(),
+                    entrypoint: gwt::cli::execution_state::entrypoint_from_launch(
+                        &config.args,
+                        false,
+                    ),
+                    requested_at,
+                }
+            });
+            super::continuation::persist_durable_launch_recovery(
+                &self.sessions_dir,
+                super::continuation::DurableLaunchRecoveryKind::FreshSuccessor {
+                    operation_id: operation_id.clone(),
+                },
+                &request.initial_session_id,
+                project_root,
+                &worktree,
+                owner,
+                None,
+                None,
+            )?;
+            let attempt = gwt::cli::execution_state::prepare_exact_manual_launch_successor(
+                &worktree,
+                owner,
+                &request,
+                gwt::cli::execution_state::ExactManualLaunchPredecessor {
+                    sessions_dir: &self.sessions_dir,
+                    session: expected_predecessor.as_deref(),
+                    runtime: expected_runtime,
+                    binding: &expected_binding,
+                    status: predecessor_status,
+                    terminal_reason:
+                        "exact producing runtime terminated before manual Launch Agent",
+                },
+            );
+            let attempt = match attempt {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    if gwt::cli::execution_state::continuation_attempt_for_operation(
+                        &worktree,
+                        owner,
+                        &operation_id,
+                    )
+                    .is_ok_and(|attempt| attempt.is_none())
+                    {
+                        let _ = super::continuation::clear_durable_launch_recovery(
+                            &self.sessions_dir,
+                            &request.initial_session_id,
+                        );
+                    }
+                    return Err(error.to_string());
+                }
+            };
+            if attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Prepared {
+                return Err(format!(
+                    "Manual successor operation is {:?}; reconcile before retrying",
+                    attempt.status
+                ));
+            }
+            let identity = gwt::cli::execution_state::prepared_successor_execution_binding(
+                &worktree,
+                owner,
+                &attempt.request,
+            )
+            .map_err(|error| error.to_string())?;
+            let repo_hash = gwt_core::repo_hash::detect_repo_hash(&worktree)
+                .ok_or_else(|| "Manual successor repository hash is unavailable".to_string())?;
+            config.execution_intent = gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(
+                gwt_agent::SessionExecutionBinding {
+                    schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: attempt.request.initial_session_id,
+                    repo_hash: repo_hash.as_str().to_string(),
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity,
+                    capability_generation: 1,
+                },
+            );
+            Ok(())
+        })();
+        if let Some(reservation) = reservation.as_ref() {
+            let finalized = if result.is_ok() {
+                issuer.commit_manual_execution_handoff(reservation)
+            } else {
+                issuer.rollback_manual_execution_handoff(reservation)
+            };
+            if !finalized && result.is_ok() {
+                return Err("Manual successor handoff reservation was lost".to_string());
+            }
+        }
+        result
     }
 
     pub(super) fn save_issue_monitor_profile_from_launch_request(
@@ -3116,7 +4637,10 @@ impl AppRuntime {
             build_shell_process_launch(Path::new(&project_root), &mut config)
         })();
 
-        proxy.send(UserEvent::ShellLaunchComplete { window_id, result });
+        proxy.send(UserEvent::ShellLaunchComplete {
+            window_id,
+            result: Box::new(result),
+        });
     }
 
     pub(super) fn refresh_open_launch_wizard_from_cache(&mut self) {
@@ -3171,6 +4695,39 @@ mod review_dispatch_tests {
             "instructs verdict report-back via the gwtd op"
         );
         assert!(prompt.contains("42"), "names the issue");
+    }
+}
+
+#[cfg(test)]
+mod manual_successor_identity_tests {
+    use super::manual_generation_operation_id;
+
+    #[test]
+    fn manual_successor_operation_id_is_generation_stable_across_runtime_incarnations() {
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3547,
+        };
+        let binding = gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-1".to_string(),
+            binding_id: "binding-1".to_string(),
+            ledger_head_hash: "head-1".to_string(),
+        };
+
+        let before_runtime_replacement = manual_generation_operation_id(
+            owner,
+            &binding,
+            gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+        );
+        let after_runtime_replacement = manual_generation_operation_id(
+            owner,
+            &binding,
+            gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+        );
+
+        assert_eq!(before_runtime_replacement, after_runtime_replacement);
+        assert!(before_runtime_replacement.contains("generation-1"));
+        assert!(before_runtime_replacement.contains("head-1"));
     }
 }
 
@@ -3265,6 +4822,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_checked_out_develop_in_container_workspace() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -3277,6 +4835,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_checked_out_main_without_develop() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &[], Some("main"));
 
@@ -3289,6 +4848,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_existing_normal_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");
 
@@ -3301,6 +4861,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_existing_bare_head_without_default_worktree() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
 
@@ -3313,6 +4874,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_empty_bare_repository() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_empty_bare_workspace(&workspace);
 
@@ -3325,6 +4887,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_unborn_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repository");
         run_git(&repo, &["init", "-q", "-b", "future"]);
@@ -3338,6 +4901,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_develop_worktree_from_detached_head() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         run_git(&repo, &["branch", "develop"]);
@@ -3355,6 +4919,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_falls_back_from_unusable_root_git_metadata() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -3368,6 +4933,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_develop_when_project_root_is_bare() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -3380,6 +4946,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_local_ref_that_is_not_a_commit() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &["main"], Some("main"));
         let blob = git_stdout(&workspace.join("seed"), &["rev-parse", "master:README.md"]);
@@ -3398,6 +4965,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_git_error_when_fallback_is_unavailable() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -3413,6 +4981,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_malformed_local_ref_error() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         fs::write(repo.join(".git/refs/heads/main"), "not-an-object-id\n")

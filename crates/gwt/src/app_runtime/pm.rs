@@ -22,12 +22,79 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
-use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
+// Issue #3632: every prompt this module injects closes with the one canonical
+// reporting clause the Stop-gate continuation also uses; see
+// `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
+use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE};
 use gwt::PmAgentOption;
 
-use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent};
+use crate::embedded_server::AgentPmSendResponder;
+
+use super::{
+    AgentCapabilityGrant, AgentCapabilityIssuer, AppRuntime, BackendEvent, ClientId, OutboundEvent,
+    WindowPreset,
+};
+
+const PM_DELIVERY_MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// Reserved before the operation deadline for terminalizing the operation.
+/// The receipt commit takes a file lock and an fsync under the same scoped
+/// deadline, and the reply still has to reach the origin socket before the
+/// server's acceptance deadline — spending the budget down to the last
+/// millisecond would turn a clean `unverified` answer back into a timeout.
+const PM_DELIVERY_TERMINAL_MARGIN: Duration = Duration::from_millis(500);
+
+/// How often the durable receipt is re-read while waiting for the target's
+/// acknowledgement.
+const PM_DELIVERY_ACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The one reason text for a delivery whose acknowledgement never arrived.
+/// Both the body and its submit terminator reached the pane on this path, so
+/// it must not claim the body is staged (Issue #3608 AC-3); the durable
+/// receipt stays the authority, which is why a fresh operation is the wrong
+/// response.
+const PM_DELIVERY_UNVERIFIED_REASON: &str =
+    "PM pane submit was not acknowledged within the delivery window; the prompt was written and \
+     submitted to the pane, and the durable receipt records the final outcome — do not retry with \
+     a new operation";
+
+/// Wait for the target Session's acknowledgement to reach the durable receipt,
+/// and report the operation's latest durable status.
+///
+/// Verification is asynchronous and out-of-process: the acknowledgement is
+/// written by the target's own `UserPromptSubmit` hook, which has to start,
+/// run its steps, and commit — routinely far longer than the submit-retry
+/// budget. Issue #3608 recorded the consequence live (`prepared 02:40:38 →
+/// ambiguous 02:40:39 → verified 02:40:40`): a delivery that had already been
+/// submitted was terminalized as unverified one second before its
+/// acknowledgement landed, with most of the operation's budget still unspent.
+/// So the wait runs to the deadline and returns early only once the operation
+/// is durably terminal.
+fn await_pm_delivery_status(
+    receipt_path: &Path,
+    operation_id: &str,
+    poll_deadline: Instant,
+) -> Result<pm_registry::PmDeliveryReceiptStatus, String> {
+    loop {
+        let status = pm_registry::pm_delivery_receipt_for_operation(receipt_path, operation_id)
+            .map_err(|error| format!("PM delivery receipt is unavailable: {error}"))?
+            .map(|receipt| receipt.status)
+            .unwrap_or(pm_registry::PmDeliveryReceiptStatus::Prepared);
+        if status != pm_registry::PmDeliveryReceiptStatus::Prepared
+            || Instant::now() >= poll_deadline
+        {
+            return Ok(status);
+        }
+        thread::sleep(
+            PM_DELIVERY_ACK_POLL_INTERVAL
+                .min(poll_deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
 
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
@@ -63,6 +130,66 @@ fn pm_wake_signals(inbox: &[gwt::IssueMonitorInboxItem]) -> std::collections::BT
         }
     }
     signals
+}
+
+/// How much of one escalation body reaches the wake prompt.
+///
+/// Enough to tell a fresh-launch request from a spec ruling from a tool bug,
+/// short enough that five of them still fit on the single physical line a pane
+/// injection has to be.
+const ESCALATION_PROMPT_BODY_CHARS: usize = 220;
+
+/// Cap on escalations quoted in one prompt. Beyond this the PM should read
+/// `issue.monitor.status` rather than a wall of text.
+const ESCALATION_PROMPT_MAX_ROWS: usize = 5;
+
+/// Issue #3655 AC-5 / AC-9: every open unblock request, with its body, as a
+/// suffix for a PM wake prompt.
+///
+/// The failure this closes: the Board's own timeline said nothing but
+/// "ready for the next instruction", so a PM reading Board history could not
+/// tell a finished agent from a stuck one, and had to read panes one by one to
+/// find out. The blocker text now travels with the wake itself. It is read
+/// from the escalation index — a file — so it still arrives when `pane.read`
+/// is failing (#3629).
+///
+/// Rendered on one physical line: the prompt is typed into a pane, and an
+/// embedded newline would submit it half-written.
+pub(crate) fn open_escalation_prompt_section(project_root: &Path) -> String {
+    let store = match gwt_core::coordination::load_escalation_store(project_root) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(%error, "PM wake could not read the Board escalation index");
+            return String::new();
+        }
+    };
+    let open = store.open_escalations();
+    if open.is_empty() {
+        return String::new();
+    }
+    let shown = open.len().min(ESCALATION_PROMPT_MAX_ROWS);
+    let lines = gwt_core::board_escalation::render_open_escalation_lines(
+        &open[..shown],
+        ESCALATION_PROMPT_BODY_CHARS,
+    );
+    let overflow = if open.len() > shown {
+        format!(" (+{} more in issue.monitor.status)", open.len() - shown)
+    } else {
+        String::new()
+    };
+    format!(
+        " UNRESOLVED BLOCKED ESCALATIONS ({count}){overflow} — decide fresh launch / spec ruling / \
+         tool fix for each, then post the resolution with params.resolves: {lines}",
+        count = open.len(),
+        lines = lines.join(" || "),
+    )
+}
+
+/// Whether any agent currently has a standing unblock request.
+pub(crate) fn has_open_board_escalations(project_root: &Path) -> bool {
+    gwt_core::coordination::load_escalation_store(project_root)
+        .map(|store| store.open().next().is_some())
+        .unwrap_or(false)
 }
 
 /// An actively-looping PM picks new events up in its own next cycle, and a PM
@@ -102,8 +229,12 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
 pub(crate) enum PmEnsureTrigger {
     /// Project open / startup restore. Honours the opt-out.
     Automatic,
-    /// Launcher click, Restart, crash recovery. Ignores the opt-out.
+    /// Launcher click or crash recovery. Ignores the opt-out.
     Explicit,
+    /// Profile restart after the predecessor registration was deliberately
+    /// cleared. The accepted close still finalizes in the background, but its
+    /// generic anti-respawn fence must not suppress this requested successor.
+    Restart,
 }
 
 impl AppRuntime {
@@ -163,6 +294,14 @@ impl AppRuntime {
             return Vec::new();
         }
         let project_root = tab.project_root.clone();
+        if trigger != PmEnsureTrigger::Restart && self.pending_pm_closes.contains_key(&project_root)
+        {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM ensure skipped while explicit pane close is finalizing"
+            );
+            return Vec::new();
+        }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         let prefs = match pm_registry::load_pm_prefs(&prefs_path) {
             Ok(prefs) => prefs,
@@ -183,6 +322,25 @@ impl AppRuntime {
             );
             return Vec::new();
         }
+        if let Some(window_id) = prefs
+            .registration
+            .as_ref()
+            .and_then(|registration| self.live_pm_window_id(&registration.session_id))
+        {
+            // FR-019: the PM launcher must always land the user on the PM, so
+            // focusing frames it in the viewport rather than only raising it.
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+        }
+        // Issue #3607 AC-1/AC-2: the singleton is per *repository*, not per
+        // project store. One repository can own two stores after a scope split
+        // (#3466), and each store's `pm.json` — `auto_start` included — is
+        // invisible to the other, so both auto-started and two PMs ended up
+        // rewriting one repository's Issue Monitor order and launch orders.
+        // Refusing here rather than at registration keeps the second store from
+        // ever spawning the pane.
+        if let Some(window_id) = self.live_pm_window_id_in_another_store(&project_root) {
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+        }
         let Some(registration) = prefs.registration else {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -190,11 +348,6 @@ impl AppRuntime {
             );
             return self.spawn_pm_agent(tab_id, &project_root);
         };
-        if let Some(window_id) = self.live_pm_window_id(&registration.session_id) {
-            // FR-019: the PM launcher must always land the user on the PM, so
-            // focusing frames it in the viewport rather than only raising it.
-            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
-        }
         // FR-003 crash-loop damper: while the backoff floor is in the future
         // the automatic ladder must not respawn. Scoped to `Automatic` for the
         // same reason as the auto_start opt-out above — FR-021 requires the
@@ -240,14 +393,49 @@ impl AppRuntime {
             .registration
             .as_ref()
             .filter(|registration| self.pm_registration_is_live(registration));
+        let running_profile = running.map(|registration| self.pm_running_profile(registration));
+        let agent_options = Self::pm_agent_options(&configured.agent_id);
         Some(BackendEvent::PmStatus {
             auto_start: prefs.settings.auto_start,
-            agent_options: Self::pm_agent_options(&configured.agent_id),
+            agent_options,
             configured_agent_id: configured.agent_id,
             configured_model: configured.model,
-            running_agent_id: running.map(|registration| registration.agent_id.clone()),
-            is_running: running.is_some(),
+            configured_reasoning: configured.reasoning,
+            running_agent_id: running_profile
+                .as_ref()
+                .map(|profile| profile.agent_id.clone()),
+            running_model: running_profile
+                .as_ref()
+                .and_then(|profile| profile.model.clone()),
+            running_reasoning: running_profile
+                .as_ref()
+                .and_then(|profile| profile.reasoning.clone()),
+            is_running: running_profile.is_some(),
         })
+    }
+
+    /// Resolve the launch identity of the conversation that is running now.
+    /// The registration deliberately stays small; the durable Session already
+    /// owns agent/model/reasoning. Legacy or temporarily unreadable Session
+    /// records retain the registered agent and expose unknown tuning.
+    fn pm_running_profile(&self, registration: &PmRegistration) -> PmLaunchProfile {
+        let session_path = self
+            .sessions_dir
+            .join(format!("{}.toml", registration.session_id));
+        gwt_agent::Session::load_and_migrate(&session_path)
+            .map(|session| {
+                PmLaunchProfile {
+                    agent_id: session.agent_id.command().to_string(),
+                    model: session.model,
+                    reasoning: session.reasoning_level,
+                    version: session.tool_version,
+                }
+                .normalized()
+            })
+            .unwrap_or_else(|_| PmLaunchProfile {
+                agent_id: registration.agent_id.clone(),
+                ..PmLaunchProfile::default()
+            })
     }
 
     /// The PM settings snapshot as a broadcast, for the call sites that change
@@ -325,13 +513,13 @@ impl AppRuntime {
             );
             return Vec::new();
         }
-        let empty_to_none = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
         let profile = PmLaunchProfile {
             agent_id: agent_id.to_string(),
-            model: empty_to_none(model),
-            reasoning: empty_to_none(reasoning),
+            model,
+            reasoning,
             version: None,
-        };
+        }
+        .normalized();
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
             prefs.settings.launch_profile = Some(profile.clone());
@@ -375,7 +563,7 @@ impl AppRuntime {
         }
         // The ensure gate broadcasts the post-restart pm_status itself, so the
         // panel is refreshed exactly once rather than twice per restart.
-        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Explicit));
+        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Restart));
         events
     }
 
@@ -467,9 +655,10 @@ impl AppRuntime {
             window_id,
             prompt: format!(
                 "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
-                 Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot, \
-                 triage the new items, and report the milestone digest.\r",
-                reasons.join(", ")
+                 Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
+                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                reasons.join(", "),
+                escalations = open_escalation_prompt_section(project_root),
             ),
         })
     }
@@ -507,9 +696,14 @@ impl AppRuntime {
             return None;
         }
         let status = monitor.agent_status();
+        // Issue #3655 AC-5: a standing unblock request is supervision work in
+        // its own right. Without this the worst case parks itself — the queue
+        // empties precisely because every agent stopped, so the tick that
+        // should raise the alarm decides there is nothing to supervise.
         if status.active_launches.is_empty()
             && status.queue.is_empty()
             && status.needs_human.is_empty()
+            && !has_open_board_escalations(project_root)
         {
             return None;
         }
@@ -534,11 +728,12 @@ impl AppRuntime {
         }
         Some(PmWakeDecision {
             window_id,
-            prompt: "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
-                     fresh `issue.monitor.status` snapshot, check the running agents' \
-                     `last_activity_at` and any NeedsHuman rows, and report the milestone \
-                     digest.\r"
-                .to_string(),
+            prompt: format!(
+                "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
+                 fresh `issue.monitor.status` snapshot, check the running agents' \
+                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                escalations = open_escalation_prompt_section(project_root),
+            ),
         })
     }
 
@@ -623,6 +818,7 @@ impl AppRuntime {
     /// the project that owns the target window, and that registration's own
     /// pane must be live right now. Everything else is refused with a typed
     /// reply and no write.
+    #[cfg(test)]
     pub(crate) fn pm_pane_send_input_events(
         &mut self,
         client_id: ClientId,
@@ -684,6 +880,566 @@ impl AppRuntime {
         self.pane_send_input_to_window_events(client_id, window_id, text)
     }
 
+    /// Authenticated FR-111 entrypoint. The capability principal supplies the
+    /// caller project and Session; no client payload identity participates in
+    /// authorization. The direct responder binds the terminal result to the
+    /// origin WebSocket.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn authenticated_pm_pane_send_input_events(
+        &mut self,
+        issuer: &AgentCapabilityIssuer,
+        client_id: ClientId,
+        grant: AgentCapabilityGrant,
+        operation_id: &str,
+        window_id: &str,
+        text: &str,
+        responder: Option<AgentPmSendResponder>,
+    ) -> Vec<OutboundEvent> {
+        let finish = |status: &str, reason: Option<String>| {
+            let event = BackendEvent::PmMessageSendResult {
+                operation_id: operation_id.to_string(),
+                status: status.to_string(),
+                window_id: Some(window_id.to_string()),
+                reason,
+            };
+            if let Some(responder) = responder.as_ref() {
+                let _ = responder.send(event);
+                Vec::new()
+            } else {
+                vec![OutboundEvent::reply(client_id.clone(), event)]
+            }
+        };
+        if uuid::Uuid::parse_str(operation_id)
+            .ok()
+            .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
+        {
+            return finish(
+                "failed",
+                Some("pm.message.send requires a canonical operation UUID".to_string()),
+            );
+        }
+        if !issuer.grant_is_current(&grant)
+            || responder
+                .as_ref()
+                .is_some_and(|responder| !responder.mutation_is_current())
+        {
+            return finish(
+                "failed",
+                Some("pm.message.send capability is stale".to_string()),
+            );
+        }
+
+        let project_root = grant.principal().canonical_project_root().to_path_buf();
+        let principal_session_id = grant.principal().session_id().to_string();
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        let registration = match pm_registry::load_pm_prefs(&prefs_path) {
+            Ok(prefs) => prefs.registration,
+            Err(error) => {
+                return finish(
+                    "failed",
+                    Some(format!(
+                        "pm.message.send registration is unreadable: {error}"
+                    )),
+                )
+            }
+        };
+        let Some(registration) =
+            registration.filter(|registration| registration.session_id == principal_session_id)
+        else {
+            return finish(
+                "failed",
+                Some("pm.message.send caller is not the live registered PM".to_string()),
+            );
+        };
+        let Some(principal_window_id) = self.live_pm_window_id(&principal_session_id) else {
+            return finish(
+                "failed",
+                Some("pm.message.send caller is not the live registered PM".to_string()),
+            );
+        };
+        let principal_pty = match self
+            .pty_writers
+            .read()
+            .map_err(|_| "pm.message.send PTY registry is unavailable".to_string())
+            .and_then(|writers| {
+                writers
+                    .get(&principal_window_id)
+                    .cloned()
+                    .ok_or_else(|| "pm.message.send caller has no live PTY".to_string())
+            }) {
+            Ok(pty) => pty,
+            Err(error) => return finish("failed", Some(error)),
+        };
+
+        let Some(body) = text.strip_suffix('\r') else {
+            return finish(
+                "failed",
+                Some(
+                    "pm.message.send requires one line terminated by a carriage return".to_string(),
+                ),
+            );
+        };
+        if body.len() > PM_DELIVERY_MAX_BODY_BYTES {
+            return finish(
+                "failed",
+                Some(format!(
+                    "pm.message.send body exceeds the {PM_DELIVERY_MAX_BODY_BYTES}-byte limit"
+                )),
+            );
+        }
+        let protected_prompt = match pm_registry::protected_pm_delivery_prompt(operation_id, body) {
+            Ok(prompt) => prompt,
+            Err(error) => return finish("failed", Some(error.to_string())),
+        };
+        let target = self.tabs.iter().find_map(|tab| {
+            let canonical_root = dunce::canonicalize(&tab.project_root)
+                .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+                .ok()?;
+            if canonical_root != project_root {
+                return None;
+            }
+            tab.workspace.persisted().windows.iter().find_map(|window| {
+                (crate::runtime_support::combined_window_id(&tab.id, &window.id) == window_id).then(
+                    || {
+                        (
+                            tab.id.clone(),
+                            window.preset,
+                            window.status,
+                            window.session_id.clone(),
+                        )
+                    },
+                )
+            })
+        });
+        let target_session_id = target
+            .as_ref()
+            .and_then(|(_, _, _, session_id)| session_id.clone());
+        let target_is_live_agent = target.as_ref().is_some_and(
+            |(target_tab_id, target_preset, target_status, target_session_id)| {
+                matches!(
+                    target_status,
+                    WindowProcessStatus::Running
+                        | WindowProcessStatus::Idle
+                        | WindowProcessStatus::Waiting
+                ) && target_session_id
+                    .as_deref()
+                    .is_some_and(|target_session_id| {
+                        self.active_agent_sessions
+                            .get(window_id)
+                            .is_some_and(|session| {
+                                let exact_prompt_ack = matches!(
+                                    target_preset,
+                                    WindowPreset::Claude | WindowPreset::Codex
+                                ) || (*target_preset == WindowPreset::Agent
+                                    && matches!(session.agent_id.as_str(), "claude" | "codex"));
+                                exact_prompt_ack
+                                    && session.window_id == window_id
+                                    && session.tab_id == *target_tab_id
+                                    && session.session_id == target_session_id
+                            })
+                    })
+            },
+        );
+        let expected_pty = if target_is_live_agent {
+            self.pty_writers
+                .read()
+                .ok()
+                .and_then(|writers| writers.get(window_id).cloned())
+        } else {
+            None
+        };
+
+        let operation_id = operation_id.to_string();
+        let window_id = window_id.to_string();
+        let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&project_root);
+        let writers = Arc::clone(&self.pty_writers);
+        let issuer = issuer.clone();
+        let worker_responder = responder.clone();
+        let worker_client_id = client_id.clone();
+        let proxy = self.proxy.clone();
+        let worker_operation_id = operation_id.clone();
+        let worker_window_id = window_id.clone();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let send_terminal = |status: &str, reason: Option<String>| {
+                let event = BackendEvent::PmMessageSendResult {
+                    operation_id: worker_operation_id.clone(),
+                    status: status.to_string(),
+                    window_id: Some(worker_window_id.clone()),
+                    reason,
+                };
+                if let Some(responder) = worker_responder.as_ref() {
+                    let _ = responder.send(event);
+                } else {
+                    proxy.send(super::UserEvent::Dispatch(vec![OutboundEvent::reply(
+                        worker_client_id.clone(),
+                        event,
+                    )]));
+                }
+            };
+            let deadline = worker_responder
+                .as_ref()
+                .map(AgentPmSendResponder::deadline)
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(2));
+            let _operation_deadline =
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            // The whole budget is available for the acknowledgement; only the
+            // terminal receipt commit and the reply are held back.
+            let ack_deadline = deadline
+                .checked_sub(PM_DELIVERY_TERMINAL_MARGIN)
+                .unwrap_or(deadline);
+            let mut body_attempted = false;
+            let mut receipt_prepared = false;
+            let mut receipt_terminalized = false;
+            let mut durable_target_session_id = target_session_id.clone();
+            let prepare = pm_registry::pm_delivery_receipt_for_operation(
+                &receipt_path,
+                &worker_operation_id,
+            )
+            .map_err(|error| format!("PM delivery receipt replay failed: {error}"))
+            .and_then(|existing| {
+                if let Some(existing) = existing {
+                    if existing.principal_session_id != principal_session_id
+                        || existing.target_window_id != worker_window_id
+                        || existing.body_sha256 != body_sha256
+                    {
+                        return Err(
+                            "PM delivery operation identity conflicts with its durable receipt"
+                                .to_string(),
+                        );
+                    }
+                    durable_target_session_id = Some(existing.target_session_id);
+                    return Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
+                        existing.status,
+                    ));
+                }
+                let target_session_id = durable_target_session_id.as_ref().ok_or_else(|| {
+                    "pm.message.send refused: target is not an authorized live agent pane"
+                        .to_string()
+                })?;
+                if !target_is_live_agent || expected_pty.is_none() {
+                    return Err(
+                        "pm.message.send refused: target is not an authorized live agent pane"
+                            .to_string(),
+                    );
+                }
+                let prepared = pm_registry::PmDeliveryReceipt {
+                    operation_id: worker_operation_id.clone(),
+                    recorded_at: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                    principal_session_id: principal_session_id.clone(),
+                    target_window_id: worker_window_id.clone(),
+                    target_session_id: target_session_id.clone(),
+                    body_sha256: body_sha256.clone(),
+                    reason: None,
+                };
+                pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared)
+                    .map_err(|error| format!("PM delivery receipt Prepared commit failed: {error}"))
+            });
+            let result = match prepare {
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Prepared) => {
+                    receipt_prepared = true;
+                    let delivery_target_session_id = durable_target_session_id
+                        .clone()
+                        .expect("Prepared PM delivery has a target Session");
+                    expected_pty
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| {
+                            "pm.message.send refused: target is not an authorized live agent pane"
+                                .to_string()
+                        })
+                        .and_then(|expected_pty| {
+                        let reservation = Arc::clone(&expected_pty)
+                            .reserve_input_transaction()
+                            .map_err(|error| {
+                                format!("PM pane input transaction unavailable: {error}")
+                            })?;
+                        super::pty_io::drive_verified_pane_submit(
+                            &protected_prompt,
+                            2,
+                            |bytes| {
+                                reservation
+                                    .write_input_authorized(bytes, |commit| {
+                                        if Instant::now() >= deadline
+                                            || worker_responder.as_ref().is_some_and(|responder| {
+                                                !responder.mutation_is_current()
+                                            })
+                                        {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError {
+                                                details: "PM delivery deadline expired before input mutation"
+                                                    .to_string(),
+                                            });
+                                        }
+                                        let current_registration =
+                                            pm_registry::load_pm_prefs(&prefs_path)
+                                                .map_err(|error| {
+                                                    gwt_terminal::TerminalError::PtyIoError {
+                                                        details: format!(
+                                                            "PM registration revalidation failed: {error}"
+                                                        ),
+                                                    }
+                                                })?
+                                                .registration;
+                                        if current_registration.as_ref() != Some(&registration) {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError {
+                                                details: "registered PM authority changed before input mutation"
+                                                    .to_string(),
+                                            });
+                                        }
+                                        {
+                                            let current = writers.read().map_err(|_| {
+                                                gwt_terminal::TerminalError::PtyIoError {
+                                                    details: "PM delivery PTY registry is unavailable"
+                                                        .to_string(),
+                                                }
+                                            })?;
+                                            if !current
+                                                .get(&worker_window_id)
+                                                .is_some_and(|pty| Arc::ptr_eq(pty, &expected_pty))
+                                                || !current
+                                                    .get(&principal_window_id)
+                                                    .is_some_and(|pty| {
+                                                        Arc::ptr_eq(pty, &principal_pty)
+                                                    })
+                                            {
+                                                return Err(
+                                                    gwt_terminal::TerminalError::PtyIoError {
+                                                        details: "PM caller or target runtime generation changed"
+                                                            .to_string(),
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        if Instant::now() >= deadline
+                                            || worker_responder.as_ref().is_some_and(|responder| {
+                                                !responder.mutation_is_current()
+                                            })
+                                        {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError {
+                                                details: "PM delivery deadline expired before input commit"
+                                                    .to_string(),
+                                            });
+                                        }
+                                        if !issuer.commit_mutation_if_current(&grant, || {
+                                            worker_responder.as_ref().is_none_or(
+                                                AgentPmSendResponder::try_commit_mutation,
+                                            )
+                                        }) {
+                                            return Err(
+                                                gwt_terminal::TerminalError::PtyIoError {
+                                                    details: "PM capability or origin changed before input mutation"
+                                                        .to_string(),
+                                                },
+                                            );
+                                        }
+                                        let mut mark_attempted = || {
+                                            if bytes != b"\r" {
+                                                body_attempted = true;
+                                            }
+                                        };
+                                        commit(&mut mark_attempted)
+                                    })
+                                    .map_err(|error| error.to_string())
+                            },
+                            |settle| {
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                thread::sleep(settle.min(remaining));
+                            },
+                            || {
+                                pm_registry::pm_delivery_receipt_for_operation(
+                                    &receipt_path,
+                                    &worker_operation_id,
+                                )
+                                    .map_err(|error| {
+                                        format!(
+                                            "PM delivery acknowledgement is unavailable: {error}"
+                                        )
+                                    })
+                                    .map(|receipt| {
+                                        receipt.is_some_and(|receipt| {
+                                            receipt.target_session_id
+                                                == delivery_target_session_id
+                                                && receipt.body_sha256 == body_sha256
+                                                && receipt.status
+                                                    == pm_registry::PmDeliveryReceiptStatus::Verified
+                                        })
+                                    })
+                            },
+                        )
+                    })
+                }
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
+                    pm_registry::PmDeliveryReceiptStatus::Verified,
+                )) => {
+                    receipt_terminalized = true;
+                    Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified {
+                        submit_attempts: 0,
+                    })
+                }
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
+                    pm_registry::PmDeliveryReceiptStatus::Prepared,
+                )) => {
+                    let target_session_id = durable_target_session_id
+                        .as_ref()
+                        .expect("existing Prepared has a target Session");
+                    match await_pm_delivery_status(
+                        &receipt_path,
+                        &worker_operation_id,
+                        ack_deadline,
+                    ) {
+                        Err(error) => Err(error),
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
+                            receipt_terminalized = true;
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified {
+                                submit_attempts: 0,
+                            })
+                        }
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Ambiguous) => {
+                            receipt_terminalized = true;
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                                submit_attempts: 0,
+                            })
+                        }
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Refused) => {
+                            receipt_terminalized = true;
+                            Err("PM delivery operation was already refused".to_string())
+                        }
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Prepared) => match pm_registry::finish_pm_delivery_receipt(
+                        &receipt_path,
+                        &worker_operation_id,
+                        target_session_id,
+                        &body_sha256,
+                        pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+                        Some("response_lost_after_prepare"),
+                    )
+                    .map_err(|error| {
+                        format!("PM delivery replay could not terminalize Prepared: {error}")
+                    }) {
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
+                            receipt_terminalized = true;
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified {
+                                submit_attempts: 0,
+                            })
+                        }
+                        Ok(_) => {
+                            receipt_terminalized = true;
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                                submit_attempts: 0,
+                            })
+                        }
+                        Err(error) => Err(error),
+                    },
+                    }
+                }
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
+                    pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+                )) => {
+                    receipt_terminalized = true;
+                    Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
+                        submit_attempts: 0,
+                    })
+                }
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
+                    pm_registry::PmDeliveryReceiptStatus::Refused,
+                )) => {
+                    receipt_terminalized = true;
+                    Err("PM delivery operation was already refused".to_string())
+                }
+                Err(error) => Err(error),
+            };
+
+            match result {
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified { .. }) => {
+                    send_terminal("delivered", None)
+                }
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { .. }) => {
+                    let target_session_id = durable_target_session_id
+                        .as_deref()
+                        .expect("Prepared PM delivery has a target Session");
+                    // Issue #3608: exhausting the submit retries is not the end
+                    // of the operation. The acknowledgement crosses a process
+                    // boundary and regularly lands after them, so spend the
+                    // rest of the budget waiting for it before terminalizing.
+                    let _ = await_pm_delivery_status(
+                        &receipt_path,
+                        &worker_operation_id,
+                        ack_deadline,
+                    );
+                    match pm_registry::finish_pm_delivery_receipt(
+                        &receipt_path,
+                        &worker_operation_id,
+                        target_session_id,
+                        &body_sha256,
+                        pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+                        Some("submit_unverified"),
+                    ) {
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
+                            send_terminal("delivered", None)
+                        }
+                        _ => send_terminal(
+                            "unverified",
+                            Some(PM_DELIVERY_UNVERIFIED_REASON.to_string()),
+                        ),
+                    }
+                }
+                Err(mut error) => {
+                    let mut verified_during_finalization = false;
+                    if receipt_prepared && !receipt_terminalized {
+                        let target_session_id = durable_target_session_id
+                            .as_deref()
+                            .expect("Prepared PM delivery has a target Session");
+                        let status = if body_attempted {
+                            pm_registry::PmDeliveryReceiptStatus::Ambiguous
+                        } else {
+                            pm_registry::PmDeliveryReceiptStatus::Refused
+                        };
+                        match pm_registry::finish_pm_delivery_receipt(
+                            &receipt_path,
+                            &worker_operation_id,
+                            target_session_id,
+                            &body_sha256,
+                            status,
+                            Some(if body_attempted {
+                                "body_staged_or_unknown"
+                            } else {
+                                "mutation_refused"
+                            }),
+                        ) {
+                            Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
+                                verified_during_finalization = true;
+                            }
+                            Ok(_) => {}
+                            Err(receipt_error) => {
+                                error.push_str(&format!(
+                                    "; PM delivery receipt terminal commit failed: {receipt_error}"
+                                ));
+                            }
+                        }
+                    }
+                    if verified_during_finalization {
+                        send_terminal("delivered", None);
+                        return;
+                    }
+                    if body_attempted {
+                        error.push_str(
+                            "; prompt body may be staged — do not retry with a new operation",
+                        );
+                    }
+                    send_terminal("failed", Some(error));
+                }
+            }
+        });
+        if let Err(error) = spawn {
+            return finish(
+                "failed",
+                Some(format!("pm.message.send worker unavailable: {error}")),
+            );
+        }
+        Vec::new()
+    }
+
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
@@ -717,6 +1473,30 @@ impl AppRuntime {
                     Some(WindowProcessStatus::Stopped) | Some(WindowProcessStatus::Error) => None,
                     _ => Some(window_id.clone()),
                 }
+            })
+    }
+
+    /// Issue #3607 AC-1: window id of a live PM registered by *another* project
+    /// store of the same repository.
+    ///
+    /// Only a live one blocks. A dead registration in a split store must never
+    /// leave the repository without a PM — the gate exists to stop duplicates,
+    /// not to stop recovery.
+    pub(crate) fn live_pm_window_id_in_another_store(&self, project_root: &Path) -> Option<String> {
+        let repository_key = pm_registry::pm_repository_key(project_root)?;
+        let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root);
+        pm_registry::pm_registrations_for_repository(&repository_key)
+            .into_iter()
+            .filter(|record| record.project_dir != own_project_dir)
+            .find_map(|record| {
+                let window_id = self.live_pm_window_id(&record.registration.session_id)?;
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    other_store = %record.project_dir.display(),
+                    session_id = %record.registration.session_id,
+                    "PM ensure refused: this repository already has a live PM in another project store"
+                );
+                Some(window_id)
             })
     }
 
@@ -765,7 +1545,7 @@ impl AppRuntime {
     }
 
     /// Keep the per-broadcast PM marker in step with the durable record.
-    fn sync_pm_session_cache(
+    pub(super) fn sync_pm_session_cache(
         &mut self,
         project_root: &Path,
         registration: Option<&PmRegistration>,
@@ -788,23 +1568,33 @@ impl AppRuntime {
     ///
     /// Returns whether this close actually deregistered a PM, so the caller can
     /// refresh the settings panel only for the close that changed PM state.
-    pub(super) fn deregister_pm_for_closed_window(
-        &mut self,
+    pub(super) fn deregister_pm_for_closed_window_in_background(
         project_root: &Path,
         session_id: &str,
-    ) -> bool {
+    ) -> (bool, Option<BackendEvent>) {
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         match pm_registry::deregister_pm(&prefs_path, session_id) {
-            Ok((_, true)) => {
+            Ok((prefs, true)) => {
                 tracing::info!(%session_id, "PM pane closed; registration cleared");
-                self.sync_pm_session_cache(project_root, None);
                 Self::cleanup_pm_worktree(project_root);
-                true
+                let configured = prefs.settings.launch_profile_or_default();
+                let status = BackendEvent::PmStatus {
+                    auto_start: prefs.settings.auto_start,
+                    agent_options: Self::pm_agent_options(&configured.agent_id),
+                    configured_agent_id: configured.agent_id,
+                    configured_model: configured.model,
+                    configured_reasoning: configured.reasoning,
+                    running_agent_id: None,
+                    running_model: None,
+                    running_reasoning: None,
+                    is_running: false,
+                };
+                (true, Some(status))
             }
-            Ok((_, false)) => false,
+            Ok((_, false)) => (false, None),
             Err(error) => {
                 tracing::warn!(%error, "failed to deregister PM on window close");
-                false
+                (false, None)
             }
         }
     }
@@ -815,24 +1605,28 @@ impl AppRuntime {
     /// arbitrary path. Fail-closed: any uncertainty keeps the worktree.
     fn cleanup_pm_worktree(project_root: &Path) {
         let worktree = pm_registry::pm_worktree_path_for_repo_path(project_root);
-        if !worktree.exists() {
-            return;
-        }
-        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
-        match manager.ephemeral_worktree_has_local_work(&worktree) {
-            Ok(false) => {
-                if let Err(error) = manager.remove_force_twice(&worktree) {
-                    tracing::warn!(%error, "failed to remove the clean PM worktree");
-                }
+        match pm_registry::cleanup_pm_worktree_for_repo_path(project_root, |worktree, entry| {
+            crate::runtime_support::intake_hook_config_is_disposable(worktree, entry)
+        }) {
+            Ok(pm_registry::PmWorktreeCleanupOutcome::Absent) => {}
+            Ok(pm_registry::PmWorktreeCleanupOutcome::Removed) => {
+                tracing::info!(
+                    worktree = %worktree.display(),
+                    "clean PM worktree removed"
+                );
             }
-            Ok(true) => {
+            Ok(pm_registry::PmWorktreeCleanupOutcome::RetainedLocalWork) => {
                 tracing::info!(
                     worktree = %worktree.display(),
                     "PM worktree has local work; keeping it for reuse"
                 );
             }
             Err(error) => {
-                tracing::warn!(%error, "PM worktree local-work check failed; keeping it");
+                tracing::warn!(
+                    %error,
+                    worktree = %worktree.display(),
+                    "PM worktree cleanup failed closed; keeping it"
+                );
             }
         }
     }
@@ -952,20 +1746,17 @@ impl AppRuntime {
         worktree: &Path,
         profile: &pm_registry::PmLaunchProfile,
     ) -> gwt_agent::LaunchConfig {
+        let profile = profile.clone().normalized();
         let agent_id = gwt_agent::resolve_agent_id(&profile.agent_id)
             .unwrap_or(gwt_agent::AgentId::ClaudeCode);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
             .working_dir(worktree.to_path_buf())
             .skip_permissions(true)
             .extra_arg(PM_BOOTSTRAP_PROMPT);
-        if let Some(model) = profile.model.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(model) = profile.model.as_deref() {
             builder = builder.model(model);
         }
-        if let Some(reasoning) = profile
-            .reasoning
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(reasoning) = profile.reasoning.as_deref() {
             builder = builder.reasoning_level(reasoning);
         }
         if let Some(version) = profile.version.as_deref().filter(|value| !value.is_empty()) {
@@ -973,35 +1764,21 @@ impl AppRuntime {
         }
         let mut config = builder.build();
         config.suppress_execution_control = true;
+        if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {
+            config.env_vars.insert(
+                "GWT_PM_SCRATCH_DIR".to_string(),
+                scratch.to_string_lossy().into_owned(),
+            );
+        }
         config
     }
 
     /// Dedicated detached worktree for the PM session (research R-10). Its
     /// lifecycle is bound to the PM registration; T-016 adds GC.
     fn ensure_pm_worktree(project_root: &Path) -> Result<PathBuf, String> {
-        let path = pm_registry::pm_worktree_path_for_repo_path(project_root);
-        if path.join(".git").exists() {
-            return Ok(path);
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
-        manager
-            .create_detached("HEAD", &path)
-            .map_err(|error| error.to_string())?;
-        Ok(path)
-    }
-
-    /// Issue #3497: the opened project root is not always a repository — the
-    /// bare layout (`parent/` holding `parent/<name>.git` plus worktrees) is
-    /// exactly what the launch paths already resolve through
-    /// `main_worktree_root`. Every PM `WorktreeManager` goes through the same
-    /// resolution, or `git worktree` dies with "not a git repository" and the
-    /// PM silently never comes up.
-    fn pm_git_root(project_root: &Path) -> PathBuf {
-        gwt_git::worktree::main_worktree_root(project_root)
-            .unwrap_or_else(|_| project_root.to_path_buf())
+        pm_registry::refresh_pm_worktree_for_repo_path(project_root)
+            .map(|outcome| outcome.worktree)
+            .map_err(|error| error.to_string())
     }
 }
 
