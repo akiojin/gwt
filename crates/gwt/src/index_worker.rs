@@ -2124,6 +2124,144 @@ mod tests {
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn arg_pair_count(args: &[OsString], flag: &str, value: &str) -> usize {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag && pair[1] == value)
+            .count()
+    }
+
+    fn protocol_rebuild_context() -> crate::cli::index::runtime::IndexContext {
+        crate::cli::index::runtime::IndexContext {
+            project_root: PathBuf::from("project-root"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://example.com/protocol-aware-rebuild.git",
+            ),
+            worktree_hash: "wt-hash".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        }
+    }
+
+    #[test]
+    fn current_and_all_worktree_status_args_request_explicit_v2() {
+        // T-IDX-431 RED: both status entry points are Rust-owned explicit-v2
+        // callers. Python's default/no-flag action remains legacy-compatible.
+        let current = current_status_runner_args("repo-hash", "wt-a");
+        let batch_hashes = vec!["wt-a".to_string(), "wt-b".to_string()];
+        let all_worktrees = batch_status_runner_args("repo-hash", &batch_hashes);
+
+        assert_eq!(arg_pair_count(&current, "--action", "status"), 1);
+        assert_eq!(arg_pair_count(&current, "--repo-hash", "repo-hash"), 1);
+        assert_eq!(arg_pair_count(&current, "--worktree-hash", "wt-a"), 1);
+        assert_eq!(
+            arg_pair_count(&current, "--file-index-protocol", "v2"),
+            1
+        );
+        assert_eq!(
+            current
+                .iter()
+                .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                .count(),
+            1,
+            "current status protocol flag must appear exactly once: {current:?}"
+        );
+
+        assert_eq!(arg_pair_count(&all_worktrees, "--action", "status"), 1);
+        assert_eq!(
+            arg_pair_count(&all_worktrees, "--repo-hash", "repo-hash"),
+            1
+        );
+        assert_eq!(
+            arg_pair_count(&all_worktrees, "--worktree-hashes", "wt-a,wt-b"),
+            1
+        );
+        assert_eq!(
+            arg_pair_count(&all_worktrees, "--file-index-protocol", "v2"),
+            1
+        );
+        assert_eq!(
+            all_worktrees
+                .iter()
+                .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                .count(),
+            1,
+            "all-worktree status protocol flag must appear exactly once: {all_worktrees:?}"
+        );
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_request_v2_for_file_scopes() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            RebuildAction {
+                label: "files",
+                action: "index-files",
+                scope: Some("files"),
+                needs_worktree_hash: true,
+            },
+            RebuildAction {
+                label: "files-docs",
+                action: "index-files",
+                scope: Some("files-docs"),
+                needs_worktree_hash: true,
+            },
+        ];
+
+        for action in actions {
+            let args = protocol_aware_rebuild_runner_args(&context, action, "background");
+
+            assert_eq!(arg_pair_count(&args, "--action", action.action), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--worktree-hash", "wt-hash"), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--scope", action.scope.expect("file scope")),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "background"), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--file-index-protocol", "v2"),
+                1
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                    .count(),
+                1,
+                "file rebuild protocol flag must appear exactly once: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_keep_non_file_scopes_legacy() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let action = RebuildAction {
+            label: "issues",
+            action: "index-issues",
+            scope: None,
+            needs_worktree_hash: false,
+        };
+        let args = protocol_aware_rebuild_runner_args(&context, action, "interactive");
+
+        assert_eq!(arg_pair_count(&args, "--action", "index-issues"), 1);
+        assert_eq!(
+            arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+            1
+        );
+        assert_eq!(arg_pair_count(&args, "--qos", "interactive"), 1);
+        assert!(
+            !args.iter().any(|arg| arg == "--file-index-protocol"),
+            "Issues and other repo scopes must retain legacy/default argv: {args:?}"
+        );
+    }
+
     #[test]
     fn automatic_background_index_opt_out_is_exact() {
         assert!(automatic_background_index_disabled_value(Some(
@@ -2664,6 +2802,64 @@ detached
         assert_eq!(
             view.last_repair_at.expect("timestamp").to_rfc3339(),
             "2026-04-24T06:15:20+00:00"
+        );
+    }
+
+    fn fallback_serving_file_status_view() -> ProjectIndexStatusView {
+        build_aggregated_status_view(
+            "asset-hash-12",
+            &[WorktreeProbeOutcome {
+                input: WorktreeProbeInput {
+                    worktree_hash: "wtAhash".to_string(),
+                    branch: "develop".to_string(),
+                    path: PathBuf::from("/abs/wtA"),
+                },
+                status_payload: Ok(serde_json::json!({
+                    "status": {
+                        "files": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 310
+                        },
+                        "files-docs": {
+                            "healthy": true,
+                            "repair_required": false,
+                            "reason": "ready",
+                            "fallback_source": "active",
+                            "view_id": "view-active",
+                            "document_count": 16
+                        }
+                    }
+                })),
+            }],
+        )
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_still_requires_repair() {
+        // T-IDX-431 RED: a previous View can keep queries healthy while the
+        // corrupt active View still requires a coordinated repair.
+        let view = fallback_serving_file_status_view();
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert_eq!(view.detail, "1 index scope(s) require repair");
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_is_collected_as_rebuild_target() {
+        let view = fallback_serving_file_status_view();
+        let targets = collect_unhealthy_rebuild_targets(&view.scopes);
+
+        assert!(
+            targets.contains(&(IndexRebuildScope::Files, Some("wtAhash".to_string()))),
+            "healthy fallback serving must not hide the required Files repair: {targets:?}"
+        );
+        assert!(
+            !targets.contains(&(IndexRebuildScope::FilesDocs, Some("wtAhash".to_string()))),
+            "healthy FilesDocs without repair_required must stay out of rebuild targets: {targets:?}"
         );
     }
 

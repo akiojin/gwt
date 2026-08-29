@@ -1968,6 +1968,88 @@ mod tests {
     }
 
     #[test]
+    fn repair_status_probe_args_request_v2_for_file_scopes() {
+        // T-IDX-431 RED: the repair recheck must use the same explicit v2
+        // selector as the search that admitted Files / FilesDocs repair.
+        let cases = [
+            vec![("files".to_string(), "missing".to_string())],
+            vec![("files-docs".to_string(), "corrupt".to_string())],
+            vec![
+                ("issues".to_string(), "missing".to_string()),
+                ("files".to_string(), "corrupt".to_string()),
+                ("files-docs".to_string(), "missing".to_string()),
+            ],
+        ];
+
+        for broken in cases {
+            let args = repair_status_probe_args("repo-hash", &broken, Some("wt-hash"));
+
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair[0] == "--file-index-protocol" && pair[1] == "v2")
+                    .count(),
+                1,
+                "file-scope repair status argv must contain one v2 pair: {args:?}"
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| {
+                        arg.as_os_str() == std::ffi::OsStr::new("--file-index-protocol")
+                    })
+                    .count(),
+                1,
+                "protocol flag must appear exactly once: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--action" && pair[1] == "status"),
+                "repair recheck must remain a status action: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--repo-hash" && pair[1] == "repo-hash"),
+                "repair recheck must retain the repository hash: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--worktree-hash" && pair[1] == "wt-hash"),
+                "repair recheck must retain the worktree hash: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_status_probe_args_keep_non_file_only_rechecks_legacy() {
+        // The flag must be gated by the broken scope set. Adding it to every
+        // status action would silently change the legacy/default Python API.
+        let broken = vec![
+            ("issues".to_string(), "missing".to_string()),
+            ("specs".to_string(), "corrupt".to_string()),
+        ];
+        let args = repair_status_probe_args("repo-hash", &broken, Some("wt-hash"));
+
+        assert!(
+            !args.iter().any(|arg| arg == "--file-index-protocol"),
+            "issues/specs-only repair status must retain legacy/default argv: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--action" && pair[1] == "status"),
+            "repair recheck must remain a status action: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--repo-hash" && pair[1] == "repo-hash"),
+            "repair recheck must retain the repository hash: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--worktree-hash" && pair[1] == "wt-hash"),
+            "repair recheck must retain the worktree hash: {args:?}"
+        );
+    }
+
+    #[test]
     fn broken_scopes_extracts_missing_issue_and_corrupt_spec_states() {
         // T-IDX-416 (SPEC #1939 Phase 70d, bundled-required by SPEC #3170
         // FR-097): the Knowledge Bridge consumer scopes classify exactly like
