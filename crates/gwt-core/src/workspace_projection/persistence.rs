@@ -4617,6 +4617,29 @@ pub fn record_workspace_work_events_paths(
     })
 }
 
+fn superseded_pause_work_ids(
+    projection: &WorkItemsProjection,
+    events: &[WorkEvent],
+) -> HashSet<String> {
+    events
+        .iter()
+        .filter(|event| event.kind == WorkEventKind::Pause)
+        .filter(|pause| {
+            projection
+                .work_items
+                .iter()
+                .find(|item| item.id == pause.work_item_id)
+                .is_some_and(|item| {
+                    item.events.iter().any(|event| {
+                        event.updated_at > pause.updated_at
+                            && workspace_event_establishes_session_attachment(event.kind)
+                    })
+                })
+        })
+        .map(|event| event.work_item_id.clone())
+        .collect()
+}
+
 fn persist_workspace_work_events_locked(
     work_items_path: &Path,
     events_path: &Path,
@@ -4626,8 +4649,17 @@ fn persist_workspace_work_events_locked(
     if events.is_empty() {
         return Ok(0);
     }
+    // A pane-close worker may acquire the WorkItems lock only after a newer
+    // Resume/Start has committed. Its Pause timestamp is the close acceptance
+    // time, so retain the late event for audit but never regress the newer
+    // producing projection. Board-ref Updates emitted in the same Pause batch
+    // are skipped with it so `updated_at` cannot move backwards either.
+    let superseded_pauses = superseded_pause_work_ids(projection, &events);
     let mut candidate = projection.clone();
     for event in &events {
+        if superseded_pauses.contains(&event.work_item_id) {
+            continue;
+        }
         if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Ok(0);
         }
@@ -4647,8 +4679,12 @@ fn persist_workspace_work_events_to_store_locked(
     if events.is_empty() {
         return Ok(0);
     }
+    let superseded_pauses = superseded_pause_work_ids(projection, &events);
     let mut candidate = projection.clone();
     for event in &events {
+        if superseded_pauses.contains(&event.work_item_id) {
+            continue;
+        }
         if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Ok(0);
         }
