@@ -1313,7 +1313,7 @@ mod tests {
         let error = publish_issue_monitor_control_with_timeout(
             project.path(),
             json!({"enabled": false}),
-            Duration::from_millis(40),
+            super::DEFAULT_TIMEOUT,
         )
         .expect_err("Busy must remain explicit when its retry budget expires");
         stop.store(true, Ordering::Release);

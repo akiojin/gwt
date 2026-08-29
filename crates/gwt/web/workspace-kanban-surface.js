@@ -1,5 +1,70 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
+// Issue #3783: close acknowledgements and Workspace watcher updates carry
+// current membership only. Preserve the already-rendered unbounded history in
+// the browser while treating every live field and membership list in the
+// patch as authoritative. Project identity is an exact fence: history must
+// never leak across a tab switch.
+export function mergeActiveWorkProjectionPatch(previous, patch) {
+  if (!patch || !previous || previous.id !== patch.id) return patch || null;
+
+  const sessionsByAgent = new Map();
+  const rememberAgents = (agents) => {
+    for (const agent of Array.isArray(agents) ? agents : []) {
+      if (
+        agent?.session_id
+        && Array.isArray(agent.sessions)
+        && agent.sessions.length > 0
+        && !sessionsByAgent.has(agent.session_id)
+      ) {
+        sessionsByAgent.set(agent.session_id, agent.sessions);
+      }
+    }
+  };
+  const visitProjectionAgents = (projection) => {
+    rememberAgents(projection?.agents);
+    rememberAgents(projection?.unassigned_agents);
+    for (const work of Array.isArray(projection?.active_works)
+      ? projection.active_works
+      : []) {
+      rememberAgents(work?.agents);
+      for (const child of Array.isArray(work?.works) ? work.works : []) {
+        rememberAgents(child?.agents);
+      }
+    }
+  };
+  visitProjectionAgents(previous);
+
+  const restoreAgents = (agents) => (Array.isArray(agents) ? agents : []).map((agent) => {
+    if (!agent?.session_id || (Array.isArray(agent.sessions) && agent.sessions.length > 0)) {
+      return agent;
+    }
+    const sessions = sessionsByAgent.get(agent.session_id);
+    return sessions ? { ...agent, sessions } : agent;
+  });
+  const activeWorks = (Array.isArray(patch.active_works) ? patch.active_works : []).map(
+    (work) => ({
+      ...work,
+      agents: restoreAgents(work?.agents),
+      works: (Array.isArray(work?.works) ? work.works : []).map((child) => ({
+        ...child,
+        agents: restoreAgents(child?.agents),
+      })),
+    }),
+  );
+
+  return {
+    ...patch,
+    journal_entries: Array.isArray(previous.journal_entries)
+      ? previous.journal_entries
+      : [],
+    works: Array.isArray(previous.works) ? previous.works : [],
+    agents: restoreAgents(patch.agents),
+    unassigned_agents: restoreAgents(patch.unassigned_agents),
+    active_works: activeWorks,
+  };
+}
+
 export function createWorkspaceKanbanSurface({
   activeWorkspace,
   agentStatusLabel,
