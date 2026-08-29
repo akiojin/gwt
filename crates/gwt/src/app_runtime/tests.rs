@@ -41462,6 +41462,8 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
     let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
+    let _commit_timeout =
+        ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT_MS", "2000");
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -41528,7 +41530,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     assert!(gh_marker.exists(), "GUI reached the fake live fetch");
     assert!(
         done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
-        "GUI writer waits at the transaction lock after loading marker 0"
+        "GUI writer must not complete while the transaction lock remains held"
     );
 
     let profile = sample_issue_monitor_launch_profile();
@@ -41569,7 +41571,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let item = inbox
         .iter()
         .find(|item| item.issue.number == 43)
-        .expect("fresh failed row");
+        .unwrap_or_else(|| panic!("fresh failed row; events={events:#?}"));
     assert_eq!(item.state, gwt::MonitorInboxState::AgentFailed);
     assert_eq!(item.error_message.as_deref(), Some(failure.as_str()));
 

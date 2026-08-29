@@ -1257,6 +1257,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
     let expected: &[(&str, &str, Option<&str>)] = &[
         ("/", "text/html; charset=utf-8", MUTABLE),
         ("/app.js", JS, MUTABLE),
+        ("/favicon.ico", "image/x-icon", IMMUTABLE),
         ("/assets/xterm/xterm.mjs", JS, None),
         ("/assets/xterm/addon-fit.mjs", JS, None),
         ("/assets/xterm/xterm.css", CSS, None),

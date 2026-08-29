@@ -1214,6 +1214,17 @@ fn local_issue_monitor_fallback_projection_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(1)
 }
 
+fn local_issue_monitor_fallback_commit_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT_MS")
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        .filter(|timeout| *timeout <= 60_000)
+    {
+        return std::time::Duration::from_millis(timeout);
+    }
+    std::time::Duration::from_millis(250)
+}
+
 #[cfg(test)]
 thread_local! {
     static LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS: std::cell::Cell<usize> = const {
@@ -4073,7 +4084,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -4403,7 +4414,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -4449,7 +4460,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
