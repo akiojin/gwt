@@ -664,11 +664,13 @@ impl AppRuntime {
     /// one background finalizer. In particular, the GUI event loop must never
     /// wait for the PTY writer barrier, durable execution leases, child reap,
     /// or the repo-global WorkItems lock before returning `PaneCloseResult`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn queue_window_close_finalizer(
         &mut self,
         window_id: &str,
         close_project_root: Option<std::path::PathBuf>,
         closing_session_id: Option<String>,
+        pm_close: bool,
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         closing_window_generation: Option<u64>,
@@ -1185,6 +1187,7 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 project_root: project_root.clone(),
                 closing_session_id: closing_session_id.clone(),
+                pm_close,
                 pm_deregistered,
                 pm_status,
                 monitor_result,

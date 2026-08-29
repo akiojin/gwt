@@ -5939,6 +5939,7 @@ fn apply_recorded_window_close_finalized(
         window_id,
         project_root,
         closing_session_id,
+        pm_close,
         pm_deregistered,
         pm_status,
         monitor_result,
@@ -5950,6 +5951,7 @@ fn apply_recorded_window_close_finalized(
         &window_id,
         project_root.as_deref(),
         closing_session_id.as_deref(),
+        pm_close,
         pm_deregistered,
         pm_status,
         monitor_result,
@@ -53551,6 +53553,7 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         Some(&repo),
         Some("pm-predecessor-a"),
         true,
+        true,
         Some(stale_status),
         super::WindowCloseMonitorResult::Noop,
     );
@@ -53565,11 +53568,136 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         "tab-1::predecessor-b",
         Some(&repo),
         Some("pm-predecessor-b"),
+        true,
         false,
         None,
         super::WindowCloseMonitorResult::Noop,
     );
     assert!(!runtime.pending_pm_closes.contains_key(&repo));
+}
+
+#[test]
+fn non_pm_pane_close_does_not_count_the_pm_close_fence() {
+    // PR #3787 review: `pending_pm_closes` fences `ensure_pm_agent_events`
+    // (Automatic / Explicit triggers) and thereby PM crash respawn. Closing
+    // an ordinary agent pane in the same project must not raise that fence —
+    // only a close of the registered PM session may.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "worker-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .pm_sessions
+        .insert(repo.clone(), "pm-session-live".to_string());
+
+    runtime.close_window_events(&window_id);
+
+    assert!(
+        runtime.pending_pm_closes.is_empty(),
+        "a non-PM pane close must not fence PM ensure"
+    );
+    assert_eq!(
+        runtime.pm_sessions.get(&repo).map(String::as_str),
+        Some("pm-session-live"),
+        "the registered PM session survives a worker pane close"
+    );
+    let finalizer = finalizers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued close finalizer");
+    finalizer();
+}
+
+#[test]
+fn pm_pane_close_counts_the_pm_close_fence() {
+    // PR #3787 review companion: the fence still counts an explicit close of
+    // the registered PM session itself, and the finalized completion releases
+    // exactly that count.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .pm_sessions
+        .insert(repo.clone(), "pm-session-live".to_string());
+
+    runtime.close_window_events(&window_id);
+
+    assert_eq!(
+        runtime.pending_pm_closes.get(&repo),
+        Some(&1),
+        "closing the registered PM session raises the ensure fence"
+    );
+    assert!(
+        !runtime.pm_sessions.contains_key(&repo),
+        "the closing PM session leaves the in-memory registration cache"
+    );
+    let finalizer = finalizers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued PM close finalizer");
+    finalizer();
+    runtime.handle_window_close_finalized(
+        &window_id,
+        Some(&repo),
+        Some("pm-session-live"),
+        true,
+        false,
+        None,
+        super::WindowCloseMonitorResult::Noop,
+    );
+    assert!(
+        !runtime.pending_pm_closes.contains_key(&repo),
+        "the finalized PM close releases the fence"
+    );
 }
 
 #[test]

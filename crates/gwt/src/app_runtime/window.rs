@@ -520,14 +520,22 @@ impl AppRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .copied();
-        if let (Some(project_root), Some(session_id)) =
-            (project_root.as_ref(), closing_session_id.as_ref())
-        {
-            *self
-                .pending_pm_closes
-                .entry(project_root.clone())
-                .or_default() += 1;
-            if self.pm_sessions.get(project_root) == Some(session_id) {
+        // PR #3787 review: the fence must count only closes of the registered
+        // PM session — any other agent pane close in the project would
+        // otherwise suppress PM ensure (Automatic/Explicit) and crash respawn
+        // through `pending_pm_closes` until its finalizer completes.
+        let closing_pm_session = match (project_root.as_ref(), closing_session_id.as_ref()) {
+            (Some(project_root), Some(session_id)) => {
+                self.pm_sessions.get(project_root) == Some(session_id)
+            }
+            _ => false,
+        };
+        if closing_pm_session {
+            if let Some(project_root) = project_root.as_ref() {
+                *self
+                    .pending_pm_closes
+                    .entry(project_root.clone())
+                    .or_default() += 1;
                 self.pm_sessions.remove(project_root);
             }
         }
@@ -535,6 +543,7 @@ impl AppRuntime {
             id,
             project_root,
             closing_session_id,
+            closing_pm_session,
             notify_issue_monitor,
             self_close_ticket,
             closing_window_generation,

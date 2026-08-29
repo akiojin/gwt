@@ -4111,18 +4111,20 @@ impl AppRuntime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_window_close_finalized(
         &mut self,
         window_id: &str,
         project_root: Option<&Path>,
         closing_session_id: Option<&str>,
+        pm_close: bool,
         pm_deregistered: bool,
         pm_status: Option<BackendEvent>,
         monitor_result: WindowCloseMonitorResult,
     ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         if let Some(project_root) = project_root {
-            if closing_session_id.is_some() {
+            if pm_close {
                 if let Some(count) = self.pending_pm_closes.get_mut(project_root) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
