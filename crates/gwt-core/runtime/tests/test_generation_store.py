@@ -22,12 +22,29 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import portalocker
+
 import chroma_index_runner as runner
 
 RUNNER_PATH = Path(runner.__file__).resolve()
 
 REPO_HASH = "abc1234567890def"
 WORKTREE_HASH = "111122223333ffff"
+
+
+def _exclusive_lock_available(lock_path: Path) -> bool:
+    probe = portalocker.Lock(
+        str(lock_path),
+        mode="a+",
+        timeout=0,
+        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+    )
+    try:
+        probe.acquire()
+    except portalocker.exceptions.LockException:
+        return False
+    probe.release()
+    return True
 
 
 def _make_project(base: Path, docs: int) -> Path:
@@ -1624,6 +1641,189 @@ runner.action_index_files_v2(
         self.assertEqual(
             served["scopes"]["files"].get("view_id"), baseline["view_id"], served
         )
+
+    def test_v2_search_and_status_pin_reader_before_view_open_until_close(self):
+        built = self._build()
+        self.assertTrue(built.get("ok"), built)
+        events = []
+        seen_lock_paths = set()
+        v2_root = runner.resolve_file_index_v2_root(
+            REPO_HASH, db_root=self.db_root
+        )
+
+        def live_pins():
+            payloads = []
+            for marker in sorted((v2_root / "leases").glob("*/pin.json")):
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+                canonical = {
+                    key: value for key, value in payload.items() if key != "checksum"
+                }
+                self.assertEqual(payload.get("checksum"), runner._sha256_json(canonical))
+                self.assertEqual(payload.get("pin_id"), marker.parent.name)
+                lock_path = marker.parent / ".lock"
+                self.assertTrue(lock_path.is_file())
+                seen_lock_paths.add(lock_path)
+                self.assertFalse(
+                    _exclusive_lock_available(lock_path),
+                    "live reader pin must hold an advisory shared lock",
+                )
+                payloads.append(payload)
+            return payloads
+
+        real_select = runner._select_file_index_v2_view
+        real_open = runner._open_file_index_v2_collection
+        real_close = runner._close_chroma_client
+
+        def record_select(*args, **kwargs):
+            events.append(("select", live_pins()))
+            return real_select(*args, **kwargs)
+
+        def record_open(*args, **kwargs):
+            events.append(("open", live_pins()))
+            return real_open(*args, **kwargs)
+
+        def record_close(*args, **kwargs):
+            events.append(("close", live_pins()))
+            return real_close(*args, **kwargs)
+
+        def assert_pinned_lifetime(operation):
+            events.clear()
+            result = operation()
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(events[0][0], "select", events)
+            self.assertTrue(any(event == "open" for event, _ in events), events)
+            self.assertTrue(any(event == "close" for event, _ in events), events)
+            for event, pins in events:
+                self.assertEqual(len(pins), 1, (event, pins, events))
+                pin = pins[0]
+                self.assertEqual(pin.get("schema_version"), 1, pin)
+                self.assertEqual(pin.get("kind"), "reader", pin)
+                self.assertEqual(pin.get("repo_hash"), REPO_HASH, pin)
+                self.assertEqual(pin.get("worktree_hash"), WORKTREE_HASH, pin)
+                self.assertIn("bases", pin.get("protected_paths", []), pin)
+                self.assertIn("cas", pin.get("protected_paths", []), pin)
+                self.assertIn(
+                    f"worktrees/{WORKTREE_HASH}", pin.get("protected_paths", []), pin
+                )
+            pin_ids = {pins[0]["pin_id"] for _, pins in events}
+            lock_paths = {
+                v2_root / "leases" / pin_id / ".lock" for pin_id in pin_ids
+            }
+            self.assertEqual(
+                len(pin_ids), 1, "one reader lease must span the full operation"
+            )
+            self.assertEqual(
+                len(lock_paths), 1, "one reader lock must span the full operation"
+            )
+            self.assertEqual(live_pins(), [], "reader pin must release after use")
+            for lock_path in seen_lock_paths:
+                if lock_path.exists():
+                    self.assertTrue(
+                        _exclusive_lock_available(lock_path),
+                        "released reader pin must release its advisory lock",
+                    )
+
+        with mock.patch.object(
+            runner, "_select_file_index_v2_view", side_effect=record_select
+        ), mock.patch.object(
+            runner, "_open_file_index_v2_collection", side_effect=record_open
+        ), mock.patch.object(
+            runner, "_close_chroma_client", side_effect=record_close
+        ):
+            assert_pinned_lifetime(self._search_v2)
+            assert_pinned_lifetime(
+                lambda: runner.action_status_v2(
+                    REPO_HASH,
+                    WORKTREE_HASH,
+                    db_root=self.db_root,
+                    file_index_protocol="v2",
+                )
+            )
+
+    def test_v2_build_holds_migration_pin_through_verified_head_publish(self):
+        events = []
+        seen_lock_paths = set()
+        v2_root = runner.resolve_file_index_v2_root(
+            REPO_HASH, db_root=self.db_root
+        )
+
+        def live_pins():
+            payloads = []
+            for marker in sorted((v2_root / "leases").glob("*/pin.json")):
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+                canonical = {
+                    key: value for key, value in payload.items() if key != "checksum"
+                }
+                self.assertEqual(payload.get("checksum"), runner._sha256_json(canonical))
+                self.assertEqual(payload.get("pin_id"), marker.parent.name)
+                lock_path = marker.parent / ".lock"
+                self.assertTrue(lock_path.is_file())
+                seen_lock_paths.add(lock_path)
+                self.assertFalse(
+                    _exclusive_lock_available(lock_path),
+                    "live migration pin must hold an advisory shared lock",
+                )
+                payloads.append(payload)
+            return payloads
+
+        def record_stage(name, function):
+            def wrapped(*args, **kwargs):
+                events.append((name, live_pins()))
+                return function(*args, **kwargs)
+
+            return wrapped
+
+        with mock.patch.object(
+            runner,
+            "_materialize_file_artifact_pair",
+            side_effect=record_stage(
+                "artifact-pair", runner._materialize_file_artifact_pair
+            ),
+        ), mock.patch.object(
+            runner,
+            "_materialize_file_index_v2_view",
+            side_effect=record_stage("view", runner._materialize_file_index_v2_view),
+        ), mock.patch.object(
+            runner,
+            "_publish_file_index_v2_view",
+            side_effect=record_stage("publish", runner._publish_file_index_v2_view),
+        ):
+            result = self._build()
+
+        self.assertTrue(result.get("ok"), result)
+        migration_pin_ids = set()
+        for stage in ("artifact-pair", "view", "publish"):
+            snapshots = [pins for event, pins in events if event == stage]
+            self.assertTrue(snapshots, (stage, events))
+            for pins in snapshots:
+                self.assertEqual(len(pins), 1, (stage, pins, events))
+                pin = pins[0]
+                self.assertEqual(pin.get("schema_version"), 1, pin)
+                self.assertEqual(pin.get("kind"), "migration", pin)
+                self.assertEqual(pin.get("repo_hash"), REPO_HASH, pin)
+                self.assertEqual(pin.get("worktree_hash"), WORKTREE_HASH, pin)
+                self.assertIn("bases", pin.get("protected_paths", []), pin)
+                self.assertIn("cas", pin.get("protected_paths", []), pin)
+                self.assertIn(
+                    f"worktrees/{WORKTREE_HASH}", pin.get("protected_paths", []), pin
+                )
+                migration_pin_ids.add(pin["pin_id"])
+        migration_lock_paths = {
+            v2_root / "leases" / pin_id / ".lock" for pin_id in migration_pin_ids
+        }
+        self.assertEqual(
+            len(migration_pin_ids), 1, "one migration lease must span all build stages"
+        )
+        self.assertEqual(
+            len(migration_lock_paths), 1, "one migration lock must span all build stages"
+        )
+        self.assertEqual(live_pins(), [], "migration pin must release after publish")
+        for lock_path in seen_lock_paths:
+            if lock_path.exists():
+                self.assertTrue(
+                    _exclusive_lock_available(lock_path),
+                    "released migration pin must release its advisory lock",
+                )
 
 
 if __name__ == "__main__":
