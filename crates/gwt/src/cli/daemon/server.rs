@@ -58,6 +58,8 @@ const ACCEPT_BACKOFF_MS: u64 = 50;
 const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
+const ISSUE_MONITOR_WAKE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const ISSUE_MONITOR_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(5);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct DaemonShutdown {
@@ -345,18 +347,133 @@ fn spawn_issue_monitor_worker_with_config(
 struct IssueMonitorWorkerTestHooks {
     #[cfg(test)]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
+    #[cfg(test)]
+    wall_clock: Option<Arc<IssueMonitorWorkerTestClock>>,
+    #[cfg(test)]
+    wake_probe_interval: Option<Duration>,
+    #[cfg(test)]
+    wake_rearm_count: Option<Arc<AtomicUsize>>,
+}
+
+impl IssueMonitorWorkerTestHooks {
+    fn wall_now(&self) -> chrono::DateTime<chrono::Utc> {
+        #[cfg(test)]
+        if let Some(clock) = &self.wall_clock {
+            return clock.now();
+        }
+        chrono::Utc::now()
+    }
+
+    fn wake_probe_interval(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(interval) = self.wake_probe_interval {
+            return interval;
+        }
+        ISSUE_MONITOR_WAKE_PROBE_INTERVAL
+    }
+
+    fn clock_sample(&self) -> IssueMonitorClockSample {
+        IssueMonitorClockSample {
+            wall: self.wall_now(),
+            uptime: Instant::now(),
+        }
+    }
+
+    fn observe_wake_gap(&self, detector: &mut IssueMonitorWakeGapDetector) -> bool {
+        let rearmed = detector.observe(self.clock_sample());
+        #[cfg(test)]
+        if rearmed {
+            if let Some(count) = &self.wake_rearm_count {
+                count.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        rearmed
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IssueMonitorClockSample {
+    wall: chrono::DateTime<chrono::Utc>,
+    uptime: Instant,
+}
+
+struct IssueMonitorWakeGapDetector {
+    previous: IssueMonitorClockSample,
+}
+
+impl IssueMonitorWakeGapDetector {
+    fn new(initial: IssueMonitorClockSample) -> Self {
+        Self { previous: initial }
+    }
+
+    fn observe(&mut self, current: IssueMonitorClockSample) -> bool {
+        let previous = std::mem::replace(&mut self.previous, current);
+        let Some(uptime_elapsed) = current.uptime.checked_duration_since(previous.uptime) else {
+            return false;
+        };
+        let Ok(wall_elapsed) = current.wall.signed_duration_since(previous.wall).to_std() else {
+            return false;
+        };
+
+        wall_elapsed >= uptime_elapsed.saturating_add(ISSUE_MONITOR_WAKE_GAP_THRESHOLD)
+    }
+}
+
+fn rearm_issue_monitor_scan_after_wake_gap(
+    test_hooks: &IssueMonitorWorkerTestHooks,
+    detector: &mut IssueMonitorWakeGapDetector,
+    scan_requested: &mut bool,
+) {
+    if test_hooks.observe_wake_gap(detector) {
+        // Preserve the ordinary periodic cadence and all single-flight /
+        // authority gates. A suspend gap only re-arms the existing
+        // coalescing request latch.
+        *scan_requested = true;
+        tracing::info!("issue monitor: wall clock advanced beyond uptime; scan re-armed");
+    }
+}
+
+#[cfg(test)]
+struct IssueMonitorWorkerTestClock {
+    now: std::sync::Mutex<chrono::DateTime<chrono::Utc>>,
+}
+
+#[cfg(test)]
+impl IssueMonitorWorkerTestClock {
+    fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            now: std::sync::Mutex::new(now),
+        }
+    }
+
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .to_owned()
+    }
+
+    fn advance(&self, elapsed: chrono::Duration) {
+        let mut now = self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now = now.to_owned() + elapsed;
+    }
 }
 
 #[cfg(test)]
 #[derive(Default)]
 struct IssueMonitorScanConcurrencyProbe {
     active: AtomicUsize,
+    starts: AtomicUsize,
     overlap_observed: AtomicBool,
 }
 
 #[cfg(test)]
 impl IssueMonitorScanConcurrencyProbe {
     fn enter(self: &Arc<Self>) -> IssueMonitorScanConcurrencyGuard {
+        self.starts.fetch_add(1, Ordering::AcqRel);
         if self.active.fetch_add(1, Ordering::AcqRel) > 0 {
             self.overlap_observed.store(true, Ordering::Release);
         }
@@ -367,6 +484,14 @@ impl IssueMonitorScanConcurrencyProbe {
 
     fn overlap_observed(&self) -> bool {
         self.overlap_observed.load(Ordering::Acquire)
+    }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+
+    fn starts(&self) -> usize {
+        self.starts.load(Ordering::Acquire)
     }
 }
 
@@ -398,6 +523,7 @@ fn spawn_issue_monitor_worker_with_config_and_scan_probe(
         ISSUE_MONITOR_SCAN_TIMEOUT,
         IssueMonitorWorkerTestHooks {
             scan_concurrency_probe: Some(scan_concurrency_probe),
+            ..IssueMonitorWorkerTestHooks::default()
         },
     )
 }
@@ -537,6 +663,9 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
         };
         let mut interval =
             tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
+        let mut wake_probe = tokio::time::interval(test_hooks.wake_probe_interval());
+        wake_probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut wake_gap_detector = IssueMonitorWakeGapDetector::new(test_hooks.clock_sample());
         let mut revision = 0_u64;
         let mut scan_requested = false;
         let mut in_flight_scan: Option<InFlightIssueMonitorScan> = None;
@@ -557,6 +686,13 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
         );
 
         loop {
+            // Cover any select branch that intentionally `continue`s before
+            // the common launch gate.
+            rearm_issue_monitor_scan_after_wake_gap(
+                &test_hooks,
+                &mut wake_gap_detector,
+                &mut scan_requested,
+            );
             let scan_watchdog_deadline = in_flight_scan
                 .as_ref()
                 .filter(|scan| !scan.watchdog_fired)
@@ -637,55 +773,60 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                     match control {
                         Some(request) => {
                             let (frame, completion) = request.into_parts();
-                            let DaemonFrame::Event { payload, .. } = frame else {
-                                completion.reject(IssueMonitorControlQueueError::Rejected);
-                                continue;
-                            };
-                            if let Some(control) = decode_issue_monitor_control(payload) {
-                                let Some(next_revision) = revision.checked_add(1) else {
-                                    tracing::error!("issue monitor revision exhausted; stopping worker");
-                                    completion.reject(IssueMonitorControlQueueError::Closed);
-                                    close_issue_monitor_control_lane(
-                                        &hub,
-                                        &mut control_rx,
-                                        &mut pending_authority_controls,
-                                        IssueMonitorControlQueueError::Closed,
-                                    );
-                                    break;
-                                };
-                                revision = next_revision;
-                                let should_scan = apply_or_queue_issue_monitor_control(
-                                    &hub,
-                                    &prefs_path,
-                                    &mut monitor,
-                                    control,
-                                    &mut effect_permit,
-                                    &mut pending_authority_controls,
-                                    Some(completion),
-                                );
-                                if pending_authority_controls
-                                    .as_ref()
-                                    .is_some_and(PendingIssueMonitorAuthorityControls::is_terminal)
-                                {
-                                    close_issue_monitor_control_lane(
-                                        &hub,
-                                        &mut control_rx,
-                                        &mut pending_authority_controls,
-                                        IssueMonitorControlQueueError::RecoveryBlocked,
-                                    );
-                                    control_open = false;
+                            let event = match frame {
+                                DaemonFrame::Event { payload, .. } => Some((payload, completion)),
+                                _ => {
+                                    completion.reject(IssueMonitorControlQueueError::Rejected);
+                                    None
                                 }
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
-                                effect_execution_requested =
-                                    !monitor.pending_effects().is_empty();
-                                // Preserve committed scan intent while the
-                                // authority barrier is active. The launch gate
-                                // below suppresses only the start, not the
-                                // request itself, so it runs after the barrier
-                                // drains.
-                                scan_requested |= should_scan;
-                            } else {
-                                completion.reject(IssueMonitorControlQueueError::Rejected);
+                            };
+                            if let Some((payload, completion)) = event {
+                                if let Some(control) = decode_issue_monitor_control(payload) {
+                                    let Some(next_revision) = revision.checked_add(1) else {
+                                        tracing::error!("issue monitor revision exhausted; stopping worker");
+                                        completion.reject(IssueMonitorControlQueueError::Closed);
+                                        close_issue_monitor_control_lane(
+                                            &hub,
+                                            &mut control_rx,
+                                            &mut pending_authority_controls,
+                                            IssueMonitorControlQueueError::Closed,
+                                        );
+                                        break;
+                                    };
+                                    revision = next_revision;
+                                    let should_scan = apply_or_queue_issue_monitor_control(
+                                        &hub,
+                                        &prefs_path,
+                                        &mut monitor,
+                                        control,
+                                        &mut effect_permit,
+                                        &mut pending_authority_controls,
+                                        Some(completion),
+                                    );
+                                    if pending_authority_controls
+                                        .as_ref()
+                                        .is_some_and(PendingIssueMonitorAuthorityControls::is_terminal)
+                                    {
+                                        close_issue_monitor_control_lane(
+                                            &hub,
+                                            &mut control_rx,
+                                            &mut pending_authority_controls,
+                                            IssueMonitorControlQueueError::RecoveryBlocked,
+                                        );
+                                        control_open = false;
+                                    }
+                                    publish_issue_monitor_payloads(&hub, &mut monitor);
+                                    effect_execution_requested =
+                                        !monitor.pending_effects().is_empty();
+                                    // Preserve committed scan intent while the
+                                    // authority barrier is active. The launch gate
+                                    // below suppresses only the start, not the
+                                    // request itself, so it runs after the barrier
+                                    // drains.
+                                    scan_requested |= should_scan;
+                                } else {
+                                    completion.reject(IssueMonitorControlQueueError::Rejected);
+                                }
                             }
                         }
                         None => {
@@ -962,7 +1103,17 @@ fn spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                         publish_issue_monitor_payloads(&hub, &mut monitor);
                     }
                 }
+                // The timer only wakes an otherwise-idle worker. Sampling is
+                // centralized below so every selected branch observes the
+                // same gap before the launch gate.
+                _ = wake_probe.tick() => {}
             }
+
+            rearm_issue_monitor_scan_after_wake_gap(
+                &test_hooks,
+                &mut wake_gap_detector,
+                &mut scan_requested,
+            );
 
             resume_deferred_restart_reviews(
                 &prefs_path,
@@ -2573,9 +2724,20 @@ fn persist_daemon_issue_monitor_state(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
-    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
-    );
+    persist_daemon_issue_monitor_state_with_timeout(
+        prefs_path,
+        monitor,
+        ISSUE_MONITOR_PREFS_TIMEOUT,
+    )
+}
+
+fn persist_daemon_issue_monitor_state_with_timeout(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    timeout: Duration,
+) -> bool {
+    let _deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now() + timeout);
     let recovery_baseline = monitor.prefs();
     match crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
         monitor.rebase_daemon_driver_prefs(disk);
@@ -3945,7 +4107,7 @@ mod tests {
         fs::{self, OpenOptions},
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc, Arc,
         },
         thread,
@@ -3969,8 +4131,10 @@ mod tests {
         issue_monitor_control_is_authorizing, run_server,
         run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
         spawn_issue_monitor_worker_with_config_and_scan_probe,
-        spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, DaemonShutdown,
-        IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
+        spawn_issue_monitor_worker_with_config_and_timeout,
+        spawn_issue_monitor_worker_with_config_timeout_and_hooks, BroadcastHub, DaemonShutdown,
+        IssueMonitorClockSample, IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
+        IssueMonitorWakeGapDetector, IssueMonitorWorkerTestClock, IssueMonitorWorkerTestHooks,
     };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
@@ -4048,6 +4212,9 @@ esac
 if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
   printf '%s\n' 'gh refresh failed' >&2
   exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "scan_marker" ] && [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '%s\n' 'started' >> "$GWT_FAKE_GH_STARTED"
 fi
 if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
   # Stands in for a saturated runner that has not scheduled this process yet.
@@ -4401,6 +4568,7 @@ exit 0
         let sequential = Arc::new(IssueMonitorScanConcurrencyProbe::default());
         drop(sequential.enter());
         drop(sequential.enter());
+        assert_eq!(sequential.starts(), 2);
         assert!(!sequential.overlap_observed());
 
         let overlapping = Arc::new(IssueMonitorScanConcurrencyProbe::default());
@@ -4410,6 +4578,134 @@ exit 0
         drop(second);
         drop(first);
         assert!(overlapping.overlap_observed());
+    }
+
+    #[test]
+    fn wake_gap_detector_distinguishes_suspend_from_elapsed_uptime() {
+        let wall_start = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:20:17Z")
+            .expect("parse wall start")
+            .with_timezone(&chrono::Utc);
+        let uptime_start = Instant::now();
+        let cases = [
+            (
+                "equal wall and uptime",
+                chrono::Duration::minutes(30),
+                Duration::from_secs(30 * 60),
+                false,
+            ),
+            (
+                "gap below threshold",
+                chrono::Duration::milliseconds(4_999),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                "gap at threshold",
+                chrono::Duration::seconds(5),
+                Duration::ZERO,
+                true,
+            ),
+            (
+                "measured clamshell suspend gap",
+                chrono::Duration::seconds(36 * 60 + 48),
+                Duration::from_secs(197 + 45),
+                true,
+            ),
+            (
+                "wall clock moves backward",
+                chrono::Duration::minutes(-30),
+                Duration::from_millis(20),
+                false,
+            ),
+        ];
+
+        for (name, wall_elapsed, uptime_elapsed, expected) in cases {
+            let mut detector = IssueMonitorWakeGapDetector::new(IssueMonitorClockSample {
+                wall: wall_start,
+                uptime: uptime_start,
+            });
+            assert_eq!(
+                detector.observe(IssueMonitorClockSample {
+                    wall: wall_start + wall_elapsed,
+                    uptime: uptime_start + uptime_elapsed,
+                }),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn wake_gap_detector_rebaselines_after_each_observation() {
+        let wall_start = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:20:17Z")
+            .expect("parse wall start")
+            .with_timezone(&chrono::Utc);
+        let uptime_start = Instant::now();
+        let resumed = IssueMonitorClockSample {
+            wall: wall_start + chrono::Duration::minutes(30),
+            uptime: uptime_start + Duration::from_millis(20),
+        };
+        let mut detector = IssueMonitorWakeGapDetector::new(IssueMonitorClockSample {
+            wall: wall_start,
+            uptime: uptime_start,
+        });
+
+        assert!(detector.observe(resumed), "the first suspend gap re-arms");
+        assert!(
+            !detector.observe(resumed),
+            "the same sample must not repeatedly re-arm after the baseline moves"
+        );
+    }
+
+    #[test]
+    fn wake_gap_after_quota_reset_rearms_one_open_scan_intent() {
+        let wall_start = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:20:17Z")
+            .expect("parse wall start")
+            .with_timezone(&chrono::Utc);
+        let uptime_start = Instant::now();
+        let reset_at = wall_start + chrono::Duration::minutes(10);
+        let gate = gwt_core::github_quota::QuotaGate::default();
+        gate.record_exhaustion(gwt_core::github_quota::RateLimitBlock {
+            resource: "graphql".to_string(),
+            limit: 5_000,
+            remaining: 0,
+            reset_at,
+        });
+        let mut detector = IssueMonitorWakeGapDetector::new(IssueMonitorClockSample {
+            wall: wall_start,
+            uptime: uptime_start,
+        });
+        let resumed = IssueMonitorClockSample {
+            wall: wall_start + chrono::Duration::minutes(30),
+            uptime: uptime_start + Duration::from_millis(20),
+        };
+        let mut scan_requested = false;
+        let mut wake_rearms = 0;
+
+        assert!(
+            gate.active_block(gwt_core::github_quota::GitHubQuota::GraphQl, wall_start)
+                .is_some(),
+            "the quota gate must suppress the pre-reset scan"
+        );
+        if detector.observe(resumed) {
+            scan_requested = true;
+            wake_rearms += 1;
+        }
+        assert!(
+            gate.active_block(gwt_core::github_quota::GitHubQuota::GraphQl, resumed.wall)
+                .is_none(),
+            "the quota gate must open at or after its wall-clock reset"
+        );
+        if detector.observe(resumed) {
+            scan_requested = true;
+            wake_rearms += 1;
+        }
+
+        assert!(
+            scan_requested,
+            "wake after reset must leave one scan intent"
+        );
+        assert_eq!(wake_rearms, 1, "one sleep gap must re-arm only once");
     }
 
     #[tokio::test]
@@ -6120,6 +6416,9 @@ exit 0
     /// human handoff.
     #[test]
     fn a_provider_usage_limit_control_holds_the_issue_instead_of_failing_it() {
+        const FUTURE_RESET_AT: &str = "2099-08-22T03:46:00Z";
+        const FUTURE_LIMIT_MESSAGE: &str =
+            "Codex usage limit reached — resumes after 2099-08-22T03:46:00Z";
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
@@ -6151,11 +6450,11 @@ exit 0
                 "agent_failed": {
                     "issue_number": 42,
                     "window_id": "tab-1::agent-42",
-                    "message": "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
+                    "message": FUTURE_LIMIT_MESSAGE,
                     "failure": {
                         "kind": "provider_usage_limit",
                         "provider": "codex",
-                        "resets_at": "2026-08-22T03:46:00Z",
+                        "resets_at": FUTURE_RESET_AT,
                     },
                 }
             }),
@@ -6176,13 +6475,10 @@ exit 0
             crate::AutonomousPhase::NeedsHuman,
             "the account ran out; the work did not fail"
         );
-        assert_eq!(
-            record.retry_not_before.as_deref(),
-            Some("2026-08-22T03:46:00Z")
-        );
+        assert_eq!(record.retry_not_before.as_deref(), Some(FUTURE_RESET_AT));
         assert_eq!(
             record.retry_hold_reason.as_deref(),
-            Some("Codex usage limit reached — resumes after 2026-08-22T03:46:00Z")
+            Some(FUTURE_LIMIT_MESSAGE)
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
@@ -7159,8 +7455,12 @@ exit 0
     /// Wait until `path` accumulates at least `expected` newline-terminated
     /// markers, so a test can observe repeated fake-gh invocations rather than
     /// only the first one.
-    async fn wait_for_marker_count(path: &Path, expected: usize) -> bool {
-        tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
+    async fn wait_for_marker_count_with_timeout(
+        path: &Path,
+        expected: usize,
+        timeout: Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
             loop {
                 if fs::read_to_string(path).unwrap_or_default().lines().count() >= expected {
                     return;
@@ -7170,6 +7470,471 @@ exit 0
         })
         .await
         .is_ok()
+    }
+
+    async fn wait_for_marker_count(path: &Path, expected: usize) -> bool {
+        wait_for_marker_count_with_timeout(path, expected, MARKER_WAIT_HANG_GUARD).await
+    }
+
+    async fn wait_for_scan_start_count(
+        probe: &IssueMonitorScanConcurrencyProbe,
+        expected: usize,
+        timeout: Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            while probe.starts() < expected {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn wait_for_scan_idle(
+        probe: &IssueMonitorScanConcurrencyProbe,
+        timeout: Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            while probe.active() != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn wait_for_counter_at_least(
+        counter: &AtomicUsize,
+        expected: usize,
+        timeout: Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            while counter.load(Ordering::Acquire) < expected {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn stop_issue_monitor_worker(
+        shutdown: &Arc<DaemonShutdown>,
+        worker: &mut tokio::task::JoinHandle<()>,
+    ) -> bool {
+        shutdown.request();
+        match tokio::time::timeout(Duration::from_secs(3), &mut *worker).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                worker.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(1), &mut *worker).await;
+                false
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
+    async fn wall_clock_sleep_gap_rearms_scan_before_long_poll_interval() {
+        // Issue #3737: a laptop may resume after the rate-limit reset while
+        // the Tokio poll interval still has most of its monotonic delay left.
+        // A short wake probe must notice the wall-clock jump and re-arm one
+        // scan without requiring Enabled OFF -> ON or waiting an hour.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let scan_started_path = temp.path().join("scan-started");
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "scan_marker");
+        let _started = ScopedEnvVar::set("GWT_FAKE_GH_STARTED", &scan_started_path);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed issue monitor prefs");
+
+        let parse_utc = |value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .expect("parse measured power-log timestamp")
+                .with_timezone(&chrono::Utc)
+        };
+        let simulated_start = parse_utc("2026-08-25T00:20:17Z");
+        let sleep_at = parse_utc("2026-08-25T00:23:34Z");
+        let dark_wake_start = parse_utc("2026-08-25T00:26:45Z");
+        let dark_wake_end = parse_utc("2026-08-25T00:27:30Z");
+        let full_wake = parse_utc("2026-08-25T00:57:05Z");
+        let first_probe_deadline = parse_utc("2026-08-25T00:57:10Z");
+        let wall_clock = Arc::new(IssueMonitorWorkerTestClock::new(simulated_start.to_owned()));
+        let wake_probe_interval = Duration::from_millis(20);
+        let scan_concurrency_probe = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let test_hooks = IssueMonitorWorkerTestHooks {
+            scan_concurrency_probe: Some(Arc::clone(&scan_concurrency_probe)),
+            wall_clock: Some(Arc::clone(&wall_clock)),
+            wake_probe_interval: Some(wake_probe_interval),
+            ..IssueMonitorWorkerTestHooks::default()
+        };
+        assert_eq!(test_hooks.wall_now(), simulated_start);
+        assert_eq!(test_hooks.wake_probe_interval(), wake_probe_interval);
+
+        let hub = BroadcastHub::new();
+        let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let mut worker = spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+            scope,
+            hub,
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 60 * 60,
+                ..crate::IssueMonitorConfig::default()
+            },
+            Duration::from_secs(2),
+            test_hooks,
+        );
+
+        let first_scan_completed =
+            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(10), |status| {
+                status.last_scan_at.is_some()
+            })
+            .await
+            .is_some();
+        let first_scan_marker_count = fs::read_to_string(&scan_started_path)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        wall_clock.advance(full_wake - simulated_start);
+        let simulated_resume = wall_clock.now();
+        let second_scan_rearmed =
+            wait_for_scan_start_count(&scan_concurrency_probe, 2, Duration::from_secs(3)).await;
+        let second_scan_completed = second_scan_rearmed
+            && wait_for_scan_idle(&scan_concurrency_probe, Duration::from_secs(3)).await;
+        if second_scan_completed {
+            tokio::time::sleep(wake_probe_interval.saturating_mul(5)).await;
+        }
+        let final_scan_count = scan_concurrency_probe.starts();
+        let final_scan_marker_count = fs::read_to_string(&scan_started_path)
+            .unwrap_or_default()
+            .lines()
+            .count();
+
+        let worker_stopped_cleanly = stop_issue_monitor_worker(&shutdown, &mut worker).await;
+
+        assert!(
+            first_scan_completed,
+            "the initial interval tick must complete the first scan"
+        );
+        assert_eq!(
+            first_scan_marker_count, 1,
+            "the fixture must establish exactly one completed baseline scan"
+        );
+        assert_eq!(
+            simulated_resume, full_wake,
+            "the fixture must resume at the measured full-wake timestamp"
+        );
+        assert_eq!(
+            sleep_at - simulated_start,
+            chrono::Duration::seconds(197),
+            "the measured scan-to-sleep active uptime must stay pinned"
+        );
+        assert_eq!(
+            dark_wake_end - dark_wake_start,
+            chrono::Duration::seconds(45),
+            "the measured DarkWake active uptime must stay pinned"
+        );
+        assert!(
+            simulated_resume <= first_probe_deadline,
+            "the wake probe must be due no later than five wall-clock seconds after full wake"
+        );
+        assert!(
+            second_scan_rearmed,
+            "a wall-clock sleep gap must re-arm a second scan before the one-hour poll interval"
+        );
+        assert!(second_scan_completed, "the re-armed scan must complete");
+        assert_eq!(
+            final_scan_count, 2,
+            "one wall-clock discontinuity must start exactly one follow-up scan"
+        );
+        assert_eq!(
+            final_scan_marker_count, 2,
+            "one wall-clock discontinuity must coalesce to exactly one follow-up scan"
+        );
+        assert!(worker_stopped_cleanly, "worker shutdown must stay bounded");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
+    async fn repeated_wake_gaps_coalesce_behind_one_in_flight_scan() {
+        // Issue #3737 / SPEC #3165 T267: wake detection only re-arms the
+        // existing request latch. Multiple discontinuities observed while the
+        // lane is occupied must neither overlap the running scan nor fan out
+        // into more than one follow-up after that scan releases.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let scan_started_path = temp.path().join("scan-started");
+        let release_scan_path = temp.path().join("release-scan");
+        let active_scan_path = temp.path().join("active-scan");
+        let overlap_scan_path = temp.path().join("overlap-scan");
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "block");
+        let _started = ScopedEnvVar::set("GWT_FAKE_GH_STARTED", &scan_started_path);
+        let _release = ScopedEnvVar::set("GWT_FAKE_GH_RELEASE", &release_scan_path);
+        let _active = ScopedEnvVar::set("GWT_FAKE_GH_ACTIVE", &active_scan_path);
+        let _overlap = ScopedEnvVar::set("GWT_FAKE_GH_OVERLAP", &overlap_scan_path);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed issue monitor prefs");
+
+        let simulated_start = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:20:17Z")
+            .expect("parse simulated wall clock")
+            .with_timezone(&chrono::Utc);
+        let wall_clock = Arc::new(IssueMonitorWorkerTestClock::new(simulated_start));
+        let wake_probe_interval = Duration::from_millis(20);
+        let scan_concurrency_probe = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let wake_rearm_count = Arc::new(AtomicUsize::new(0));
+        let test_hooks = IssueMonitorWorkerTestHooks {
+            scan_concurrency_probe: Some(Arc::clone(&scan_concurrency_probe)),
+            wall_clock: Some(Arc::clone(&wall_clock)),
+            wake_probe_interval: Some(wake_probe_interval),
+            wake_rearm_count: Some(Arc::clone(&wake_rearm_count)),
+        };
+
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let mut worker = spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+            scope,
+            hub,
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 60 * 60,
+                ..crate::IssueMonitorConfig::default()
+            },
+            Duration::from_secs(10),
+            test_hooks,
+        );
+
+        let first_scan_started =
+            wait_for_scan_start_count(&scan_concurrency_probe, 1, Duration::from_secs(3)).await;
+        wall_clock.advance(chrono::Duration::minutes(30));
+        let first_wake_observed =
+            wait_for_counter_at_least(&wake_rearm_count, 1, Duration::from_secs(3)).await;
+        wall_clock.advance(chrono::Duration::minutes(15));
+        let second_wake_observed =
+            wait_for_counter_at_least(&wake_rearm_count, 2, Duration::from_secs(3)).await;
+        let scans_before_release = scan_concurrency_probe.starts();
+        let wake_rearms_before_release = wake_rearm_count.load(Ordering::Acquire);
+        let overlap_before_release = scan_concurrency_probe.overlap_observed();
+
+        // Release before any RED assertion so the blocking child and worker
+        // always have a bounded cleanup path even while wake re-arm is absent.
+        fs::write(&release_scan_path, b"release").expect("release fake gh scan");
+        let follow_up_started =
+            wait_for_scan_start_count(&scan_concurrency_probe, 2, Duration::from_secs(3)).await;
+        let follow_up_completed = follow_up_started
+            && wait_for_scan_idle(&scan_concurrency_probe, Duration::from_secs(3)).await;
+        if follow_up_completed {
+            tokio::time::sleep(wake_probe_interval.saturating_mul(5)).await;
+        }
+        let final_scan_count = scan_concurrency_probe.starts();
+        let worker_stopped_cleanly = stop_issue_monitor_worker(&shutdown, &mut worker).await;
+
+        drop(_overlap);
+        drop(_active);
+        drop(_release);
+        drop(_started);
+        drop(_mode);
+        drop(_gh);
+        drop(_path);
+        drop(_home);
+        drop(_env_lock);
+
+        assert!(first_scan_started, "the first scan must occupy the lane");
+        assert!(first_wake_observed, "the first wake gap must be observed");
+        assert!(second_wake_observed, "the second wake gap must be observed");
+        assert_eq!(
+            scans_before_release, 1,
+            "wake-only requests must not start a second scan while one is in flight"
+        );
+        assert_eq!(
+            wake_rearms_before_release, 2,
+            "both discontinuities must be observed before their intents coalesce"
+        );
+        assert!(
+            !overlap_before_release,
+            "wake-only requests must retain the existing single-flight lane"
+        );
+        assert!(
+            follow_up_started,
+            "coalesced wake requests must start one follow-up after the lane releases"
+        );
+        assert!(follow_up_completed, "the coalesced follow-up must complete");
+        assert_eq!(
+            final_scan_count, 2,
+            "multiple wake gaps behind one in-flight scan must coalesce to exactly one follow-up"
+        );
+        assert!(worker_stopped_cleanly, "worker shutdown must stay bounded");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
+    async fn scan_now_after_wall_clock_resume_coalesces_with_wake_rearm() {
+        // A control event can wake the select loop before the low-frequency
+        // wake heartbeat. The detector must run before the launch gate so the
+        // ScanNow and resume intents share one scan instead of scheduling a
+        // redundant follow-up.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed issue monitor prefs");
+
+        let simulated_start = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:20:17Z")
+            .expect("parse simulated wall clock")
+            .with_timezone(&chrono::Utc);
+        let wall_clock = Arc::new(IssueMonitorWorkerTestClock::new(simulated_start));
+        let scan_concurrency_probe = Arc::new(IssueMonitorScanConcurrencyProbe::default());
+        let wake_rearm_count = Arc::new(AtomicUsize::new(0));
+        let test_hooks = IssueMonitorWorkerTestHooks {
+            scan_concurrency_probe: Some(Arc::clone(&scan_concurrency_probe)),
+            wall_clock: Some(Arc::clone(&wall_clock)),
+            wake_probe_interval: Some(Duration::from_secs(60 * 60)),
+            wake_rearm_count: Some(Arc::clone(&wake_rearm_count)),
+        };
+
+        let hub = BroadcastHub::new();
+        let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let mut worker = spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 60 * 60,
+                ..crate::IssueMonitorConfig::default()
+            },
+            Duration::from_secs(2),
+            test_hooks,
+        );
+
+        let first_scan_completed =
+            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(10), |status| {
+                status.last_scan_at.is_some()
+            })
+            .await
+            .is_some();
+        wall_clock.advance(chrono::Duration::minutes(30));
+        let scan_now_acked = tokio::time::timeout(
+            MARKER_WAIT_HANG_GUARD,
+            hub.publish_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"scan_now": {}}),
+                    std::process::id().wrapping_add(1),
+                ),
+            }),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        let second_scan_started =
+            wait_for_scan_start_count(&scan_concurrency_probe, 2, Duration::from_secs(3)).await;
+        let second_scan_completed = second_scan_started
+            && wait_for_scan_idle(&scan_concurrency_probe, Duration::from_secs(3)).await;
+        if second_scan_completed {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let final_scan_count = scan_concurrency_probe.starts();
+        let wake_rearms = wake_rearm_count.load(Ordering::Acquire);
+        let worker_stopped_cleanly = stop_issue_monitor_worker(&shutdown, &mut worker).await;
+
+        assert!(first_scan_completed, "the baseline scan must complete");
+        assert!(scan_now_acked, "ScanNow intent must be acknowledged");
+        assert_eq!(
+            wake_rearms, 1,
+            "the control-driven loop iteration must also observe the wake gap"
+        );
+        assert!(second_scan_started, "the coalesced scan must start");
+        assert!(second_scan_completed, "the coalesced scan must complete");
+        assert_eq!(
+            final_scan_count, 2,
+            "ScanNow and wake re-arm must share exactly one post-resume scan"
+        );
+        assert!(worker_stopped_cleanly, "worker shutdown must stay bounded");
     }
 
     #[tokio::test]
@@ -7388,6 +8153,25 @@ exit 0
             })
             .await
             .is_ok();
+        // The awaited publish resolves from the control receipt while fake-gh
+        // still owns the scan lane. A successful result therefore pins the
+        // public ScanNow contract to accepted intent rather than scan completion.
+        let scan_now_acked_while_in_flight = matches!(
+            tokio::time::timeout(
+                MARKER_WAIT_HANG_GUARD,
+                hub.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"scan_now": {}}),
+                        source_pid,
+                    ),
+                }),
+            )
+            .await,
+            Ok(Ok(()))
+        );
 
         let responsive_status = recv_issue_monitor_status_matching(
             &mut status_rx,
@@ -7463,6 +8247,10 @@ exit 0
         assert!(scan_started, "fake gh scan must be in flight");
         assert!(heartbeat_queued, "worker must receive controls");
         assert!(max_active_queued, "worker must receive controls");
+        assert!(
+            scan_now_acked_while_in_flight,
+            "ScanNow must ACK accepted intent before the in-flight scan completes"
+        );
         assert!(disabled_queued, "OFF control must reach the worker");
         assert!(
             responsive_status.is_some(),
@@ -11368,7 +12156,15 @@ exit 1
         let writer_path = prefs_path.clone();
         let writer = thread::spawn(move || {
             started_tx.send(()).expect("signal writer start");
-            super::persist_daemon_issue_monitor_state(&writer_path, &mut stale_monitor);
+            // This scenario isolates post-contention rebase correctness. The
+            // production 250 ms bound is covered by the stuck-lock tests, so
+            // give a loaded runner enough time to schedule after the lock is
+            // released without changing the production timeout.
+            super::persist_daemon_issue_monitor_state_with_timeout(
+                &writer_path,
+                &mut stale_monitor,
+                Duration::from_secs(2),
+            );
             done_tx
                 .send(stale_monitor)
                 .expect("return committed monitor");
@@ -11400,7 +12196,7 @@ exit 1
         FileExt::unlock(&lock).expect("release issue monitor prefs lock");
 
         let committed_monitor = done_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(3))
             .expect("daemon writer completes after unlock");
         writer.join().expect("daemon writer thread");
         let committed =
