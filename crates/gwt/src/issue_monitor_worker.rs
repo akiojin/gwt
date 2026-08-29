@@ -1972,6 +1972,47 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_claim_path_honors_autonomous_retry_backoff() {
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        monitor.record_candidate(issue(42));
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        assert_eq!(
+            monitor.record_autonomous_failure(
+                42,
+                crate::issue_monitor::FailureClass::Transient,
+                "retry later",
+                "2026-08-26T00:00:00Z",
+            ),
+            crate::issue_monitor::AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+
+        assert!(
+            monitor
+                .claim_next_launch_requests(&client, "host-a/session-a", "2026-08-26T00:00:30Z",)
+                .is_empty(),
+            "the legacy synchronous path must not bypass retry_not_before"
+        );
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.attempt_count(42), 1);
+
+        assert_eq!(
+            monitor
+                .claim_next_launch_requests(&client, "host-a/session-a", "2026-08-26T00:01:00Z",)
+                .iter()
+                .map(|request| request.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42]
+        );
+    }
+
+    #[test]
     fn durable_launch_delivery_survives_fanout_zero_and_replays_one_stable_identity() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,

@@ -47,6 +47,9 @@ const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 pub struct VerificationCommandResult {
     pub command: String,
     pub exit_code: i32,
+    /// Bounded stdout/stderr tail retained only when the command fails.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output_tail: String,
 }
 
 /// One tool-generated verification run (T-110).
@@ -1940,10 +1943,9 @@ fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), Stri
     {
         Ok(output) => output,
         Err(err) => {
-            return Ok((
-                -1,
-                format!("--- spawn error ---\nfailed to spawn '{command}': {err}\n"),
-            ));
+            let diagnostic = format!("failed to spawn '{command}': {err}");
+            let clipped = bounded_output_tail(diagnostic.as_bytes());
+            return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
         }
     };
     let exit_code = output.status.code().unwrap_or(-1);
@@ -1952,25 +1954,39 @@ fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), Stri
         if bytes.is_empty() {
             continue;
         }
-        let text = String::from_utf8_lossy(bytes);
-        let text = text.trim_end();
-        let clipped: String = if text.len() > OUTPUT_TAIL_LIMIT {
-            // Snap the cut to a char boundary — runner output is frequently
-            // multibyte (Japanese cargo messages) and a raw byte slice would
-            // panic mid-character.
-            let mut start = text.len() - OUTPUT_TAIL_LIMIT;
-            while start < text.len() && !text.is_char_boundary(start) {
-                start += 1;
-            }
-            format!("...[truncated]\n{}", &text[start..])
-        } else {
-            text.to_string()
-        };
+        let clipped = bounded_output_tail(bytes);
         if !clipped.is_empty() {
             tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
         }
     }
     Ok((exit_code, tail))
+}
+
+fn bounded_output_tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let stripped = gwt_core::process_console::strip_ansi(&text);
+    let control_safe: String = stripped
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .collect();
+    let redacted = gwt_core::process_console::redact_line(control_safe.trim_end());
+    if redacted.len() <= OUTPUT_TAIL_LIMIT {
+        return redacted;
+    }
+    // Snap the cut to a char boundary — runner output is frequently
+    // multibyte (Japanese cargo messages) and a raw byte slice would panic.
+    let mut start = redacted.len() - OUTPUT_TAIL_LIMIT;
+    while start < redacted.len() && !redacted.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...[truncated]\n{}", &redacted[start..])
+}
+
+fn persisted_failure_output(exit_code: i32, tail: &str) -> String {
+    if exit_code == 0 || tail.is_empty() {
+        return String::new();
+    }
+    tail.to_string()
 }
 
 /// Run the verification commands and persist the record (T-110). The record
@@ -2057,6 +2073,7 @@ where
         results.push(VerificationCommandResult {
             command: command.clone(),
             exit_code,
+            output_tail: persisted_failure_output(exit_code, &tail),
         });
     }
     after_commands();
@@ -2759,6 +2776,7 @@ pub(crate) mod tests {
             commands: vec![VerificationCommandResult {
                 command: "git --version".to_string(),
                 exit_code: 0,
+                output_tail: String::new(),
             }],
             all_passed: true,
             started_at: Some(Utc::now()),
@@ -3005,6 +3023,158 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn legacy_command_result_without_output_tail_remains_compatible() {
+        let legacy = r#"{"command":"git --version","exit_code":0}"#;
+        let result: VerificationCommandResult = serde_json::from_str(legacy).unwrap();
+
+        assert!(result.output_tail.is_empty());
+        assert_eq!(serde_json::to_string(&result).unwrap(), legacy);
+    }
+
+    #[test]
+    fn legacy_record_content_hash_remains_valid_without_output_tail() {
+        #[derive(Serialize)]
+        struct LegacyCommandResult<'a> {
+            command: &'a str,
+            exit_code: i32,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyVerificationRunRecord<'a> {
+            record_id: &'a str,
+            session_id: &'a str,
+            owner_number: u64,
+            worktree_fingerprint: &'a str,
+            commands: Vec<LegacyCommandResult<'a>>,
+            all_passed: bool,
+            created_at: DateTime<Utc>,
+            plan_covered: bool,
+        }
+
+        let legacy = LegacyVerificationRunRecord {
+            record_id: "vrr-legacy",
+            session_id: "sess-legacy",
+            owner_number: 3248,
+            worktree_fingerprint: "abc",
+            commands: vec![LegacyCommandResult {
+                command: "git --version",
+                exit_code: 0,
+            }],
+            all_passed: true,
+            created_at: DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            plan_covered: true,
+        };
+        let serialized = serde_json::to_vec(&legacy).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&serialized));
+        let mut value = serde_json::to_value(&legacy).unwrap();
+        value["content_hash"] = serde_json::Value::String(hash.clone());
+
+        let loaded: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(integrity_ok(&loaded));
+        assert_eq!(compute_content_hash(&loaded), hash);
+        assert!(loaded.commands[0].output_tail.is_empty());
+    }
+
+    #[test]
+    fn successful_commands_omit_output_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-success", &["git --version".to_string()]).unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert!(record.commands[0].output_tail.is_empty());
+        let serialized = serde_json::to_value(&record.commands[0]).unwrap();
+        assert!(serialized.get("output_tail").is_none(), "{serialized}");
+    }
+
+    #[test]
+    fn failed_output_is_sanitized_before_persistence() {
+        let sanitized = bounded_output_tail(
+            b"\x1b[31mAuthorization: Bearer ghp_abcdef0123456789abcdef\x1b[0m\n",
+        );
+        let output = persisted_failure_output(1, &sanitized);
+
+        assert!(!output.contains('\u{1b}'), "{output:?}");
+        assert!(!output.contains("ghp_abcdef0123456789abcdef"), "{output}");
+        assert!(output.contains(gwt_core::process_console::REDACTED));
+        assert!(persisted_failure_output(0, "failure-looking success output").is_empty());
+    }
+
+    #[test]
+    fn bounded_output_tail_sanitizes_before_clipping() {
+        let input = format!(
+            "{}\u{1b}[31mghp_abcdef0123456789abcdef\u{1b}[0m\0\u{7}\u{8}visible",
+            "https://a@example.test ".repeat(2_000)
+        );
+
+        let output = bounded_output_tail(input.as_bytes());
+
+        assert!(output.contains("...[truncated]"), "{output}");
+        assert!(
+            output.len() <= OUTPUT_TAIL_LIMIT + 32,
+            "sanitized output exceeded the stream tail budget: {} bytes",
+            output.len()
+        );
+        assert!(!output.contains("https://a@"), "{output}");
+        assert!(!output.contains("ghp_abcdef0123456789abcdef"), "{output}");
+        assert!(
+            output
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn failed_cargo_test_output_is_bounded_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "verification-failure-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn named_failure_for_verification_record() {
+        eprintln!("{}", "診断".repeat(10_000));
+        panic!("intentional verification fixture failure");
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-failure", &["cargo test".to_string()]).unwrap();
+
+        assert!(!record.all_passed, "{transcript}");
+        let persisted = load(dir.path()).unwrap().unwrap();
+        let output_tail = &persisted.commands[0].output_tail;
+        assert!(
+            output_tail.contains("tests::named_failure_for_verification_record"),
+            "{output_tail}"
+        );
+        assert!(output_tail.contains("...[truncated]"), "{output_tail}");
+        assert!(
+            output_tail.len() <= OUTPUT_TAIL_LIMIT * 2 + 128,
+            "persisted output exceeded the stdout+stderr tail budget: {} bytes",
+            output_tail.len()
+        );
+    }
+
     // Spawn failures are recorded as failed results, never dropped runs.
     #[test]
     fn spawn_failure_is_recorded_as_failed_result() {
@@ -3026,6 +3196,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn spawn_failure_output_is_bounded_and_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "ghp_abcdef0123456789abcdef";
+        let command = format!(
+            "definitely-not-real-{}-{secret}\u{7}",
+            "x".repeat(OUTPUT_TAIL_LIMIT * 2)
+        );
+
+        let (record, _) = run_verification(dir.path(), "sess-spawn", &[command]).unwrap();
+
+        assert_eq!(record.commands[0].exit_code, -1);
+        let output_tail = &record.commands[0].output_tail;
+        assert!(
+            output_tail.len() <= OUTPUT_TAIL_LIMIT + 64,
+            "spawn output exceeded the tail budget: {} bytes",
+            output_tail.len()
+        );
+        assert!(!output_tail.contains(secret), "{output_tail}");
+        assert!(
+            output_tail
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')),
+            "{output_tail:?}"
+        );
+    }
+
+    #[test]
     fn record_roundtrips_and_missing_is_none() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), None);
@@ -3038,6 +3235,7 @@ pub(crate) mod tests {
             commands: vec![VerificationCommandResult {
                 command: "git --version".to_string(),
                 exit_code: 0,
+                output_tail: String::new(),
             }],
             all_passed: true,
             started_at: Some(Utc::now()),

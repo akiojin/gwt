@@ -211,6 +211,9 @@ pub enum DaemonCommand {
     /// fan-out pipeline.
     Subscribe {
         channels: Vec<String>,
+        /// SPEC-3431 FR-141: optional explicit project daemon authority for the
+        /// event stream; `None` preserves the legacy cwd-derived scope.
+        project_root: Option<PathBuf>,
         /// SPEC-3431 FR-025: bound the read so an unattended caller can run
         /// subscribe → reconcile in a loop without an external supervisor.
         timeout_seconds: Option<u64>,
