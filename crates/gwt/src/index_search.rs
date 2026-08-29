@@ -270,7 +270,7 @@ pub(crate) fn search_project_index_attempt(
     let per_scope_limit = per_scope_limit(effective_scopes.len());
     let worktree_hash_arg = file_worktree.as_ref().map(|worktree| worktree.hash.clone());
     let run_batch = || -> Result<Value, IndexSearchAttemptError> {
-        match run_batch_scope_search(
+        run_batch_scope_search(
             &repo_search_root,
             repo_hash.as_str(),
             &effective_scopes,
@@ -278,24 +278,25 @@ pub(crate) fn search_project_index_attempt(
             query,
             per_scope_limit,
             match_mode,
-        ) {
-            Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => {
-                let broken = not_ready
-                    .affected_scopes
-                    .iter()
-                    .map(|scope| (scope.clone(), "not-ready".to_string()))
-                    .collect::<Vec<_>>();
-                queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
-                Err(IndexSearchError::NotReady(not_ready).into())
-            }
-            outcome => outcome,
-        }
+        )
     };
 
     let repair_deadline = Duration::from_millis(search_repair_wait_ms());
     let started = std::time::Instant::now();
-    let mut payload = run_batch()?;
-    let mut broken = broken_scopes(&payload);
+    let mut payload = None;
+    let mut broken = match run_batch() {
+        Ok(initial) => {
+            let broken = broken_scopes(&initial);
+            payload = Some(initial);
+            broken
+        }
+        Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => not_ready
+            .affected_scopes
+            .into_iter()
+            .map(|scope| (scope, "not-ready".to_string()))
+            .collect(),
+        Err(error) => return Err(error),
+    };
     if !broken.is_empty() {
         // FR-388: missing / corrupt scopes never degrade into a silent
         // empty success. FR-097 (T-IDX-417): every caller queues the
@@ -314,25 +315,59 @@ pub(crate) fn search_project_index_attempt(
                 return Err(build_not_ready_error(&broken, elapsed.as_millis() as u64).into());
             }
             let remaining = repair_deadline - elapsed;
-            sleep_with_attempt_deadline(remaining.min(Duration::from_secs(1)))?;
+            if sleep_with_attempt_deadline(remaining.min(Duration::from_secs(1))).is_err() {
+                return Err(
+                    build_not_ready_error(&broken, started.elapsed().as_millis() as u64).into(),
+                );
+            }
             // PR #3301 review: poll repair progress through the model-free
             // status action; the full batch search (one model load) runs
             // only after the broken scopes report healthy again.
-            if broken_scopes_still_unhealthy(
+            let still_unhealthy = match broken_scopes_still_unhealthy(
                 &repo_search_root,
                 repo_hash.as_str(),
                 &broken,
                 worktree_hash_arg.as_deref(),
-            )? {
+            ) {
+                Ok(value) => value,
+                Err(_error)
+                    if gwt_core::operation_deadline::current()
+                        .is_some_and(|deadline| deadline <= Instant::now()) =>
+                {
+                    return Err(build_not_ready_error(
+                        &broken,
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .into());
+                }
+                Err(error) => return Err(error),
+            };
+            if still_unhealthy {
                 continue;
             }
-            payload = run_batch()?;
-            broken = broken_scopes(&payload);
-            if broken.is_empty() {
-                break;
+            match run_batch() {
+                Ok(next) => {
+                    broken = broken_scopes(&next);
+                    payload = Some(next);
+                    if broken.is_empty() {
+                        break;
+                    }
+                }
+                Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => {
+                    broken = not_ready
+                        .affected_scopes
+                        .into_iter()
+                        .map(|scope| (scope, "not-ready".to_string()))
+                        .collect();
+                }
+                Err(error) => return Err(error),
             }
+            queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         }
     }
+    let payload = payload.ok_or_else(|| {
+        search_unavailable_error("project index search completed without a payload")
+    })?;
 
     // FR-387 stale-while-revalidate: verified results return immediately;
     // one refresh is queued per stale scope (the coordinator coalesces
@@ -445,16 +480,7 @@ fn broken_scopes_still_unhealthy(
     broken: &[(String, String)],
     worktree_hash: Option<&str>,
 ) -> Result<bool, IndexSearchAttemptError> {
-    let mut args = vec![
-        gwt_core::runtime::project_index_runner_path().into_os_string(),
-        OsString::from("--action"),
-        OsString::from("status"),
-        OsString::from("--repo-hash"),
-        OsString::from(repo_hash),
-    ];
-    if let Some(hash) = worktree_hash {
-        args.extend([OsString::from("--worktree-hash"), OsString::from(hash)]);
-    }
+    let args = repair_status_probe_args(repo_hash, broken, worktree_hash);
     let output = match gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::ProcessConsoleHub::new(),
         gwt_core::process_console::ProcessKind::IndexRunner,
@@ -491,15 +517,38 @@ fn broken_scopes_still_unhealthy(
                     .get("healthy")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let repair_required = entry
-                    .get("repair_required")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                healthy && !repair_required
+                healthy
             })
             .unwrap_or(false);
         !ready
     }))
+}
+
+fn repair_status_probe_args(
+    repo_hash: &str,
+    broken: &[(String, String)],
+    worktree_hash: Option<&str>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from("status"),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+    ];
+    if let Some(hash) = worktree_hash {
+        args.extend([OsString::from("--worktree-hash"), OsString::from(hash)]);
+    }
+    if broken
+        .iter()
+        .any(|(scope, _)| matches!(scope.as_str(), "files" | "files-docs"))
+    {
+        args.extend([
+            OsString::from("--file-index-protocol"),
+            OsString::from("v2"),
+        ]);
+    }
+    args
 }
 
 fn build_not_ready_error(broken: &[(String, String)], waited_ms: u64) -> IndexSearchError {
@@ -640,16 +689,25 @@ fn queue_scope_rebuilds(
     let repair_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
         .unwrap_or_else(|| project_root.to_path_buf());
     let repair_repo_root = dunce::canonicalize(&repair_repo_root).unwrap_or(repair_repo_root);
+    let mut scheduled = HashSet::new();
     for (scope_name, _) in scopes {
-        let Some(rebuild_scope) = rebuild_scope_for_name(scope_name) else {
+        let Some(mut rebuild_scope) = rebuild_scope_for_name(scope_name) else {
             continue;
+        };
+        let scope_label = if matches!(scope_name.as_str(), "files" | "files-docs") {
+            rebuild_scope = crate::index_worker::IndexRebuildScope::Files;
+            "files".to_string()
+        } else {
+            scope_name.clone()
         };
         let project_root = project_root.to_path_buf();
         let worktree = rebuild_scope
             .requires_worktree_hash()
             .then(|| worktree_hash.map(str::to_string))
             .flatten();
-        let scope_label = scope_name.clone();
+        if !scheduled.insert((scope_label.clone(), worktree.clone())) {
+            continue;
+        }
         let key = RepairKey {
             repo_root: repair_repo_root.clone(),
             scope: scope_label.clone(),

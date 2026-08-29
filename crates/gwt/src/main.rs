@@ -8957,7 +8957,7 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(vec![OutboundEvent::broadcast(
                     BackendEvent::ProjectIndexStatus {
                         project_root,
-                        status,
+                        status: Box::new(status),
                     },
                 )]);
             }

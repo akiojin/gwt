@@ -97,6 +97,41 @@ case \"$*\" in\n\
 esac\n\
 printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
 
+/// Action-aware runner for the explicit-v2 repair lifecycle. The first
+/// search reports the Python runner's top-level typed NotReady payload, the
+/// queued file rebuild releases the fixture, status exposes a healthy
+/// previous View while repair remains required, and the final search serves
+/// that fallback. This is deliberately different from the passthrough
+/// fixture: it proves the Rust caller joins repair instead of returning the
+/// runner's first typed error immediately.
+const FAKE_RUNNER_V2_NOT_READY_THEN_FALLBACK: &str = "#!/bin/sh\n\
+echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
+case \"$*\" in\n\
+  *\"--action search-multi\"*)\n\
+    case \"$*\" in *\"--file-index-protocol v2\"*) ;; *) exit 91 ;; esac\n\
+    if [ -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; then\n\
+      printf '%s\\n' '{\"ok\":true,\"scopes\":{\"files\":{\"state\":\"stale\",\"fallback_source\":\"previous\"},\"files-docs\":{\"state\":\"stale\",\"fallback_source\":\"previous\"}},\"scope_results\":{\"files\":{\"results\":[]},\"files-docs\":{\"results\":[]}},\"stale_scopes\":[\"files\",\"files-docs\"]}'\n\
+    else\n\
+      printf '%s\\n' '{\"ok\":false,\"error_code\":\"INDEX_NOT_READY\",\"retryable\":true,\"retry_after_ms\":25,\"waited_ms\":0,\"affected_scopes\":[\"files\",\"files-docs\"],\"error\":\"file index v2 has no compatible readable corpus\"}'\n\
+      exit 75\n\
+    fi\n\
+    ;;\n\
+  *\"--action index-files\"*)\n\
+    case \"$*\" in *\"--file-index-protocol v2\"*) ;; *) exit 92 ;; esac\n\
+    touch \"$GWT_FAKE_RUNNER_RELEASE\"\n\
+    printf '%s\\n' '{\"ok\":true}'\n\
+    ;;\n\
+  *\"--action status\"*)\n\
+    case \"$*\" in *\"--file-index-protocol v2\"*) ;; *) exit 93 ;; esac\n\
+    if [ -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; then\n\
+      printf '%s\\n' '{\"ok\":true,\"status\":{\"files\":{\"healthy\":true,\"repair_required\":true,\"fallback_source\":\"previous\"},\"files-docs\":{\"healthy\":true,\"repair_required\":true,\"fallback_source\":\"previous\"}}}'\n\
+    else\n\
+      printf '%s\\n' '{\"ok\":true,\"status\":{\"files\":{\"healthy\":false,\"repair_required\":true},\"files-docs\":{\"healthy\":false,\"repair_required\":true}}}'\n\
+    fi\n\
+    ;;\n\
+  *) printf '%s\\n' '{\"ok\":true}' ;;\n\
+esac\n";
+
 /// Fake runner whose `search-multi` attempt spawns a descendant, records its
 /// pid, then outlives any reasonable deadline (T-IDX-418 deadline + tree
 /// reaping case). Non-search actions answer instantly with the payload.
@@ -388,6 +423,88 @@ fn missing_scope_returns_typed_not_ready_instead_of_silent_empty_success() {
         other => panic!("expected typed INDEX_NOT_READY, got {other:?}"),
     }
     assert_eq!(INDEX_NOT_READY_EXIT_CODE, 75);
+}
+
+#[test]
+fn typed_v2_not_ready_canonicalizes_file_pair_repair_and_retries_fallback() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture =
+        setup_search_fixture_with_script(r#"{"ok": true}"#, FAKE_RUNNER_V2_NOT_READY_THEN_FALLBACK);
+    let _wait_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_WAIT_MS", "3000");
+
+    let outcome = gwt::search_project_index(
+        &fixture.repo,
+        "recover explicit v2 files",
+        &[IndexSearchScope::Files, IndexSearchScope::FilesDocs],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect("typed v2 NotReady must join repair and retry the healthy fallback");
+
+    assert_eq!(
+        outcome.stale_scopes,
+        vec!["files".to_string(), "files-docs".to_string()]
+    );
+    assert!(outcome.refresh_queued);
+    let log = fs::read_to_string(&fixture.runner_log).expect("runner log");
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("--action search-multi"))
+            .count(),
+        2,
+        "one initial search and one post-repair retry are required:\n{log}"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("--action index-files "))
+            .count(),
+        1,
+        "the coordinated file repair must be single-flight:\n{log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|line| line.contains("--action index-files-docs")),
+        "the atomic file View repair must never schedule a duplicate docs job:\n{log}"
+    );
+    assert!(
+        log.lines()
+            .filter(|line| line.contains("--action status"))
+            .all(|line| line.contains("--file-index-protocol v2")),
+        "every repair status probe for file scopes must inspect v2:\n{log}"
+    );
+}
+
+#[test]
+fn ambient_deadline_expiry_after_broken_scope_stays_typed_not_ready() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture =
+        setup_search_fixture(r#"{"ok": true, "scopes": {"files": {"state": "missing"}}}"#);
+    gwt_core::runtime::ensure_project_index_runtime()
+        .expect("prime the managed runtime outside the shortened search deadline");
+    let _deadline_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "250");
+    let _wait_env = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_WAIT_MS", "30000");
+
+    let error = gwt::search_project_index(
+        &fixture.repo,
+        "deadline while files repair remains pending",
+        &[IndexSearchScope::Files],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect_err("a broken scope at the hard deadline must remain typed NotReady");
+
+    let IndexSearchError::NotReady(not_ready) = error else {
+        panic!("expected typed INDEX_NOT_READY after repair deadline, got {error:?}");
+    };
+    assert_eq!(not_ready.affected_scopes, vec!["files".to_string()]);
+    assert!(not_ready.waited_ms > 0, "{not_ready:?}");
+    assert!(not_ready.retry_after_ms > 0, "{not_ready:?}");
 }
 
 #[test]

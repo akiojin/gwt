@@ -2675,9 +2675,13 @@ def _is_file_index_timestamp(value: Any) -> bool:
 
 
 def _expected_file_index_vector_dimension(descriptor: Dict[str, Any]) -> int:
-    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+    declared_dimension = int(descriptor["dimension"])
+    if (
+        os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1"
+        and declared_dimension == default_file_index_compatibility()["dimension"]
+    ):
         return _FakeEmbeddingModel.DIM
-    return int(descriptor["dimension"])
+    return declared_dimension
 
 
 def _read_cas_vector(
@@ -2722,6 +2726,31 @@ def _write_bytes_atomic(path: Path, content: bytes) -> None:
             temporary.unlink()
         except OSError:
             pass
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist directory entries where the platform exposes directory fsync."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(str(path), flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> None:
+    """Publish a verified immutable directory before a durable head names it."""
+    for current_root, _directories, filenames in os.walk(staging, topdown=False):
+        current = Path(current_root)
+        for filename in filenames:
+            with (current / filename).open("rb") as artifact:
+                os.fsync(artifact.fileno())
+        _fsync_directory(current)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging, target)
+    _fsync_directory(target.parent)
 
 
 def _write_cas_vector(
@@ -3249,7 +3278,7 @@ def _materialize_file_artifact_pair(
                 cas_root,
             ):
                 raise RuntimeError("file-index-v2 staging artifact verification failed")
-            os.replace(staging, artifact_dir)
+            _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
@@ -3312,6 +3341,14 @@ _HEAD_FIELDS = {
     "active_view_id",
     "previous_view_id",
     "sequence",
+    "checksum",
+}
+_RECOVERY_MARKER_FIELDS = {
+    "schema_version",
+    "view_id",
+    "head_sequence",
+    "reason",
+    "fallback_source",
     "checksum",
 }
 _MANIFEST_ENTRY_FIELDS = {
@@ -3763,7 +3800,7 @@ def _materialize_file_index_v2_view(
             descriptor["descriptor_checksum"] = _sha256_json(descriptor)
             _write_json_atomic(staging / "descriptor.json", descriptor)
             view_dir.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging, view_dir)
+            _durably_replace_file_index_v2_directory(staging, view_dir)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -3796,18 +3833,25 @@ def _file_index_v2_head_is_valid(payload: Any) -> bool:
     return payload["checksum"] == _sha256_json(canonical)
 
 
-def _read_file_index_v2_head(path: Path) -> Optional[Dict[str, Any]]:
+def _read_file_index_v2_head_token(
+    path: Path,
+) -> tuple[Optional[bytes], Optional[Dict[str, Any]]]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return payload if _file_index_v2_head_is_valid(payload) else None
+        token = path.read_bytes()
+    except OSError:
+        return None, None
+    try:
+        payload = json.loads(token.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return token, None
+    return token, payload if _file_index_v2_head_is_valid(payload) else None
 
 
-def _write_file_index_v2_head_atomic(path: Path, payload: Dict[str, Any]) -> None:
-    """Durably replace a flat head without unlinking the old Windows file."""
-    if not _file_index_v2_head_is_valid(payload):
-        raise ValueError("invalid file-index-v2 head payload")
+def _read_file_index_v2_head(path: Path) -> Optional[Dict[str, Any]]:
+    return _read_file_index_v2_head_token(path)[1]
+
+
+def _write_durable_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
@@ -3816,16 +3860,65 @@ def _write_file_index_v2_head_atomic(path: Path, payload: Dict[str, Any]) -> Non
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        if os.name != "nt":
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            directory_fd = os.open(str(path.parent), flags)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+        _fsync_directory(path.parent)
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
+
+
+def _write_file_index_v2_head_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    """Durably replace a flat head without unlinking the old Windows file."""
+    if not _file_index_v2_head_is_valid(payload):
+        raise ValueError("invalid file-index-v2 head payload")
+    _write_durable_json_atomic(path, payload)
+
+
+def _file_index_v2_recovery_marker_is_valid(payload: Any) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _RECOVERY_MARKER_FIELDS
+        or payload.get("schema_version") != 1
+        or not _is_safe_file_index_v2_id(payload.get("view_id"))
+        or not isinstance(payload.get("head_sequence"), int)
+        or isinstance(payload.get("head_sequence"), bool)
+        or payload["head_sequence"] <= 0
+        or payload["head_sequence"] > (2**64 - 1)
+        or not isinstance(payload.get("reason"), str)
+        or not payload["reason"]
+        or payload.get("fallback_source") != "previous"
+        or not _is_sha256(payload.get("checksum"))
+    ):
+        return False
+    canonical = {
+        key: payload[key]
+        for key in _RECOVERY_MARKER_FIELDS
+        if key != "checksum"
+    }
+    return payload["checksum"] == _sha256_json(canonical)
+
+
+def _read_file_index_v2_recovery_marker(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if _file_index_v2_recovery_marker_is_valid(payload) else None
+
+
+def _write_file_index_v2_recovery_marker_atomic(
+    path: Path, payload: Dict[str, Any]
+) -> None:
+    if not _file_index_v2_recovery_marker_is_valid(payload):
+        raise ValueError("invalid file-index-v2 recovery marker payload")
+    _write_durable_json_atomic(path, payload)
+
+
+def _clear_file_index_v2_recovery_marker(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_directory(path.parent)
 
 
 def _visible_file_index_v2_snapshot_id(
@@ -3852,6 +3945,8 @@ def _publish_file_index_v2_view(
 ) -> Dict[str, Any]:
     worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
     head_path = worktree_root / "head.json"
+    previous_head_path = worktree_root / "head.previous.json"
+    recovery_marker_path = worktree_root / "head.recovery.json"
     head_lock = worktree_root / ".head-lock"
     if not _verify_file_index_v2_view(view_dir):
         return {
@@ -3883,6 +3978,13 @@ def _publish_file_index_v2_view(
             or current_source_snapshot_id != desired_source_snapshot_id
         ):
             return {"ok": True, "published": False, "superseded": True}
+        if not _verify_file_index_v2_view(view_dir):
+            return {
+                "ok": False,
+                "error_code": "BUILD_VERIFY_FAILED",
+                "error": "file-index-v2 View closure changed before head publish",
+                "retryable": True,
+            }
         current = _read_file_index_v2_head(head_path)
         if head_path.exists() and current is None:
             return {
@@ -3892,6 +3994,15 @@ def _publish_file_index_v2_view(
                 "retryable": True,
             }
         if current is not None and current["active_view_id"] == view_id:
+            try:
+                _clear_file_index_v2_recovery_marker(recovery_marker_path)
+            except OSError as error:
+                return {
+                    "ok": False,
+                    "error_code": "PUBLISH_FAILED",
+                    "error": f"failed to clear file-index-v2 recovery marker: {error}",
+                    "retryable": True,
+                }
             return {
                 "ok": True,
                 "published": False,
@@ -3915,7 +4026,14 @@ def _publish_file_index_v2_view(
         }
         head = {**canonical, "checksum": _sha256_json(canonical)}
         try:
+            if current is not None:
+                # Keep the exact last published head as the only recovery
+                # journal. Readers must never infer a predecessor by scanning
+                # immutable View directories: verified but unpublished Views
+                # may exist after a superseded or interrupted build.
+                _write_file_index_v2_head_atomic(previous_head_path, current)
             _write_file_index_v2_head_atomic(head_path, head)
+            _clear_file_index_v2_recovery_marker(recovery_marker_path)
         except OSError as error:
             return {
                 "ok": False,
@@ -7410,6 +7528,7 @@ def action_search_v2(
     no_auto_build: bool = False,
     db_root: Optional[Path] = None,
     match_mode: str = "semantic",
+    file_index_protocol: str = "legacy",
 ) -> dict:
     """Unified v2 search dispatcher with auto-build fallback."""
     scope_for_action = {
@@ -7425,6 +7544,28 @@ def action_search_v2(
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
     scope = scope_for_action[action]
+    if file_index_protocol not in {"legacy", "v2"}:
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+    if file_index_protocol == "v2" and scope in {"files", "files-docs"}:
+        result = action_search_multi_v2(
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash,
+            project_root=project_root,
+            query=query,
+            n_results=n_results,
+            scopes=[scope],
+            db_root=db_root,
+            match_mode=match_mode,
+            file_index_protocol="v2",
+        )
+        if not result.get("ok"):
+            return result
+        scope_payload = (result.get("scope_results") or {}).get(scope) or {}
+        payload = {"ok": True, **scope_payload}
+        scope_state = (result.get("scopes") or {}).get(scope) or {}
+        if scope_state.get("fallback_source"):
+            payload["fallback_source"] = scope_state["fallback_source"]
+        return payload
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     if scope == "issues":
@@ -7585,37 +7726,229 @@ def _classify_scope_for_search(
     return "fresh", health
 
 
-def _pin_active_file_index_v2_view(
-    repo_hash: str,
-    worktree_hash: str,
-    db_root: Optional[Path],
-) -> tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
-    """Pin and verify the active immutable View once for a search batch."""
-    v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
-    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
-    head_path = worktree_root / "head.json"
-    if not head_path.is_file():
-        return None, "missing", {"reason": "view_head_missing"}
-    head = _read_file_index_v2_head(head_path)
-    if head is None:
-        return None, "corrupt", {"reason": "view_head_invalid"}
-    view_dir = worktree_root / "views" / head["active_view_id"]
-    if not _verify_file_index_v2_view(view_dir):
-        return None, "corrupt", {"reason": "view_closure_invalid"}
-    view_descriptor = _read_artifact_descriptor(view_dir)
-    if view_descriptor is None:
-        return None, "corrupt", {"reason": "view_descriptor_missing"}
-    base_dir = v2_root / "bases" / view_descriptor["base_generation_id"]
-    overlay_dir = (
-        worktree_root / "overlays" / view_descriptor["overlay_generation_id"]
+def _file_index_v2_view_metadata_is_valid(
+    view_dir: Path, descriptor: Any
+) -> bool:
+    """Validate a View descriptor without opening either Chroma store."""
+    if (
+        not isinstance(descriptor, dict)
+        or set(descriptor) != _VIEW_DESCRIPTOR_FIELDS
+        or descriptor.get("schema_version") != 1
+        or descriptor.get("view_id") != view_dir.name
+        or not all(
+            _is_safe_file_index_v2_id(descriptor.get(field))
+            for field in (
+                "view_id",
+                "repo_hash",
+                "worktree_hash",
+                "base_generation_id",
+                "overlay_generation_id",
+                "source_snapshot_id",
+            )
+        )
+        or not _is_file_index_timestamp(descriptor.get("verified_at"))
+        or not _is_sha256(descriptor.get("descriptor_checksum"))
+    ):
+        return False
+    compatibility = descriptor.get("compatibility")
+    if (
+        not isinstance(compatibility, dict)
+        or set(compatibility) != set(FILE_INDEX_V2_REQUIRED_FIELDS)
+        or not _file_index_descriptor_has_valid_shape(compatibility)
+        or not isinstance(compatibility.get("document_contract"), dict)
+        or set(compatibility["document_contract"])
+        != {"payload_builder_version", "decode", "content_limit"}
+    ):
+        return False
+    visible_counts = descriptor.get("visible_counts")
+    if (
+        not isinstance(visible_counts, dict)
+        or set(visible_counts) != {"files", "files-docs"}
+        or any(
+            not isinstance(visible_counts.get(scope), int)
+            or isinstance(visible_counts.get(scope), bool)
+            or visible_counts[scope] < 0
+            for scope in ("files", "files-docs")
+        )
+    ):
+        return False
+    checksum_payload = {
+        key: value for key, value in descriptor.items() if key != "descriptor_checksum"
+    }
+    if _sha256_json(checksum_payload) != descriptor["descriptor_checksum"]:
+        return False
+    expected_view_id = _sha256_json(
+        _file_index_v2_view_identity(
+            descriptor["repo_hash"],
+            descriptor["worktree_hash"],
+            descriptor["base_generation_id"],
+            descriptor["overlay_generation_id"],
+            compatibility,
+            visible_counts,
+            descriptor["source_snapshot_id"],
+        )
     )
-    overlay_descriptor = _read_artifact_descriptor(overlay_dir)
-    if overlay_descriptor is None:
-        return None, "corrupt", {"reason": "overlay_descriptor_missing"}
+    worktree_root = view_dir.parent.parent
+    v2_root = worktree_root.parent.parent
     return (
-        {
-            "view_id": view_descriptor["view_id"],
-            "compatibility": view_descriptor["compatibility"],
+        descriptor["view_id"] == expected_view_id
+        and view_dir.parent.name == "views"
+        and worktree_root.parent.name == "worktrees"
+        and v2_root.name == "file-index-v2"
+        and descriptor["worktree_hash"] == worktree_root.name
+        and descriptor["repo_hash"] == v2_root.parent.name
+    )
+
+
+def _file_index_v2_compatibility_contract_kind(value: Any) -> str:
+    """Classify current, future-additive, and malformed compatibility shapes."""
+    if not isinstance(value, dict):
+        return "corrupt"
+    required = set(FILE_INDEX_V2_REQUIRED_FIELDS)
+    fields = set(value)
+    if not required.issubset(fields):
+        return "corrupt"
+    if fields != required:
+        return "incompatible"
+    document_contract = value.get("document_contract")
+    if not isinstance(document_contract, dict):
+        return "corrupt"
+    required_document_fields = {
+        "payload_builder_version",
+        "decode",
+        "content_limit",
+    }
+    document_fields = set(document_contract)
+    if not required_document_fields.issubset(document_fields):
+        return "corrupt"
+    if document_fields != required_document_fields:
+        return "incompatible"
+    if not _file_index_descriptor_has_valid_shape(value):
+        return "corrupt"
+    return "current"
+
+
+def _file_index_v2_view_contract_kind(descriptor: Any) -> str:
+    if not isinstance(descriptor, dict):
+        return "corrupt"
+    schema_version = descriptor.get("schema_version")
+    if (
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version > 1
+    ):
+        return "incompatible"
+    if schema_version != 1:
+        return "corrupt"
+    fields = set(descriptor)
+    if not _VIEW_DESCRIPTOR_FIELDS.issubset(fields):
+        return "corrupt"
+    if fields != _VIEW_DESCRIPTOR_FIELDS:
+        return "incompatible"
+    return _file_index_v2_compatibility_contract_kind(
+        descriptor.get("compatibility")
+    )
+
+
+def _file_index_v2_reader_compatible(compatibility: Dict[str, Any]) -> bool:
+    expected = default_file_index_compatibility()
+    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+        # The deterministic test runtime deliberately uses compact vectors;
+        # every other semantic field remains reader-pinned.
+        expected["dimension"] = compatibility.get("dimension")
+    return file_index_compatibility(compatibility, expected)
+
+
+def _file_index_v2_component_is_reader_compatible(path: Path) -> bool:
+    """Reject a newer component contract before any Chroma client is opened."""
+    descriptor = _read_artifact_descriptor(path)
+    if descriptor is None:
+        return True
+    expected_fields = (
+        _BASE_DESCRIPTOR_FIELDS
+        if path.parent.name == "bases"
+        else _OVERLAY_DESCRIPTOR_FIELDS
+        if path.parent.name == "overlays"
+        else None
+    )
+    schema_version = descriptor.get("schema_version")
+    if (
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version > 1
+    ):
+        return False
+    if expected_fields is not None:
+        fields = set(descriptor)
+        if expected_fields.issubset(fields) and fields != expected_fields:
+            return False
+    compatibility = descriptor.get("compatibility")
+    contract_kind = _file_index_v2_compatibility_contract_kind(compatibility)
+    if contract_kind == "incompatible":
+        return False
+    if contract_kind == "corrupt":
+        return True
+    return _file_index_v2_reader_compatible(compatibility)
+
+
+def _inspect_file_index_v2_view(
+    v2_root: Path,
+    worktree_root: Path,
+    view_id: str,
+) -> Dict[str, Any]:
+    """Inspect compatibility first, then verify and pin one complete closure."""
+    view_dir = worktree_root / "views" / _safe_artifact_id(view_id)
+    descriptor = _read_artifact_descriptor(view_dir)
+    contract_kind = _file_index_v2_view_contract_kind(descriptor)
+    if contract_kind == "incompatible":
+        return {"kind": "incompatible", "reason": "active_view_incompatible"}
+    if not _file_index_v2_view_metadata_is_valid(view_dir, descriptor):
+        return {
+            "kind": "corrupt",
+            "reason": "view_descriptor_invalid",
+            "corrupt_component": view_dir,
+        }
+    assert descriptor is not None
+    if not _file_index_v2_reader_compatible(descriptor["compatibility"]):
+        return {"kind": "incompatible", "reason": "active_view_incompatible"}
+    base_dir = v2_root / "bases" / descriptor["base_generation_id"]
+    overlay_dir = worktree_root / "overlays" / descriptor["overlay_generation_id"]
+    if not _file_index_v2_component_is_reader_compatible(
+        base_dir
+    ) or not _file_index_v2_component_is_reader_compatible(overlay_dir):
+        return {"kind": "incompatible", "reason": "active_view_incompatible"}
+    if not _verify_file_index_v2_view(view_dir):
+        # Base generations are shared by every worktree and are never
+        # quarantined by a reader. An invalid worktree-private Overlay or View
+        # can be isolated, but only after a fallback head is durable.
+        base_verified = _load_verified_file_index_v2_artifact(base_dir, "base")
+        overlay_verified = _load_verified_file_index_v2_artifact(
+            overlay_dir, "overlay"
+        )
+        corrupt_component = None
+        if base_verified is not None and overlay_verified is None:
+            corrupt_component = overlay_dir
+        elif base_verified is not None and overlay_verified is not None:
+            corrupt_component = view_dir
+        return {
+            "kind": "corrupt",
+            "reason": "view_closure_invalid",
+            "corrupt_component": corrupt_component,
+        }
+    overlay_descriptor = _read_artifact_descriptor(overlay_dir)
+    if overlay_descriptor is None:  # pragma: no cover - closure guard
+        return {
+            "kind": "corrupt",
+            "reason": "overlay_descriptor_missing",
+            "corrupt_component": overlay_dir,
+        }
+    return {
+        "kind": "compatible",
+        "view": {
+            "view_id": descriptor["view_id"],
+            "view_dir": view_dir,
+            "compatibility": descriptor["compatibility"],
+            "visible_counts": descriptor["visible_counts"],
             "base_store": base_dir / "store",
             "overlay_store": overlay_dir / "store",
             "files_shadow": frozenset(overlay_descriptor["files_shadow"]),
@@ -7624,9 +7957,222 @@ def _pin_active_file_index_v2_view(
             ),
             "tombstones": frozenset(overlay_descriptor["tombstones"]),
         },
-        "fresh",
-        {"reason": "ready"},
+    }
+
+
+def _repair_file_index_v2_head_and_quarantine(
+    worktree_root: Path,
+    source_head: Dict[str, Any],
+    source_head_path: Path,
+    source_head_token: Optional[bytes],
+    expected_head_token: Optional[bytes],
+    selected_view: Dict[str, Any],
+    reason: str,
+    corrupt_component: Optional[Path],
+) -> bool:
+    """Repair a search head, then isolate only a proven private component."""
+    head_path = worktree_root / "head.json"
+    previous_head_path = worktree_root / "head.previous.json"
+    recovery_marker_path = worktree_root / "head.recovery.json"
+    head_lock = worktree_root / ".head-lock"
+    sequence = source_head["sequence"]
+    if sequence == 2**64 - 1:
+        return False
+    sequence += 1
+    canonical = {
+        "schema_version": 1,
+        "active_view_id": selected_view["view_id"],
+        "previous_view_id": None,
+        "sequence": sequence,
+    }
+    repaired = {**canonical, "checksum": _sha256_json(canonical)}
+    marker_canonical = {
+        "schema_version": 1,
+        "view_id": selected_view["view_id"],
+        "head_sequence": sequence,
+        "reason": reason,
+        "fallback_source": "previous",
+    }
+    marker = {
+        **marker_canonical,
+        "checksum": _sha256_json(marker_canonical),
+    }
+    with acquire_lock(head_lock, exclusive=True):
+        # A publisher may have advanced the head after selection. Never
+        # overwrite its newer decision, and never quarantine based on a stale
+        # closure diagnosis.
+        current_head_token, _current = _read_file_index_v2_head_token(head_path)
+        if current_head_token != expected_head_token:
+            return False
+        current_source_token, current_source = _read_file_index_v2_head_token(
+            source_head_path
+        )
+        if current_source_token != source_head_token or current_source != source_head:
+            return False
+        component_lock = _file_index_v2_private_component_lock(
+            worktree_root, corrupt_component
+        )
+        lock_context = (
+            acquire_lock(component_lock, exclusive=True)
+            if component_lock is not None
+            else contextlib.nullcontext()
+        )
+        # Lock order is always head -> private component. Writers release the
+        # immutable component lock before acquiring head, so repair cannot
+        # deadlock a publisher.
+        with lock_context:
+            if not _verify_file_index_v2_view(selected_view["view_dir"]):
+                return False
+            should_quarantine = _file_index_v2_private_component_is_corrupt(
+                worktree_root, corrupt_component
+            )
+            try:
+                # A matching durable marker is written first. If head replace
+                # fails, the marker cannot match the old head and is ignored.
+                _write_file_index_v2_recovery_marker_atomic(
+                    recovery_marker_path, marker
+                )
+                _write_file_index_v2_head_atomic(previous_head_path, source_head)
+                _write_file_index_v2_head_atomic(head_path, repaired)
+            except OSError:
+                return False
+            readback = _read_file_index_v2_head(head_path)
+            if (
+                readback != repaired
+                or not _verify_file_index_v2_view(selected_view["view_dir"])
+            ):
+                return False
+            if not should_quarantine or not _file_index_v2_private_component_is_corrupt(
+                worktree_root, corrupt_component
+            ):
+                return True
+            assert corrupt_component is not None
+            quarantine = corrupt_component.with_name(
+                f".{corrupt_component.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+            )
+            with contextlib.suppress(OSError):
+                os.replace(corrupt_component, quarantine)
+            return True
+
+
+def _file_index_v2_private_component_lock(
+    worktree_root: Path, component: Optional[Path]
+) -> Optional[Path]:
+    if component is None:
+        return None
+    if component.parent == worktree_root / "views":
+        return worktree_root / ".locks" / f"view-{component.name}"
+    if component.parent == worktree_root / "overlays":
+        return component.parent / ".locks" / component.name
+    return None
+
+
+def _file_index_v2_private_component_is_corrupt(
+    worktree_root: Path, component: Optional[Path]
+) -> bool:
+    if component is None or not component.exists():
+        return False
+    if component.parent == worktree_root / "views":
+        return not _verify_file_index_v2_view(component)
+    if component.parent == worktree_root / "overlays":
+        return _load_verified_file_index_v2_artifact(component, "overlay") is None
+    return False
+
+
+def _select_file_index_v2_view(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    *,
+    repair_corruption: bool,
+) -> Dict[str, Any]:
+    """Select active, predecessor, or legacy without scanning View dirs."""
+    v2_root = resolve_file_index_v2_root(repo_hash, db_root=db_root)
+    worktree_root = v2_root / "worktrees" / _safe_artifact_id(worktree_hash)
+    head_path = worktree_root / "head.json"
+    head_token, head = _read_file_index_v2_head_token(head_path)
+    journal = None
+    journal_token = None
+    primary_issue: Optional[Dict[str, Any]] = None
+    if head is None:
+        reason = "view_head_invalid" if head_path.exists() else "view_head_missing"
+        primary_issue = {
+            "kind": "corrupt",
+            "reason": reason,
+            "corrupt_component": None,
+        }
+        journal_path = worktree_root / "head.previous.json"
+        journal_token, journal = _read_file_index_v2_head_token(journal_path)
+    source_head = head if head is not None else journal
+    source_head_path = (
+        head_path if head is not None else worktree_root / "head.previous.json"
     )
+    source_head_token = head_token if head is not None else journal_token
+    if source_head is None:
+        return {
+            "view": None,
+            "state": "missing",
+            "reason": primary_issue["reason"] if primary_issue else "view_head_missing",
+            "repair_required": True,
+        }
+
+    recovery_marker = _read_file_index_v2_recovery_marker(
+        worktree_root / "head.recovery.json"
+    )
+    recovery_pending = bool(
+        head is not None
+        and recovery_marker is not None
+        and recovery_marker["view_id"] == head["active_view_id"]
+        and recovery_marker["head_sequence"] == head["sequence"]
+    )
+    candidates = [(source_head["active_view_id"], "active")]
+    if source_head.get("previous_view_id") is not None:
+        candidates.append((source_head["previous_view_id"], "previous"))
+    for view_id, role in candidates:
+        inspection = _inspect_file_index_v2_view(v2_root, worktree_root, view_id)
+        if inspection["kind"] != "compatible":
+            if role == "active":
+                primary_issue = inspection
+            continue
+        selected_view = inspection["view"]
+        marker_fallback = recovery_pending and role == "active"
+        fallback = head is None or role == "previous" or marker_fallback
+        if (
+            fallback
+            and not marker_fallback
+            and repair_corruption
+            and primary_issue is not None
+            and primary_issue["kind"] == "corrupt"
+        ):
+            _repair_file_index_v2_head_and_quarantine(
+                worktree_root,
+                source_head,
+                source_head_path,
+                source_head_token,
+                head_token,
+                selected_view,
+                primary_issue["reason"],
+                primary_issue.get("corrupt_component"),
+            )
+        return {
+            "view": selected_view,
+            "state": "stale" if fallback else "fresh",
+            "reason": (
+                recovery_marker["reason"]
+                if marker_fallback and recovery_marker is not None
+                else primary_issue["reason"]
+                if fallback and primary_issue is not None
+                else "ready"
+            ),
+            "fallback_source": "previous" if fallback else None,
+            "repair_required": fallback,
+        }
+    return {
+        "view": None,
+        "state": "corrupt",
+        "reason": primary_issue["reason"] if primary_issue else "view_closure_invalid",
+        "repair_required": True,
+    }
 
 
 def _encode_file_index_v2_query(
@@ -7643,7 +8189,7 @@ def _encode_file_index_v2_query(
     if len(vectors) != 1:
         raise ValueError("file-index-v2 query model returned the wrong vector count")
     vector = vectors[0]
-    if len(vector) != compatibility["dimension"]:
+    if len(vector) != _expected_file_index_vector_dimension(compatibility):
         raise ValueError("file-index-v2 query model returned the wrong vector dimension")
     return vector
 
@@ -7842,42 +8388,71 @@ def action_search_multi_v2(
     }
     if file_index_protocol not in {"legacy", "v2"}:
         raise ValueError(f"unknown file index protocol: {file_index_protocol}")
+    invalid_scopes = [scope for scope in scopes if scope not in valid_scopes]
+    if invalid_scopes:
+        return {
+            "ok": False,
+            "error_code": "BAD_ARGS",
+            "error": f"unsupported search scope {invalid_scopes[0]}",
+        }
     v2_file_scopes = [
         scope for scope in scopes if scope in {"files", "files-docs"}
     ]
     pinned_file_view: Optional[Dict[str, Any]] = None
-    pinned_file_state = "missing"
-    pinned_file_health: Dict[str, Any] = {"reason": "view_head_missing"}
+    file_selection: Optional[Dict[str, Any]] = None
+    legacy_file_selections: Dict[str, Dict[str, Any]] = {}
     if file_index_protocol == "v2" and v2_file_scopes:
         if not worktree_hash:
             raise ValueError("file-index-v2 search requires worktree_hash")
-        (
-            pinned_file_view,
-            pinned_file_state,
-            pinned_file_health,
-        ) = _pin_active_file_index_v2_view(
+        file_selection = _select_file_index_v2_view(
             repo_hash,
             worktree_hash,
             db_root,
+            repair_corruption=True,
         )
+        pinned_file_view = file_selection["view"]
+        if pinned_file_view is None:
+            unresolved: List[str] = []
+            for scope in dict.fromkeys(v2_file_scopes):
+                state, health = _classify_scope_for_search(
+                    repo_hash, worktree_hash, scope, db_root=db_root
+                )
+                if state in ("missing", "corrupt"):
+                    unresolved.append(scope)
+                    continue
+                legacy_file_selections[scope] = {
+                    "state": "stale",
+                    "reason": file_selection["reason"],
+                    "fallback_source": "legacy",
+                    "health": health,
+                }
+            if unresolved:
+                return {
+                    "ok": False,
+                    "error_code": "INDEX_NOT_READY",
+                    "retryable": True,
+                    "retry_after_ms": 250,
+                    "waited_ms": 0,
+                    "affected_scopes": unresolved,
+                    "error": "file index v2 has no compatible readable corpus",
+                }
     payload: Dict[str, Any] = {"ok": True}
     scope_states: Dict[str, Dict[str, Any]] = {}
     scope_results: Dict[str, Any] = {}
     stale_scopes: List[str] = []
     query_embedding: Optional[List[float]] = None
     for scope in scopes:
-        if scope not in valid_scopes:
-            return {
-                "ok": False,
-                "error_code": "BAD_ARGS",
-                "error": f"unsupported search scope {scope}",
-            }
         scope_worktree = worktree_hash if scope in WORKTREE_SCOPED else None
         is_v2_file_scope = (
             file_index_protocol == "v2" and scope in {"files", "files-docs"}
         )
         if is_v2_file_scope:
-            state, health = pinned_file_state, pinned_file_health
+            if pinned_file_view is not None:
+                assert file_selection is not None
+                state, health = file_selection["state"], file_selection
+            else:
+                health = legacy_file_selections[scope]
+                state = health["state"]
         else:
             state, health = _classify_scope_for_search(
                 repo_hash, scope_worktree, scope, db_root=db_root
@@ -7907,16 +8482,26 @@ def action_search_multi_v2(
                 )
         try:
             if is_v2_file_scope:
-                if pinned_file_view is None:  # pragma: no cover - state guard
-                    raise RuntimeError("file-index-v2 pinned View is unavailable")
-                result = _search_file_index_v2_scope(
-                    pinned_file_view,
-                    scope,
-                    query,
-                    n_results,
-                    match_mode,
-                    query_embedding,
-                )
+                if pinned_file_view is not None:
+                    result = _search_file_index_v2_scope(
+                        pinned_file_view,
+                        scope,
+                        query,
+                        n_results,
+                        match_mode,
+                        query_embedding,
+                    )
+                else:
+                    result = _search_scope_collection(
+                        repo_hash,
+                        scope_worktree,
+                        scope,
+                        query,
+                        n_results,
+                        match_mode,
+                        db_root,
+                        query_embedding,
+                    )
             else:
                 result = _search_scope_collection(
                     repo_hash,
@@ -7949,8 +8534,14 @@ def action_search_multi_v2(
                 continue
             return _search_failed_payload([scope], "query", error)
         scope_states[scope] = {"state": state}
-        if is_v2_file_scope and pinned_file_view is not None:
-            scope_states[scope]["view_id"] = pinned_file_view["view_id"]
+        if is_v2_file_scope:
+            if pinned_file_view is not None:
+                scope_states[scope]["view_id"] = pinned_file_view["view_id"]
+            fallback_source = health.get("fallback_source")
+            if fallback_source:
+                scope_states[scope]["fallback_source"] = fallback_source
+            if health.get("reason") != "ready":
+                scope_states[scope]["reason"] = health.get("reason")
         if state == "stale":
             stale_scopes.append(scope)
         scope_results[scope] = result
@@ -7985,12 +8576,70 @@ def _runtime_status_v2() -> Dict[str, Any]:
     }
 
 
+def _explicit_file_index_v2_status(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+) -> Dict[str, Dict[str, Any]]:
+    """Project the shared selector into additive, read-only scope health."""
+    selection = _select_file_index_v2_view(
+        repo_hash,
+        worktree_hash,
+        db_root,
+        repair_corruption=False,
+    )
+    view = selection["view"]
+    if view is not None:
+        result: Dict[str, Dict[str, Any]] = {}
+        for scope in ("files", "files-docs"):
+            status: Dict[str, Any] = {
+                "exists": True,
+                "healthy": True,
+                "repair_required": selection["repair_required"],
+                "document_count": view["visible_counts"][scope],
+                "reason": selection["reason"],
+                "legacy_residue_detected": False,
+                "last_repair_at": None,
+                "view_id": view["view_id"],
+            }
+            if selection.get("fallback_source"):
+                status["fallback_source"] = selection["fallback_source"]
+            result[scope] = status
+        return result
+
+    result = {}
+    for scope in ("files", "files-docs"):
+        legacy = _scope_status_v2(
+            repo_hash, worktree_hash, scope, db_root=db_root
+        )
+        if legacy.get("healthy") and not legacy.get("repair_required"):
+            legacy = {
+                **legacy,
+                "healthy": True,
+                "repair_required": True,
+                "reason": selection["reason"],
+                "fallback_source": "legacy",
+            }
+        else:
+            legacy = {
+                **legacy,
+                "healthy": False,
+                "repair_required": True,
+                "reason": selection["reason"],
+            }
+        result[scope] = legacy
+    return result
+
+
 def action_status_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
     db_root: Optional[Path] = None,
     worktree_hashes: Optional[Sequence[str]] = None,
+    file_index_protocol: str = "legacy",
 ) -> dict:
+    if file_index_protocol not in {"legacy", "v2"}:
+        raise ValueError(f"unknown file index protocol: {file_index_protocol}")
     out: Dict[str, Any] = {
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
@@ -8000,24 +8649,42 @@ def action_status_v2(
         "works": _scope_status_v2(repo_hash, None, "works", db_root=db_root),
     }
     if worktree_hash:
-        for scope in ("files", "files-docs"):
-            out[scope] = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
+        if file_index_protocol == "v2":
+            out.update(
+                _explicit_file_index_v2_status(
+                    repo_hash, worktree_hash, db_root
+                )
+            )
+        else:
+            for scope in ("files", "files-docs"):
+                out[scope] = _scope_status_v2(
+                    repo_hash, worktree_hash, scope, db_root=db_root
+                )
 
     payload = {"ok": True, "runtime": _runtime_status_v2(), "status": out}
     if worktree_hashes:
         # Phase 70 FR-393 / AS-13: one batch process reports every requested
         # worktree so all-worktree status no longer spawns one Python per
         # worktree.
-        payload["worktrees"] = {
-            hash_value: {
-                scope: _scope_status_v2(
-                    repo_hash, hash_value, scope, db_root=db_root
+        if file_index_protocol == "v2":
+            payload["worktrees"] = {
+                hash_value: _explicit_file_index_v2_status(
+                    repo_hash, hash_value, db_root
                 )
-                for scope in ("files", "files-docs")
+                for hash_value in worktree_hashes
+                if hash_value
             }
-            for hash_value in worktree_hashes
-            if hash_value
-        }
+        else:
+            payload["worktrees"] = {
+                hash_value: {
+                    scope: _scope_status_v2(
+                        repo_hash, hash_value, scope, db_root=db_root
+                    )
+                    for scope in ("files", "files-docs")
+                }
+                for hash_value in worktree_hashes
+                if hash_value
+            }
     return payload
 
 
@@ -8110,6 +8777,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash,
                     db_root=db_root,
                     worktree_hashes=worktree_hashes or None,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0
@@ -8259,6 +8927,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     no_auto_build=args.no_auto_build,
                     match_mode=args.match_mode,
                     db_root=db_root,
+                    file_index_protocol=args.file_index_protocol,
                 )
             )
             return 0

@@ -707,6 +707,107 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         )
         self.assertNotIn("feature_v2", json.dumps(result), result)
 
+    def test_repaired_fallback_remains_stale_across_process_restart(self):
+        first, second, _head = self._seed_legacy_and_two_views()
+        active = self._view_descriptor(second["view_id"])
+        active_overlay = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            active["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        (active_overlay / "descriptor.json").write_text(
+            "{corrupt active overlay", encoding="utf-8"
+        )
+
+        repaired = self._search_v2()
+        self.assertTrue(repaired.get("ok"), repaired)
+        self.assertEqual(repaired["scopes"]["files"]["state"], "stale", repaired)
+        self.assertEqual(
+            repaired["scopes"]["files"].get("view_id"), first["view_id"], repaired
+        )
+
+        restarted = self._search_v2_in_fresh_process()
+        self.assertTrue(restarted.get("ok"), restarted)
+        self.assertEqual(
+            restarted["scopes"]["files"]["state"],
+            "stale",
+            "head repair must retain a durable projection-regeneration marker",
+        )
+        self.assertEqual(
+            restarted["scopes"]["files"].get("fallback_source"),
+            "previous",
+            restarted,
+        )
+        self.assertEqual(restarted.get("stale_scopes"), ["files"], restarted)
+
+    def test_head_token_is_derived_from_one_immutable_read(self):
+        future = {
+            "schema_version": 1,
+            "active_view_id": "future-view",
+            "previous_view_id": None,
+            "sequence": 9,
+        }
+        future["checksum"] = self._expected_head_checksum(future)
+        future_bytes = json.dumps(
+            future, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=[b"{corrupt observed head", future_bytes],
+        ) as read_bytes:
+            token, head = runner._read_file_index_v2_head_token(
+                self._head_path()
+            )
+
+        self.assertEqual(token, b"{corrupt observed head")
+        self.assertIsNone(head)
+        self.assertEqual(
+            read_bytes.call_count,
+            1,
+            "the CAS token and parsed head must come from the same filesystem read",
+        )
+
+    def test_repair_reinspects_component_before_quarantining_concurrent_replacement(self):
+        _first, second, _head = self._seed_legacy_and_two_views()
+        active = self._view_descriptor(second["view_id"])
+        active_overlay = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH,
+            WORKTREE_HASH,
+            active["overlay_generation_id"],
+            db_root=self.db_root,
+        )
+        descriptor_path = active_overlay / "descriptor.json"
+        healthy_descriptor = descriptor_path.read_bytes()
+        descriptor_path.write_text("{corrupt active overlay", encoding="utf-8")
+        real_replace = os.replace
+        quarantines = []
+
+        def concurrent_repair_after_head_replace(src, dst, *args, **kwargs):
+            source = Path(src)
+            destination = Path(dst)
+            result = real_replace(src, dst, *args, **kwargs)
+            if destination == self._head_path():
+                descriptor_path.write_bytes(healthy_descriptor)
+            if source == active_overlay and ".quarantine-" in destination.name:
+                quarantines.append(destination)
+            return result
+
+        with mock.patch("os.replace", side_effect=concurrent_repair_after_head_replace):
+            result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(
+            runner._load_verified_file_index_v2_artifact(active_overlay, "overlay"),
+            "a concurrent healthy replacement must remain reusable",
+        )
+        self.assertEqual(
+            quarantines,
+            [],
+            "reader repair must re-diagnose a private artifact under its lock",
+        )
+
     def test_corrupt_head_recovers_previous_view_from_durable_journal(self):
         legacy = self._build_legacy()
         self.assertTrue(legacy.get("ok"), legacy)
@@ -926,6 +1027,56 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
             "incompatible artifacts are never reset or quarantined as corrupt",
         )
 
+    def test_future_view_schema_falls_back_without_head_repair_or_quarantine(self):
+        first = self._build()
+        self.assertTrue(first.get("ok"), first)
+        (self.repo / "src" / "future.rs").write_text(
+            "fn future() {}\n", encoding="utf-8"
+        )
+        second = self._build()
+        self.assertTrue(second.get("ok"), second)
+        head_before = self._head_path().read_bytes()
+        active_view_dir = self._worktree_root() / "views" / second["view_id"]
+        descriptor_path = active_view_dir / "descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        descriptor["future_extension"] = {"reader_epoch": 2}
+        descriptor["descriptor_checksum"] = runner._sha256_json(
+            {
+                key: value
+                for key, value in descriptor.items()
+                if key != "descriptor_checksum"
+            }
+        )
+        descriptor_path.write_text(
+            json.dumps(descriptor, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        descriptor_before = descriptor_path.read_bytes()
+        quarantines_before = set(
+            runner.resolve_file_index_v2_root(
+                REPO_HASH, db_root=self.db_root
+            ).rglob("*quarantine-*")
+        )
+
+        result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        files = result["scopes"]["files"]
+        self.assertEqual(files.get("reason"), "active_view_incompatible", files)
+        self.assertEqual(files.get("fallback_source"), "previous", files)
+        self.assertEqual(files.get("view_id"), first["view_id"], files)
+        self.assertEqual(self._head_path().read_bytes(), head_before)
+        self.assertEqual(descriptor_path.read_bytes(), descriptor_before)
+        self.assertEqual(
+            set(
+                runner.resolve_file_index_v2_root(
+                    REPO_HASH, db_root=self.db_root
+                ).rglob("*quarantine-*")
+            ),
+            quarantines_before,
+            "an additive future View descriptor is incompatible, never corrupt",
+        )
+
     def test_explicit_v2_build_never_promotes_unfingerprinted_legacy_vectors_to_cas(self):
         legacy_vector = [0.0, 1.0] + [0.0] * 766
         legacy_model = mock.MagicMock()
@@ -1081,6 +1232,87 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertLess(events.index("artifact:overlay:done"), events.index("head:replace"))
         self.assertLess(events.index("view:verified"), events.index("head:replace"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
+    def test_directory_artifact_publish_fsyncs_tree_and_parent_around_replace(self):
+        publish = getattr(
+            runner, "_durably_replace_file_index_v2_directory", None
+        )
+        self.assertTrue(
+            callable(publish),
+            "Base/Overlay/View closure must be durable before a durable head can name it",
+        )
+        staging = self.base / "artifact.staging"
+        target = self.base / "artifact"
+        (staging / "store").mkdir(parents=True)
+        (staging / "store" / "payload.bin").write_bytes(b"durable closure")
+        events = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def record_fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def record_replace(src, dst, *args, **kwargs):
+            events.append("replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with mock.patch("os.fsync", side_effect=record_fsync):
+            with mock.patch("os.replace", side_effect=record_replace):
+                publish(staging, target)
+
+        replace_index = events.index("replace")
+        self.assertIn("fsync", events[:replace_index], events)
+        self.assertIn("fsync", events[replace_index + 1 :], events)
+        self.assertEqual((target / "store" / "payload.bin").read_bytes(), b"durable closure")
+
+    def test_publisher_reverifies_view_inside_head_critical_section(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        old_head = self._head_path().read_bytes()
+        (self.repo / "src" / "candidate.rs").write_text(
+            "fn candidate() {}\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            runner,
+            "_publish_file_index_v2_view",
+            return_value={"ok": True, "published": False, "superseded": True},
+        ):
+            candidate = self._build()
+        self.assertTrue(candidate.get("ok"), candidate)
+        view_dir = self._worktree_root() / "views" / candidate["view_id"]
+        snapshot = runner._canonical_git_tree(self.repo)
+        inherited = {
+            record["path"]: record
+            for record in runner._canonical_base_records(self.repo, snapshot)
+        }
+        snapshot_id = runner._visible_file_index_v2_snapshot_id(
+            self.repo, snapshot, inherited
+        )
+
+        with mock.patch.object(
+            runner, "_verify_file_index_v2_view", side_effect=[True, False]
+        ) as verify:
+            result = runner._publish_file_index_v2_view(
+                self.repo,
+                runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root),
+                WORKTREE_HASH,
+                view_dir,
+                candidate["view_id"],
+                snapshot.get("root_tree_oid"),
+                snapshot_id,
+                inherited,
+            )
+
+        self.assertGreaterEqual(
+            verify.call_count,
+            2,
+            "publisher must reverify the closure after acquiring the head lock",
+        )
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("error_code"), "BUILD_VERIFY_FAILED", result)
+        self.assertEqual(self._head_path().read_bytes(), old_head)
+
     def test_head_sequence_exhaustion_preserves_old_head_bytes(self):
         baseline = self._build()
         self.assertTrue(baseline.get("ok"), baseline)
@@ -1150,6 +1382,17 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertIn("fsync", events[:replace_index], events)
         self.assertIn("fsync", events[replace_index + 1 :], events)
         self.assertEqual(json.loads(head_path.read_text(encoding="utf-8")), payload)
+
+    def test_recovery_marker_clear_propagates_io_failure(self):
+        marker = self._worktree_root() / "head.recovery.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{}", encoding="utf-8")
+
+        with mock.patch.object(
+            Path, "unlink", side_effect=OSError(5, "injected marker unlink failure")
+        ):
+            with self.assertRaisesRegex(OSError, "injected marker unlink failure"):
+                runner._clear_file_index_v2_recovery_marker(marker)
 
     def test_overlay_failure_after_new_base_keeps_old_pinned_view(self):
         baseline = self._build()

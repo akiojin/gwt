@@ -300,6 +300,123 @@ fn default_rebuild_runner_waits_for_host_wide_heavy_lease() {
     );
 }
 
+/// T-IDX-431 review regression: file-index-v2 reports action failures in its
+/// JSON payload while intentionally retaining exit status 0. The owner must
+/// publish that structured failure through the coordinator so an equivalent
+/// joined rebuild cannot observe a false `Completed` outcome.
+#[cfg(unix)]
+#[test]
+fn default_rebuild_runner_propagates_structured_file_failure_to_joiner() {
+    use gwt_core::index_coordinator::{IndexCoordinator, TargetKey};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let _home = ScopedEnvVar::set("HOME", &home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+    add_origin(&repo, "https://github.com/example/structured-failure.git");
+    commit_file(&repo, "README.md", "# repo\n");
+
+    let runner_log = tmp.path().join("runner-log.txt");
+    let runner_started = tmp.path().join("runner-started");
+    let runner_release = tmp.path().join("runner-release");
+    let _runner_log_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_LOG", &runner_log);
+    let _runner_started_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_STARTED", &runner_started);
+    let _runner_release_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_RELEASE", &runner_release);
+    let python = gwt_core::runtime::project_index_python_path();
+    fs::create_dir_all(python.parent().expect("python parent")).expect("create venv dir");
+    fs::write(
+        &python,
+        "#!/bin/sh\n\
+echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
+: > \"$GWT_FAKE_RUNNER_STARTED\"\n\
+while [ ! -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; do sleep 0.01; done\n\
+printf '{\"ok\":false,\"error_code\":\"PUBLISH_FAILED\",\"error\":\"marker fsync failed\"}\\n'\n",
+    )
+    .expect("write fake python");
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod fake python");
+
+    let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+    let worktree_hash = compute_worktree_hash(&repo).expect("worktree hash");
+    let coordinator = IndexCoordinator::open(gwt_core::index_coordinator::coordinator_root())
+        .expect("open coordinator");
+    let key = TargetKey::worktree(repo_hash.as_str(), "files", worktree_hash.as_str());
+
+    let owner_repo = repo.clone();
+    let owner = std::thread::spawn(move || {
+        gwt::default_rebuild_runner(
+            &owner_repo,
+            gwt::index_worker::IndexRebuildScope::Files,
+            None,
+        )
+    });
+    let started_deadline = Instant::now() + Duration::from_secs(10);
+    while !runner_started.exists() {
+        assert!(
+            Instant::now() < started_deadline,
+            "owner runner never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let joiner_repo = repo.clone();
+    let joiner = std::thread::spawn(move || {
+        gwt::default_rebuild_runner(
+            &joiner_repo,
+            gwt::index_worker::IndexRebuildScope::Files,
+            None,
+        )
+    });
+    let waiter_deadline = Instant::now() + Duration::from_secs(10);
+    while fs::read_dir(coordinator.target_waiters_dir(&key))
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
+        == 0
+    {
+        assert!(
+            Instant::now() < waiter_deadline,
+            "equivalent rebuild never joined the owner"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(&runner_release, b"release").expect("release fake runner");
+
+    let owner_error = owner
+        .join()
+        .expect("join owner")
+        .expect_err("structured owner failure must propagate");
+    let joiner_error = joiner
+        .join()
+        .expect("join joiner")
+        .expect_err("joined caller must observe failed outcome");
+    for error in [&owner_error, &joiner_error] {
+        assert!(
+            error.contains("PUBLISH_FAILED"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("marker fsync failed"),
+            "unexpected error: {error}"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&runner_log)
+            .expect("runner log")
+            .lines()
+            .count(),
+        1,
+        "equivalent rebuilds must share one runner invocation"
+    );
+}
+
 fn call_project_root_matches(call: &str, expected: &Path) -> bool {
     let Some(actual) = call.split('|').nth(1) else {
         return false;
