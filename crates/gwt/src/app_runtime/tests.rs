@@ -53696,6 +53696,8 @@ fn close_registered_pm_worktree_fixture(
         WindowProcessStatus::Running,
     );
     let mut runtime = sample_runtime(runtime_root, vec![tab], Some(&tab_id));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let window_id = format!("{tab_id}::{raw_id}");
     let session_id = format!("pm-session-{suffix}");
     let mut session = sample_active_agent_session(&tab_id, &window_id);
@@ -53712,6 +53714,16 @@ fn close_registered_pm_worktree_fixture(
     .expect("seed PM registration");
 
     runtime.close_window_events(&window_id);
+    loop {
+        let next = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop();
+        match next {
+            Some(finalizer) => finalizer(),
+            None => break,
+        }
+    }
 }
 
 #[test]
