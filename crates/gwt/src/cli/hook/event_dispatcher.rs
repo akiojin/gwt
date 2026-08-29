@@ -99,6 +99,7 @@ fn handle_user_prompt_submit(
     input: &str,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
+    let pm_refresh_context = pm_loop_stop_check::handle_user_prompt_submit(worktree_root)?;
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
@@ -127,13 +128,14 @@ fn handle_user_prompt_submit(
     run_value(event, "action-obligation-record", || {
         action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
-    // SPEC-3431 FR-012: user contact re-arms the PM's resident-loop budget.
-    run_value(event, "pm-loop-reset", || {
-        pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
-    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::UserPromptSubmit,
+        pm_refresh_context,
+    );
     let output = append_additional_context(
         output,
         IntentBoundaryEvent::UserPromptSubmit,
