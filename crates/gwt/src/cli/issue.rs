@@ -323,10 +323,18 @@ fn merge_board_escalations_into_needs_human(
                     // live Open row from the daemon projection.
                     return true;
                 };
-                item.issue_updated_at
+                match item
+                    .issue_updated_at
                     .as_deref()
                     .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                    .is_some_and(|live_open_at| live_open_at > cached_closed_at)
+                {
+                    Some(live_open_at) => live_open_at > cached_closed_at,
+                    // A live Open row with a missing or malformed timestamp
+                    // cannot be proven stale; fail open like a malformed
+                    // cached revision so the daemon's positive Open signal
+                    // is never erased by an older Closed cache entry.
+                    None => true,
+                }
             });
             !newer_live_open
         })
@@ -2251,6 +2259,70 @@ mod tests {
             vec![2338, 2339],
             "status filtering must not rewrite Board history"
         );
+    }
+
+    /// Issue #3602 regression: a live daemon Open row can carry a missing or
+    /// malformed `issue_updated_at`. Timestamp absence proves nothing, so it
+    /// must fail open exactly like a malformed cached revision instead of
+    /// letting a stale Closed cache erase the issue from every projection.
+    #[test]
+    fn live_open_row_without_timestamp_fails_open() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(2338),
+                title: "Closed owner".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Closed,
+                updated_at: UpdatedAt::new("2026-08-26T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write closed cache entry");
+
+        for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
+            let mut status = crate::IssueMonitorAgentStatus {
+                queue: vec![2338],
+                active_launches: Vec::new(),
+                max_active: 1,
+                enabled: true,
+                autonomous_mode: true,
+                has_launch_profile: true,
+                needs_human: vec![2338],
+                inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                    issue_number: 2338,
+                    state: crate::MonitorInboxState::Queued,
+                    github_state: crate::IssueMonitorIssueState::Open,
+                    issue_updated_at: issue_updated_at.clone(),
+                    readiness: crate::IssueMonitorReadiness::NotApplicable,
+                    recoverable_merged: false,
+                    completion_reason: None,
+                    blocked_by_owner: None,
+                    launched_window_id: None,
+                    error_message: None,
+                    last_activity_at: None,
+                    retry_not_before: None,
+                    retry_hold_reason: None,
+                    claim_id: None,
+                    delivery_id: None,
+                }],
+                last_error: None,
+                last_scan_at: None,
+                scan_stall: None,
+            };
+            merge_board_escalations_into_needs_human(&repo, &mut status);
+            assert_eq!(
+                status.queue,
+                vec![2338],
+                "live Open row with {issue_updated_at:?} must fail open"
+            );
+            assert_eq!(status.needs_human, vec![2338]);
+            assert_eq!(status.inbox.len(), 1);
+        }
     }
 
     #[test]
