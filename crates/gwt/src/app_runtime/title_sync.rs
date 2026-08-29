@@ -57,6 +57,23 @@ impl AppRuntime {
         project_root: &Path,
         projection: &WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
+        self.apply_workspace_projection_title_sync_with_mode(project_root, projection, false)
+    }
+
+    pub(crate) fn apply_workspace_projection_title_sync_cache_only(
+        &mut self,
+        project_root: &Path,
+        projection: &WorkspaceProjection,
+    ) -> Vec<OutboundEvent> {
+        self.apply_workspace_projection_title_sync_with_mode(project_root, projection, true)
+    }
+
+    fn apply_workspace_projection_title_sync_with_mode(
+        &mut self,
+        project_root: &Path,
+        projection: &WorkspaceProjection,
+        cache_only: bool,
+    ) -> Vec<OutboundEvent> {
         let dynamic_title_changed =
             self.sync_agent_window_titles_from_workspace_projection(project_root, projection);
 
@@ -64,7 +81,18 @@ impl AppRuntime {
         if dynamic_title_changed {
             events.push(self.workspace_state_broadcast());
         }
-        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+        let projection_event = if cache_only {
+            // Issue #3783: watcher notifications run directly on the Tao event
+            // loop. Merge the already-loaded watcher payload into the last
+            // materialized view before replaying it; a full Session/WorkItems
+            // rebuild here blocks every pane request, while replaying the
+            // cache without this merge publishes stale title/status fields.
+            self.merge_workspace_projection_into_cached_active_work(project_root, projection);
+            self.cached_active_work_projection_broadcast_for_workspace_watcher()
+        } else {
+            self.active_work_projection_broadcast_for_active_tab()
+        };
+        if let Some(event) = projection_event {
             events.push(event);
         }
         events
@@ -92,12 +120,10 @@ impl AppRuntime {
         let issue_fallback_title = projection
             .linked_issues
             .first()
-            .map(|issue| issue.number)
-            .and_then(|number| {
-                let cache_root =
-                    gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
-                gwt::issue_cache::load_issue_title_from_cache(&cache_root, number)
-            });
+            .and_then(|issue| issue.title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string);
 
         let updates = projection
             .agents
