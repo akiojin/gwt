@@ -3640,6 +3640,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://example.test/100".to_string(),
                 will_close_target: false,
+                merged_at: None,
             }],
         )
         .expect("write linked PR cache");
@@ -3652,6 +3653,7 @@ mod tests {
                 state: "MERGED".to_string(),
                 url: "https://example.test/101".to_string(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
 
@@ -3676,6 +3678,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://example.test/100".to_string(),
                 will_close_target: false,
+                merged_at: None,
             }],
         )
         .expect("write linked PR cache");
@@ -3709,6 +3712,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://example.test/101".to_string(),
                 will_close_target: true,
+                merged_at: None,
             }],
         );
 
