@@ -53063,6 +53063,9 @@ fn pm_status_projects_configured_and_running_agent_model_and_reasoning() {
 
 #[test]
 fn pm_launch_config_exports_project_state_scratch_dir() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = tempdir().expect("gwt home");
     let _gwt_home = ScopedGwtHome::set(home.path());
     let repo = home.path().join("repo");
