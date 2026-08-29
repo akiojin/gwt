@@ -1860,7 +1860,7 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         .active_agent_sessions
         .insert(session.window_id.clone(), session.clone());
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("repo-global active Work view");
     let live_rows = view
         .active_works
@@ -1902,7 +1902,7 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     gwt_core::workspace_projection::save_workspace_projection(&project_root, &saved)
         .expect("clear current execution-container hint");
     let stopped_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("stopped repo-global Work view");
     let paused_rows = stopped_view
         .active_works
@@ -3308,6 +3308,49 @@ fn sample_runtime(
     sample_runtime_with_events(temp_root, tabs, active_tab_id).0
 }
 
+/// Drive the same background projection continuation that the tao event loop
+/// handles in production, then return the committed projection for the active
+/// tab. Tests that mutate Work/Workspace state must not assume the initiating
+/// handler still performs the potentially large disk decode synchronously.
+fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkProjectionView {
+    let tab_id = runtime
+        .active_tab_id
+        .clone()
+        .expect("active tab for projection completion");
+    let recorded_events = match &runtime.proxy {
+        AppEventProxy::Stub(events) => events.clone(),
+        AppEventProxy::Real(_) => panic!("test runtime must use a stub event proxy"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let completion = {
+            let mut events = recorded_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+                .map(|index| events.remove(index))
+        };
+        if let Some(UserEvent::ActiveWorkProjectionPrepared(completion)) = completion {
+            let commit = runtime.handle_active_work_projection_prepared(*completion);
+            if commit.prepared_dispatch.is_some() {
+                return runtime
+                    .active_work_projection_cache
+                    .borrow()
+                    .get(&tab_id)
+                    .cloned()
+                    .expect("committed active Work projection");
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background Active Work projection did not commit before the deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn wait_for_scheduled_scan_completion(
     events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> (
@@ -3609,10 +3652,17 @@ fn sample_runtime_with_events(
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
-        work_items_cache: std::cell::RefCell::new(
+        work_items_cache: Arc::new(Mutex::new(
             gwt_core::workspace_projection::WorkItemsCache::new(),
-        ),
+        )),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+        active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
+        active_work_projection_refresh: std::cell::RefCell::new(
+            super::ActiveWorkProjectionRefreshBroker::default(),
+        ),
+        active_work_session_ledger_cache: Arc::new(Mutex::new(
+            crate::session_ledger_cache::SessionLedgerCache::new(),
+        )),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -9219,7 +9269,7 @@ fn app_runtime_geometry_focus_dock_and_activate_never_build_disk_projection() {
 }
 
 #[test]
-fn app_runtime_full_projection_miss_invalidates_stale_replay_cache() {
+fn app_runtime_authoritative_empty_projection_replaces_stale_replay_cache() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -9248,7 +9298,7 @@ fn app_runtime_full_projection_miss_invalidates_stale_replay_cache() {
     );
 
     assert!(runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .is_some());
     assert!(runtime
         .active_work_projection_cache
@@ -9256,15 +9306,16 @@ fn app_runtime_full_projection_miss_invalidates_stale_replay_cache() {
         .contains_key("tab-1"));
 
     runtime.active_agent_sessions.clear();
-    assert!(runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
-        .is_none());
+    let empty = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .expect("authoritative empty projection");
+    assert!(empty.active_works.is_empty());
     assert!(
-        !runtime
-            .active_work_projection_cache
+        runtime
+            .active_work_projection_payload_cache
             .borrow()
             .contains_key("tab-1"),
-        "a full rebuild that finds no projection must not leave stale data for FrontendReady"
+        "an authoritative empty rebuild replaces the stale prepared replay"
     );
 }
 
@@ -24283,17 +24334,14 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         .agents
         .iter()
         .all(gwt_core::workspace_projection::WorkspaceAgentSummary::is_unassigned));
-    assert!(second_events.iter().any(|event| matches!(
-        event,
-        OutboundEvent {
-            target: DispatchTarget::Broadcast,
-            event: BackendEvent::ActiveWorkProjection { projection },
-            ..
-        } if projection.active_agents == 2
-            && projection.active_work_count == 2
-            && projection.agents.len() == 2
-            && projection.unassigned_agents.is_empty()
-    )));
+    assert!(second_events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let active_work = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(active_work.active_agents, 2);
+    assert_eq!(active_work.active_work_count, 2);
+    assert_eq!(active_work.agents.len(), 2);
+    assert!(active_work.unassigned_agents.is_empty());
 }
 
 #[test]
@@ -24344,7 +24392,7 @@ fn app_runtime_active_work_projection_groups_live_assigned_agents_by_work_id() {
     let expected_b = "work-session-session-b";
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_work_count, 2);
@@ -24393,7 +24441,7 @@ fn app_runtime_active_work_projection_includes_managed_hook_health() {
         .expect("runtime state");
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     let health = view
@@ -24747,7 +24795,7 @@ fn app_runtime_active_work_projection_groups_same_session_windows_in_one_work_ro
     }
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_work_count, 1);
@@ -24811,7 +24859,7 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
     }
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     // SPEC-2359 W16-2 (FR-389 / SC-259) supersedes the original two-row
@@ -24893,7 +24941,7 @@ fn app_runtime_active_work_projection_sets_lifecycle_state_active() {
         .insert("tab-1::agent-a".to_string(), session);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_works.len(), 1);
@@ -24971,7 +25019,7 @@ fn app_runtime_active_work_projection_uses_agent_session_id_over_branch_and_work
         .insert(session.window_id.clone(), session);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_work_count, 1);
@@ -25018,7 +25066,7 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
 
     // While the agent is live the Work is Active.
     let live_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("live projection view");
     assert_eq!(live_view.active_works.len(), 1);
     assert_eq!(live_view.active_works[0].lifecycle_state, "active");
@@ -25031,7 +25079,7 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
         .contains_key("tab-1::agent-paused"));
 
     let paused_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("paused projection view");
     assert_eq!(
         paused_view.active_works.len(),
@@ -25089,7 +25137,7 @@ fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work
         "clean intake worktree is removed when the session ends"
     );
     let active_work_count = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .map(|view| view.active_works.len())
         .unwrap_or(0);
     assert_eq!(
@@ -25327,7 +25375,7 @@ fn app_runtime_close_work_done_removes_paused_work_from_active_surface() {
     // Stop → Paused row retained on the active surface.
     runtime.mark_agent_session_stopped("tab-1::agent-done");
     let paused_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("paused projection view");
     assert_eq!(paused_view.active_works.len(), 1);
     assert_eq!(paused_view.active_works[0].lifecycle_state, "paused");
@@ -25335,13 +25383,11 @@ fn app_runtime_close_work_done_removes_paused_work_from_active_surface() {
     // Close (Done): the Work leaves the active surface.
     let events = runtime.close_work("work-session-session-done", "done");
     assert!(
-        !events.is_empty(),
-        "close_work should broadcast a refreshed projection"
+        events.is_empty(),
+        "close_work schedules the refreshed projection off the event-loop path"
     );
 
-    let closed_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
-        .expect("closed projection view");
+    let closed_view = wait_for_active_work_projection(&mut runtime);
     assert!(
         closed_view
             .active_works
@@ -25403,11 +25449,9 @@ fn app_runtime_close_work_discarded_marks_terminal_and_removes_from_surface() {
     runtime.mark_agent_session_stopped("tab-1::agent-discard");
 
     let events = runtime.close_work("work-session-session-discard", "discarded");
-    assert!(!events.is_empty());
+    assert!(events.is_empty());
 
-    let closed_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
-        .expect("closed projection view");
+    let closed_view = wait_for_active_work_projection(&mut runtime);
     assert!(
         closed_view
             .active_works
@@ -25483,7 +25527,7 @@ fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
 
     // No terminal close was recorded; the Work remains live/active.
     let live_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("live projection view");
     let work = live_view
         .active_works
@@ -25583,7 +25627,8 @@ fn app_runtime_close_work_retains_worktree_and_branch() {
 
     // No live agent session: close the Work without cleaning its materialization.
     let events = runtime.close_work("work-session-session-cleanup", "done");
-    assert!(!events.is_empty());
+    assert!(events.is_empty());
+    let _closed_projection = wait_for_active_work_projection(&mut runtime);
 
     assert!(
         worktree_path.exists(),
@@ -25646,7 +25691,7 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
     // Stop → paused marker persisted to work history.
     runtime.mark_agent_session_stopped("tab-1::agent-resume");
     let paused_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("paused projection view");
     assert_eq!(paused_view.active_works.len(), 1);
     assert_eq!(paused_view.active_works[0].lifecycle_state, "paused");
@@ -25657,7 +25702,7 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
     assert!(same_worktree_path(&worktree, &alternate_worktree_path));
     build_session(&mut runtime, alternate_worktree_path);
     let resumed_view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("resumed projection view");
     assert_eq!(
         resumed_view.active_works.len(),
@@ -25715,7 +25760,7 @@ fn app_runtime_active_work_projection_merges_live_and_paused_work_rows() {
     runtime.mark_agent_session_stopped("tab-1::agent-session-stop");
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     assert_eq!(view.active_works.len(), 2, "live + paused Work rows");
     let live = view
@@ -26542,7 +26587,7 @@ fn app_runtime_active_work_projection_resolves_branch_known_unassigned_agents_as
         .insert(session.window_id.clone(), session);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_work_count, 1);
@@ -26645,7 +26690,7 @@ fn app_runtime_active_work_projection_promotes_branch_known_unassigned_agents_to
         .insert(session.window_id.clone(), session);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_work_count, 1);
@@ -28631,7 +28676,7 @@ fn app_runtime_active_work_projection_filters_stale_saved_agents_when_no_agent_i
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_agents, 0);
@@ -28697,7 +28742,7 @@ fn app_runtime_active_work_projection_resets_stale_current_identity_when_no_agen
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.title, "Repo Work");
@@ -28767,7 +28812,7 @@ fn app_runtime_active_work_projection_filters_stale_agent_when_window_id_is_reus
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_agents, 1);
@@ -28811,7 +28856,7 @@ fn app_runtime_active_work_projection_includes_recent_workspace_journal_entries(
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(
@@ -31712,7 +31757,7 @@ fn app_runtime_active_work_projection_exposes_done_workspace_cleanup_candidate()
         .insert(repo.clone(), HashSet::new());
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let candidate = view.cleanup_candidate.expect("cleanup candidate");
 
@@ -31760,7 +31805,7 @@ fn app_runtime_active_work_projection_does_not_spawn_git_for_cleanup_candidate()
         .insert(repo.clone(), HashSet::new());
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert!(view.cleanup_candidate.is_some());
@@ -31834,7 +31879,7 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
     let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_works.len(), 64);
@@ -31966,7 +32011,7 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
 
     let started = Instant::now();
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let elapsed = started.elapsed();
 
@@ -32059,7 +32104,7 @@ fn active_work_projection_resumability_follows_published_branch_refs() {
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     let resumable_by_branch: HashMap<String, bool> = view
@@ -32190,7 +32235,7 @@ fn app_runtime_active_work_projection_exposes_saved_pr_metadata_without_live_age
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.active_agents, 0);
@@ -32263,7 +32308,7 @@ fn app_runtime_active_work_projection_hides_cleanup_candidate_for_live_agent_bra
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
     assert_eq!(view.cleanup_candidate, None);
@@ -32329,7 +32374,7 @@ fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -32383,7 +32428,7 @@ fn app_runtime_row_cleanup_candidate_exposes_merged_workspace_without_live_agent
         .insert(repo.clone(), HashSet::new());
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -32463,7 +32508,7 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -32528,7 +32573,7 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -32602,16 +32647,13 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         projection.status_category,
         gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        OutboundEvent {
-            target: DispatchTarget::Broadcast,
-            event: BackendEvent::ActiveWorkProjection { projection },
-            ..
-        } if projection.active_agents == 0
-            && projection.agents.is_empty()
-            && projection.status_category == "idle"
-    )));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let active_work = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(active_work.active_agents, 0);
+    assert!(active_work.agents.is_empty());
+    assert_eq!(active_work.status_category, "idle");
 }
 
 #[test]
@@ -32727,16 +32769,15 @@ fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
 
     // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item, and
     // the surface must update without a saved current.json or live agents —
-    // so the projection broadcast accompanies the WindowCanvasState event.
-    assert_eq!(events.len(), 2);
+    // so the projection continuation follows the WindowCanvasState event.
+    assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].event,
         BackendEvent::WindowCanvasState { .. }
     ));
-    assert!(matches!(
-        events[1].event,
-        BackendEvent::ActiveWorkProjection { .. }
-    ));
+    let projection = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(projection.active_agents, 0);
+    assert_eq!(projection.status_category, "idle");
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
@@ -32762,15 +32803,13 @@ fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_
     let mut events = Vec::new();
     runtime.push_workspace_and_active_work_projection_broadcasts(&mut events);
 
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].event,
         BackendEvent::WindowCanvasState { .. }
     ));
-    assert!(matches!(
-        events[1].event,
-        BackendEvent::ActiveWorkProjection { .. }
-    ));
+    let projection = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(projection.active_agents, 1);
 }
 
 #[test]
@@ -38123,28 +38162,21 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     .with_origin_branch("work/20260504-1234");
 
     let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
-    let event = events
+    assert!(events
         .iter()
-        .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
-        .cloned()
-        .expect("active projection broadcast");
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let projection = wait_for_active_work_projection(&mut runtime);
 
-    assert!(matches!(
-        event,
-        OutboundEvent {
-            target: DispatchTarget::Broadcast,
-            event: BackendEvent::ActiveWorkProjection { projection },
-            ..
-        } if projection.status_category == "blocked"
-            && projection.blocked_agents == 1
-            && projection.agents.iter().any(|agent|
-                agent.session_id == "session-1"
-                    && agent.status_category == "blocked"
-                    && agent.last_board_entry_id.as_deref() == Some(blocked.id.as_str())
-            )
-            && projection.board_refs == vec![blocked.id.clone()]
-            && projection.next_action.as_deref() == Some("Resolve blocker")
-    ));
+    assert_eq!(projection.status_category, "blocked");
+    assert_eq!(projection.blocked_agents, 1);
+    assert!(projection
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == "session-1"
+            && agent.status_category == "blocked"
+            && agent.last_board_entry_id.as_deref() == Some(blocked.id.as_str())));
+    assert_eq!(projection.board_refs, vec![blocked.id.clone()]);
+    assert_eq!(projection.next_action.as_deref(), Some("Resolve blocker"));
 }
 
 #[test]
@@ -38265,23 +38297,15 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
     .with_origin_session_id("session-1");
 
     let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &status);
-    let event = events
+    assert!(events
         .iter()
-        .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
-        .cloned()
-        .expect("active projection broadcast");
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let projection = wait_for_active_work_projection(&mut runtime);
 
-    assert!(matches!(
-        event,
-        OutboundEvent {
-            target: DispatchTarget::Broadcast,
-            event: BackendEvent::ActiveWorkProjection { projection },
-            ..
-        } if projection.status_category == "active"
-            && projection.active_agents == 1
-            && projection.blocked_agents == 0
-            && projection.branch.as_deref() == Some("work/20260504-1234")
-    ));
+    assert_eq!(projection.status_category, "active");
+    assert_eq!(projection.active_agents, 1);
+    assert_eq!(projection.blocked_agents, 0);
+    assert_eq!(projection.branch.as_deref(), Some("work/20260504-1234"));
 }
 
 #[test]
@@ -38344,25 +38368,20 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
     .with_origin_session_id("session-1");
 
     let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &next);
-    let event = events
+    assert!(events
         .iter()
-        .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
-        .cloned()
-        .expect("blocked projection broadcast");
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let projection = wait_for_active_work_projection(&mut runtime);
 
-    assert!(matches!(
-        event,
-        OutboundEvent {
-            target: DispatchTarget::Broadcast,
-            event: BackendEvent::ActiveWorkProjection { projection },
-            ..
-        } if projection.status_category == "blocked"
-            && projection.active_agents == 0
-            && projection.blocked_agents == 1
-            && projection.status_text == "Waiting for API credentials"
-            && projection.next_action.as_deref() == Some("Try alternate credential source")
-            && projection.branch.as_deref() == Some("work/20260504-1234")
-    ));
+    assert_eq!(projection.status_category, "blocked");
+    assert_eq!(projection.active_agents, 0);
+    assert_eq!(projection.blocked_agents, 1);
+    assert_eq!(projection.status_text, "Waiting for API credentials");
+    assert_eq!(
+        projection.next_action.as_deref(),
+        Some("Try alternate credential source")
+    );
+    assert_eq!(projection.branch.as_deref(), Some("work/20260504-1234"));
 }
 
 #[test]
@@ -44167,8 +44186,8 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
 
 /// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that updates
 /// an agent's current focus must broadcast both `WindowCanvasState` (so the
-/// pane detail rehydrates on WS reconnect / GUI reload) and
-/// `ActiveWorkProjection` (Active Work card) in the same batch. Board
+/// pane detail rehydrates on WS reconnect / GUI reload), then schedule
+/// `ActiveWorkProjection` (Active Work card) on the background path. Board
 /// `title_summary` is legacy history metadata; the live pane title comes
 /// from Workspace purpose updates.
 #[test]
@@ -44241,12 +44260,11 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
                 .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
             "expected WindowCanvasState broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
         );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "expected ActiveWorkProjection broadcast from Board path: {events:?}"
-    );
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let projection = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(projection.active_agents, 1);
 }
 
 /// Phase U-5 (SPEC-2359 US-38, FR-129, FR-130): the WebSocket reconnect
@@ -44403,12 +44421,11 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
                 .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
             "second Board post with identical current_focus must not duplicate WindowCanvasState: {second:?}"
         );
-    assert!(
-        second
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "ActiveWorkProjection should still broadcast on identical resync: {second:?}"
-    );
+    assert!(second
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let projection = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(projection.active_agents, 1);
 }
 
 #[test]
@@ -44646,7 +44663,9 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
 
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let projection = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(projection.active_agents, 1);
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab.workspace.window("agent-1").expect("agent window");
     assert_eq!(
@@ -44794,12 +44813,11 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
 
     let events = runtime.apply_workspace_projection_title_sync(&repo, &projection);
 
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "expected ActiveWorkProjection broadcast in events: {events:?}"
-    );
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let active_work = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(active_work.active_agents, 1);
 }
 
 #[test]
@@ -44944,14 +44962,12 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
             .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
         "second sync with identical title must not broadcast WindowCanvasState: {second:?}"
     );
-    // ActiveWorkProjection still fires (it's idempotent on the
-    // frontend; the active card snapshot is harmless to re-send).
-    assert!(
-        second
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "ActiveWorkProjection should still broadcast on resync: {second:?}"
-    );
+    // ActiveWorkProjection still commits on the background continuation.
+    assert!(second
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let active_work = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(active_work.active_agents, 1);
 }
 
 #[test]
@@ -44986,12 +45002,11 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
             .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
         "handle_workspace_projection_changed_events must broadcast WindowCanvasState: {events:?}"
     );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "ActiveWorkProjection broadcast must still fire: {events:?}"
-    );
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+    let active_work = wait_for_active_work_projection(&mut runtime);
+    assert_eq!(active_work.active_agents, 1);
 }
 
 #[test]
@@ -45617,7 +45632,7 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
 
     let events = runtime.handle_board_projection_changed_events(&repo);
 
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     for expected_id in [
         combined_window_id("tab-1", "board-1"),
         combined_window_id("tab-1", "board-2"),
@@ -45640,6 +45655,7 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
             ..
         } if *id == combined_window_id("tab-2", "board-3")
     )));
+    let _active_work = wait_for_active_work_projection(&mut runtime);
 }
 
 fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRuntime {
@@ -47022,7 +47038,7 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -47278,7 +47294,7 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     runtime.reconcile_workspace_worktrees(&repo);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let expected_id =
         gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/foo"), None).unwrap();
@@ -48920,7 +48936,7 @@ fn apply_work_merge_status_caches_and_flags_rows() {
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -49140,7 +49156,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
     let _ = runtime.apply_work_merge_status(&repo, event.0, event.1, event.2, event.3, event.4);
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -49331,7 +49347,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
     );
 
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
     let row = view
         .active_works
@@ -49355,7 +49371,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
         None,
     );
     let view = runtime
-        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view after cache clear");
     let row = view
         .active_works
@@ -49663,11 +49679,11 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
     );
 }
 
-/// SPEC-2359 W-16 (FR-387): the ingest completion handler runs the worktree
-/// reconcile AFTER the intake (intake → reconcile order) and rebroadcasts
-/// the projection only when the intake applied events.
+/// SPEC-2359 W-16 (FR-387): the ingest worker completes reconcile before the
+/// tao continuation, which only commits prepared branch state and schedules a
+/// projection refresh when persisted Work state changed.
 #[test]
-fn handle_work_events_ingested_broadcasts_only_on_change() {
+fn handle_work_events_ingested_commits_prepared_state_and_refreshes_only_on_change() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -49684,6 +49700,8 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
         &[WindowPreset::Shell],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     // Seed one Work record so the projection broadcast has content.
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
@@ -49696,18 +49714,31 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
     gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
         .expect("seed work record");
 
-    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false);
+    let unchanged = runtime.handle_work_events_ingested(
+        repo.clone(),
+        false,
+        Some(std::collections::HashSet::from([
+            "work/issue-3777".to_string()
+        ])),
+    );
     assert!(
         unchanged.is_empty(),
         "no-op ingest must not rebroadcast the projection"
     );
+    assert_eq!(
+        runtime.local_worktree_branches.borrow().get(&repo).cloned(),
+        Some(std::collections::HashSet::from([
+            "work/issue-3777".to_string()
+        ])),
+        "the tao continuation commits only the already-prepared branch set",
+    );
 
-    let changed = runtime.handle_work_events_ingested(repo, true);
-    assert!(
-        changed
-            .iter()
-            .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
-        "changed ingest rebroadcasts the projection"
+    let changed = runtime.handle_work_events_ingested(repo, true, None);
+    assert!(changed.is_empty());
+    assert_eq!(
+        tasks.lock().expect("queued tasks").len(),
+        1,
+        "changed ingest schedules exactly one background projection prepare",
     );
 }
 
@@ -49727,7 +49758,10 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
         sample_project_tab("tab-a", "Repo A", repo_a, ProjectKind::NonRepo, &[]),
         sample_project_tab("tab-b", "Repo B", repo_b.clone(), ProjectKind::NonRepo, &[]),
     ];
-    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-a"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-a"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     let branch = "work/inactive-cache";
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
@@ -49750,7 +49784,7 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
         .expect("seed inactive project work");
 
     let initial = runtime
-        .active_work_projection_for_tab("tab-b", &runtime.tabs[1])
+        .build_active_work_projection_for_tab_for_test("tab-b", &runtime.tabs[1])
         .expect("initial inactive projection");
     assert_eq!(initial.active_works[0].work_summary, None);
 
@@ -49765,16 +49799,38 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
         events.is_empty(),
         "an inactive project cache refresh must not broadcast into the active tab"
     );
+    tasks.lock().expect("queued tasks").remove(0)();
+    let completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("inactive projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    assert!(
+        runtime
+            .handle_active_work_projection_prepared(*completion)
+            .prepared_dispatch
+            .is_none(),
+        "inactive completion updates caches without broadcasting",
+    );
 
     runtime.active_tab_id = Some("tab-b".to_string());
-    let outbound = runtime
+    assert!(runtime
         .active_work_projection_broadcast_on_tab_change()
-        .expect("tab-change projection");
-    let BackendEvent::ActiveWorkProjection { projection } = outbound.event else {
-        panic!("expected active work projection");
+        .is_none());
+    let dispatch = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("cached tab-change dispatch");
+    let UserEvent::PreparedActiveWorkDispatch { payload, .. } = dispatch else {
+        panic!("expected PreparedActiveWorkDispatch");
     };
+    let payload: serde_json::Value = serde_json::from_str(&payload).expect("prepared payload");
     assert_eq!(
-        projection.active_works[0].work_summary.as_deref(),
+        payload["projection"]["active_works"][0]["work_summary"].as_str(),
         Some("Fresh inactive project purpose"),
         "tab change must use the target project's completion-refreshed cache",
     );
@@ -55082,5 +55138,608 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
     assert!(
         refusal_of(&events).contains("no live pane"),
         "a stale PM registration must not deliver"
+    );
+}
+
+#[test]
+fn issue_3777_runtime_hook_returns_before_full_projection_build() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "codex-1",
+        repo,
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "RuntimeHook must only enqueue projection preparation on the tao callback",
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
+        "the projection is dispatched only after background preparation commits",
+    );
+    assert_eq!(
+        tasks.lock().expect("queued tasks").len(),
+        1,
+        "one background projection worker must be queued",
+    );
+}
+
+#[test]
+fn issue_3777_tab_change_reuses_background_serialized_projection() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), payload.clone());
+
+    let structured = runtime.active_work_projection_broadcast_on_tab_change();
+
+    assert!(structured.is_none());
+    let event = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("prepared cache dispatch");
+    let UserEvent::PreparedActiveWorkDispatch {
+        tab_id,
+        target,
+        payload: dispatched,
+    } = event
+    else {
+        panic!("expected PreparedActiveWorkDispatch");
+    };
+    assert_eq!(tab_id, "tab-1");
+    assert!(matches!(target, DispatchTarget::Broadcast));
+    assert!(Arc::ptr_eq(&payload, &dispatched));
+}
+
+#[test]
+fn issue_3777_frontend_ready_reuses_background_serialized_projection() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), payload.clone());
+
+    let structured = runtime.active_work_projection_reply("client-1");
+
+    assert!(structured.is_none());
+    let event = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("prepared cache reply");
+    let UserEvent::PreparedActiveWorkDispatch {
+        target,
+        payload: dispatched,
+        ..
+    } = event
+    else {
+        panic!("expected PreparedActiveWorkDispatch");
+    };
+    assert!(matches!(target, DispatchTarget::Client(id) if id == "client-1"));
+    assert!(Arc::ptr_eq(&payload, &dispatched));
+}
+
+#[test]
+fn issue_3777_runtime_hook_refresh_burst_keeps_one_worker_and_latest_generation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    assert!(runtime
+        .refresh_active_work_projection_for_project_root(&repo)
+        .is_empty());
+    assert!(runtime
+        .refresh_active_work_projection_for_project_root(&repo)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().expect("queued tasks").len(),
+        1,
+        "a refresh burst must keep at most one worker in flight",
+    );
+
+    let first_task = tasks.lock().expect("queued tasks").remove(0);
+    first_task();
+    let first_completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("first projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(first_completion) = first_completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    let first_commit = runtime.handle_active_work_projection_prepared(*first_completion);
+    assert!(
+        first_commit.prepared_dispatch.is_none(),
+        "a stale generation must not dispatch",
+    );
+    assert!(
+        first_commit.profile.is_some(),
+        "a stale generation still emits its content-free timing profile",
+    );
+    assert_eq!(
+        tasks.lock().expect("queued tasks").len(),
+        1,
+        "the latest dirty generation starts only after the first worker completes",
+    );
+
+    let latest_task = tasks.lock().expect("queued tasks").remove(0);
+    latest_task();
+    let latest_completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("latest projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(latest_completion) = latest_completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    let latest_commit = runtime.handle_active_work_projection_prepared(*latest_completion);
+    assert!(
+        latest_commit.prepared_dispatch.is_some(),
+        "only the latest generation may commit and dispatch",
+    );
+}
+
+#[test]
+fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).expect("repo dir");
+    fs::create_dir_all(&other).expect("other dir");
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]),
+        sample_project_tab("tab-2", "Other", other, ProjectKind::Git, &[]),
+    ];
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), tabs, Some("tab-2"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.active_work_projection_cache.borrow_mut().insert(
+        "tab-1".to_string(),
+        active_work_projection_from_saved(
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+        ),
+    );
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), Arc::from("closed-project-payload"));
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-2".to_string(), Arc::from("active-project-payload"));
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(work_items_path.parent().expect("project state dir"))
+        .expect("project state dir");
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+        &work_items_path,
+        &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+    )
+    .expect("seed cached Work projection");
+    let cached_work_items = runtime
+        .work_items_cache
+        .lock()
+        .expect("Work cache")
+        .load_or_synthesize_shared(&repo)
+        .expect("cache Work projection")
+        .0;
+    let retained_work_items = Arc::downgrade(&cached_work_items);
+    drop(cached_work_items);
+
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    assert_eq!(tasks.lock().expect("queued tasks").len(), 1);
+    let cache_owner = runtime.work_items_cache.clone();
+    let cache_lease = cache_owner.lock().expect("hold Work cache lease");
+
+    runtime.close_project_tab_events("tab-1");
+
+    assert!(!runtime
+        .active_work_projection_cache
+        .borrow()
+        .contains_key("tab-1"));
+    assert!(!runtime
+        .active_work_projection_payload_cache
+        .borrow()
+        .contains_key("tab-1"));
+    assert!(
+        retained_work_items.upgrade().is_some(),
+        "a busy Work cache turns close-time eviction into a pending request"
+    );
+    drop(cache_lease);
+
+    tasks.lock().expect("queued tasks").remove(0)();
+    let completion_index = recorded_events
+        .lock()
+        .expect("recorded events")
+        .iter()
+        .position(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+        .expect("stale projection completion");
+    let completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .remove(completion_index);
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    let commit = runtime.handle_active_work_projection_prepared(*completion);
+    assert!(commit.prepared_dispatch.is_none());
+    assert!(
+        retained_work_items.upgrade().is_none(),
+        "worker completion drains the pending close-time Work cache eviction"
+    );
+    assert!(
+        tasks.lock().expect("queued tasks").is_empty(),
+        "closing a project must discard its pending generation"
+    );
+}
+
+#[test]
+fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let legacy_root = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace");
+    let legacy_current = legacy_root.join("current.json");
+    let legacy_works = legacy_root.join("work_items.json");
+    let now = Utc::now();
+    gwt_core::workspace_projection::save_workspace_projection_to_path(
+        &legacy_current,
+        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+    )
+    .expect("seed legacy current");
+    let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+    work_items.apply_event(gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-3777-legacy-first",
+        now,
+    ));
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+        &legacy_works,
+        &work_items,
+    )
+    .expect("seed legacy works");
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    tasks.lock().expect("queued tasks").remove(0)();
+    let completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("first projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    assert!(completion
+        .result
+        .as_ref()
+        .expect("prepare succeeds")
+        .is_some());
+
+    let committed = runtime.handle_active_work_projection_prepared(*completion);
+    assert!(committed.prepared_dispatch.is_some());
+    assert!(runtime
+        .active_work_projection_cache
+        .borrow()
+        .get("tab-1")
+        .is_some_and(|projection| projection
+            .active_works
+            .iter()
+            .any(|work| work.id == "work-3777-legacy-first")));
+}
+
+#[test]
+fn issue_3777_normal_refresh_does_not_erase_pending_runtime_hook_profile() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    runtime.schedule_runtime_hook_active_work_projection_refresh(&repo, "stop", "stopped");
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+
+    tasks.lock().expect("queued tasks").remove(0)();
+    let first = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("first completion");
+    let UserEvent::ActiveWorkProjectionPrepared(first) = first else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    runtime.handle_active_work_projection_prepared(*first);
+    tasks.lock().expect("queued tasks").remove(0)();
+    let latest = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("latest completion");
+    let UserEvent::ActiveWorkProjectionPrepared(latest) = latest else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+
+    assert_eq!(latest.profile.source_event, "stop");
+    assert_eq!(latest.profile.composed_state, "stopped");
+}
+
+#[test]
+fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let last_good = gwt::ActiveWorkProjectionView {
+        id: "last-good".to_string(),
+        title: "Last good".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: None,
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        pr_created_at: None,
+        board_refs: Vec::new(),
+        journal_entries: Vec::new(),
+        works: Vec::new(),
+        cleanup_candidate: None,
+        managed_hook_health: None,
+        active_work_count: 0,
+        active_works: Vec::new(),
+        agents: Vec::new(),
+        unassigned_agents: Vec::new(),
+    };
+    runtime
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), last_good);
+    let last_good_payload: Arc<str> = Arc::from("last-good-payload");
+    runtime
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab-1".to_string(), last_good_payload.clone());
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(work_items_path.parent().expect("project-state dir"))
+        .expect("project-state dir");
+    fs::write(&work_items_path, b"{not valid json").expect("corrupt works fixture");
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    tasks.lock().expect("queued tasks").remove(0)();
+    let completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("failed projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+    let commit = runtime.handle_active_work_projection_prepared(*completion);
+
+    assert!(commit.prepared_dispatch.is_none());
+    assert!(
+        commit.profile.is_some(),
+        "a failed prepare still emits its content-free timing profile",
+    );
+    assert_eq!(
+        runtime
+            .active_work_projection_cache
+            .borrow()
+            .get("tab-1")
+            .map(|projection| projection.id.as_str()),
+        Some("last-good"),
+        "a failed prepare must preserve the last-good cache",
+    );
+    assert!(Arc::ptr_eq(
+        runtime
+            .active_work_projection_payload_cache
+            .borrow()
+            .get("tab-1")
+            .expect("last-good payload"),
+        &last_good_payload,
+    ));
+}
+
+#[test]
+fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(work_items_path.parent().expect("project-state dir"))
+        .expect("project-state dir");
+    let now = Utc::now();
+    let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+    work_items.apply_event(gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-3777-profile",
+        now,
+    ));
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+        &work_items_path,
+        &work_items,
+    )
+    .expect("save works fixture");
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let lease = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(work_items_path.with_extension("lock"))
+        .expect("open Work lease");
+    lease.lock_exclusive().expect("hold Work lease");
+    let release = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(120));
+        lease.unlock().expect("release Work lease");
+    });
+
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    tasks.lock().expect("queued tasks").remove(0)();
+    release.join().expect("join Work lease holder");
+    let completion = recorded_events
+        .lock()
+        .expect("recorded events")
+        .pop()
+        .expect("projection completion");
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+        panic!("expected ActiveWorkProjectionPrepared");
+    };
+
+    assert!(
+        completion.profile.lock_wait_ms >= 75,
+        "filesystem Work lease wait must be attributed to lock_wait_ms: {:?}",
+        completion.profile
+    );
+    assert!(
+        completion.profile.parse_ms < completion.profile.lock_wait_ms,
+        "parse_ms must exclude the Work lease wait: {:?}",
+        completion.profile
+    );
+}
+
+#[test]
+fn issue_3777_runtime_hook_profile_uses_content_free_exact_substage_allowlist() {
+    let source = include_str!("../main.rs");
+    let marker = source
+        .split_once("marker = \"issue_3777_runtime_hook_profile\"")
+        .map(|(_, tail)| tail.split_once(");").map_or(tail, |(marker, _)| marker))
+        .expect("Issue #3777 RuntimeHook profile marker");
+    let mut fields = marker
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('"') {
+                return None;
+            }
+            let field = line
+                .split_once(" =")
+                .map_or_else(|| line.strip_suffix(','), |(field, _)| Some(field))?;
+            (!field.is_empty()
+                && field
+                    .chars()
+                    .all(|character| character == '_' || character.is_ascii_alphanumeric()))
+            .then_some(field)
+        })
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        vec![
+            "cache_hit",
+            "clone_ms",
+            "composed_state",
+            "dispatch_ms",
+            "lock_wait_ms",
+            "parse_ms",
+            "projection_ms",
+            "serialization_ms",
+            "source_event",
+        ],
+        "profiling fields are an exact content-free allowlist",
+    );
+    for forbidden in [
+        "project_root",
+        "window_id",
+        "message",
+        "tool_name",
+        "path",
+        "payload",
+        "error",
+        "raw",
+    ] {
+        assert!(!marker.contains(forbidden), "forbidden field {forbidden}");
+    }
+}
+
+#[test]
+fn issue_3777_serialization_profile_attributes_serializer_latency() {
+    let event = BackendEvent::ActiveWorkProjection {
+        projection: Box::new(active_work_projection_from_saved(
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project("/repo"),
+        )),
+    };
+
+    let (_payload, serialization_ms) =
+        super::workspace_views::serialize_active_work_projection_event_with(&event, |event| {
+            thread::sleep(Duration::from_millis(40));
+            serde_json::to_string(event).map_err(|error| error.to_string())
+        })
+        .expect("serialize projection event");
+
+    assert!(
+        serialization_ms >= 30,
+        "serializer latency must be attributed to serialization_ms: {serialization_ms}ms"
     );
 }

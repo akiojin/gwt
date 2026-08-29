@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
@@ -8,6 +11,8 @@ use gwt_core::workspace_projection::{
 };
 
 use super::HookError;
+
+const HOOK_WORKSPACE_REPAIR_LEASE_WAIT: Duration = Duration::from_millis(25);
 
 /// SessionStart hook: ensure the running agent session is present in the
 /// Workspace projection's `agents[]` before any further coordination CLI
@@ -150,14 +155,31 @@ pub(crate) fn handle_user_prompt_submit(_input: &str) -> Result<(), HookError> {
     handle_user_prompt_submit_for_session(&session)
 }
 
-fn handle_user_prompt_submit_for_session(session: &Session) -> Result<(), HookError> {
+pub(crate) fn handle_user_prompt_submit_for_session(session: &Session) -> Result<(), HookError> {
     let project_state_root = project_state_root_for_session(session);
-    crate::agent_project_state::repair_split_agent_state_if_needed(
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + HOOK_WORKSPACE_REPAIR_LEASE_WAIT,
+    );
+    match crate::agent_project_state::repair_split_agent_state_if_needed(
         &project_state_root,
         &session.worktree_path,
         &session.id,
-    )?;
-    Ok(())
+    ) {
+        Ok(_) => Ok(()),
+        Err(gwt_core::GwtError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            tracing::debug!(
+                session_id = %session.id,
+                "UserPromptSubmit skipped split Agent repair because the Work lease was busy"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn current_session_from_env() -> Result<Option<Session>, HookError> {
@@ -181,6 +203,7 @@ fn current_session_from_env() -> Result<Option<Session>, HookError> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use fs2::FileExt;
     use gwt_agent::{AgentId, Session};
     use gwt_core::workspace_projection::{
         load_workspace_projection, save_workspace_projection, WorkspaceAgentAffiliationStatus,
@@ -349,6 +372,68 @@ mod tests {
         assert_eq!(
             agent.current_focus, None,
             "hook must not derive current_focus from prompt"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_split_repair_fails_open_under_work_lease_contention() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = temp.path().join("split-worktree");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+
+        let mut session = fresh_session(&worktree);
+        session.id = "session-contended-repair".to_string();
+        session.project_state_root = Some(project_root.clone());
+
+        let mut canonical = projection_for(&project_root);
+        let mut canonical_agent = assigned_agent(&session.id, &worktree);
+        canonical_agent.title_summary = Some("canonical purpose".to_string());
+        canonical.agents.push(canonical_agent);
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+
+        let mut split = projection_for(&worktree);
+        let mut split_agent = assigned_agent(&session.id, &worktree);
+        split_agent.title_summary = Some("newer split purpose".to_string());
+        split_agent.updated_at = canonical.updated_at + chrono::Duration::seconds(1);
+        split.agents.push(split_agent);
+        save_workspace_projection(&worktree, &split).expect("save split projection");
+
+        let work_items_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let lease = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(work_items_path.with_extension("lock"))
+            .expect("open Work lease");
+        lease.lock_exclusive().expect("hold Work lease");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            lease.unlock().expect("release Work lease");
+        });
+
+        let started = std::time::Instant::now();
+        handle_user_prompt_submit_for_session(&session)
+            .expect("contended split repair must fail open");
+        let elapsed = started.elapsed();
+        release.join().expect("join Work lease holder");
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "UserPromptSubmit waited {elapsed:?} for the Work lease"
+        );
+        let after = load_workspace_projection(&project_root)
+            .expect("load projection")
+            .expect("projection present");
+        assert_eq!(
+            after
+                .latest_agent_for_session(&session.id)
+                .and_then(|agent| agent.title_summary.as_deref()),
+            Some("canonical purpose"),
+            "a skipped repair must preserve the canonical projection"
         );
     }
 

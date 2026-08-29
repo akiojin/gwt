@@ -74,10 +74,10 @@ pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
-    ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
-    BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress,
+    ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
+    AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch,
+    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
+    ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1291,15 +1291,23 @@ enum UserEvent {
         ai_summaries: std::collections::HashMap<String, String>,
     },
     /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
-    /// The handler runs the worktree reconcile AFTER the intake (so branches
-    /// already recorded elsewhere are not redundantly backfilled) and
-    /// rebroadcasts the Workspace projection when anything was applied.
+    /// The ingest worker runs worktree reconcile AFTER intake (so branches
+    /// already recorded elsewhere are not redundantly backfilled), then the
+    /// handler commits only prepared branch state and schedules a projection
+    /// refresh when anything was applied.
     WorkEventsIngested {
         project_root: PathBuf,
         changed: bool,
+        local_branches: Option<std::collections::HashSet<String>>,
     },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
+    },
+    ActiveWorkProjectionPrepared(Box<ActiveWorkProjectionPrepared>),
+    PreparedActiveWorkDispatch {
+        tab_id: String,
+        target: DispatchTarget,
+        payload: Arc<str>,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
@@ -2994,6 +3002,45 @@ mod tests {
         sample_runtime_with_events(temp_root, tabs, active_tab_id).0
     }
 
+    fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkProjectionView {
+        let tab_id = runtime
+            .active_tab_id
+            .clone()
+            .expect("active tab for projection completion");
+        let recorded_events = match &runtime.proxy {
+            AppEventProxy::Stub(events) => events.clone(),
+            AppEventProxy::Real(_) => panic!("test runtime must use a stub event proxy"),
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let completion = {
+                let mut events = recorded_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                events
+                    .iter()
+                    .position(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+                    .map(|index| events.remove(index))
+            };
+            if let Some(UserEvent::ActiveWorkProjectionPrepared(completion)) = completion {
+                let commit = runtime.handle_active_work_projection_prepared(*completion);
+                if commit.prepared_dispatch.is_some() {
+                    return runtime
+                        .active_work_projection_cache
+                        .borrow()
+                        .get(&tab_id)
+                        .cloned()
+                        .expect("committed active Work projection");
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background Active Work projection did not commit before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn sample_runtime_with_events(
         temp_root: &Path,
         tabs: Vec<ProjectTabRuntime>,
@@ -3063,10 +3110,17 @@ mod tests {
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
-            work_items_cache: std::cell::RefCell::new(
+            work_items_cache: Arc::new(Mutex::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
+            )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_refresh: std::cell::RefCell::new(
+                super::app_runtime::ActiveWorkProjectionRefreshBroker::default(),
+            ),
+            active_work_session_ledger_cache: Arc::new(Mutex::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -4369,22 +4423,20 @@ mod tests {
         );
         // PTY exit alone keeps the window open so launch diagnostics remain
         // visible; explicit hook stop owns structural auto-close.
-        assert_eq!(close_events.len(), 3);
+        assert_eq!(close_events.len(), 2);
         assert!(matches!(
             close_events[0].event,
-            BackendEvent::ActiveWorkProjection { .. }
-        ));
-        assert!(matches!(
-            close_events[1].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_two_id && state == WindowProcessStatus::Stopped
         ));
         assert!(matches!(
-            close_events[2].event,
+            close_events[1].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Stopped
                     && detail.as_deref() == Some("Process exited")
         ));
+        let active_work = wait_for_active_work_projection(&mut runtime);
+        assert_eq!(active_work.active_agents, 1);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(runtime.window_lookup.contains_key(&claude_two_id));
 
@@ -8778,8 +8830,10 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
+                local_branches,
             }) => {
-                let events = app.handle_work_events_ingested(project_root, changed);
+                let events =
+                    app.handle_work_events_ingested(project_root, changed, local_branches);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {
@@ -8824,6 +8878,43 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
                 let events = app.handle_workspace_projection_changed_events(&project_root);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
+                let commit = app.handle_active_work_projection_prepared(*prepared);
+                let mut dispatch_ms = 0;
+                if let Some(prepared_dispatch) = commit.prepared_dispatch {
+                    let dispatch_started = std::time::Instant::now();
+                    clients.dispatch_prepared_active_work(
+                        prepared_dispatch.payload,
+                        DispatchTarget::Broadcast,
+                    );
+                    dispatch_ms = dispatch_started.elapsed().as_millis() as u64;
+                }
+                if let Some(profile) = commit.profile {
+                    tracing::debug!(
+                        target: "gwt.frontend.timing",
+                        marker = "issue_3777_runtime_hook_profile",
+                        source_event = profile.source_event,
+                        composed_state = profile.composed_state,
+                        cache_hit = profile.cache_hit,
+                        lock_wait_ms = profile.lock_wait_ms,
+                        parse_ms = profile.parse_ms,
+                        clone_ms = profile.clone_ms,
+                        serialization_ms = profile.serialization_ms,
+                        projection_ms = profile.projection_ms,
+                        dispatch_ms,
+                        "RuntimeHook Active Work projection profile"
+                    );
+                }
+            }
+            Event::UserEvent(UserEvent::PreparedActiveWorkDispatch {
+                tab_id,
+                target,
+                payload,
+            }) => {
+                if app.active_tab_id.as_deref() == Some(tab_id.as_str()) {
+                    clients.dispatch_prepared_active_work(payload, target);
+                }
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let events = app.handle_runtime_hook_event(event);

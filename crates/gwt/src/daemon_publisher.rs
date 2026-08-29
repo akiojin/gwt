@@ -1278,7 +1278,9 @@ mod tests {
                     std::io::BufReader::new(stream.try_clone().expect("clone publisher stream"));
                 let mut writer = stream;
                 let mut line = String::new();
-                reader.read_line(&mut line).expect("read handshake");
+                if reader.read_line(&mut line).expect("read handshake") == 0 {
+                    continue;
+                }
                 let request: IpcHandshakeRequest =
                     serde_json::from_str(line.trim_end()).expect("parse handshake");
                 assert_eq!(request.scope, scope);
@@ -1288,25 +1290,39 @@ mod tests {
                     accepted: true,
                     rejection_reason: None,
                 };
-                writeln!(
+                if let Err(error) = writeln!(
                     writer,
                     "{}",
                     serde_json::to_string(&handshake).expect("serialize handshake")
-                )
-                .expect("write handshake");
+                ) {
+                    assert_eq!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe,
+                        "write handshake: {error}"
+                    );
+                    continue;
+                }
                 line.clear();
-                reader.read_line(&mut line).expect("read publish");
+                if reader.read_line(&mut line).expect("read publish") == 0 || line.trim().is_empty()
+                {
+                    continue;
+                }
                 let _: ClientFrame = serde_json::from_str(line.trim_end()).expect("parse publish");
                 let response = DaemonFrame::Error {
                     message: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR
                         .to_string(),
                 };
-                writeln!(
+                if let Err(error) = writeln!(
                     writer,
                     "{}",
                     serde_json::to_string(&response).expect("serialize response")
-                )
-                .expect("write response");
+                ) {
+                    assert_eq!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe,
+                        "write response: {error}"
+                    );
+                }
             }
         });
 

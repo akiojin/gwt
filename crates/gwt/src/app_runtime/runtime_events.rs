@@ -52,6 +52,32 @@ const RESUME_WRITER_CONFLICT_PREFIX: &str = "thread/resume failed during TUI boo
 const RESUME_WRITER_CONFLICT_SUFFIX: &str = "already has an active writer";
 const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
 
+fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'static str {
+    match source_event {
+        Some("SessionStart") => "session_start",
+        Some("UserPromptSubmit") => "user_prompt_submit",
+        Some("PreToolUse") => "pre_tool_use",
+        Some("PostToolUse") => "post_tool_use",
+        Some("Stop") => "stop",
+        Some("SubagentStart") => "subagent_start",
+        Some("SubagentStop") => "subagent_stop",
+        Some("Notification") => "notification",
+        Some("PermissionRequest") => "permission_request",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+fn runtime_hook_composed_state_profile_label(state: WindowProcessStatus) -> &'static str {
+    match state {
+        WindowProcessStatus::Running => "running",
+        WindowProcessStatus::Waiting => "waiting",
+        WindowProcessStatus::Stopped => "stopped",
+        WindowProcessStatus::Error => "error",
+        _ => "other",
+    }
+}
+
 fn marker_is_inside_double_quotes(line: &str, marker_offset: usize) -> bool {
     let mut quoted = false;
     let mut escaped = false;
@@ -1351,7 +1377,14 @@ impl AppRuntime {
                 &window_id,
             ) {
                 let _ = self.persist();
-                self.push_workspace_and_active_work_projection_broadcasts(&mut events);
+                events.push(self.workspace_state_broadcast());
+                if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                    self.schedule_runtime_hook_active_work_projection_refresh(
+                        &project_root,
+                        runtime_hook_source_event_profile_label(event.source_event.as_deref()),
+                        runtime_hook_composed_state_profile_label(composed_state),
+                    );
+                }
             }
             return events;
         }
@@ -1381,8 +1414,12 @@ impl AppRuntime {
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                events.push(event);
+            if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                self.schedule_runtime_hook_active_work_projection_refresh(
+                    &project_root,
+                    runtime_hook_source_event_profile_label(event.source_event.as_deref()),
+                    runtime_hook_composed_state_profile_label(composed_state),
+                );
             }
         }
         if hook_state_changed || effective_before != Some(composed_state) {

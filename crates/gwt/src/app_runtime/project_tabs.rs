@@ -547,6 +547,15 @@ impl AppRuntime {
             self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
 
         self.tabs.remove(index);
+        let project_still_open = self
+            .tabs
+            .iter()
+            .any(|tab| same_worktree_path(&tab.project_root, &closing_project_root));
+        self.discard_active_work_projection_for_closed_tab(
+            tab_id,
+            &closing_project_root,
+            project_still_open,
+        );
         if self.tabs.is_empty() {
             self.active_tab_id = None;
         } else if self.active_tab_id.as_deref() == Some(tab_id) {

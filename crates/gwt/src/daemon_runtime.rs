@@ -1,6 +1,8 @@
 use std::{
-    io::Read,
+    io::{BufRead, BufReader, Read, Write},
+    net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs},
     path::PathBuf,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -20,7 +22,10 @@ use crate::cli::hook::{
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
 const HOOK_LIVE_OVERALL_DEADLINE_MS: u64 = 1_000;
 const HOOK_LIVE_RETRY_DELAY_MS: u64 = 25;
+const USER_PROMPT_SUBMIT_HOOK_LIVE_DEADLINE_MS: u64 = 25;
 const AGENT_BRIDGE_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
+
+static HOOK_LIVE_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 struct HookLiveRetryPolicy {
@@ -701,19 +706,34 @@ fn send_terminalization_via_agent_bridge(
 }
 
 pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
+    handle_runtime_state_prepared(event, input).map(|_| ())
+}
+
+pub(crate) fn handle_runtime_state_prepared(
+    event: &str,
+    input: &str,
+) -> Result<Option<Session>, HookError> {
     if std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
-        return Ok(());
+        return Ok(None);
     }
-    runtime_state::handle_with_input(event, input)?;
+    let session = runtime_state::handle_with_input_prepared(event, input)?;
+    // Hook-live is a best-effort notification after the authoritative runtime
+    // state write. A missing GUI must not consume half of the aggregate
+    // UserPromptSubmit budget before the Board and obligation handlers run.
+    let _live_deadline = (event == "UserPromptSubmit").then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_millis(USER_PROMPT_SUBMIT_HOOK_LIVE_DEADLINE_MS),
+        )
+    });
     emit_live_event_fail_open(RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
         Some(event),
         runtime_state::status_for_event(event).map(str::to_string),
         None,
-        current_session_from_env(),
+        session.clone(),
         parse_hook_event_best_effort(input),
     ));
-    Ok(())
+    Ok(session)
 }
 
 pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
@@ -856,9 +876,6 @@ fn emit_live_event_with_policy(
 ) -> Result<(), String> {
     target.validate()?;
 
-    let client = reqwest::blocking::Client::builder()
-        .build()
-        .map_err(|err| format!("build hook live client failed: {err}"))?;
     let readiness_delivery = event.source_event.as_deref() == Some("SessionStart")
         && event.continuation_readiness_nonce.is_some();
     let overall_timeout = if readiness_delivery {
@@ -868,6 +885,19 @@ fn emit_live_event_with_policy(
     };
     let started = Instant::now();
     let deadline = started.checked_add(overall_timeout).unwrap_or(started);
+    let outer_deadline = gwt_core::operation_deadline::current();
+    let deadline = outer_deadline.map_or(deadline, |outer| outer.min(deadline));
+    let bounded_user_prompt_submit =
+        event.source_event.as_deref() == Some("UserPromptSubmit") && outer_deadline.is_some();
+    let use_bounded_plain_http = bounded_user_prompt_submit
+        && Url::parse(&target.url).is_ok_and(|url| url.scheme() == "http");
+    let client = if use_bounded_plain_http {
+        None
+    } else if bounded_user_prompt_submit {
+        Some(hook_live_http_client_with_deadline(deadline)?)
+    } else {
+        Some(hook_live_http_client()?)
+    };
     let mut attempts = 0usize;
 
     loop {
@@ -883,17 +913,25 @@ fn emit_live_event_with_policy(
         }
         attempts += 1;
         let attempt_timeout = policy.per_attempt_timeout.min(remaining);
-        let failure = match client
-            .post(&target.url)
-            .bearer_auth(&target.token)
-            .json(event)
-            .timeout(attempt_timeout)
-            .send()
-        {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(response) => HookLiveAttemptFailure::Http(response.status()),
-            Err(error) if error.is_timeout() => HookLiveAttemptFailure::Timeout,
-            Err(_) => HookLiveAttemptFailure::Transport,
+        let failure = if use_bounded_plain_http {
+            match bounded_plain_http_hook_live_attempt(event, target, attempt_timeout) {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            }
+        } else {
+            match client
+                .expect("reqwest client is present outside bounded plain HTTP")
+                .post(&target.url)
+                .bearer_auth(&target.token)
+                .json(event)
+                .timeout(attempt_timeout)
+                .send()
+            {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) => HookLiveAttemptFailure::Http(response.status()),
+                Err(error) if error.is_timeout() => HookLiveAttemptFailure::Timeout,
+                Err(_) => HookLiveAttemptFailure::Transport,
+            }
         };
 
         if !readiness_delivery || !failure.is_retryable() {
@@ -909,6 +947,187 @@ fn emit_live_event_with_policy(
             ));
         }
         std::thread::sleep(policy.retry_delay);
+    }
+}
+
+fn hook_live_http_client() -> Result<&'static reqwest::blocking::Client, String> {
+    if let Some(client) = HOOK_LIVE_HTTP_CLIENT.get() {
+        return Ok(client);
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|err| format!("build hook live client failed: {err}"))?;
+    let _ = HOOK_LIVE_HTTP_CLIENT.set(client);
+    HOOK_LIVE_HTTP_CLIENT
+        .get()
+        .ok_or_else(|| "hook live client initialization failed".to_string())
+}
+
+fn hook_live_http_client_with_deadline(
+    deadline: Instant,
+) -> Result<&'static reqwest::blocking::Client, String> {
+    if let Some(client) = HOOK_LIVE_HTTP_CLIENT.get() {
+        return Ok(client);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("hook live deadline expired before client initialization".to_string());
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder()
+            .build()
+            .map_err(|error| format!("build hook live client failed: {error}"));
+        let _ = sender.send(client);
+    });
+    let client = receiver
+        .recv_timeout(remaining)
+        .map_err(|_| "hook live deadline expired during client initialization".to_string())??;
+    let _ = HOOK_LIVE_HTTP_CLIENT.set(client);
+    HOOK_LIVE_HTTP_CLIENT
+        .get()
+        .ok_or_else(|| "hook live client initialization failed".to_string())
+}
+
+fn bounded_plain_http_hook_live_attempt(
+    event: &RuntimeHookEvent,
+    target: &HookForwardTarget,
+    timeout: Duration,
+) -> Result<(), HookLiveAttemptFailure> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let url = Url::parse(&target.url).map_err(|_| HookLiveAttemptFailure::Transport)?;
+    if url.scheme() != "http"
+        || target
+            .token
+            .bytes()
+            .any(|byte| !(0x21..=0x7e).contains(&byte))
+    {
+        return Err(HookLiveAttemptFailure::Transport);
+    }
+    let host = url
+        .host_str()
+        .ok_or(HookLiveAttemptFailure::Transport)?
+        .to_string();
+    let port = url.port().ok_or(HookLiveAttemptFailure::Transport)?;
+    let addresses = resolve_hook_live_addresses(&host, port, deadline)?;
+    let mut stream = None;
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(HookLiveAttemptFailure::Timeout);
+        }
+        match TcpStream::connect_timeout(&address, remaining) {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => {}
+        }
+    }
+    let mut stream = stream.ok_or_else(|| {
+        if Instant::now() >= deadline {
+            HookLiveAttemptFailure::Timeout
+        } else {
+            HookLiveAttemptFailure::Transport
+        }
+    })?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(HookLiveAttemptFailure::Timeout);
+    }
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| HookLiveAttemptFailure::Transport)?;
+    stream
+        .set_write_timeout(Some(remaining))
+        .map_err(|_| HookLiveAttemptFailure::Transport)?;
+    let _ = stream.set_nodelay(true);
+
+    let body = serde_json::to_vec(event).map_err(|_| HookLiveAttemptFailure::Transport)?;
+    if Instant::now() >= deadline {
+        return Err(HookLiveAttemptFailure::Timeout);
+    }
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let headers = format!(
+        "POST /internal/hook-live HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        target.token,
+        body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .and_then(|()| stream.write_all(&body))
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                HookLiveAttemptFailure::Timeout
+            } else {
+                HookLiveAttemptFailure::Transport
+            }
+        })?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(HookLiveAttemptFailure::Timeout);
+    }
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| HookLiveAttemptFailure::Transport)?;
+    let mut status_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut status_line)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                HookLiveAttemptFailure::Timeout
+            } else {
+                HookLiveAttemptFailure::Transport
+            }
+        })?;
+    let status = status_line
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .and_then(|value| reqwest::StatusCode::from_u16(value).ok())
+        .ok_or(HookLiveAttemptFailure::Transport)?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(HookLiveAttemptFailure::Http(status))
+    }
+}
+
+fn resolve_hook_live_addresses(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<Vec<SocketAddr>, HookLiveAttemptFailure> {
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(address, port)]);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(HookLiveAttemptFailure::Timeout);
+    }
+    let host = host.to_string();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let resolved = (host.as_str(), port)
+            .to_socket_addrs()
+            .map(|addresses| addresses.collect::<Vec<_>>());
+        let _ = sender.send(resolved);
+    });
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(addresses)) if !addresses.is_empty() => Ok(addresses),
+        Ok(Ok(_)) | Ok(Err(_)) => Err(HookLiveAttemptFailure::Transport),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(HookLiveAttemptFailure::Timeout),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(HookLiveAttemptFailure::Transport)
+        }
     }
 }
 
@@ -1179,6 +1398,28 @@ mod tests {
             short_hook_live_retry_policy(),
         )
         .expect_err("ordinary hook remains a single fail-open transport attempt");
+
+        assert_eq!(server.attempts(), 1);
+    }
+
+    #[test]
+    fn bounded_user_prompt_uses_plain_http_without_a_process_warm_client() {
+        let server = HookLiveTestServer::start(vec![(Duration::ZERO, StatusCode::NO_CONTENT)]);
+        let event = hook_live_test_event("UserPromptSubmit", None);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_millis(250),
+        );
+
+        emit_live_event_with_policy(
+            &event,
+            &server.target("private-forward-token"),
+            HookLiveRetryPolicy {
+                per_attempt_timeout: Duration::from_millis(100),
+                overall_deadline: Duration::from_millis(100),
+                retry_delay: Duration::ZERO,
+            },
+        )
+        .expect("bounded UserPromptSubmit must deliver through the cold plain HTTP path");
 
         assert_eq!(server.attempts(), 1);
     }

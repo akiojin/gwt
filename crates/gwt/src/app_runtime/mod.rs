@@ -269,6 +269,12 @@ use workspace_views::{
     workspace_execution_diagnosis_view, workspace_work_agent_view_from_ref,
     workspace_work_event_kind_wire,
 };
+pub(crate) use workspace_views::{ActiveWorkProjectionPrepared, ActiveWorkProjectionRefreshBroker};
+
+struct WorkspaceWorktreeReconcileOutcome {
+    local_branches: std::collections::HashSet<String>,
+    backfilled: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct ActiveAgentSession {
@@ -1024,13 +1030,24 @@ pub struct AppRuntime {
     pub(crate) session_ledger_cache:
         std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
     /// Same root fix for the home works.json (megabytes of Work items +
-    /// events): cache hit clones instead of re-parsing per projection event.
-    pub(crate) work_items_cache: std::cell::RefCell<gwt_core::workspace_projection::WorkItemsCache>,
+    /// events): shared cache hits reuse an Arc instead of re-parsing or deep
+    /// cloning per projection event.
+    pub(crate) work_items_cache: Arc<Mutex<gwt_core::workspace_projection::WorkItemsCache>>,
     /// SPEC-3170 FR-076: latest fully built projection per tab. FrontendReady
     /// replays this snapshot (or a live-session-only fallback) without
     /// entering disk-backed projection loading on the GUI event loop.
     pub(crate) active_work_projection_cache:
         std::cell::RefCell<HashMap<String, gwt::ActiveWorkProjectionView>>,
+    /// Background-serialized wire snapshots paired with the view cache. Tab
+    /// changes and frontend hydration reuse these Arcs instead of cloning and
+    /// serializing a large Work graph on tao.
+    pub(crate) active_work_projection_payload_cache: std::cell::RefCell<HashMap<String, Arc<str>>>,
+    /// Issue #3777: project-scoped latest-wins Work projection preparation.
+    /// All disk-backed projection work is owned by its single background worker.
+    pub(crate) active_work_projection_refresh:
+        std::cell::RefCell<ActiveWorkProjectionRefreshBroker>,
+    pub(crate) active_work_session_ledger_cache:
+        Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
@@ -2158,10 +2175,17 @@ impl AppRuntime {
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
-            work_items_cache: std::cell::RefCell::new(
+            work_items_cache: Arc::new(Mutex::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
+            )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_refresh: std::cell::RefCell::new(
+                ActiveWorkProjectionRefreshBroker::default(),
+            ),
+            active_work_session_ledger_cache: Arc::new(Mutex::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -2257,9 +2281,9 @@ impl AppRuntime {
     }
 
     /// SPEC-2359 W-16 (FR-387): run the cross-machine work events ingest on a
-    /// background thread, then hand control back to the event loop via
-    /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
-    /// intake → reconcile order (plan decision 9).
+    /// background thread, reconcile worktrees in intake → reconcile order,
+    /// then hand only prepared cache state back through
+    /// [`UserEvent::WorkEventsIngested`].
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
         if !self.note_work_events_ingest_attempt(&project_root, force) {
             return;
@@ -2301,22 +2325,32 @@ impl AppRuntime {
                 tracing::warn!(%error, "resume owner bleed repair failed");
                 false
             });
+            let reconcile = Self::reconcile_workspace_worktrees_off_event_loop(&project_root);
+            let reconciled = reconcile
+                .as_ref()
+                .is_some_and(|outcome| outcome.backfilled > 0);
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
-                changed: summary.changed() || repaired,
+                changed: summary.changed() || repaired || reconciled,
+                local_branches: reconcile.map(|outcome| outcome.local_branches),
             });
         });
     }
 
-    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]:
-    /// reconcile worktrees after the intake, kick the merge scan, and
-    /// rebroadcast the projection when the intake applied anything.
+    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]: commit
+    /// prepared branch state, kick background scans, and schedule a projection
+    /// refresh when intake/reconcile changed persisted Work state.
     pub(crate) fn handle_work_events_ingested(
         &mut self,
         project_root: PathBuf,
         changed: bool,
+        local_branches: Option<std::collections::HashSet<String>>,
     ) -> Vec<OutboundEvent> {
-        self.reconcile_workspace_worktrees(&project_root);
+        if let Some(local_branches) = local_branches {
+            self.local_worktree_branches
+                .borrow_mut()
+                .insert(project_root.clone(), local_branches);
+        }
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
         self.spawn_work_pr_titles_scan(project_root.clone());
@@ -2605,7 +2639,19 @@ impl AppRuntime {
     /// plus the home works projection) so the Workspace list shows the union
     /// of existing worktrees and unclosed records. Errors are logged and
     /// swallowed — reconciliation must never block startup or project open.
+    #[cfg(test)]
     pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
+        let Some(outcome) = Self::reconcile_workspace_worktrees_off_event_loop(project_root) else {
+            return;
+        };
+        self.local_worktree_branches
+            .borrow_mut()
+            .insert(project_root.to_path_buf(), outcome.local_branches);
+    }
+
+    fn reconcile_workspace_worktrees_off_event_loop(
+        project_root: &Path,
+    ) -> Option<WorkspaceWorktreeReconcileOutcome> {
         let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
             Ok(entries) => entries,
             Err(error) => {
@@ -2613,7 +2659,7 @@ impl AppRuntime {
                     "workspace worktree reconcile: enumerate failed for {}: {error}",
                     project_root.display()
                 );
-                return;
+                return None;
             }
         };
         // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
@@ -2625,28 +2671,39 @@ impl AppRuntime {
             .map(crate::runtime_support::normalize_branch_name)
             .filter(|branch| !branch.is_empty())
             .collect();
-        self.local_worktree_branches
-            .borrow_mut()
-            .insert(project_root.to_path_buf(), local_branches);
         let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
         if sources.is_empty() {
-            return;
+            return Some(WorkspaceWorktreeReconcileOutcome {
+                local_branches,
+                backfilled: 0,
+            });
         }
-        match gwt_core::workspace_projection::reconcile_worktree_work_items(
+        let backfilled = match gwt_core::workspace_projection::reconcile_worktree_work_items(
             project_root,
             &sources,
             chrono::Utc::now(),
         ) {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(
-                "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
-                project_root.display()
-            ),
-            Err(error) => tracing::warn!(
-                "workspace worktree reconcile failed for {}: {error}",
-                project_root.display()
-            ),
-        }
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
+                        project_root.display()
+                    );
+                }
+                count
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "workspace worktree reconcile failed for {}: {error}",
+                    project_root.display()
+                );
+                0
+            }
+        };
+        Some(WorkspaceWorktreeReconcileOutcome {
+            local_branches,
+            backfilled,
+        })
     }
 
     /// SPEC-2970 FR-009/FR-013: persist the Claude account-usage opt-in and

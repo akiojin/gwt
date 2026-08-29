@@ -12278,8 +12278,12 @@ exit 1
         });
         started_rx.recv().expect("writer started");
 
+        // Keep the observation window well below the production 250 ms lock
+        // budget. Burning 100 ms here made the success path scheduler-sensitive
+        // in the full instrumented suite even though the lock was released
+        // promptly and the exact test passed in isolation.
         assert!(
-            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            done_rx.recv_timeout(Duration::from_millis(25)).is_err(),
             "the real daemon transaction writer must wait for the sibling lock"
         );
 

@@ -637,10 +637,17 @@ mod tests {
             },
         );
 
-        // Now bring the daemon up. The resolver is on a backoff loop;
-        // wait long enough for it to call past the threshold and then
-        // start the server before the next backoff window.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Observe the intended startup race, then begin binding the daemon
+        // while the resolver still has two deterministic failures left. This
+        // guarantees the socket is live before the fourth (successful)
+        // resolve without depending on OS-thread scheduling or a fixed sleep.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while *calls.lock().unwrap() < 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resolver records the initial pre-daemon failure");
         let server_endpoint = endpoint.clone();
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
@@ -656,16 +663,12 @@ mod tests {
             channel: "board".to_string(),
             payload: json!({"entries": 11}),
         };
-        for _ in 0..200 {
-            if publisher.publish("board", event.clone()) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        // Wait up to 5 s for the callback to record the event.
+        // Publish until the callback observes one event. This verifies the
+        // end-to-end subscription instead of treating a transient forwarder
+        // count as delivery proof.
         let mut delivered = false;
         for _ in 0..500 {
+            publisher.publish("board", event.clone());
             if !received.lock().unwrap().is_empty() {
                 delivered = true;
                 break;

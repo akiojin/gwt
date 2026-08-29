@@ -192,7 +192,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 struct PreparedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -212,7 +212,7 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         _ => (None, None),
     };
     PreparedOutbound {
-        payload: serde_json::to_string(event).expect("backend event json"),
+        payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -267,12 +267,12 @@ fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
             );
         }
     }
-    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared.payload = Arc::from(serde_json::to_string(&payload).expect("backend event json"));
     prepared
 }
 
 struct QueuedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
 }
@@ -412,7 +412,7 @@ impl ClientQueue {
             Vec::new()
         };
         Some(DrainStep::Message {
-            payload: entry.payload,
+            payload: entry.payload.to_string(),
             repair_panes,
         })
     }
@@ -661,6 +661,56 @@ impl ClientHub {
                 dead_clients = ?dead_clients,
                 "disconnecting websocket clients stuck past the lossless hard cap; reconnect will replay latest state"
             );
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for client_id in dead_clients {
+                if let Some(registration) = clients.remove(&client_id) {
+                    registration.queue.close();
+                }
+            }
+        }
+    }
+
+    /// Issue #3777: enqueue a background-serialized Active Work snapshot
+    /// without reserializing its large Work/event graph on the tao thread.
+    pub(super) fn dispatch_prepared_active_work(&self, payload: Arc<str>, target: DispatchTarget) {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+            let clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients
+                .iter()
+                .map(|(id, registration)| {
+                    (
+                        id.clone(),
+                        registration.queue.clone(),
+                        registration.receives_broadcasts,
+                    )
+                })
+                .collect()
+        };
+        let kind = "active_work_projection";
+        let prepared = PreparedOutbound {
+            payload,
+            kind,
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: queue_class_for_kind(kind),
+        };
+        let mut dead_clients = Vec::new();
+        for (client_id, queue, receives_broadcasts) in snapshot {
+            let selected = match &target {
+                DispatchTarget::Broadcast => receives_broadcasts,
+                DispatchTarget::Client(target_id) => target_id == &client_id,
+            };
+            if selected && queue.enqueue(&prepared) {
+                dead_clients.push(client_id);
+            }
+        }
+        if !dead_clients.is_empty() {
             let mut clients = self
                 .clients
                 .lock()
@@ -5698,19 +5748,21 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{ "id": window_id }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{ "id": window_id }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -5878,24 +5930,26 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{
-                                "id": window_id,
-                                "preset": "agent",
-                                "status": "idle",
-                                "session_id": "target-session"
-                            }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{
+                                    "id": window_id,
+                                    "preset": "agent",
+                                    "status": "idle",
+                                    "session_id": "target-session"
+                                }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6143,21 +6197,23 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": {
-                                "windows": [{ "id": "tab-owned::agent-1" }]
-                            }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": {
+                                    "windows": [{ "id": "tab-owned::agent-1" }]
+                                }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -8032,6 +8088,31 @@ mod tests {
             retryable: true,
             retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
         }
+    }
+
+    #[test]
+    fn prepared_active_work_enqueue_reuses_the_background_payload_allocation() {
+        let queue = ClientQueue::default();
+        let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
+        let prepared = PreparedOutbound {
+            payload: payload.clone(),
+            kind: "active_work_projection",
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: QueueClass::IdempotentLatest,
+        };
+
+        assert!(!queue.enqueue(&prepared));
+
+        let state = queue
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued = state.entries.front().expect("queued Active Work payload");
+        assert!(
+            Arc::ptr_eq(&queued.payload, &payload),
+            "tao-side enqueue must retain the background Arc instead of cloning 4 MB"
+        );
     }
 
     #[test]

@@ -398,7 +398,7 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
     };
     match crate::cli::trusted_store::with_write_lease_wait(
         worktree,
-        std::time::Duration::from_millis(300),
+        prompt_write_lease_wait(),
         || {
             let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
             mark_locked(worktree, session_id, prompt, kind)
@@ -415,6 +415,13 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
         Err(err) => Err(err),
         Ok(()) => Ok(true),
     }
+}
+
+fn prompt_write_lease_wait() -> std::time::Duration {
+    let configured = std::time::Duration::from_millis(300);
+    gwt_core::operation_deadline::current().map_or(configured, |deadline| {
+        configured.min(deadline.saturating_duration_since(std::time::Instant::now()))
+    })
 }
 
 /// Settle every open obligation of the given kinds with the named canonical
@@ -596,6 +603,41 @@ pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_lease_wait_is_bounded_by_the_hook_operation_deadline() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let held_worktree = worktree.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&held_worktree, || {
+                acquired_tx.send(()).expect("signal acquired lease");
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("release lease");
+                Ok(())
+            })
+            .expect("hold write lease");
+        });
+        acquired_rx.recv().expect("lease acquired");
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(40),
+        );
+
+        let armed = mark_from_prompt(worktree.path(), "session-deadline", "バグを修正して")
+            .expect("WouldBlock fallback remains fail-open");
+
+        assert!(armed);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "prompt lease must not consume its standalone 300ms wait: {:?}",
+            started.elapsed()
+        );
+        release_tx.send(()).expect("release holder");
+        holder.join().expect("holder thread");
+    }
 
     // T-240 core: request-form producing prompts arm typed kinds; status
     // and design questions never arm.

@@ -9,6 +9,7 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
@@ -3494,6 +3495,8 @@ fn classify_json_decode_error(context: &'static str, error: serde_json::Error) -
 pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkItemsProjection>> {
     match fs::read(path) {
         Ok(bytes) => {
+            #[cfg(debug_assertions)]
+            mark_playwright_work_items_decode_started(path);
             let mut items: WorkItemsProjection = serde_json::from_slice(&bytes)
                 .map_err(|error| classify_json_decode_error("workspace work items json", error))?;
             for item in &mut items.work_items {
@@ -3513,6 +3516,24 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+#[cfg(debug_assertions)]
+fn mark_playwright_work_items_decode_started(path: &Path) {
+    if std::env::var("GWT_PLAYWRIGHT_ACTIVE_WORK_RENDEZVOUS").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = crate::paths::gwt_home().join("issue-3777-active-work-rendezvous");
+    let Ok(requested_path) = fs::read_to_string(directory.join("work-items-path")) else {
+        return;
+    };
+    let requested_path = PathBuf::from(requested_path.trim());
+    let requested_path = fs::canonicalize(&requested_path).unwrap_or(requested_path);
+    let actual_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if requested_path != actual_path {
+        return;
+    }
+    let _ = fs::write(directory.join("started"), b"started\n");
 }
 
 pub fn load_or_synthesize_workspace_work_items(repo_path: &Path) -> Result<WorkItemsProjection> {
@@ -3535,6 +3556,63 @@ pub fn load_or_synthesize_workspace_work_items(repo_path: &Path) -> Result<WorkI
     })
 }
 
+fn load_or_synthesize_workspace_work_items_profiled(
+    repo_path: &Path,
+) -> Result<(
+    WorkItemsProjection,
+    WorkItemsLoadProfile,
+    Option<WorkItemsFileSignature>,
+)> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    with_workspace_current_and_work_items_lock_profiled(
+        &current_path,
+        &work_items_path,
+        |lock_wait_micros| {
+            let parse_started = Instant::now();
+            // A Recent Project can reach this background loader before the
+            // restored-startup migration path. Materialize legacy-only state
+            // while the same project lock is held so the first authoritative
+            // projection cannot publish an empty Work list. All migration
+            // I/O is deliberately attributed to parse/work time, never lock
+            // wait time.
+            copy_validated_workspace_projection_if_needed(
+                &legacy_workspace_projection_path_for_repo_path(repo_path),
+                &current_path,
+            )?;
+            copy_validated_workspace_work_items_if_needed(
+                &legacy_workspace_work_items_path_for_repo_path(repo_path),
+                &work_items_path,
+            )?;
+            copy_legacy_workspace_file_if_needed(
+                &legacy_workspace_journal_path_for_repo_path(repo_path),
+                &journal_path,
+            )?;
+            let projection = load_or_synthesize_workspace_work_items_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                repo_path,
+            )?;
+            // Bind the cache signature to the exact projection read while the
+            // project lock is still held. A writer may publish a new file as
+            // soon as this closure returns, so metadata must not be re-read by
+            // the later cache-store step.
+            let signature = work_items_file_signature(&work_items_path);
+            Ok((
+                projection,
+                WorkItemsLoadProfile {
+                    cache_hit: false,
+                    lock_wait_micros,
+                    parse_micros: parse_started.elapsed().as_micros() as u64,
+                },
+                signature,
+            ))
+        },
+    )
+}
+
 pub fn load_or_synthesize_workspace_work_items_from_paths(
     work_items_path: &Path,
     current_path: &Path,
@@ -3551,9 +3629,9 @@ pub fn load_or_synthesize_workspace_work_items_from_paths(
 /// front of [`load_or_synthesize_workspace_work_items`]. The home works.json
 /// grows to megabytes (hundreds of Work items × thousands of events) and the
 /// UI event loop rebuilds the Workspace projection on every broadcast-bearing
-/// action; re-parsing the file each time stalls the queue. A cache hit clones
-/// the parsed projection instead. Synthesized fallbacks (works.json absent)
-/// are never cached — they must observe legacy-file changes.
+/// action; re-parsing the file each time stalls the queue. Shared callers keep
+/// an `Arc` to the parsed projection instead. Synthesized fallbacks (works.json
+/// absent) are never cached — they must observe legacy-file changes.
 #[derive(Default)]
 pub struct WorkItemsCache {
     entries: HashMap<PathBuf, CachedWorkItemsProjection>,
@@ -3561,10 +3639,53 @@ pub struct WorkItemsCache {
     pub parse_count: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_PROFILED_WORK_ITEMS_LOAD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_after_profiled_work_items_load(operation: impl FnOnce() + 'static) {
+    AFTER_PROFILED_WORK_ITEMS_LOAD.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(operation));
+    });
+}
+
+#[cfg(test)]
+fn run_after_profiled_work_items_load() {
+    AFTER_PROFILED_WORK_ITEMS_LOAD.with(|slot| {
+        if let Some(operation) = slot.borrow_mut().take() {
+            operation();
+        }
+    });
+}
+
 struct CachedWorkItemsProjection {
+    signature: WorkItemsFileSignature,
+    projection: std::sync::Arc<WorkItemsProjection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkItemsFileSignature {
     mtime: std::time::SystemTime,
     size: u64,
-    projection: WorkItemsProjection,
+}
+
+fn work_items_file_signature(path: &Path) -> Option<WorkItemsFileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(WorkItemsFileSignature {
+        mtime: metadata.modified().ok()?,
+        size: metadata.len(),
+    })
+}
+
+/// Content-free timing facts for one WorkItems cache/load operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkItemsLoadProfile {
+    pub cache_hit: bool,
+    pub lock_wait_micros: u64,
+    pub parse_micros: u64,
 }
 
 impl WorkItemsCache {
@@ -3572,15 +3693,43 @@ impl WorkItemsCache {
         Self::default()
     }
 
+    /// Release the parsed projection retained for a project that is no longer
+    /// open. Repository-scale `works.json` files expand substantially while
+    /// decoded, so keeping closed projects in this process-local cache makes
+    /// later project opens compete with state that can no longer be rendered.
+    pub fn evict(&mut self, repo_path: &Path) -> bool {
+        let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+        self.entries.remove(&work_items_path).is_some()
+    }
+
     /// Cached equivalent of [`load_or_synthesize_workspace_work_items`].
     pub fn load_or_synthesize(&mut self, repo_path: &Path) -> Result<WorkItemsProjection> {
+        let (projection, _) = self.load_or_synthesize_shared(repo_path)?;
+        Ok(projection.as_ref().clone())
+    }
+
+    /// Clone-free cache API used by background GUI projection preparation.
+    pub fn load_or_synthesize_shared(
+        &mut self,
+        repo_path: &Path,
+    ) -> Result<(std::sync::Arc<WorkItemsProjection>, WorkItemsLoadProfile)> {
         let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-        if let Some(hit) = self.lookup(&work_items_path) {
-            return Ok(hit);
+        if let Some(hit) = self.lookup_shared(&work_items_path) {
+            return Ok((
+                hit,
+                WorkItemsLoadProfile {
+                    cache_hit: true,
+                    ..WorkItemsLoadProfile::default()
+                },
+            ));
         }
-        let projection = load_or_synthesize_workspace_work_items(repo_path)?;
-        self.store(&work_items_path, &projection);
-        Ok(projection)
+        let (projection, profile, signature) =
+            load_or_synthesize_workspace_work_items_profiled(repo_path)?;
+        #[cfg(test)]
+        run_after_profiled_work_items_load();
+        let projection = std::sync::Arc::new(projection);
+        self.store_shared(&work_items_path, projection.clone(), signature);
+        Ok((projection, profile))
     }
 
     /// Paths-injected variant for tests and path-explicit callers (#3022).
@@ -3591,44 +3740,79 @@ impl WorkItemsCache {
         journal_path: &Path,
         project_root: &Path,
     ) -> Result<WorkItemsProjection> {
-        if let Some(hit) = self.lookup(work_items_path) {
-            return Ok(hit);
-        }
-        let projection = load_or_synthesize_workspace_work_items_from_paths(
+        let (projection, _) = self.load_or_synthesize_shared_from_paths(
             work_items_path,
             current_path,
             journal_path,
             project_root,
         )?;
-        self.store(work_items_path, &projection);
-        Ok(projection)
+        Ok(projection.as_ref().clone())
     }
 
-    fn lookup(&self, work_items_path: &Path) -> Option<WorkItemsProjection> {
-        let meta = fs::metadata(work_items_path).ok()?;
-        let mtime = meta.modified().ok()?;
+    /// Paths-injected clone-free cache API used by tests and explicit callers.
+    pub fn load_or_synthesize_shared_from_paths(
+        &mut self,
+        work_items_path: &Path,
+        current_path: &Path,
+        journal_path: &Path,
+        project_root: &Path,
+    ) -> Result<(std::sync::Arc<WorkItemsProjection>, WorkItemsLoadProfile)> {
+        if let Some(hit) = self.lookup_shared(work_items_path) {
+            return Ok((
+                hit,
+                WorkItemsLoadProfile {
+                    cache_hit: true,
+                    ..WorkItemsLoadProfile::default()
+                },
+            ));
+        }
+        let signature_before = work_items_file_signature(work_items_path);
+        let started = std::time::Instant::now();
+        let projection = std::sync::Arc::new(load_or_synthesize_workspace_work_items_from_paths(
+            work_items_path,
+            current_path,
+            journal_path,
+            project_root,
+        )?);
+        let parse_micros = started.elapsed().as_micros() as u64;
+        let signature_after = work_items_file_signature(work_items_path);
+        let signature = (signature_before == signature_after)
+            .then_some(signature_after)
+            .flatten();
+        self.store_shared(work_items_path, projection.clone(), signature);
+        Ok((
+            projection,
+            WorkItemsLoadProfile {
+                parse_micros,
+                ..WorkItemsLoadProfile::default()
+            },
+        ))
+    }
+
+    fn lookup_shared(&self, work_items_path: &Path) -> Option<std::sync::Arc<WorkItemsProjection>> {
+        let signature = work_items_file_signature(work_items_path)?;
         let hit = self.entries.get(work_items_path)?;
-        (hit.mtime == mtime && hit.size == meta.len()).then(|| hit.projection.clone())
+        (hit.signature == signature).then(|| hit.projection.clone())
     }
 
-    fn store(&mut self, work_items_path: &Path, projection: &WorkItemsProjection) {
+    fn store_shared(
+        &mut self,
+        work_items_path: &Path,
+        projection: std::sync::Arc<WorkItemsProjection>,
+        signature: Option<WorkItemsFileSignature>,
+    ) {
         self.parse_count += 1;
-        let Ok(meta) = fs::metadata(work_items_path) else {
+        let Some(signature) = signature else {
             // works.json absent: the result was synthesized from legacy
             // sources — do not cache it against a missing file.
-            self.entries.remove(work_items_path);
-            return;
-        };
-        let Ok(mtime) = meta.modified() else {
             self.entries.remove(work_items_path);
             return;
         };
         self.entries.insert(
             work_items_path.to_path_buf(),
             CachedWorkItemsProjection {
-                mtime,
-                size: meta.len(),
-                projection: projection.clone(),
+                signature,
+                projection,
             },
         );
     }
@@ -3660,6 +3844,13 @@ fn with_workspace_work_items_locks<T>(
     work_items_paths: &[PathBuf],
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_workspace_work_items_locks_profiled(work_items_paths, |_| operation())
+}
+
+fn with_workspace_work_items_locks_profiled<T>(
+    work_items_paths: &[PathBuf],
+    operation: impl FnOnce(u64) -> Result<T>,
+) -> Result<T> {
     let mut lock_paths = work_items_paths
         .iter()
         .map(|path| path.with_extension("lock"))
@@ -3667,6 +3858,7 @@ fn with_workspace_work_items_locks<T>(
     lock_paths.sort();
     lock_paths.dedup();
     let mut locks = Vec::with_capacity(lock_paths.len());
+    let mut lock_wait_micros = 0u64;
     for lock_path in lock_paths {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
@@ -3677,10 +3869,13 @@ fn with_workspace_work_items_locks<T>(
             .read(true)
             .write(true)
             .open(&lock_path)?;
-        lock.lock_exclusive()?;
+        let lock_started = Instant::now();
+        crate::operation_deadline::lock_exclusive(&lock)?;
+        lock_wait_micros =
+            lock_wait_micros.saturating_add(lock_started.elapsed().as_micros() as u64);
         locks.push(lock);
     }
-    let result = operation();
+    let result = operation(lock_wait_micros);
     drop(locks);
     result
 }
@@ -3701,6 +3896,22 @@ pub(crate) fn with_workspace_current_and_work_items_lock<T>(
     )
 }
 
+fn with_workspace_current_and_work_items_lock_profiled<T>(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation: impl FnOnce(u64) -> Result<T>,
+) -> Result<T> {
+    let current_work_items_path = current_path.with_file_name("works.json");
+    with_workspace_transaction_recovery_observed_profiled(
+        vec![current_work_items_path, work_items_path.to_path_buf()],
+        vec![
+            pending_workspace_state_transaction_path(current_path),
+            pending_workspace_state_transaction_path_for_work_items(work_items_path),
+        ],
+        |_recovered, lock_wait_micros| operation(lock_wait_micros),
+    )
+}
+
 fn with_workspace_transaction_recovery<T>(
     base_lock_targets: Vec<PathBuf>,
     base_marker_paths: Vec<PathBuf>,
@@ -3716,8 +3927,21 @@ fn with_workspace_transaction_recovery_observed<T>(
     base_marker_paths: Vec<PathBuf>,
     operation: impl FnOnce(bool) -> Result<T>,
 ) -> Result<T> {
+    with_workspace_transaction_recovery_observed_profiled(
+        base_lock_targets,
+        base_marker_paths,
+        |recovered, _lock_wait_micros| operation(recovered),
+    )
+}
+
+fn with_workspace_transaction_recovery_observed_profiled<T>(
+    base_lock_targets: Vec<PathBuf>,
+    base_marker_paths: Vec<PathBuf>,
+    operation: impl FnOnce(bool, u64) -> Result<T>,
+) -> Result<T> {
     let mut operation = Some(operation);
     let mut recovered = false;
+    let mut total_lock_wait_micros = 0u64;
     loop {
         let mut marker_paths = base_marker_paths.clone();
         marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
@@ -3745,68 +3969,72 @@ fn with_workspace_transaction_recovery_observed<T>(
         marker_paths.sort();
         marker_paths.dedup();
 
-        let outcome = with_workspace_work_items_locks(&lock_targets, || {
-            marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
-                &lock_targets,
-            )?);
-            marker_paths.sort();
-            marker_paths.dedup();
-            loop {
-                let pending = match find_pending_workspace_state_transaction(&marker_paths) {
-                    Ok(pending) => pending,
-                    Err(
-                        error @ GwtError::JsonDecode {
-                            kind: JsonDecodeKind::Malformed,
-                            ..
-                        },
-                    ) => {
-                        quarantine_invalid_pending_workspace_state_transactions(
-                            &marker_paths,
-                            &error,
-                        )?;
-                        return Err(error);
-                    }
-                    Err(error) => return Err(error),
-                };
-                let Some(transaction) = pending else {
-                    break;
-                };
-                if let Some(external_commit) = transaction.external_commit.as_ref() {
-                    if external_commit.phase == ExternalWorkspaceCommitPhase::Prepared {
-                        return Err(GwtError::Other(format!(
+        let outcome = with_workspace_work_items_locks_profiled(
+            &lock_targets,
+            |lock_wait_micros| {
+                total_lock_wait_micros = total_lock_wait_micros.saturating_add(lock_wait_micros);
+                marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
+                    &lock_targets,
+                )?);
+                marker_paths.sort();
+                marker_paths.dedup();
+                loop {
+                    let pending = match find_pending_workspace_state_transaction(&marker_paths) {
+                        Ok(pending) => pending,
+                        Err(
+                            error @ GwtError::JsonDecode {
+                                kind: JsonDecodeKind::Malformed,
+                                ..
+                            },
+                        ) => {
+                            quarantine_invalid_pending_workspace_state_transactions(
+                                &marker_paths,
+                                &error,
+                            )?;
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let Some(transaction) = pending else {
+                        break;
+                    };
+                    if let Some(external_commit) = transaction.external_commit.as_ref() {
+                        if external_commit.phase == ExternalWorkspaceCommitPhase::Prepared {
+                            return Err(GwtError::Other(format!(
                             "workspace state transaction external commit is unresolved for operation {}",
                             external_commit.operation_id
                         )));
-                    }
-                    if external_commit.reconciliation_work_items_path.is_some() {
-                        return Err(GwtError::Other(format!(
+                        }
+                        if external_commit.reconciliation_work_items_path.is_some() {
+                            return Err(GwtError::Other(format!(
                             "workspace state transaction external commit requires canonical reconciliation for operation {}",
                             external_commit.operation_id
                         )));
+                        }
                     }
+                    let required_locks = [
+                        transaction.current_path.with_file_name("works.json"),
+                        transaction.work_items_path.clone(),
+                    ];
+                    if required_locks
+                        .iter()
+                        .any(|required| !lock_targets.iter().any(|locked| locked == required))
+                    {
+                        return Ok(None);
+                    }
+                    apply_workspace_state_transaction_locked(
+                        &transaction.current_path,
+                        &transaction,
+                        true,
+                    )?;
+                    recovered = true;
                 }
-                let required_locks = [
-                    transaction.current_path.with_file_name("works.json"),
-                    transaction.work_items_path.clone(),
-                ];
-                if required_locks
-                    .iter()
-                    .any(|required| !lock_targets.iter().any(|locked| locked == required))
-                {
-                    return Ok(None);
-                }
-                apply_workspace_state_transaction_locked(
-                    &transaction.current_path,
-                    &transaction,
-                    true,
-                )?;
-                recovered = true;
-            }
-            let operation = operation
-                .take()
-                .expect("workspace state operation must run exactly once");
-            operation(recovered).map(Some)
-        })?;
+                let operation = operation
+                    .take()
+                    .expect("workspace state operation must run exactly once");
+                operation(recovered, total_lock_wait_micros).map(Some)
+            },
+        )?;
         if let Some(result) = outcome {
             return Ok(result);
         }

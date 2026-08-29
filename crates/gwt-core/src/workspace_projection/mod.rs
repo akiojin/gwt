@@ -88,9 +88,9 @@ pub use persistence::{
     ExternalWorkspaceCommitResolution, PruneAction, PruneSkipReason, PruneSummary,
     ResumeOwnerBleedRepairReport, SessionBoundWorkspaceMutationTarget,
     SessionBoundWorkspaceTerminalTarget, StaleReason, TrackedWorkEventPolicy, WorkItemsCache,
-    WorkItemsRebuildOutcome, WorkspaceRetentionConfig, WorkspaceSessionAssignment,
-    WorkspaceTerminalEventOutcome, WorktreeReconcileSource, WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
-    WORK_ITEMS_REBUILD_VERSION,
+    WorkItemsLoadProfile, WorkItemsRebuildOutcome, WorkspaceRetentionConfig,
+    WorkspaceSessionAssignment, WorkspaceTerminalEventOutcome, WorktreeReconcileSource,
+    WORKSPACE_AGENT_IDENTITY_RESET_VERSION, WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
     with_workspace_current_and_work_items_lock, with_workspace_work_items_lock, write_atomic,

@@ -88,6 +88,86 @@ fn work_items_cache_reuses_unchanged_file_and_reparses_on_change() {
 }
 
 #[test]
+fn issue_3777_work_items_cache_evicts_a_closed_project_projection() {
+    let _guard = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&project_root);
+
+    let now = chrono::Utc::now();
+    let mut projection = super::WorkItemsProjection::empty(now);
+    projection.apply_event(sample_work_event("work-3777-evict", now));
+    super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+
+    let mut cache = super::WorkItemsCache::new();
+    let (loaded, _) = cache
+        .load_or_synthesize_shared(&project_root)
+        .expect("load cached projection");
+    let retained = std::sync::Arc::downgrade(&loaded);
+    drop(loaded);
+    assert!(
+        retained.upgrade().is_some(),
+        "the cache owns the parsed projection before project close"
+    );
+
+    assert!(cache.evict(&project_root));
+    assert!(
+        retained.upgrade().is_none(),
+        "eviction must release the parsed projection owned only by the cache"
+    );
+    assert!(
+        !cache.evict(&project_root),
+        "evicting an already-absent project is a no-op"
+    );
+}
+
+#[test]
+fn issue_3777_work_items_cache_does_not_attach_a_newer_signature_to_an_older_projection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap();
+    record_workspace_work_event(&repo, sample_work_event("work-a", now))
+        .expect("seed projection A");
+
+    let writer_repo = repo.clone();
+    set_after_profiled_work_items_load(move || {
+        record_workspace_work_event(
+            &writer_repo,
+            sample_work_event("work-b", now + chrono::Duration::seconds(1)),
+        )
+        .expect("writer publishes projection B after reader releases the project lock");
+    });
+
+    let mut cache = WorkItemsCache::new();
+    let (first, first_profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("reader returns projection A");
+    assert!(!first_profile.cache_hit);
+    assert_eq!(first.work_items.len(), 1, "first reader owns projection A");
+
+    let (second, second_profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("next reader observes projection B");
+    assert!(
+        !second_profile.cache_hit,
+        "projection A must not be cached with projection B's file signature"
+    );
+    assert_eq!(
+        second.work_items.len(),
+        2,
+        "a cache miss must reload the writer's projection B"
+    );
+}
+
+#[test]
 fn work_items_loader_classifies_malformed_and_incompatible_json() {
     let temp = tempfile::tempdir().expect("tempdir");
     let malformed_path = temp.path().join("malformed.json");
@@ -449,6 +529,45 @@ fn work_items_cache_never_caches_synthesized_fallback() {
         )
         .expect("post-create load");
     assert_eq!(loaded.work_items.len(), 1);
+}
+
+#[test]
+fn issue_3777_profiled_cache_materializes_legacy_only_project_before_first_projection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+
+    let legacy_current = legacy_workspace_projection_path_for_repo_path(&repo);
+    let legacy_works = legacy_workspace_work_items_path_for_repo_path(&repo);
+    let canonical_current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let canonical_works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 1, 0, 0).unwrap();
+    let current = WorkspaceProjection::default_for_project(&repo);
+    let mut works = WorkItemsProjection::empty(now);
+    works.apply_event(sample_work_event("work-legacy-first-projection", now));
+    save_workspace_projection_to_path(&legacy_current, &current).expect("seed legacy current");
+    save_workspace_work_items_projection_to_path(&legacy_works, &works).expect("seed legacy works");
+    assert!(!canonical_current.exists());
+    assert!(!canonical_works.exists());
+
+    let mut cache = WorkItemsCache::new();
+    let (loaded, profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("first profiled load");
+
+    assert!(!profile.cache_hit);
+    assert!(loaded
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-legacy-first-projection"));
+    assert!(canonical_current.is_file());
+    assert!(canonical_works.is_file());
+    assert!(load_workspace_projection_from_path(&canonical_current)
+        .expect("canonical current load")
+        .is_some());
 }
 
 #[test]
@@ -12696,4 +12815,41 @@ fn session_bound_board_store_rejects_reassignment_then_update_authority_escalati
         after == before,
         "rejected in-closure reassignment must preserve current/work/event/journal bytes"
     );
+}
+
+#[test]
+fn issue_3777_runtime_hook_shared_cache_hit_does_not_deep_clone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let current_path = tmp.path().join("current.json");
+    let journal_path = tmp.path().join("journal.jsonl");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let now = chrono::Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    projection.apply_event(sample_work_event("work-3777", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+    let mut cache = WorkItemsCache::new();
+
+    let (first, first_profile) = cache
+        .load_or_synthesize_shared_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            &project_root,
+        )
+        .expect("first shared load");
+    let (second, second_profile) = cache
+        .load_or_synthesize_shared_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            &project_root,
+        )
+        .expect("second shared load");
+
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    assert!(!first_profile.cache_hit);
+    assert!(second_profile.cache_hit);
 }
