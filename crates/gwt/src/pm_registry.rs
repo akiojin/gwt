@@ -1087,6 +1087,7 @@ fn create_pm_scratch_quarantine(path: &Path) -> io::Result<PmScratchQuarantine> 
             ".gwt-pm-scratch-quarantine-{}",
             uuid::Uuid::new_v4().simple()
         ));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
