@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.83.6] - 2026-08-29
+
+### Bug Fixes
+
+- **pm:** Refresh resident worktree at safe boundaries
+- **pm:** Preserve fresh spawn without remote evidence
+- **pm:** Preserve caller head during degraded spawn
+- **issue-monitor:** Retry tracking ref CAS conflicts
+- **test:** Pm_launch_config テストに env_test_lock を追加 (#3572)
+- **board:** Close overflowed blocked escalations via params.resolves
+- **pane:** Finalize close teardown off the GUI thread
+- **pane:** PR #3787 レビュー指摘3件を修正 (#3783)
+- Deliver Grok handoffs through semantic receipts
+- **test:** PM close fixture で queued finalizer を drain する (#3572)
+- **issue-monitor:** Converge closed issue state
+- **issue-monitor:** Issue_updated_at 欠落時の live Open 行を fail-open にする (#3602)
+- **launch:** Readiness 上限で生存 pane を kill しない
+
+### Miscellaneous Tasks
+
+- **work:** Settle issue 3783 delivery events
+- **ci:** Daemon subscribe_resolver flake (2738 pass / 1 fail) の再トリガー (#3612)
+- **ci:** Timing flake 再トリガー2回目 — 各回別テスト（subscribe_resolver→pane_sync bounded）のCI負荷起因 (#3612)
+- Satisfy latest stable clippy slice fill lint
+- **ci:** Durable delivery 3テスト同時flakeの再トリガー — 直列x4/並列x3 全PASS実測 (#3612)
+- **ci:** Timing flake 再トリガー — 3件クラスタは再発せず毎回別の単発 timing test のみ (#3612)
+- **ci:** Daemon server flake の再トリガー (#3612)
+- **ci:** Daemon zombie-marker flake の再トリガー (#3612)
+- **ci:** Daemon zombie-marker flake の再トリガー (#3612)
+
+### Testing
+
+- **pm:** Materialize canonical restore fixture
+- **pm:** Isolate generated config fixture home
+- **pane:** Stabilize close verification contracts
+- **daemon:** Isolate deadline-sensitive contracts
+
+
 ## [9.83.5] - 2026-08-27
 
 ### Bug Fixes
