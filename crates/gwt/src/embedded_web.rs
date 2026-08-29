@@ -24,6 +24,7 @@ const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
 const CSS_CONTENT_TYPE: &str = "text/css; charset=utf-8";
 const FONT_CONTENT_TYPE: &str = "font/woff2";
+const ICON_CONTENT_TYPE: &str = "image/x-icon";
 
 /// First-party sources change on every build; never serve them stale.
 const MUTABLE_CACHE_CONTROL: &str = "no-store, max-age=0";
@@ -270,6 +271,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: JS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/app.js")),
+    },
+    StaticAsset {
+        route: "/favicon.ico",
+        content_type: ICON_CONTENT_TYPE,
+        cache_control: Some(IMMUTABLE_CACHE_CONTROL),
+        body: AssetBody::Bytes(include_bytes!("../../../assets/icons/icon.ico")),
     },
     // Vendored xterm.js — pinned versions bundled so the terminal works
     // offline without CDN reach.

@@ -669,6 +669,16 @@ fn provider_conversation_cwd(path: &Path) -> std::io::Result<Option<PathBuf>> {
 pub(super) fn provider_conversation_availability(
     session: &gwt_agent::Session,
 ) -> ProviderConversationAvailability {
+    provider_conversation_availability_with_grok_home(
+        session,
+        gwt_core::usage::grok::grok_home().as_deref(),
+    )
+}
+
+pub(super) fn provider_conversation_availability_with_grok_home(
+    session: &gwt_agent::Session,
+    grok_home: Option<&Path>,
+) -> ProviderConversationAvailability {
     let Some(conversation_id) = session.exact_resume_session_id() else {
         return ProviderConversationAvailability::Missing;
     };
@@ -688,6 +698,27 @@ pub(super) fn provider_conversation_availability(
             };
             gwt_core::usage::codex::rollout_for_session(&home, conversation_id)
         }
+        gwt_agent::AgentId::GrokBuild => {
+            let Some(home) = grok_home else {
+                return ProviderConversationAvailability::Unknown;
+            };
+            return match gwt_core::usage::grok::resumable_session_summary(
+                home,
+                conversation_id,
+                &session.worktree_path,
+            ) {
+                Ok(gwt_core::usage::grok::GrokSessionStoreAvailability::Present(_)) => {
+                    ProviderConversationAvailability::Present
+                }
+                Ok(gwt_core::usage::grok::GrokSessionStoreAvailability::Missing) => {
+                    ProviderConversationAvailability::Missing
+                }
+                Ok(gwt_core::usage::grok::GrokSessionStoreAvailability::Foreign) => {
+                    ProviderConversationAvailability::Foreign
+                }
+                Err(_) => ProviderConversationAvailability::Unknown,
+            };
+        }
         _ => return ProviderConversationAvailability::Unknown,
     };
     let Some(path) = path else {
@@ -703,13 +734,27 @@ pub(super) fn provider_conversation_availability(
     }
 }
 
+#[cfg(test)]
 pub(super) fn configure_provider_continuation(
     config: &mut gwt_agent::LaunchConfig,
     source_session: &gwt_agent::Session,
 ) -> gwt::ContinueWorkOutcomeKind {
+    configure_provider_continuation_with_grok_home(config, source_session, None)
+}
+
+pub(super) fn configure_provider_continuation_with_grok_home(
+    config: &mut gwt_agent::LaunchConfig,
+    source_session: &gwt_agent::Session,
+    grok_home: Option<&Path>,
+) -> gwt::ContinueWorkOutcomeKind {
+    let availability = if source_session.agent_id == gwt_agent::AgentId::GrokBuild {
+        provider_conversation_availability_with_grok_home(source_session, grok_home)
+    } else {
+        provider_conversation_availability(source_session)
+    };
     let exact_resume_is_safe = source_session.exact_resume_session_id().is_some()
         && !matches!(
-            provider_conversation_availability(source_session),
+            availability,
             ProviderConversationAvailability::Missing | ProviderConversationAvailability::Foreign
         );
     if exact_resume_is_safe {
@@ -718,6 +763,26 @@ pub(super) fn configure_provider_continuation(
     config.session_mode = gwt_agent::SessionMode::Normal;
     config.resume_session_id = None;
     gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+}
+
+impl AppRuntime {
+    /// Resolve Grok's session store from the same active Profile environment
+    /// and child cwd that the eventual provider process receives.
+    pub(super) fn active_profile_grok_home_for_continuation(
+        &self,
+        source_session: &gwt_agent::Session,
+        launch_cwd: &Path,
+    ) -> Option<PathBuf> {
+        let profile_config_path = self.profile_config_path().ok()?;
+        let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+            &profile_config_path,
+            source_session.runtime_target,
+        )
+        .ok()?
+        .with_project_root(launch_cwd)
+        .into_parts();
+        gwt_core::usage::grok::grok_home_from_env(&effective_env, launch_cwd)
+    }
 }
 
 fn path_matches(left: &Path, right: &Path) -> bool {
@@ -730,7 +795,10 @@ fn path_matches(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn session_matches_project_state(session: &gwt_agent::Session, project_root: &Path) -> bool {
+pub(super) fn session_matches_project_state(
+    session: &gwt_agent::Session,
+    project_root: &Path,
+) -> bool {
     if let Some(root) = session
         .project_state_root
         .as_deref()
@@ -5702,7 +5770,19 @@ impl AppRuntime {
                 let mut config = launch_config_from_persisted_session(source_session);
                 config.working_dir = Some(target.worktree_path.clone());
                 config.branch = Some(source_session.branch.clone());
-                let outcome = configure_provider_continuation(&mut config, source_session);
+                let grok_home = (source_session.agent_id == gwt_agent::AgentId::GrokBuild)
+                    .then(|| {
+                        self.active_profile_grok_home_for_continuation(
+                            source_session,
+                            &target.worktree_path,
+                        )
+                    })
+                    .flatten();
+                let outcome = configure_provider_continuation_with_grok_home(
+                    &mut config,
+                    source_session,
+                    grok_home.as_deref(),
+                );
                 (config, outcome)
             }
             ContinueWorkLaunchSeed::WorkProjection {
