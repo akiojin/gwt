@@ -3092,7 +3092,8 @@ fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
     assert!(matches!(
         outcome,
         IssueMonitorRequeueOutcome::Requeued {
-            stale_window_id: None
+            stale_window_id: None,
+            ..
         }
     ));
 
