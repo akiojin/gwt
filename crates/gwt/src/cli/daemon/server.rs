@@ -59,6 +59,18 @@ const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn issue_monitor_prefs_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        .filter(|timeout| *timeout <= 60_000)
+    {
+        return Duration::from_millis(timeout);
+    }
+    ISSUE_MONITOR_PREFS_TIMEOUT
+}
+
 /// How often a serving daemon re-checks that its endpoint descriptor is still
 /// on disk and still describes this process (#3766 AC-2 self-heal). A cheap
 /// stat per tick; short enough that CLI callers recover within seconds after
@@ -2642,7 +2654,7 @@ fn persist_daemon_issue_monitor_state(
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let recovery_baseline = monitor.prefs();
     match crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
@@ -12417,6 +12429,10 @@ exit 1
 
     #[test]
     fn daemon_persist_waits_for_sibling_lock_and_rebases_committed_state() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_timeout = ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS", "2000");
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let unrelated_failure = crate::IssueMonitorFailedIssue {
