@@ -80,18 +80,20 @@ pub(crate) use app_runtime::{
     ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
-pub(crate) use docker_launch::{
-    apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
-    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
-    resolve_docker_shell_command,
-};
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
     mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
     resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
+};
+pub(crate) use docker_launch::{
+    detect_wizard_docker_context_and_status, docker_binary_for_launch,
+    docker_compose_exec_env_args, ensure_docker_launch_service_ready,
+    finalize_docker_agent_launch_config_with_binding, prepare_docker_runtime_for_launch,
+    register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
+    resolve_docker_agent_program_with_binding, resolve_docker_launch_plan,
+    resolve_docker_shell_command, DockerLaunchBinding,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
@@ -7752,14 +7754,14 @@ mod tests {
             .env_vars
             .insert("EXTRA_FLAG".to_string(), "1".to_string());
         let runtime = super::resolved_test_docker_runtime(temp.path());
+        let plan = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = super::DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
 
-        let runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
-            &project,
-            &mut config,
-            Some(&runtime),
-        )
-        .expect("finalize docker launch")
-        .expect("Docker runtime worktree");
+        let runtime_worktree =
+            super::finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalize docker launch")
+                .expect("Docker runtime worktree");
 
         assert_eq!(config.command, runtime.binary());
         assert_eq!(runtime_worktree, "/workspace/app");
@@ -7808,13 +7810,13 @@ mod tests {
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
         let runtime = super::resolved_test_docker_runtime(temp.path());
+        let plan = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = super::DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
 
-        let _runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
-            &project,
-            &mut config,
-            Some(&runtime),
-        )
-        .expect("finalize docker launch");
+        let _runtime_worktree =
+            super::finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalize docker launch");
 
         assert_eq!(config.command, runtime.binary());
         assert_eq!(

@@ -401,6 +401,22 @@ fn absolute_launch_cwd(cwd: Option<&Path>) -> PathBuf {
 }
 
 fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -> Option<String> {
+    effective_launch_path_with_inherited(env, remove_env, || {
+        host_process_env()
+            .into_iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| value)
+    })
+}
+
+fn effective_launch_path_with_inherited<F>(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    inherited_path: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Option<String>,
+{
     if let Some((_, value)) = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
         return Some(value.clone());
     }
@@ -410,10 +426,7 @@ fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -
     {
         return None;
     }
-    host_process_env()
-        .into_iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value)
+    inherited_path()
 }
 
 fn find_package_runner_in_path(
@@ -3825,24 +3838,41 @@ mod tests {
         std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
         write_test_runner(&inherited_bin.join("npx"));
         write_test_runner(&explicit_bin.join("npx"));
-        let _lock = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &inherited_bin);
-
-        let removed = resolve_host_npx_fallback_executable_with_effective_env(
-            &HashMap::new(),
-            &["PATH".to_string()],
-            Some(temp.path()),
-        );
-        let overridden = resolve_host_npx_fallback_executable_with_effective_env(
+        let inherited_consulted = std::cell::Cell::new(false);
+        let removed_path =
+            effective_launch_path_with_inherited(&HashMap::new(), &["PATH".to_string()], || {
+                inherited_consulted.set(true);
+                Some(inherited_bin.display().to_string())
+            });
+        let overridden_path = effective_launch_path_with_inherited(
             &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
             &["PATH".to_string()],
-            Some(temp.path()),
+            || {
+                inherited_consulted.set(true);
+                Some(inherited_bin.display().to_string())
+            },
         );
+        let removed = removed_path
+            .as_deref()
+            .and_then(|path| {
+                find_package_runner_in_path(npx_fallback_candidates(), Some(path), temp.path())
+            })
+            .map(|(executable, _)| executable)
+            .unwrap_or_else(|| "npx".to_string());
+        let overridden = overridden_path
+            .as_deref()
+            .and_then(|path| {
+                find_package_runner_in_path(npx_fallback_candidates(), Some(path), temp.path())
+            })
+            .map(|(executable, _)| executable)
+            .unwrap_or_else(|| "npx".to_string());
 
         assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
         assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
+        assert!(
+            !inherited_consulted.get(),
+            "explicit PATH or PATH removal must not hydrate the inherited host environment"
+        );
     }
 
     #[cfg(not(windows))]

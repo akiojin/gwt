@@ -787,6 +787,10 @@ pub enum IssueMonitorFailure {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder_window_id: Option<String>,
     },
+    /// Codex rendered its directory-trust onboarding prompt in a live pane.
+    /// Only the exact Issue Monitor window binding may commit this terminal
+    /// human handoff; standalone and stale panes are rejected by the driver.
+    CodexDirectoryTrustPrompt,
     /// Issue #3616: the provider backing the agent ran out of quota.
     ///
     /// Distinct from every other agent exit because the cause is stated by the
@@ -3383,6 +3387,27 @@ impl IssueMonitorState {
             }
         }
         resumed
+    }
+
+    /// Escalate a Codex directory-trust prompt only while its source pane is
+    /// still the exact live window bound to `issue_number`.
+    pub fn try_escalate_codex_directory_trust_prompt(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        reason: impl Into<String>,
+    ) -> bool {
+        if !self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|stored_window_id| {
+                issue_monitor_window_ids_match(stored_window_id, source_window_id)
+            })
+        {
+            return false;
+        }
+        self.escalate_to_needs_human(issue_number, reason);
+        true
     }
 
     /// SPEC #3200 FR-027: escalate an issue to the terminal `NeedsHuman` state —
@@ -9899,6 +9924,70 @@ mod tests {
             monitor.prefs(),
             successor,
             "a stale source window cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_escalates_exact_live_window_and_releases_slot() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+
+        assert!(monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-1::agent-old",
+            "Codex requires directory trust confirmation for the managed worktree",
+        ));
+
+        assert_eq!(monitor.active_count(), 0, "NeedsHuman releases the slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert_eq!(
+            monitor
+                .inbox_item(42)
+                .and_then(|item| item.error_message.as_deref()),
+            Some("Codex requires directory trust confirmation for the managed worktree")
+        );
+        assert!(
+            !monitor
+                .try_escalate_codex_directory_trust_prompt(42, "tab-1::agent-old", "duplicate",),
+            "replayed prompt output is idempotently rejected after the live binding is cleared"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_cannot_escalate_foreign_or_successor_window() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let original = monitor.prefs();
+
+        assert!(!monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-2::agent-old",
+            "foreign tab",
+        ));
+        assert!(!monitor.try_escalate_codex_directory_trust_prompt(
+            43,
+            "tab-1::agent-old",
+            "foreign issue",
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-1::agent-old",
+            "first prompt",
+        ));
+        monitor.complete_active_launch(42, "tab-1::agent-successor");
+        let successor = monitor.prefs();
+        assert!(!monitor.try_escalate_codex_directory_trust_prompt(
+            42,
+            "tab-1::agent-old",
+            "stale prompt replay",
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale prompt must not revoke the successor launch"
         );
     }
 

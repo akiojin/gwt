@@ -277,10 +277,14 @@ pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Resul
         .map_err(|err| io::Error::other(format!("settings.local.json serialize failed: {err}")))?;
 
     {
-        let mut tmp = fs::File::create(&tmp_path)?;
+        let mut tmp = create_atomic_staging_file(&tmp_path)?;
         tmp.write_all(json.as_bytes())?;
         tmp.write_all(b"\n")?;
         tmp.sync_all()?;
+    }
+    if let Err(error) = preserve_existing_destination_permissions(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
     }
 
     commit_staged_file(&tmp_path, path)?;
@@ -288,18 +292,68 @@ pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Resul
 }
 
 pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
+    write_text_atomically_with_replace_policy(
+        path,
+        content,
+        replace_staged_file,
+        production_replace_failure_staging(),
+    )
+}
+
+#[cfg(test)]
+fn write_text_atomically_with_replace(
+    path: &Path,
+    content: &str,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    write_text_atomically_with_replace_policy(path, content, replace, ReplaceFailureStaging::Remove)
+}
+
+fn write_text_atomically_with_replace_policy(
+    path: &Path,
+    content: &str,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    failure_staging: ReplaceFailureStaging,
+) -> io::Result<()> {
     let tmp_path = atomic_staging_path(path, "gwt-managed")?;
 
-    {
-        let mut tmp = fs::File::create(&tmp_path)?;
+    let write_result = (|| {
+        let mut tmp = create_atomic_staging_file(&tmp_path)?;
         tmp.write_all(content.as_bytes())?;
         if !content.ends_with('\n') {
             tmp.write_all(b"\n")?;
         }
-        tmp.sync_all()?;
+        tmp.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    if let Err(error) = preserve_existing_destination_permissions(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
     }
 
-    commit_staged_file(&tmp_path, path)?;
+    commit_staged_file_with_replace_policy(&tmp_path, path, replace, failure_staging)
+}
+
+#[cfg(unix)]
+fn preserve_existing_destination_permissions(
+    staging_path: &Path,
+    destination: &Path,
+) -> io::Result<()> {
+    match fs::metadata(destination) {
+        Ok(metadata) => fs::set_permissions(staging_path, metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn preserve_existing_destination_permissions(
+    _staging_path: &Path,
+    _destination: &Path,
+) -> io::Result<()> {
     Ok(())
 }
 
@@ -316,20 +370,115 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
     )))
 }
 
+fn create_atomic_staging_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    let _replace_guard = {
-        static WINDOWS_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = WINDOWS_REPLACE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if destination.exists() {
-            fs::remove_file(destination)?;
+    commit_staged_file_with_replace_policy(
+        staging_path,
+        destination,
+        replace_staged_file,
+        production_replace_failure_staging(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplaceFailureStaging {
+    Remove,
+    RetainForRecovery,
+}
+
+fn production_replace_failure_staging() -> ReplaceFailureStaging {
+    if cfg!(windows) {
+        ReplaceFailureStaging::RetainForRecovery
+    } else {
+        ReplaceFailureStaging::Remove
+    }
+}
+
+fn commit_staged_file_with_replace_policy(
+    staging_path: &Path,
+    destination: &Path,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    failure_staging: ReplaceFailureStaging,
+) -> io::Result<()> {
+    match replace(staging_path, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if failure_staging == ReplaceFailureStaging::Remove {
+                let _ = fs::remove_file(staging_path);
+                return Err(error);
+            }
+            Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; atomic replacement may have partially changed the destination; recovery staging retained at {}",
+                    staging_path.display()
+                ),
+            ))
         }
-        guard
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(staging_path, destination)
+}
+
+#[cfg(windows)]
+fn replace_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{
+            MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACE_FILE_FLAGS,
+        },
     };
 
-    fs::rename(staging_path, destination)
+    let staging_wide = staging_path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+
+    if destination.exists() {
+        // ReplaceFileW preserves the destination's attributes and ACLs while
+        // atomically installing the fully-synced staging file.
+        unsafe {
+            ReplaceFileW(
+                PCWSTR(destination_wide.as_ptr()),
+                PCWSTR(staging_wide.as_ptr()),
+                PCWSTR::null(),
+                REPLACE_FILE_FLAGS(0),
+                None,
+                None,
+            )
+        }
+        .map_err(io::Error::other)
+    } else {
+        unsafe {
+            MoveFileExW(
+                PCWSTR(staging_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(io::Error::other)
+    }
 }
 
 pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
@@ -712,6 +861,116 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn failed_atomic_text_replace_preserves_destination_and_cleans_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        fs::write(&destination, "old durable config\n").unwrap();
+
+        let error = write_text_atomically_with_replace(
+            &destination,
+            "new config",
+            |staging, replacement_destination| {
+                assert_eq!(replacement_destination, destination);
+                assert_eq!(
+                    fs::read_to_string(replacement_destination).unwrap(),
+                    "old durable config\n",
+                    "replacement must never pre-delete the canonical config"
+                );
+                assert_eq!(fs::read_to_string(staging).unwrap(), "new config\n");
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected atomic replacement failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "old durable config\n"
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-")),
+            "failed replacement must clean the uncommitted staging file"
+        );
+    }
+
+    #[test]
+    fn partial_replace_failure_retains_recovery_staging_with_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        fs::write(&destination, "old durable config\n").unwrap();
+
+        let error = write_text_atomically_with_replace_policy(
+            &destination,
+            "new recoverable config",
+            |_staging, _replacement_destination| {
+                Err(io::Error::other("injected partial replacement failure"))
+            },
+            ReplaceFailureStaging::RetainForRecovery,
+        )
+        .unwrap_err();
+
+        let recovery_files = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_files.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&recovery_files[0]).unwrap(),
+            "new recoverable config\n"
+        );
+        assert!(error.to_string().contains("recovery staging retained"));
+        assert!(
+            error
+                .to_string()
+                .contains(&recovery_files[0].display().to_string()),
+            "diagnostic must identify the exact recoverable file: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_text_replace_preserves_existing_destination_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        fs::write(&destination, "old config\n").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_text_atomically(&destination, "new config").unwrap();
+
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "new config\n");
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_text_create_is_owner_only_before_any_existing_mode_can_be_copied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("new-config.toml");
+
+        write_text_atomically(&destination, "new config").unwrap();
+
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn concurrent_codex_hook_regeneration_uses_distinct_atomic_temp_files() {

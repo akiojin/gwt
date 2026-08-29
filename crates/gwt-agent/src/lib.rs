@@ -49,12 +49,11 @@ pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
     install_launch_gwt_bin_env_with_lookup, pane_websocket_url_for_launch_runtime,
-    prepare_agent_launch, register_codex_managed_hook_trust_in_docker,
-    resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe_and_repair,
-    resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
-    HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
-    PreparedAgentLaunch, PreparedProcessLaunch, ResolvedHostPackagePlan,
-    WindowsNpxCacheRepairCandidate,
+    prepare_agent_launch, resolve_host_runner_health_checked,
+    resolve_host_runner_health_checked_with_probe_and_repair, resolve_launch_worktree,
+    resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup, HookForwardEnv,
+    HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome, PreparedAgentLaunch,
+    PreparedProcessLaunch, ResolvedHostPackagePlan, WindowsNpxCacheRepairCandidate,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,

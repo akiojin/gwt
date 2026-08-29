@@ -85,6 +85,7 @@ pub enum HookKind {
     WorkflowPolicy,
     Forward,
     RegisterCodexManagedHookTrust,
+    RegisterCodexManagedProjectTrust,
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
@@ -108,6 +109,7 @@ impl HookKind {
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
             "register-codex-managed-hook-trust" => Some(Self::RegisterCodexManagedHookTrust),
+            "register-codex-managed-project-trust" => Some(Self::RegisterCodexManagedProjectTrust),
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
@@ -421,6 +423,35 @@ pub fn run_daemon_hook<E: CliEnv>(
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
+        HookKind::RegisterCodexManagedProjectTrust => {
+            let project_root = option_value(rest, "--project-root")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let Some(codex_config_path) = option_value(rest, "--codex-config")
+                .map(std::path::PathBuf::from)
+                .or_else(default_codex_config_path)
+            else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "hook.register_codex_managed_project_trust: missing --codex-config and home directory is unavailable"
+                );
+                return Ok(2);
+            };
+            match gwt_skills::register_codex_managed_project_trust(
+                &project_root,
+                &codex_config_path,
+            ) {
+                Ok(report) => {
+                    let _ = writeln!(
+                        env.stdout(),
+                        "trusted gwt-managed Codex worktree {}",
+                        report.project_path.display()
+                    );
+                    Ok(0)
+                }
+                Err(err) => Err(io_as_api_error(err)),
+            }
+        }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
             let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
@@ -470,9 +501,15 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {
-    gwt_core::paths::gwt_home()
-        .parent()
-        .map(|home| home.join(".codex/config.toml"))
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("config.toml"))
+        .or_else(|| {
+            gwt_core::paths::gwt_home()
+                .parent()
+                .map(|home| home.join(".codex/config.toml"))
+        })
 }
 
 #[cfg(test)]

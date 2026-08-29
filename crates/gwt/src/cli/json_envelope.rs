@@ -432,6 +432,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
             hook_register_codex_trust(params)?
         }
+        "hook.register_codex_managed_project_trust"
+        | "hook.register-codex-managed-project-trust" => hook_register_codex_project_trust(params)?,
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
@@ -1021,6 +1023,24 @@ fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, 
     }
     Ok(CliCommand::Hook(HookCommand::Run {
         name: "register-codex-managed-hook-trust".to_string(),
+        rest,
+    }))
+}
+
+fn hook_register_codex_project_trust(
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    let mut rest = Vec::new();
+    if let Some(project_root) = optional_string(params, "project_root")? {
+        rest.push("--project-root".to_string());
+        rest.push(project_root);
+    }
+    if let Some(codex_config) = optional_string(params, "codex_config")? {
+        rest.push("--codex-config".to_string());
+        rest.push(codex_config);
+    }
+    Ok(CliCommand::Hook(HookCommand::Run {
+        name: "register-codex-managed-project-trust".to_string(),
         rest,
     }))
 }
@@ -3026,6 +3046,24 @@ mod tests {
             ),
             CliCommand::Hook(_)
         ));
+        assert_eq!(
+            ok(
+                "hook.register_codex_managed_project_trust",
+                json!({
+                    "project_root": "/repo",
+                    "codex_config": "/cfg",
+                })
+            ),
+            CliCommand::Hook(HookCommand::Run {
+                name: "register-codex-managed-project-trust".to_string(),
+                rest: vec![
+                    "--project-root".to_string(),
+                    "/repo".to_string(),
+                    "--codex-config".to_string(),
+                    "/cfg".to_string(),
+                ],
+            })
+        );
     }
 
     #[test]

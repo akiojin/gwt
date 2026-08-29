@@ -1864,6 +1864,22 @@ fn try_apply_typed_issue_monitor_failure(
                 holder_window_id.as_deref(),
             ))
         }
+        IssueMonitorControl::AgentFailed {
+            issue_number,
+            window_id,
+            message,
+            failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+        } => {
+            let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
+            let Some(issue_number) = issue_number else {
+                return Some(false);
+            };
+            Some(monitor.try_escalate_codex_directory_trust_prompt(
+                issue_number,
+                &window_id,
+                message,
+            ))
+        }
         // Issue #3616: a quota block releases the slot and holds the issue
         // until the provider recovers. Nothing about the work failed, so it
         // never reaches `record_agent_window_failed` — that path is terminal
@@ -1894,6 +1910,13 @@ fn try_apply_typed_issue_monitor_failure(
         // means a pane already exists.
         IssueMonitorControl::LaunchFailed {
             failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit { .. }),
+            ..
+        } => Some(false),
+        // A directory-trust prompt is rendered only after a pane exists. The
+        // launch channel has no source window identity and is never allowed to
+        // commit this terminal transition.
+        IssueMonitorControl::LaunchFailed {
+            failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
             ..
         } => Some(false),
         _ => unreachable!("typed failure helper requires typed failure control"),
@@ -2015,6 +2038,7 @@ fn apply_routine_issue_monitor_control(
             // Issue #3616: the launch path cannot observe a provider refusal —
             // the agent has to be running to be refused.
             Some(crate::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
+            Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt) => false,
             None => monitor.record_launch_failed_delivery(
                 issue_number,
                 message,
@@ -2060,6 +2084,14 @@ fn apply_routine_issue_monitor_control(
                     resets_at.as_deref(),
                     &now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
+            }
+            Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
+                let issue_number =
+                    issue_number.or_else(|| monitor.launched_window_issue(&window_id));
+                let Some(issue_number) = issue_number else {
+                    return false;
+                };
+                monitor.try_escalate_codex_directory_trust_prompt(issue_number, &window_id, message)
             }
             None => {
                 if let Some(issue_number) = issue_number {
@@ -2604,14 +2636,33 @@ fn persist_daemon_issue_monitor_state(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
+    persist_daemon_issue_monitor_state_observed(
+        prefs_path,
+        monitor,
+        ISSUE_MONITOR_PREFS_TIMEOUT,
+        || {},
+    )
+}
+
+fn persist_daemon_issue_monitor_state_observed(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    prefs_timeout: Duration,
+    on_first_contention: impl FnMut(),
+) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + prefs_timeout,
     );
     let recovery_baseline = monitor.prefs();
-    match crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
-        monitor.rebase_daemon_driver_prefs(disk);
-        *disk = monitor.prefs();
-    }) {
+    match crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
+        prefs_path,
+        &recovery_baseline,
+        on_first_contention,
+        |disk| {
+            monitor.rebase_daemon_driver_prefs(disk);
+            *disk = monitor.prefs();
+        },
+    ) {
         Ok((_persisted, ())) => true,
         Err(error) => {
             tracing::warn!(
@@ -4267,17 +4318,23 @@ mod tests {
         ));
 
         fs::remove_file(&endpoint_path).expect("simulate descriptor loss");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !endpoint_path.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            endpoint_path.exists(),
-            "self-heal must restore the deleted endpoint descriptor"
-        );
-        let restored: DaemonEndpoint =
-            serde_json::from_slice(&fs::read(&endpoint_path).expect("read restored descriptor"))
-                .expect("parse restored descriptor");
+        let restored = tokio::time::timeout(MARKER_WAIT_HANG_GUARD, async {
+            loop {
+                if let Ok(payload) = fs::read(&endpoint_path) {
+                    if let Ok(candidate) = serde_json::from_slice::<DaemonEndpoint>(&payload) {
+                        if candidate.pid == endpoint.pid
+                            && candidate.auth_token == endpoint.auth_token
+                            && candidate.bind == endpoint.bind
+                        {
+                            break candidate;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("self-heal must restore a usable endpoint descriptor");
         assert_eq!(restored.pid, endpoint.pid);
         assert_eq!(restored.auth_token, endpoint.auth_token);
         assert_eq!(restored.bind, endpoint.bind);
@@ -5924,10 +5981,12 @@ exit 0
         );
 
         assert_eq!(
-            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 &prefs_path,
                 &mut monitor,
                 accepted.clone(),
+                Duration::from_secs(30),
+                || {},
             ),
             super::IssueMonitorControlCommit::RetryableFailure
         );
@@ -5946,10 +6005,12 @@ exit 0
         // returning Committed.
         monitor = stale_before_control;
         assert!(matches!(
-            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 &prefs_path,
                 &mut monitor,
                 accepted,
+                Duration::from_secs(30),
+                || {},
             ),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
@@ -6655,6 +6716,89 @@ exit 0
                 "the typed failure and optional known holder must survive daemon decode"
             );
         }
+    }
+
+    #[test]
+    fn codex_directory_trust_failure_decodes_and_escalates_only_the_exact_live_window() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(sample_issue_monitor_issue(42), "claim-directory-trust");
+        monitor
+            .next_launch_request("2026-08-29T00:00:00Z")
+            .expect("launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-42",
+                    "message": "Codex requires directory trust confirmation for the managed worktree",
+                    "failure": {
+                        "kind": "codex_directory_trust_prompt",
+                    },
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("typed directory-trust control");
+        assert!(matches!(
+            &control,
+            IssueMonitorControl::AgentFailed {
+                failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+                ..
+            }
+        ));
+
+        assert!(apply_issue_monitor_control(&mut monitor, control.clone()));
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "typed escalation releases the slot"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::NeedsHuman)
+        );
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "receipt replay is idempotent once the live binding is gone"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_failure_rejects_stale_window_and_launch_failure_channels() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(sample_issue_monitor_issue(42), "claim-successor");
+        monitor
+            .next_launch_request("2026-08-29T00:00:00Z")
+            .expect("launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-successor");
+        let original = monitor.prefs();
+        let stale_agent = IssueMonitorControl::AgentFailed {
+            issue_number: Some(42),
+            window_id: "tab-1::agent-old".to_string(),
+            message: "stale directory prompt".to_string(),
+            failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+        };
+        let launch_failure = IssueMonitorControl::LaunchFailed {
+            issue_number: 42,
+            message: "directory prompt cannot exist before a pane".to_string(),
+            delivery_id: None,
+            materializer_id: None,
+            failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+        };
+
+        assert!(!apply_issue_monitor_control(&mut monitor, stale_agent));
+        assert!(!apply_issue_monitor_control(&mut monitor, launch_failure));
+        assert_eq!(monitor.prefs(), original, "rejected sources are inert");
     }
 
     #[tokio::test]
@@ -12266,20 +12410,29 @@ exit 1
         );
 
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
-        let (started_tx, started_rx) = mpsc::channel();
+        let (contended_tx, contended_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let writer_path = prefs_path.clone();
         let writer = thread::spawn(move || {
-            started_tx.send(()).expect("signal writer start");
-            super::persist_daemon_issue_monitor_state(&writer_path, &mut stale_monitor);
+            let persisted = super::persist_daemon_issue_monitor_state_observed(
+                &writer_path,
+                &mut stale_monitor,
+                Duration::from_secs(30),
+                move || {
+                    contended_tx
+                        .send(())
+                        .expect("signal exact sibling-lock contention");
+                },
+            );
             done_tx
-                .send(stale_monitor)
+                .send((persisted, stale_monitor))
                 .expect("return committed monitor");
         });
-        started_rx.recv().expect("writer started");
-
+        contended_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("daemon persist reaches the held sibling lock");
         assert!(
-            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "the real daemon transaction writer must wait for the sibling lock"
         );
 
@@ -12302,10 +12455,11 @@ exit 1
         write_issue_monitor_prefs_without_lock(&prefs_path, &newer_disk);
         FileExt::unlock(&lock).expect("release issue monitor prefs lock");
 
-        let committed_monitor = done_rx
+        let (persisted, committed_monitor) = done_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("daemon writer completes after unlock");
         writer.join().expect("daemon writer thread");
+        assert!(persisted, "daemon persist succeeds after contention clears");
         let committed =
             crate::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
 

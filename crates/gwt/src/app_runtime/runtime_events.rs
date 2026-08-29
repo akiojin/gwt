@@ -51,6 +51,8 @@ const RESUME_WRITER_CONFLICT_OUTER_PREFIX: &str = "Failed to resume session from
 const RESUME_WRITER_CONFLICT_PREFIX: &str = "thread/resume failed during TUI bootstrap:";
 const RESUME_WRITER_CONFLICT_SUFFIX: &str = "already has an active writer";
 const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
+const CODEX_DIRECTORY_TRUST_PROMPT_REASON: &str =
+    "Codex requires directory trust confirmation for the managed worktree";
 
 fn marker_is_inside_double_quotes(line: &str, marker_offset: usize) -> bool {
     let mut quoted = false;
@@ -93,10 +95,11 @@ fn resume_writer_conflict_outer_offset(line: &str) -> Option<usize> {
 
 /// Classify a typed failure out of an agent's exit detail.
 ///
-/// Two causes are typed today, and they are checked in this order because they
-/// answer different questions. A provider quota block is a property of the
-/// account and applies to any session mode, so it is tested first; the
-/// late-resume writer race can only happen while resuming.
+/// The two exit-detail causes are checked in this order because they answer
+/// different questions. A provider quota block is a property of the account
+/// and applies to any session mode, so it is tested first; the late-resume
+/// writer race can only happen while resuming. Screen-only onboarding prompts
+/// are classified separately from this exit-detail path.
 pub(super) fn classify_issue_monitor_failure(
     detail: &str,
     session_mode: gwt_agent::SessionMode,
@@ -322,6 +325,7 @@ impl AppRuntime {
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
         })];
         if publish_to_daemon {
+            events.extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id));
             let prompt = self.current_screen_approval_prompt(&output_id);
             events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
             // Issue #3616: the only place a still-running quota-blocked pane can
@@ -332,6 +336,33 @@ impl AppRuntime {
             );
         }
         events
+    }
+
+    fn observe_codex_directory_trust_prompt_from_screen(
+        &mut self,
+        window_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some((provider, screen)) = self.current_approval_screen(window_id) else {
+            return Vec::new();
+        };
+        if gwt::window_state::directory_trust_prompt_fingerprint(provider, &screen).is_none() {
+            return Vec::new();
+        }
+        let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) else {
+            return Vec::new();
+        };
+        let Some(issue_number) =
+            self.issue_monitor_live_issue_number_for_window(&project_root, window_id)
+        else {
+            return Vec::new();
+        };
+        self.issue_monitor_agent_failed_events_with_failure(
+            &project_root,
+            window_id,
+            CODEX_DIRECTORY_TRUST_PROMPT_REASON,
+            Some(issue_number),
+            Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+        )
     }
 
     fn current_screen_approval_prompt(&self, id: &str) -> Option<u64> {

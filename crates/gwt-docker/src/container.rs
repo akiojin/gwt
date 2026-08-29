@@ -325,6 +325,27 @@ fn run_docker_with_output_streaming_in_dir_and_timeout<F>(
 where
     F: FnMut(CommandOutputStream, &str),
 {
+    run_container_runtime_with_output_streaming_in_dir_and_timeout(
+        &docker_binary(),
+        args,
+        action,
+        current_dir,
+        timeout,
+        on_line,
+    )
+}
+
+fn run_container_runtime_with_output_streaming_in_dir_and_timeout<F>(
+    runtime_binary: &std::ffi::OsStr,
+    args: &[&str],
+    action: &str,
+    current_dir: Option<&std::path::Path>,
+    timeout: Duration,
+    on_line: F,
+) -> Result<Output>
+where
+    F: FnMut(CommandOutputStream, &str),
+{
     // SPEC-2809 / SPEC-1924 Phase D-docker — chain the existing callback
     // with a `ProcessConsoleHub` push so the docker tab of the Console
     // window and the Logs Process facet observe every line. The timeout
@@ -336,7 +357,7 @@ where
     let started_at = Instant::now();
     let mut on_line = wrap_on_line_with_hub(on_line, hub.clone(), spawn_id);
 
-    let mut command = gwt_core::process::hidden_command(docker_binary());
+    let mut command = gwt_core::process::hidden_command(runtime_binary);
     command
         .args(args)
         .stdout(Stdio::piped())
@@ -794,6 +815,26 @@ pub fn compose_service_exec_capture_with_files(
         "docker compose exec",
         Some(compose_parent_dir_for_files(compose_files)),
         docker_compose_exec_timeout(),
+    )
+}
+
+/// Execute an already-built Compose command with the runtime binary pinned by
+/// the caller's resolved launch binding. This preserves the ordinary Compose
+/// exec timeout, output logging, and process-console behavior without reading
+/// ambient `GWT_DOCKER_BIN` again.
+pub fn compose_exec_capture_with_resolved_runtime_args(
+    runtime: &crate::detect::ResolvedContainerRuntime,
+    compose_files: &[PathBuf],
+    args: &[String],
+) -> Result<Output> {
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_container_runtime_with_output_streaming_in_dir_and_timeout(
+        std::ffi::OsStr::new(runtime.binary()),
+        &arg_refs,
+        "docker compose exec",
+        Some(compose_parent_dir_for_files(compose_files)),
+        docker_compose_exec_timeout(),
+        |_, _| {},
     )
 }
 

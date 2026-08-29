@@ -1,10 +1,12 @@
 //! Codex hook trust-state registration for gwt-managed project hooks.
 
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io,
     path::{Path, PathBuf},
 };
 
+use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -32,6 +34,12 @@ pub struct CodexHookTrustEntry {
 pub struct CodexHookTrustReport {
     pub config_path: PathBuf,
     pub trusted_entries: Vec<CodexHookTrustEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexProjectTrustReport {
+    pub config_path: PathBuf,
+    pub project_path: PathBuf,
 }
 
 pub fn collect_codex_managed_hook_trust_entries(
@@ -166,6 +174,268 @@ pub fn register_codex_managed_hook_trust_for_mode(
         });
     }
 
+    update_codex_config(config_path, |root_table| {
+        let hooks_table = ensure_child_table(root_table, "hooks")?;
+        let state_table = ensure_child_table(hooks_table, "state")?;
+
+        for entry in &trusted_entries {
+            let hook_state = ensure_child_table(state_table, &entry.key)?;
+            enable_hook_unless_explicitly_disabled(hook_state);
+            hook_state.insert(
+                "trusted_hash".to_string(),
+                toml::Value::String(entry.trusted_hash.clone()),
+            );
+        }
+        Ok(())
+    })?;
+
+    Ok(CodexHookTrustReport {
+        config_path: config_path.to_path_buf(),
+        trusted_entries,
+    })
+}
+
+pub fn register_codex_managed_project_trust(
+    worktree: &Path,
+    config_path: &Path,
+) -> io::Result<CodexProjectTrustReport> {
+    register_codex_managed_project_trust_with_writer(worktree, config_path, write_text_atomically)
+}
+
+fn register_codex_managed_project_trust_with_writer(
+    worktree: &Path,
+    config_path: &Path,
+    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<CodexProjectTrustReport> {
+    let canonical_worktree = fs::canonicalize(worktree)?;
+    let project_path = gwt_core::paths::normalize_windows_child_process_path(&canonical_worktree);
+
+    update_codex_config_with_writer(
+        config_path,
+        |root_table| ensure_codex_project_trust_level(root_table, &project_path),
+        write_config,
+    )?;
+
+    Ok(CodexProjectTrustReport {
+        config_path: config_path.to_path_buf(),
+        project_path,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingCodexProjectTrust {
+    Missing,
+    Trusted,
+}
+
+fn ensure_codex_project_trust_level(
+    root_table: &mut toml::Table,
+    project_path: &Path,
+) -> io::Result<()> {
+    let project_key = project_path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "gwt-managed Codex worktree path is not valid UTF-8: {}",
+                project_path.display()
+            ),
+        )
+    })?;
+
+    let projects = match root_table.get("projects") {
+        Some(toml::Value::Table(projects)) => Some(projects),
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Codex config key `projects` must be a TOML table",
+            ));
+        }
+        None => None,
+    };
+    let mut equivalent_count = 0usize;
+    let mut exact_key_exists = false;
+    let mut observed_trust: Option<ExistingCodexProjectTrust> = None;
+
+    if let Some(projects) = projects {
+        for (key, value) in projects {
+            if !codex_project_keys_equivalent(key, project_key) {
+                continue;
+            }
+            equivalent_count += 1;
+            exact_key_exists |= key == project_key;
+
+            let project = value.as_table().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Codex project alias `{key}` must be a TOML table"),
+                )
+            })?;
+            let trust = match project.get("trust_level") {
+                Some(toml::Value::String(level)) if level == "untrusted" => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "gwt-managed Codex worktree is explicitly untrusted through alias `{key}`"
+                        ),
+                    ));
+                }
+                Some(toml::Value::String(level)) if level == "trusted" => {
+                    ExistingCodexProjectTrust::Trusted
+                }
+                Some(toml::Value::String(level)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Codex project trust level for alias `{key}` is unsupported: {level}"
+                        ),
+                    ));
+                }
+                Some(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Codex project trust level for alias `{key}` must be a string"),
+                    ));
+                }
+                None => ExistingCodexProjectTrust::Missing,
+            };
+            if observed_trust.is_some_and(|observed| observed != trust) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Codex project trust has conflicting aliases for {}",
+                        project_path.display()
+                    ),
+                ));
+            }
+            observed_trust = Some(trust);
+        }
+    }
+
+    if observed_trust == Some(ExistingCodexProjectTrust::Missing)
+        && (!exact_key_exists || equivalent_count > 1)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Codex project trust has conflicting aliases for {}",
+                project_path.display()
+            ),
+        ));
+    }
+
+    let projects = ensure_child_table(root_table, "projects")?;
+    let project = ensure_child_table(projects, project_key)?;
+    project.insert(
+        "trust_level".to_string(),
+        toml::Value::String("trusted".to_string()),
+    );
+    Ok(())
+}
+
+fn codex_project_keys_equivalent(candidate: &str, project_key: &str) -> bool {
+    let normalized_candidate =
+        gwt_core::paths::normalize_windows_child_process_path_text(candidate);
+    if normalized_candidate == project_key {
+        return true;
+    }
+
+    match (
+        normalized_windows_project_identity(candidate),
+        normalized_windows_project_identity(project_key),
+    ) {
+        (Some(candidate), Some(project)) => candidate == project,
+        _ => false,
+    }
+}
+
+fn normalized_windows_project_identity(value: &str) -> Option<String> {
+    const POWERSHELL_FILE_SYSTEM_PROVIDER_PREFIX: &str = r"Microsoft.PowerShell.Core\FileSystem::";
+
+    let value = strip_ascii_prefix_ignore_case(value, POWERSHELL_FILE_SYSTEM_PROVIDER_PREFIX)
+        .unwrap_or(value);
+    let mut normalized = value.replace('\\', "/");
+    if let Some(rest) = strip_ascii_prefix_ignore_case(&normalized, "//?/UNC/") {
+        normalized = format!("//{rest}");
+    } else if let Some(rest) = strip_ascii_prefix_ignore_case(&normalized, "//?/") {
+        normalized = rest.to_string();
+    }
+
+    let (prefix, remainder, protected_components) =
+        if let Some(unc_path) = normalized.strip_prefix("//") {
+            let components = unc_path
+                .split('/')
+                .filter(|component| !component.is_empty())
+                .collect::<Vec<_>>();
+            if components.len() < 2 {
+                return None;
+            }
+            (
+                format!(
+                    "//{}/{}",
+                    components[0].to_lowercase(),
+                    components[1].to_lowercase()
+                ),
+                components[2..].to_vec(),
+                0,
+            )
+        } else {
+            let bytes = normalized.as_bytes();
+            if bytes.len() < 3
+                || !bytes[0].is_ascii_alphabetic()
+                || bytes[1] != b':'
+                || bytes[2] != b'/'
+            {
+                return None;
+            }
+            (
+                normalized[..2].to_ascii_lowercase(),
+                normalized[3..]
+                    .split('/')
+                    .filter(|component| !component.is_empty())
+                    .collect::<Vec<_>>(),
+                0,
+            )
+        };
+
+    let mut components = Vec::new();
+    for component in remainder {
+        match component {
+            "." => {}
+            ".." if components.len() > protected_components => {
+                components.pop();
+            }
+            ".." => return None,
+            component => components.push(component.to_lowercase()),
+        }
+    }
+
+    if components.is_empty() {
+        Some(format!("{prefix}/"))
+    } else {
+        Some(format!("{prefix}/{}", components.join("/")))
+    }
+}
+
+fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let candidate = value.get(..prefix.len())?;
+    candidate
+        .eq_ignore_ascii_case(prefix)
+        .then(|| &value[prefix.len()..])
+}
+
+fn update_codex_config(
+    config_path: &Path,
+    update: impl FnOnce(&mut toml::Table) -> io::Result<()>,
+) -> io::Result<()> {
+    update_codex_config_with_writer(config_path, update, write_text_atomically)
+}
+
+fn update_codex_config_with_writer(
+    config_path: &Path,
+    update: impl FnOnce(&mut toml::Table) -> io::Result<()>,
+    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+) -> io::Result<()> {
+    let _lock = acquire_codex_config_lock(config_path)?;
     let mut root = read_codex_config(config_path)?;
     let root_table = root.as_table_mut().ok_or_else(|| {
         io::Error::new(
@@ -173,26 +443,30 @@ pub fn register_codex_managed_hook_trust_for_mode(
             "Codex config root must be a TOML table",
         )
     })?;
-    let hooks_table = ensure_child_table(root_table, "hooks")?;
-    let state_table = ensure_child_table(hooks_table, "state")?;
-
-    for entry in &trusted_entries {
-        let hook_state = ensure_child_table(state_table, &entry.key)?;
-        enable_hook_unless_explicitly_disabled(hook_state);
-        hook_state.insert(
-            "trusted_hash".to_string(),
-            toml::Value::String(entry.trusted_hash.clone()),
-        );
-    }
+    update(root_table)?;
 
     let rendered = toml::to_string_pretty(&root)
         .map_err(|err| io::Error::other(format!("Codex config TOML serialize failed: {err}")))?;
-    write_text_atomically(config_path, &rendered)?;
+    write_config(config_path, &rendered)
+}
 
-    Ok(CodexHookTrustReport {
-        config_path: config_path.to_path_buf(),
-        trusted_entries,
-    })
+fn acquire_codex_config_lock(config_path: &Path) -> io::Result<fs::File> {
+    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut lock_name = config_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config.toml"))
+        .to_os_string();
+    lock_name.push(".lock");
+    let lock_path = parent.join(lock_name);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
 }
 
 #[cfg(test)]
@@ -337,8 +611,14 @@ fn expected_generated_gwt_event_commands(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs::{self, OpenOptions},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
 
+    use fs2::FileExt;
     use serde_json::{json, Value};
 
     use super::*;
@@ -404,6 +684,526 @@ mod tests {
             assert!(
                 entry.trusted_hash.starts_with("sha256:"),
                 "trusted hash must use Codex sha256 prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_registers_only_the_exact_canonical_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        let sibling = dir.path().join("sibling-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        let canonical_worktree = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let canonical_sibling = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&sibling).unwrap(),
+        );
+        let canonical_parent = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(dir.path()).unwrap(),
+        );
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let mut root = toml::Table::new();
+        root.insert(
+            "model".to_string(),
+            toml::Value::String("gpt-5.6-sol".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        let mut managed_config = toml::Table::new();
+        managed_config.insert(
+            "sandbox_mode".to_string(),
+            toml::Value::String("workspace-write".to_string()),
+        );
+        projects.insert(
+            canonical_worktree.to_string_lossy().into_owned(),
+            toml::Value::Table(managed_config),
+        );
+        let mut sibling_config = toml::Table::new();
+        sibling_config.insert(
+            "trust_level".to_string(),
+            toml::Value::String("untrusted".to_string()),
+        );
+        projects.insert(
+            canonical_sibling.to_string_lossy().into_owned(),
+            toml::Value::Table(sibling_config),
+        );
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        fs::write(
+            &config_path,
+            toml::to_string_pretty(&toml::Value::Table(root)).unwrap(),
+        )
+        .unwrap();
+
+        let report = register_codex_managed_project_trust(&worktree, &config_path).unwrap();
+
+        assert_eq!(report.project_path, canonical_worktree);
+        assert_eq!(report.config_path, config_path);
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&report.config_path).unwrap()).unwrap();
+        assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            config["projects"][report.project_path.to_string_lossy().as_ref()]["trust_level"]
+                .as_str(),
+            Some("trusted")
+        );
+        assert_eq!(
+            config["projects"][report.project_path.to_string_lossy().as_ref()]["sandbox_mode"]
+                .as_str(),
+            Some("workspace-write"),
+            "unknown settings on the exact project must survive trust registration"
+        );
+        assert_eq!(
+            config["projects"][canonical_sibling.to_string_lossy().as_ref()]["trust_level"]
+                .as_str(),
+            Some("untrusted"),
+            "a sibling directory must never be trusted as a side effect"
+        );
+        assert!(
+            config["projects"]
+                .as_table()
+                .is_some_and(|projects| projects
+                    .get(canonical_parent.to_string_lossy().as_ref())
+                    .is_none()),
+            "a parent directory must never be trusted as a side effect"
+        );
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_device_prefix_alias_explicit_untrusted() {
+        let project_path = Path::new(r"C:\repo\work\issue-3729");
+        let alias = r"\\?\C:\repo\work\issue-3729";
+        let mut alias_config = toml::Table::new();
+        alias_config.insert(
+            "trust_level".to_string(),
+            toml::Value::String("untrusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(alias.to_string(), toml::Value::Table(alias_config));
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        let original = root.clone();
+
+        let error = ensure_codex_project_trust_level(&mut root, project_path).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("explicitly untrusted"));
+        assert_eq!(root, original);
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_case_and_separator_alias_explicit_untrusted() {
+        let project_path = Path::new(r"C:\Repo\Work\issue-3729");
+        let aliases = [
+            r"c:/repo/work/ISSUE-3729",
+            r"Microsoft.PowerShell.Core\FileSystem:://?/c:/repo/work/issue-3729",
+        ];
+
+        for alias in aliases {
+            let mut alias_config = toml::Table::new();
+            alias_config.insert(
+                "trust_level".to_string(),
+                toml::Value::String("untrusted".to_string()),
+            );
+            let mut projects = toml::Table::new();
+            projects.insert(alias.to_string(), toml::Value::Table(alias_config));
+            let mut root = toml::Table::new();
+            root.insert("projects".to_string(), toml::Value::Table(projects));
+            let original = root.clone();
+
+            let error = ensure_codex_project_trust_level(&mut root, project_path).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{alias}");
+            assert!(error.to_string().contains("explicitly untrusted"));
+            assert_eq!(root, original);
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_conflicting_device_prefix_aliases() {
+        let project_path = Path::new(r"C:\repo\work\issue-3729");
+        let alias = r"\\?\C:\repo\work\issue-3729";
+        let mut exact_config = toml::Table::new();
+        exact_config.insert(
+            "sandbox_mode".to_string(),
+            toml::Value::String("workspace-write".to_string()),
+        );
+        let mut alias_config = toml::Table::new();
+        alias_config.insert(
+            "trust_level".to_string(),
+            toml::Value::String("trusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(
+            project_path.to_string_lossy().into_owned(),
+            toml::Value::Table(exact_config),
+        );
+        projects.insert(alias.to_string(), toml::Value::Table(alias_config));
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        let original = root.clone();
+
+        let error = ensure_codex_project_trust_level(&mut root, project_path).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("conflicting aliases"));
+        assert_eq!(root, original);
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_invalid_device_prefix_alias_values() {
+        let project_path = Path::new(r"C:\repo\work\issue-3729");
+        let alias = r"\\?\C:\repo\work\issue-3729";
+
+        for alias_value in [
+            {
+                let mut table = toml::Table::new();
+                table.insert(
+                    "trust_level".to_string(),
+                    toml::Value::String("ask".to_string()),
+                );
+                toml::Value::Table(table)
+            },
+            {
+                let mut table = toml::Table::new();
+                table.insert("trust_level".to_string(), toml::Value::Boolean(true));
+                toml::Value::Table(table)
+            },
+            toml::Value::String("scalar project entry".to_string()),
+        ] {
+            let mut projects = toml::Table::new();
+            projects.insert(alias.to_string(), alias_value);
+            let mut root = toml::Table::new();
+            root.insert("projects".to_string(), toml::Value::Table(projects));
+            let original = root.clone();
+
+            let error = ensure_codex_project_trust_level(&mut root, project_path).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(root, original);
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_preserves_trusted_aliases_and_mutates_only_exact_target() {
+        let project_path = Path::new("E:/gwt/work/issue-3729");
+        let aliases = [
+            "//?/E:/gwt/work/issue-3729",
+            "Microsoft.PowerShell.Core\\FileSystem:://?/E:/gwt/work/issue-3729",
+        ];
+        let mut projects = toml::Table::new();
+        for alias in aliases {
+            let mut alias_config = toml::Table::new();
+            alias_config.insert(
+                "trust_level".to_string(),
+                toml::Value::String("trusted".to_string()),
+            );
+            alias_config.insert("owner".to_string(), toml::Value::String(alias.to_string()));
+            projects.insert(alias.to_string(), toml::Value::Table(alias_config));
+        }
+        let original_aliases = projects.clone();
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+
+        ensure_codex_project_trust_level(&mut root, project_path).unwrap();
+
+        let projects = root["projects"].as_table().unwrap();
+        assert_eq!(projects.len(), aliases.len() + 1);
+        assert_eq!(
+            projects[project_path.to_string_lossy().as_ref()]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        for alias in aliases {
+            assert_eq!(projects.get(alias), original_aliases.get(alias));
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let config_path = dir.path().join("codex/config.toml");
+
+        let first = register_codex_managed_project_trust(&worktree, &config_path).unwrap();
+        let first_config = fs::read_to_string(&config_path).unwrap();
+        let second = register_codex_managed_project_trust(&worktree, &config_path).unwrap();
+        let second_config = fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(second, first);
+        assert_eq!(second_config, first_config);
+    }
+
+    #[test]
+    fn managed_project_trust_write_failure_preserves_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let original = "model = \"gpt-5.6-sol\"\n";
+        fs::write(&config_path, original).unwrap();
+
+        let error = register_codex_managed_project_trust_with_writer(
+            &worktree,
+            &config_path,
+            |_path, _rendered| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected platform-stable config write failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    }
+
+    #[test]
+    fn managed_project_trust_lock_setup_failure_preserves_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let blocked_parent = dir.path().join("codex-home-is-a-file");
+        let original = "do not replace this file\n";
+        fs::write(&blocked_parent, original).unwrap();
+        let config_path = blocked_parent.join("config.toml");
+
+        register_codex_managed_project_trust(&worktree, &config_path)
+            .expect_err("lock parent creation must fail closed");
+
+        assert_eq!(fs::read_to_string(&blocked_parent).unwrap(), original);
+        assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_unknown_or_non_string_trust_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let canonical_worktree = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        for unsupported in [
+            toml::Value::String("ask".to_string()),
+            toml::Value::Boolean(true),
+        ] {
+            let mut project = toml::Table::new();
+            project.insert("trust_level".to_string(), unsupported);
+            let mut projects = toml::Table::new();
+            projects.insert(
+                canonical_worktree.to_string_lossy().into_owned(),
+                toml::Value::Table(project),
+            );
+            let mut root = toml::Table::new();
+            root.insert("projects".to_string(), toml::Value::Table(projects));
+            let original = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+            fs::write(&config_path, &original).unwrap();
+
+            let error = register_codex_managed_project_trust(&worktree, &config_path).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_malformed_or_scalar_projects_without_rewriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        for original in ["model = [\n", "projects = \"legacy scalar\"\n"] {
+            fs::write(&config_path, original).unwrap();
+
+            let error = register_codex_managed_project_trust(&worktree, &config_path).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn managed_project_trust_refuses_to_override_explicit_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let canonical_worktree = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(&worktree).unwrap(),
+        );
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let mut project = toml::Table::new();
+        project.insert(
+            "trust_level".to_string(),
+            toml::Value::String("untrusted".to_string()),
+        );
+        let mut projects = toml::Table::new();
+        projects.insert(
+            canonical_worktree.to_string_lossy().into_owned(),
+            toml::Value::Table(project),
+        );
+        let mut root = toml::Table::new();
+        root.insert("projects".to_string(), toml::Value::Table(projects));
+        let original = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+        fs::write(&config_path, &original).unwrap();
+
+        let error = register_codex_managed_project_trust(&worktree, &config_path).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("explicitly untrusted"));
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    }
+
+    #[test]
+    fn project_and_hook_trust_share_one_config_rmw_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("managed-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        generate_codex_hooks(&worktree).unwrap();
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let lock_path = config_path.with_extension("toml.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (project_tx, project_rx) = mpsc::channel();
+        let project_worktree = worktree.clone();
+        let project_config = config_path.clone();
+        let project_thread = thread::spawn(move || {
+            project_tx
+                .send(register_codex_managed_project_trust(
+                    &project_worktree,
+                    &project_config,
+                ))
+                .unwrap();
+        });
+        let (hook_tx, hook_rx) = mpsc::channel();
+        let hook_worktree = worktree.clone();
+        let hook_config = config_path.clone();
+        let hook_thread = thread::spawn(move || {
+            hook_tx
+                .send(register_codex_managed_hook_trust(
+                    &hook_worktree,
+                    &hook_config,
+                ))
+                .unwrap();
+        });
+
+        assert!(matches!(
+            project_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(matches!(
+            hook_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lock);
+
+        project_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("project registration should resume after unlock")
+            .unwrap();
+        hook_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("hook registration should resume after unlock")
+            .unwrap();
+        project_thread.join().unwrap();
+        hook_thread.join().unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+        let canonical_worktree = gwt_core::paths::normalize_windows_child_process_path(
+            &fs::canonicalize(worktree).unwrap(),
+        );
+        assert_eq!(
+            config["projects"][canonical_worktree.to_string_lossy().as_ref()]["trust_level"]
+                .as_str(),
+            Some("trusted")
+        );
+        assert!(
+            config["hooks"]["state"]
+                .as_table()
+                .is_some_and(|state| !state.is_empty()),
+            "hook update must survive the concurrent project RMW"
+        );
+    }
+
+    #[test]
+    fn concurrent_project_trust_registrations_preserve_both_exact_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_worktree = dir.path().join("first-managed-worktree");
+        let second_worktree = dir.path().join("second-managed-worktree");
+        fs::create_dir_all(&first_worktree).unwrap();
+        fs::create_dir_all(&second_worktree).unwrap();
+        let config_path = dir.path().join("codex/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let lock_path = config_path.with_extension("toml.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut threads = Vec::new();
+        for worktree in [&first_worktree, &second_worktree] {
+            let tx = tx.clone();
+            let worktree = worktree.clone();
+            let config_path = config_path.clone();
+            threads.push(thread::spawn(move || {
+                tx.send(register_codex_managed_project_trust(
+                    &worktree,
+                    &config_path,
+                ))
+                .unwrap();
+            }));
+        }
+        drop(tx);
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lock);
+
+        for _ in 0..2 {
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("project registration should resume after unlock")
+                .unwrap();
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        for worktree in [first_worktree, second_worktree] {
+            let canonical = gwt_core::paths::normalize_windows_child_process_path(
+                &fs::canonicalize(worktree).unwrap(),
+            );
+            assert_eq!(
+                config["projects"][canonical.to_string_lossy().as_ref()]["trust_level"].as_str(),
+                Some("trusted")
             );
         }
     }

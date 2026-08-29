@@ -47,6 +47,56 @@ pub struct DockerLaunchPlan {
     pub(crate) container_cwd: String,
 }
 
+/// Immutable Docker identity resolved for one launch. Every operation that
+/// belongs to the launch contract (trust preflight and final process wrapping)
+/// consumes this value instead of re-reading Compose configuration or ambient
+/// runtime selection.
+#[derive(Debug, Clone)]
+pub struct DockerLaunchBinding {
+    runtime: gwt_docker::detect::ResolvedContainerRuntime,
+    compose_files: Vec<PathBuf>,
+    service: String,
+    container_cwd: String,
+}
+
+impl DockerLaunchBinding {
+    fn capture(
+        runtime: gwt_docker::detect::ResolvedContainerRuntime,
+        launch: DockerLaunchPlan,
+    ) -> Self {
+        Self {
+            runtime,
+            compose_files: launch.compose_files_for_runtime(),
+            service: launch.service,
+            container_cwd: launch.container_cwd,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_for_test(
+        runtime: gwt_docker::detect::ResolvedContainerRuntime,
+        launch: DockerLaunchPlan,
+    ) -> Self {
+        Self::capture(runtime, launch)
+    }
+
+    pub(crate) fn runtime(&self) -> &gwt_docker::detect::ResolvedContainerRuntime {
+        &self.runtime
+    }
+
+    pub(crate) fn compose_files(&self) -> &[PathBuf] {
+        &self.compose_files
+    }
+
+    pub(crate) fn service(&self) -> &str {
+        &self.service
+    }
+
+    pub(crate) fn container_cwd(&self) -> &str {
+        &self.container_cwd
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DockerExecProgram {
     executable: String,
@@ -84,10 +134,10 @@ impl DockerLaunchPlan {
     }
 }
 
-pub fn apply_docker_runtime_to_launch_config(
+pub fn prepare_docker_runtime_for_launch(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
-) -> Result<Option<gwt_docker::detect::ResolvedContainerRuntime>, String> {
+) -> Result<Option<DockerLaunchBinding>, String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
         return Ok(None);
     }
@@ -112,14 +162,26 @@ pub fn apply_docker_runtime_to_launch_config(
     ensure_docker_launch_service_ready(&launch, lifecycle_intent)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
-    let runtime_program = resolve_docker_exec_program(&launch, config)?;
-    config.command = runtime_program.executable;
-    config.args = runtime_program.args;
     config
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
-    config.docker_service = Some(launch.service);
-    Ok(Some(runtime))
+    config.docker_service = Some(launch.service.clone());
+    Ok(Some(DockerLaunchBinding::capture(runtime, launch)))
+}
+
+pub fn resolve_docker_agent_program_with_binding(
+    config: &mut gwt_agent::LaunchConfig,
+    binding: Option<&DockerLaunchBinding>,
+) -> Result<(), String> {
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
+        return Ok(());
+    }
+    let binding = binding
+        .ok_or_else(|| "Docker agent program resolution requires a resolved binding".to_string())?;
+    let runtime_program = resolve_docker_exec_program(binding, config)?;
+    config.command = runtime_program.executable;
+    config.args = runtime_program.args;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -154,48 +216,176 @@ pub fn resolved_test_docker_runtime(
     .expect("resolve fake Docker runtime")
 }
 
-pub fn finalize_docker_agent_launch_config_with_runtime(
-    repo_path: &Path,
+pub fn finalize_docker_agent_launch_config_with_binding(
     config: &mut gwt_agent::LaunchConfig,
-    runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+    binding: Option<&DockerLaunchBinding>,
 ) -> Result<Option<String>, String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
         return Ok(None);
     }
-    let runtime = runtime
-        .ok_or_else(|| "Docker launch finalization requires a resolved runtime".to_string())?;
-
-    let worktree = gwt_core::paths::normalize_windows_child_process_path(
-        &config
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| repo_path.to_path_buf()),
-    );
-    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+    let binding = binding
+        .ok_or_else(|| "Docker launch finalization requires a resolved binding".to_string())?;
     let runtime_program = PackageRunnerProgram {
         executable: config.command.clone(),
         args: config.args.clone(),
     };
 
     let mut args = vec!["compose".to_string()];
-    for compose_file in launch.compose_files_for_runtime() {
+    for compose_file in binding.compose_files() {
         args.push("-f".to_string());
         args.push(compose_file.display().to_string());
     }
-    let runtime_worktree_path = launch.container_cwd;
+    let runtime_worktree_path = binding.container_cwd().to_string();
     args.extend([
         "exec".to_string(),
         "-w".to_string(),
         runtime_worktree_path.clone(),
     ]);
     args.extend(docker_compose_exec_env_args(&config.env_vars));
-    args.push(launch.service);
+    args.push(binding.service().to_string());
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
-    config.command = runtime.binary().to_string();
+    config.command = binding.runtime().binary().to_string();
     config.args = args;
     Ok(Some(runtime_worktree_path))
+}
+
+fn docker_codex_home_env_args(env_vars: &HashMap<String, String>) -> Result<Vec<String>, String> {
+    let codex_home = env_vars.get("CODEX_HOME").filter(|value| !value.is_empty());
+    if codex_home.is_none() {
+        if let Some(home) = env_vars.get("HOME").filter(|value| !value.is_empty()) {
+            if !Path::new(home).is_absolute() {
+                return Err(format!(
+                    "container HOME must be absolute when CODEX_HOME is unset, got {home:?}"
+                ));
+            }
+        }
+    }
+
+    let mut args = Vec::new();
+    for key in ["CODEX_HOME", "HOME"] {
+        if let Some(value) = env_vars.get(key) {
+            args.push("-e".to_string());
+            args.push(format!("{key}={value}"));
+        }
+    }
+    Ok(args)
+}
+
+fn docker_codex_trust_registration_args(
+    binding: &DockerLaunchBinding,
+    env_vars: &HashMap<String, String>,
+    hook_bin: Option<&str>,
+    hook_name: &str,
+    extra_args: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, String> {
+    let mut args = vec!["compose".to_string()];
+    for compose_file in binding.compose_files() {
+        args.push("-f".to_string());
+        args.push(compose_file.display().to_string());
+    }
+    args.extend([
+        "exec".to_string(),
+        "-T".to_string(),
+        "-w".to_string(),
+        binding.container_cwd().to_string(),
+    ]);
+    args.extend(docker_codex_home_env_args(env_vars)?);
+    if let Some(hook_bin) = hook_bin {
+        args.push("-e".to_string());
+        args.push(format!("GWT_HOOK_BIN={hook_bin}"));
+    }
+    args.extend([
+        binding.service().to_string(),
+        DOCKER_GWTD_BIN_PATH.to_string(),
+        "__internal".to_string(),
+        "daemon-hook".to_string(),
+        hook_name.to_string(),
+        "--project-root".to_string(),
+        binding.container_cwd().to_string(),
+    ]);
+    args.extend(extra_args);
+    Ok(args)
+}
+
+fn docker_codex_project_trust_registration_args(
+    binding: &DockerLaunchBinding,
+    env_vars: &HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    docker_codex_trust_registration_args(
+        binding,
+        env_vars,
+        None,
+        "register-codex-managed-project-trust",
+        std::iter::empty(),
+    )
+}
+
+fn docker_codex_hook_trust_registration_args(
+    binding: &DockerLaunchBinding,
+    env_vars: &HashMap<String, String>,
+    hook_bin: &str,
+    discovery_mode: gwt_skills::CodexHookDiscoveryMode,
+) -> Result<Vec<String>, String> {
+    docker_codex_trust_registration_args(
+        binding,
+        env_vars,
+        Some(hook_bin),
+        "register-codex-managed-hook-trust",
+        [
+            "--codex-hook-discovery".to_string(),
+            discovery_mode.as_cli_value().to_string(),
+        ],
+    )
+}
+
+fn execute_docker_trust_registration(
+    binding: &DockerLaunchBinding,
+    args: &[String],
+) -> Result<(), String> {
+    let output = gwt_docker::compose_exec_capture_with_resolved_runtime_args(
+        binding.runtime(),
+        binding.compose_files(),
+        args,
+    )
+    .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit status {}", output.status)
+    };
+    Err(format!(
+        "container-local Codex trust registration failed for service '{}': {detail}",
+        binding.service()
+    ))
+}
+
+pub fn register_codex_managed_project_trust_in_docker(
+    binding: &DockerLaunchBinding,
+    env_vars: &HashMap<String, String>,
+) -> Result<(), String> {
+    let args = docker_codex_project_trust_registration_args(binding, env_vars)?;
+    execute_docker_trust_registration(binding, &args)
+}
+
+pub fn register_codex_managed_hook_trust_in_docker(
+    binding: &DockerLaunchBinding,
+    env_vars: &HashMap<String, String>,
+    hook_bin: &str,
+    discovery_mode: gwt_skills::CodexHookDiscoveryMode,
+) -> Result<(), String> {
+    let args =
+        docker_codex_hook_trust_registration_args(binding, env_vars, hook_bin, discovery_mode)?;
+    execute_docker_trust_registration(binding, &args)
 }
 
 fn resolve_user_home_dir() -> Result<PathBuf, String> {
@@ -409,17 +599,17 @@ pub fn is_valid_docker_env_key(key: &str) -> bool {
 }
 
 fn resolve_docker_exec_program(
-    launch: &DockerLaunchPlan,
+    binding: &DockerLaunchBinding,
     config: &gwt_agent::LaunchConfig,
 ) -> Result<DockerExecProgram, String> {
     let Some(version_spec) = package_runner_version_spec(config) else {
-        ensure_docker_launch_command_ready(launch, &config.command)?;
+        ensure_docker_launch_command_ready(binding, &config.command)?;
         return Ok(DockerExecProgram {
             executable: config.command.clone(),
             args: config.args.clone(),
         });
     };
-    resolve_docker_package_runner(launch, config, &version_spec)
+    resolve_docker_package_runner(binding, config, &version_spec)
 }
 
 pub fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
@@ -436,7 +626,7 @@ pub fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<S
 }
 
 fn resolve_docker_package_runner(
-    launch: &DockerLaunchPlan,
+    binding: &DockerLaunchBinding,
     config: &gwt_agent::LaunchConfig,
     version_spec: &str,
 ) -> Result<DockerExecProgram, String> {
@@ -453,13 +643,11 @@ fn resolve_docker_package_runner(
     ];
 
     for candidate in candidates {
-        let output = gwt_docker::compose_service_exec_capture_with_files(
-            &launch.compose_files_for_runtime(),
-            &launch.service,
-            Some(&launch.container_cwd),
+        let output = execute_docker_binding_command(
+            binding,
+            Some(binding.container_cwd()),
             &candidate.probe_args(),
-        )
-        .map_err(|err| err.to_string())?;
+        )?;
         if output.status.success() {
             return Ok(candidate.into_exec_program(agent_args));
         }
@@ -467,8 +655,33 @@ fn resolve_docker_package_runner(
 
     Err(format!(
         "Selected Docker runtime cannot launch {version_spec} in service '{}'",
-        launch.service
+        binding.service()
     ))
+}
+
+fn execute_docker_binding_command(
+    binding: &DockerLaunchBinding,
+    working_dir: Option<&str>,
+    command_args: &[String],
+) -> Result<std::process::Output, String> {
+    let mut args = vec!["compose".to_string()];
+    for compose_file in binding.compose_files() {
+        args.push("-f".to_string());
+        args.push(compose_file.display().to_string());
+    }
+    args.extend(["exec".to_string(), "-T".to_string()]);
+    if let Some(working_dir) = working_dir {
+        args.push("-w".to_string());
+        args.push(working_dir.to_string());
+    }
+    args.push(binding.service().to_string());
+    args.extend(command_args.iter().cloned());
+    gwt_docker::compose_exec_capture_with_resolved_runtime_args(
+        binding.runtime(),
+        binding.compose_files(),
+        &args,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
@@ -503,21 +716,30 @@ pub fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String,
 }
 
 fn ensure_docker_launch_command_ready(
-    launch: &DockerLaunchPlan,
+    binding: &DockerLaunchBinding,
     command: &str,
 ) -> Result<(), String> {
-    let available = gwt_docker::compose_service_has_command_with_files(
-        &launch.compose_files_for_runtime(),
-        &launch.service,
-        command,
-    )
-    .map_err(|err| err.to_string())?;
-    if available {
+    let output = execute_docker_binding_command(
+        binding,
+        None,
+        &[
+            "sh".to_string(),
+            "-lc".to_string(),
+            "command -v \"$1\" >/dev/null 2>&1".to_string(),
+            "sh".to_string(),
+            command.to_string(),
+        ],
+    )?;
+    if output.status.success() {
         Ok(())
     } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            return Err(stderr);
+        }
         Err(format!(
             "Command '{command}' is not available in Docker service '{}'",
-            launch.service
+            binding.service()
         ))
     }
 }
@@ -971,5 +1193,295 @@ fi
         assert!(args.contains(&gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string()));
         assert!(args.contains(&gwt_agent::GWT_SESSION_ID_ENV.to_string()));
         assert!(args.contains(&"VISIBLE_SETTING=visible".to_string()));
+    }
+
+    fn phase85_launch_plan(temp: &Path, container_cwd: &str) -> (DockerLaunchPlan, Vec<PathBuf>) {
+        let project = temp.join("project");
+        std::fs::create_dir_all(&project).expect("create project");
+        let compose_files = vec![
+            project.join("compose.base.yml"),
+            project.join("compose.feature.yml"),
+            project.join("docker-compose.override.yml"),
+            project.join(DOCKER_GWT_OVERRIDE_FILE_NAME),
+        ];
+        for compose_file in &compose_files {
+            std::fs::write(compose_file, "services: {}\n").expect("write compose input");
+        }
+        (
+            DockerLaunchPlan {
+                compose_files: compose_files[..2].to_vec(),
+                compose_file: compose_files[0].clone(),
+                user_override_file: compose_files[2].clone(),
+                managed_override_file: compose_files[3].clone(),
+                service: "agent-service".to_string(),
+                container_cwd: container_cwd.to_string(),
+            },
+            compose_files,
+        )
+    }
+
+    fn phase85_resolved_binding(
+        temp: &Path,
+        container_cwd: &str,
+    ) -> (DockerLaunchBinding, Vec<PathBuf>) {
+        let (plan, compose_files) = phase85_launch_plan(temp, container_cwd);
+        let runtime = resolved_test_docker_runtime(temp);
+        (DockerLaunchBinding::capture(runtime, plan), compose_files)
+    }
+
+    #[cfg(unix)]
+    fn write_phase85_runtime_wrapper(path: &Path, invocation_marker: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'Docker version 28.3.0, build phase85\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" >> '{}'\n",
+                invocation_marker.display()
+            ),
+        )
+        .expect("write runtime wrapper");
+        let mut permissions = std::fs::metadata(path)
+            .expect("runtime wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod runtime wrapper");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_trust_executor_uses_the_runtime_pinned_by_the_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bound_runtime = temp.path().join("bound-docker");
+        let ambient_runtime = temp.path().join("ambient-docker");
+        let bound_marker = temp.path().join("bound-invocations");
+        let ambient_marker = temp.path().join("ambient-invocations");
+        write_phase85_runtime_wrapper(&bound_runtime, &bound_marker);
+        write_phase85_runtime_wrapper(&ambient_runtime, &ambient_marker);
+
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            bound_runtime.to_str().expect("UTF-8 bound runtime path"),
+        )
+        .expect("resolve bound runtime");
+        let (plan, _compose_files) = phase85_launch_plan(temp.path(), "/workspace/runtime-pinned");
+        let binding = DockerLaunchBinding::capture(runtime, plan);
+        let _ambient_runtime =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_DOCKER_BIN", &ambient_runtime);
+        let effective_env =
+            HashMap::from([("CODEX_HOME".to_string(), "relative/codex-home".to_string())]);
+
+        let project_args = docker_codex_project_trust_registration_args(&binding, &effective_env)
+            .expect("project trust argv");
+        execute_docker_trust_registration(&binding, &project_args)
+            .expect("execute project trust with bound runtime");
+        let hook_args = docker_codex_hook_trust_registration_args(
+            &binding,
+            &effective_env,
+            "/usr/local/bin/gwt",
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        )
+        .expect("hook trust argv");
+        execute_docker_trust_registration(&binding, &hook_args)
+            .expect("execute hook trust with bound runtime");
+
+        let bound_invocations =
+            std::fs::read_to_string(&bound_marker).expect("bound runtime invocations");
+        assert!(bound_invocations.contains("register-codex-managed-project-trust"));
+        assert!(bound_invocations.contains("register-codex-managed-hook-trust"));
+        assert!(
+            !ambient_marker.exists(),
+            "trust execution must not re-resolve ambient GWT_DOCKER_BIN"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_agent_program_probe_uses_the_runtime_pinned_by_the_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bound_runtime = temp.path().join("bound-docker");
+        let ambient_runtime = temp.path().join("ambient-docker");
+        let bound_marker = temp.path().join("bound-invocations");
+        let ambient_marker = temp.path().join("ambient-invocations");
+        write_phase85_runtime_wrapper(&bound_runtime, &bound_marker);
+        write_phase85_runtime_wrapper(&ambient_runtime, &ambient_marker);
+
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            bound_runtime.to_str().expect("UTF-8 bound runtime path"),
+        )
+        .expect("resolve bound runtime");
+        let (plan, _compose_files) = phase85_launch_plan(temp.path(), "/workspace/runtime-pinned");
+        let binding = DockerLaunchBinding::capture(runtime, plan);
+        let _ambient_runtime =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_DOCKER_BIN", &ambient_runtime);
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(temp.path().join("project"))
+            .version("latest")
+            .build();
+        config.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+
+        resolve_docker_agent_program_with_binding(&mut config, Some(&binding))
+            .expect("resolve agent program with bound runtime");
+
+        assert_eq!(config.command, "bunx");
+        assert!(config
+            .args
+            .first()
+            .is_some_and(|arg| arg == "@openai/codex@latest"));
+        let bound_invocations =
+            std::fs::read_to_string(&bound_marker).expect("bound runtime invocations");
+        assert!(bound_invocations.contains("bunx"));
+        assert!(bound_invocations.contains("--version"));
+        assert!(
+            !ambient_marker.exists(),
+            "agent program probe must not re-resolve ambient GWT_DOCKER_BIN"
+        );
+    }
+
+    #[test]
+    fn resolved_docker_binding_is_the_only_finalizer_input_after_multi_compose_resolution() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (binding, compose_files) =
+            phase85_resolved_binding(temp.path(), "/workspace/resolved-once");
+        assert_eq!(binding.compose_files(), compose_files.as_slice());
+        assert_eq!(binding.service(), "agent-service");
+        assert_eq!(binding.container_cwd(), "/workspace/resolved-once");
+
+        for compose_file in &compose_files {
+            std::fs::remove_file(compose_file).expect("remove resolver input after capture");
+        }
+
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(temp.path().join("project"))
+            .build();
+        config.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        config.command = "codex".to_string();
+        config.args = vec!["--no-alt-screen".to_string()];
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalization must not re-resolve removed compose inputs")
+                .expect("Docker runtime worktree");
+
+        assert_eq!(runtime_worktree, "/workspace/resolved-once");
+        assert_eq!(config.command, binding.runtime().binary());
+        let actual_compose_files = config
+            .args
+            .windows(2)
+            .filter(|pair| pair[0] == "-f")
+            .map(|pair| PathBuf::from(&pair[1]))
+            .collect::<Vec<_>>();
+        assert_eq!(actual_compose_files, compose_files);
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| { pair == ["-w".to_string(), "/workspace/resolved-once".to_string()] }));
+        assert!(config.args.contains(&"agent-service".to_string()));
+    }
+
+    #[test]
+    fn docker_project_and_hook_trust_share_binding_and_use_safe_hidden_daemon_argv() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let container_cwd = "/workspace/project with $HOME and $(touch-pwned)";
+        let (binding, compose_files) = phase85_resolved_binding(temp.path(), container_cwd);
+        let codex_home = "relative/$HOME/$(touch codex-home-pwned)";
+        let home = "/home/codex user/$HOME";
+        let userprofile = "C:/Users/ignored container user/$(touch profile-pwned)";
+        let effective_env = HashMap::from([
+            ("CODEX_HOME".to_string(), codex_home.to_string()),
+            ("HOME".to_string(), home.to_string()),
+            ("USERPROFILE".to_string(), userprofile.to_string()),
+            (
+                "API_SECRET".to_string(),
+                "must-not-enter-trust-argv".to_string(),
+            ),
+        ]);
+        let hook_bin = "/usr/local/bin/gwt with $HOME and $(touch hook-pwned)";
+
+        let project_args = docker_codex_project_trust_registration_args(&binding, &effective_env)
+            .expect("project trust argv");
+        let hook_args = docker_codex_hook_trust_registration_args(
+            &binding,
+            &effective_env,
+            hook_bin,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        )
+        .expect("hook trust argv");
+
+        for args in [&project_args, &hook_args] {
+            assert!(!args.iter().any(|arg| arg == "sh" || arg == "-lc"));
+            assert!(args
+                .windows(2)
+                .any(|pair| { pair == ["-w".to_string(), container_cwd.to_string()] }));
+            assert!(args.contains(&"agent-service".to_string()));
+            assert!(args.contains(&DOCKER_GWTD_BIN_PATH.to_string()));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "__internal" && pair[1] == "daemon-hook"));
+            assert!(args
+                .windows(2)
+                .any(|pair| { pair == ["--project-root".to_string(), container_cwd.to_string()] }));
+            assert!(!args.contains(&"--codex-config".to_string()));
+            assert!(args.contains(&format!("CODEX_HOME={codex_home}")));
+            assert!(args.contains(&format!("HOME={home}")));
+            assert!(
+                !args.iter().any(|arg| arg.contains(userprofile)),
+                "Linux container trust must ignore Windows-only USERPROFILE"
+            );
+            assert!(!args
+                .iter()
+                .any(|arg| arg.contains("must-not-enter-trust-argv")));
+
+            let actual_compose_files = args
+                .windows(2)
+                .filter(|pair| pair[0] == "-f")
+                .map(|pair| PathBuf::from(&pair[1]))
+                .collect::<Vec<_>>();
+            assert_eq!(actual_compose_files, compose_files);
+        }
+
+        assert!(project_args.windows(3).any(|triple| {
+            triple
+                == [
+                    "daemon-hook".to_string(),
+                    "register-codex-managed-project-trust".to_string(),
+                    "--project-root".to_string(),
+                ]
+        }));
+        assert!(hook_args.contains(&format!("GWT_HOOK_BIN={hook_bin}")));
+        assert!(hook_args.windows(3).any(|triple| {
+            triple
+                == [
+                    "daemon-hook".to_string(),
+                    "register-codex-managed-hook-trust".to_string(),
+                    "--project-root".to_string(),
+                ]
+        }));
+        assert!(hook_args.windows(2).any(|pair| {
+            pair == [
+                "--codex-hook-discovery".to_string(),
+                "workspace-home".to_string(),
+            ]
+        }));
+    }
+
+    #[test]
+    fn docker_trust_rejects_relative_linux_home_when_codex_home_is_unset() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (binding, _compose_files) =
+            phase85_resolved_binding(temp.path(), "/workspace/relative-home");
+        let effective_env =
+            HashMap::from([("HOME".to_string(), "relative/container-home".to_string())]);
+
+        let error = docker_codex_project_trust_registration_args(&binding, &effective_env)
+            .expect_err("Codex requires its Linux fallback home to be absolute");
+        assert!(error.contains("HOME must be absolute"), "{error}");
     }
 }
