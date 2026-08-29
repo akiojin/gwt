@@ -2126,6 +2126,10 @@ pub struct ContinueWorkReadinessWatch {
     pub silent_extensions: u32,
     /// Cumulative PTY output bytes observed when this deadline was armed.
     pub observed_output_bytes: u64,
+    /// Issue #3482: the wait budget is spent and the launch was handed to the
+    /// user with its live pane intact. The deadline keeps firing from here on,
+    /// but only to reap the candidate once the pane stops being ours.
+    pub handed_off: bool,
 }
 
 impl ContinueWorkReadinessWatch {
@@ -2135,6 +2139,7 @@ impl ContinueWorkReadinessWatch {
             extensions: 0,
             silent_extensions: 0,
             observed_output_bytes: 0,
+            handed_off: false,
         }
     }
 
@@ -2151,6 +2156,41 @@ impl ContinueWorkReadinessWatch {
             CONTINUE_WORK_READY_EXTENSION
         }
     }
+
+    /// Issue #3482: freeze this watch into supervision mode. The budget fields
+    /// stop moving because nothing is being waited for any more.
+    fn handed_off(&self) -> Self {
+        Self {
+            handed_off: true,
+            ..self.clone()
+        }
+    }
+}
+
+/// Issue #3482: what a fired readiness deadline can prove about the pane in the
+/// launch's window. A window id can outlive the runtime that was installed in
+/// it, so liveness alone is not enough to decide who may be torn down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadinessPaneEvidence {
+    /// gwt still owns the window, the exact candidate Session is bound to it,
+    /// and the PTY process is running.
+    Live,
+    /// The launch's own pane is gone: no PTY runtime, or the process watcher
+    /// reported an exit or error.
+    Dead,
+    /// The window is gone, or another Session owns it now. Nothing in that
+    /// window belongs to this launch.
+    Foreign,
+}
+
+/// Issue #3482: whether rolling a failed launch back may also tear down the
+/// pane and window it was launched into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchPaneDisposition {
+    /// The pane belongs to this launch, so it goes down with it.
+    Teardown,
+    /// Something else owns the window now — clean up durable state only.
+    Retain,
 }
 
 /// Issue #3475: what a fired readiness deadline should do next.
@@ -2158,34 +2198,72 @@ impl ContinueWorkReadinessWatch {
 pub(crate) enum ReadinessDeadlineDecision {
     /// Keep waiting; re-arm with this updated watch.
     Extend(ContinueWorkReadinessWatch),
-    /// Give up. `detail` names the total wait and what never happened.
-    Abort { detail: String },
+    /// Issue #3482: stop waiting without stopping the agent. The pane is still
+    /// the exact live launch pane, so it and its prepared candidate are left
+    /// alone and the deadline re-arms as a supervisor. `detail` is `Some` only
+    /// on the transition, so supervision does not repeat the diagnostic.
+    HandOff {
+        watch: ContinueWorkReadinessWatch,
+        detail: Option<String>,
+    },
+    /// Roll the launch back. `detail` names the total wait and what never
+    /// happened; `pane` says whether cleanup owns the window it fired for.
+    Abort {
+        detail: String,
+        pane: LaunchPaneDisposition,
+    },
 }
 
-/// Issue #3475: decide a fired readiness deadline from evidence instead of a
-/// fixed expiry. A dead pane aborts immediately; a live one buys an extension,
-/// and new PTY output resets the silent streak so a busy bootstrap keeps the
-/// larger budget. Both budgets are capped, so a launch that never reports
-/// SessionStart still terminates.
+/// Issue #3475 / #3482: decide a fired readiness deadline from evidence instead
+/// of a fixed expiry. A live pane buys an extension, and new PTY output resets
+/// the silent streak so a busy bootstrap keeps the larger budget.
+///
+/// Both budgets stay capped, but Issue #3482 draws the line the cap was
+/// crossing: the deadline's authority is over *waiting*, not over a live
+/// Session. Spending the budget on a pane that is provably still this launch's
+/// own live pane hands the launch to the user instead of destroying an
+/// in-flight resume. Only a dead pane — or a window some other Session owns
+/// now — is rolled back, and the foreign case is rolled back without touching
+/// whatever is running there.
 ///
 /// Pure so the policy is unit-testable without a PTY or a clock.
 pub(crate) fn continue_work_readiness_decision(
     watch: &ContinueWorkReadinessWatch,
-    pane_alive: bool,
+    evidence: ReadinessPaneEvidence,
     output_bytes: u64,
 ) -> ReadinessDeadlineDecision {
     let waited = watch.waited().as_secs();
-    if !pane_alive {
-        return ReadinessDeadlineDecision::Abort {
-            detail: readiness_timeout_detail(waited, "the agent process is no longer running"),
+    match evidence {
+        ReadinessPaneEvidence::Foreign => {
+            return ReadinessDeadlineDecision::Abort {
+                detail: readiness_timeout_detail(
+                    waited,
+                    "this launch no longer owns the pane in its window",
+                ),
+                pane: LaunchPaneDisposition::Retain,
+            };
+        }
+        ReadinessPaneEvidence::Dead => {
+            return ReadinessDeadlineDecision::Abort {
+                detail: readiness_timeout_detail(waited, "the agent process is no longer running"),
+                pane: LaunchPaneDisposition::Teardown,
+            };
+        }
+        ReadinessPaneEvidence::Live => {}
+    }
+    if watch.handed_off {
+        return ReadinessDeadlineDecision::HandOff {
+            watch: watch.clone(),
+            detail: None,
         };
     }
     if watch.extensions >= CONTINUE_WORK_READY_MAX_EXTENSIONS {
-        return ReadinessDeadlineDecision::Abort {
-            detail: readiness_timeout_detail(
+        return ReadinessDeadlineDecision::HandOff {
+            watch: watch.handed_off(),
+            detail: Some(readiness_handoff_detail(
                 waited,
                 "the agent process kept running but never reported an authenticated SessionStart",
-            ),
+            )),
         };
     }
     let silent_extensions = if output_bytes > watch.observed_output_bytes {
@@ -2194,15 +2272,16 @@ pub(crate) fn continue_work_readiness_decision(
         watch.silent_extensions + 1
     };
     if silent_extensions > CONTINUE_WORK_READY_MAX_SILENT_EXTENSIONS {
-        return ReadinessDeadlineDecision::Abort {
-            detail: readiness_timeout_detail(
+        return ReadinessDeadlineDecision::HandOff {
+            watch: watch.handed_off(),
+            detail: Some(readiness_handoff_detail(
                 waited,
                 if output_bytes > 0 {
                     "the agent process is still running but stopped producing output before reporting an authenticated SessionStart"
                 } else {
                     "the agent process is still running but never produced any output"
                 },
-            ),
+            )),
         };
     }
     ReadinessDeadlineDecision::Extend(ContinueWorkReadinessWatch {
@@ -2210,11 +2289,24 @@ pub(crate) fn continue_work_readiness_decision(
         extensions: watch.extensions + 1,
         silent_extensions,
         observed_output_bytes: output_bytes,
+        handed_off: false,
     })
 }
 
 fn readiness_timeout_detail(waited_secs: u64, observation: &str) -> String {
     format!("authenticated SessionStart readiness timed out after {waited_secs}s: {observation}")
+}
+
+/// Issue #3482: the user-facing half of a handoff. It has to say how long gwt
+/// waited, what never happened, and that the pane was deliberately left alive —
+/// otherwise a pane that simply stops progressing looks like a hang with no
+/// explanation.
+fn readiness_handoff_detail(waited_secs: u64, observation: &str) -> String {
+    format!(
+        "still waiting for an authenticated SessionStart after {waited_secs}s: {observation}. \
+         gwt stopped waiting but left this agent running — keep waiting for it, or stop the \
+         window to cancel the launch."
+    )
 }
 
 /// Identity of a launch for in-flight dedup. Includes the agent and the
@@ -3683,12 +3775,35 @@ impl AppRuntime {
         });
     }
 
-    /// Issue #3475: liveness evidence for a fired readiness deadline. A pane is
-    /// alive only while gwt still owns its PTY runtime *and* the process watcher
-    /// has not reported an exit or error.
-    pub(crate) fn readiness_pane_is_alive(&self, window_id: &str) -> bool {
-        self.runtimes.contains_key(window_id)
+    /// Issue #3475 / #3482: evidence for a fired readiness deadline.
+    ///
+    /// Liveness alone is not enough to decide cleanup. A window id can be
+    /// reused, so a background event has to prove the thing it is about to act
+    /// on still belongs to it (see [`super::WindowRuntime::incarnation`]). The
+    /// launch-level identity for that is the Session: the deadline only owns
+    /// the pane while `expected_session_id` is the one bound to the window.
+    pub(crate) fn readiness_pane_evidence(
+        &self,
+        window_id: &str,
+        expected_session_id: &str,
+    ) -> ReadinessPaneEvidence {
+        if !self.window_lookup.contains_key(window_id) {
+            return ReadinessPaneEvidence::Foreign;
+        }
+        let bound_session = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|active| active.session_id.as_str());
+        if bound_session != Some(expected_session_id) {
+            return ReadinessPaneEvidence::Foreign;
+        }
+        if self.runtimes.contains_key(window_id)
             && self.window_pty_statuses.get(window_id) == Some(&WindowProcessStatus::Running)
+        {
+            ReadinessPaneEvidence::Live
+        } else {
+            ReadinessPaneEvidence::Dead
+        }
     }
 
     /// Issue #3475: progress evidence for a fired readiness deadline.

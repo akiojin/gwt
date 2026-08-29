@@ -121,9 +121,9 @@ use super::workspace::{
 use super::{
     continue_work_readiness_decision, launch_config_from_persisted_session,
     non_empty_workspace_text, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
-    ContinueWorkReadinessWatch, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
-    PendingFreshExecutionLaunch, ReadinessDeadlineDecision, WindowGeometry, WindowProcessStatus,
-    WorkspaceResumeContext,
+    ContinueWorkReadinessWatch, LaunchPaneDisposition, OutboundEvent, PendingContinueWork,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ReadinessDeadlineDecision,
+    WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
 };
 use regex::Regex;
 
@@ -3609,6 +3609,9 @@ impl AppRuntime {
             return None;
         }
         self.pending_continue_work.remove(window_id);
+        // Issue #3482: see `completed_fresh_execution_launch_events` — a late
+        // SessionStart must retire the readiness handoff diagnostic.
+        self.window_details.remove(window_id);
         let outcome = CachedContinueWorkOutcome {
             work_id: pending.work_id.clone(),
             outcome: pending.outcome,
@@ -6076,6 +6079,23 @@ impl AppRuntime {
         window_id: &str,
         detail: &str,
     ) -> Vec<OutboundEvent> {
+        self.continue_work_launch_failed_events_with_pane(
+            window_id,
+            detail,
+            LaunchPaneDisposition::Teardown,
+        )
+    }
+
+    /// Issue #3482: same rollback, but the caller decides whether the pane in
+    /// the window goes down with the launch. A deadline that fires for a window
+    /// another Session owns must still release its own durable candidate — and
+    /// must not terminate that Session's pane on the way out.
+    pub(crate) fn continue_work_launch_failed_events_with_pane(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        pane: LaunchPaneDisposition,
+    ) -> Vec<OutboundEvent> {
         let Some(pending) = self.pending_continue_work.get(window_id).cloned() else {
             return Vec::new();
         };
@@ -6147,8 +6167,13 @@ impl AppRuntime {
                 );
             }
         }
-        self.stop_window_runtime_without_session_projection(window_id);
-        let mut events = self.close_window_events(window_id);
+        let mut events = match pane {
+            LaunchPaneDisposition::Teardown => {
+                self.stop_window_runtime_without_session_projection(window_id);
+                self.close_window_events(window_id)
+            }
+            LaunchPaneDisposition::Retain => Vec::new(),
+        };
         self.pending_continue_work.remove(window_id);
         let message = format!("Continue work launch failed before activation: {detail}");
         self.continue_work_outcomes.insert(
@@ -6202,6 +6227,10 @@ impl AppRuntime {
         self.pending_fresh_execution_launches.remove(window_id);
         let _ = self.persist();
         self.launch_error_terminal_details.remove(window_id);
+        // Issue #3482: a launch that reported SessionStart late still carries
+        // the readiness handoff diagnostic. Retire it here so a reconnecting
+        // client is not told a started agent is still unready.
+        self.window_details.remove(window_id);
         let mut events = vec![self.workspace_state_broadcast()];
         if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(projection);
@@ -6300,6 +6329,22 @@ impl AppRuntime {
         window_id: &str,
         detail: &str,
     ) -> Vec<OutboundEvent> {
+        self.fresh_execution_launch_failed_events_with_pane(
+            window_id,
+            detail,
+            LaunchPaneDisposition::Teardown,
+        )
+    }
+
+    /// Issue #3482: see
+    /// [`Self::continue_work_launch_failed_events_with_pane`] — a rollback that
+    /// does not own the window rolls back durable state only.
+    pub(crate) fn fresh_execution_launch_failed_events_with_pane(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        pane: LaunchPaneDisposition,
+    ) -> Vec<OutboundEvent> {
         let Some(pending) = self
             .pending_fresh_execution_launches
             .get(window_id)
@@ -6349,15 +6394,23 @@ impl AppRuntime {
         };
         match cleanup {
             Ok(true) => {
-                self.stop_window_runtime_without_session_projection(window_id);
                 self.launch_wizard_cache
                     .forget_session(&pending.binding.session_id);
-                let mut events = Self::status_events(
-                    window_id.to_string(),
-                    WindowProcessStatus::Error,
-                    Some(detail.to_string()),
-                );
-                events.extend(self.close_window_events(window_id));
+                let events = match pane {
+                    LaunchPaneDisposition::Teardown => {
+                        self.stop_window_runtime_without_session_projection(window_id);
+                        let mut events = Self::status_events(
+                            window_id.to_string(),
+                            WindowProcessStatus::Error,
+                            Some(detail.to_string()),
+                        );
+                        events.extend(self.close_window_events(window_id));
+                        events
+                    }
+                    // Painting or closing a window this launch does not own
+                    // would report someone else's pane as failed.
+                    LaunchPaneDisposition::Retain => Vec::new(),
+                };
                 self.pending_fresh_execution_launches.remove(window_id);
                 let _ =
                     clear_durable_launch_recovery(&self.sessions_dir, &pending.binding.session_id);
@@ -6388,31 +6441,42 @@ impl AppRuntime {
     }
 
     /// Issue #3475: a fired readiness deadline is a checkpoint, not an expiry.
-    /// It aborts the prepared successor only once the pane stops showing that
-    /// the agent is still coming up, and always within a bounded number of
-    /// extensions. The `operation_id` correlation is unchanged, so a timer that
-    /// fires after its launch already succeeded (or was superseded) is still a
-    /// no-op.
+    /// It extends while the pane shows that the agent is still coming up, and
+    /// always within a bounded number of extensions. The `operation_id`
+    /// correlation is unchanged, so a timer that fires after its launch already
+    /// succeeded (or was superseded) is still a no-op.
+    ///
+    /// Issue #3482: spending that budget is not a licence to destroy a live
+    /// Session. The deadline re-proves session identity and process liveness
+    /// before it decides anything, and only a dead pane — or a window another
+    /// Session owns now — is rolled back. A pane that is still this launch's own
+    /// live pane is handed to the user with its process and prepared candidate
+    /// intact, and the deadline stays armed purely to reap it later.
     pub(crate) fn handle_continue_work_ready_timeout(
         &mut self,
         window_id: &str,
         watch: &ContinueWorkReadinessWatch,
     ) -> Vec<OutboundEvent> {
         let operation_id = watch.operation_id.as_str();
-        let is_pending_continue_work = self
+        let pending_continue_work_session = self
             .pending_continue_work
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id);
-        let is_pending_fresh_execution = self
+            .filter(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.binding.session_id.clone());
+        let pending_fresh_execution_session = self
             .pending_fresh_execution_launches
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id);
-        if !is_pending_continue_work && !is_pending_fresh_execution {
+            .filter(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.binding.session_id.clone());
+        let is_pending_continue_work = pending_continue_work_session.is_some();
+        let Some(expected_session_id) =
+            pending_continue_work_session.or(pending_fresh_execution_session)
+        else {
             return Vec::new();
-        }
-        let pane_alive = self.readiness_pane_is_alive(window_id);
+        };
+        let evidence = self.readiness_pane_evidence(window_id, &expected_session_id);
         let output_bytes = self.observed_window_output_bytes(window_id);
-        match continue_work_readiness_decision(watch, pane_alive, output_bytes) {
+        match continue_work_readiness_decision(watch, evidence, output_bytes) {
             ReadinessDeadlineDecision::Extend(next) => {
                 tracing::info!(
                     window_id = %window_id,
@@ -6424,22 +6488,63 @@ impl AppRuntime {
                 self.rearm_continue_work_readiness_deadline(window_id, next);
                 Vec::new()
             }
-            ReadinessDeadlineDecision::Abort { detail } => {
+            ReadinessDeadlineDecision::HandOff {
+                watch: next,
+                detail,
+            } => {
+                self.rearm_continue_work_readiness_deadline(window_id, next);
+                let Some(detail) = detail else {
+                    return Vec::new();
+                };
+                tracing::warn!(
+                    window_id = %window_id,
+                    operation_id = %operation_id,
+                    "handed an unready but live launch pane to the user"
+                );
+                self.readiness_handoff_events(window_id, detail)
+            }
+            ReadinessDeadlineDecision::Abort { detail, pane } => {
                 if is_pending_continue_work {
-                    self.continue_work_launch_failed_events(window_id, &detail)
+                    self.continue_work_launch_failed_events_with_pane(window_id, &detail, pane)
                 } else {
                     let feedback = self
                         .pending_fresh_execution_launches
                         .get(window_id)
                         .and_then(|pending| pending.launch_feedback_context.clone());
-                    self.launch_error_events_with_continue_work(
-                        window_id.to_string(),
-                        detail,
-                        feedback,
-                    )
+                    match pane {
+                        LaunchPaneDisposition::Teardown => self
+                            .launch_error_events_with_continue_work(
+                                window_id.to_string(),
+                                detail,
+                                feedback,
+                            ),
+                        // A foreign window must not travel the generic launch
+                        // error path: that one paints and tears down whatever
+                        // window it is given.
+                        LaunchPaneDisposition::Retain => self
+                            .fresh_execution_launch_failed_events_with_pane(
+                                window_id, &detail, pane,
+                            ),
+                    }
                 }
             }
         }
+    }
+
+    /// Issue #3482: publish the handoff so the pane says why it is still
+    /// waiting. The window keeps its runtime state — only the detail changes,
+    /// and it is stored so a client that reconnects later still sees it.
+    fn readiness_handoff_events(&mut self, window_id: &str, detail: String) -> Vec<OutboundEvent> {
+        self.window_details
+            .insert(window_id.to_string(), detail.clone());
+        let status = self
+            .window_status(window_id)
+            .unwrap_or(WindowProcessStatus::Running);
+        vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+            id: window_id.to_string(),
+            status,
+            detail: Some(detail),
+        })]
     }
 
     pub(crate) fn finalize_fresh_execution_launch_session_start(
@@ -6889,6 +6994,9 @@ impl AppRuntime {
         }
 
         self.pending_continue_work.remove(window_id);
+        // Issue #3482: see `completed_fresh_execution_launch_events` — a late
+        // SessionStart must retire the readiness handoff diagnostic.
+        self.window_details.remove(window_id);
         self.continue_work_outcomes.insert(
             pending.operation_id.clone(),
             CachedContinueWorkOutcome {
