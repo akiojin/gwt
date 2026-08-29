@@ -2783,13 +2783,6 @@ impl IssueMonitorState {
         }
         state.failure_release_version = prefs.failure_release_version;
         for release in prefs.released_failures {
-            // A failure and a release for the same issue cannot both be true.
-            // Trust the failure: it is the state that keeps work out of the
-            // queue, so believing a contradictory release would relaunch work
-            // that a live process just reported as broken.
-            if state.failed_issues.contains_key(&release.issue_number) {
-                continue;
-            }
             state
                 .released_failures
                 .insert(release.issue_number, release);
@@ -2814,6 +2807,14 @@ impl IssueMonitorState {
             state.autonomous_records.insert(record.issue_number, record);
         }
         state.autonomous_handoffs = prefs.autonomous_handoffs;
+        let completed = state.merged_issues.iter().copied().collect::<Vec<_>>();
+        for issue_number in completed {
+            state.apply_merged_terminal_state(issue_number);
+        }
+        // Issue #3757: positive recovery authority outranks contradictory
+        // failed/in-flight companions even on a cold restart. A valid fresh
+        // claim consumes the release atomically before persistence.
+        state.enforce_failure_release_fences();
         state
             .queued_launch_session_strategies
             .retain(|issue_number, _| {
@@ -3779,6 +3780,12 @@ impl IssueMonitorState {
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
         let reopened_completion_fences = self.local_reopened_completion_fences(disk);
+        // Issue #3757: resolve the exact recovery/fresh-claim authority before
+        // union-merging in-flight companions. Otherwise a stale local launch
+        // can mask the fresh disk launch or survive a disk recovery fence.
+        self.consume_releases_superseded_by_disk_launches(disk);
+        self.adopt_failure_releases_from_prefs(disk);
+        self.enforce_failure_release_fences();
         self.merge_completion_records_from_prefs(disk);
         self.merge_inflight_launches_from_disk_excluding(disk, &reopened_completion_fences);
         let rejected_terminal_companions = self.rejected_disk_terminal_failure_companions(disk);
@@ -3841,9 +3848,13 @@ impl IssueMonitorState {
         // convinced the issue is still broken and writing that view back over
         // the recovery on its next commit.
         self.merge_requeue_audit(disk.requeue_audit.iter().cloned());
-        self.adopt_failure_releases_from_prefs(disk);
+        self.enforce_failure_release_fences();
         self.drop_releases_for_failed_issues();
         self.refresh_disk_owned_prefs(disk);
+        // The refresh replaces durable delivery/effect projections. Reapply
+        // the fence so a contradictory disk snapshot cannot restore an
+        // abandoned delivery after the first cleanup.
+        self.enforce_failure_release_fences();
         let terminal_issue_numbers = self
             .merged_issues
             .iter()
@@ -4115,6 +4126,10 @@ impl IssueMonitorState {
             let issue_number = failed.issue_number;
             if failed.message.trim().is_empty()
                 || (skip_migration_tombstones && self.is_migrated_failure_tombstone(failed))
+                || disk
+                    .released_failures
+                    .iter()
+                    .any(|release| release.issue_number == issue_number)
                 || self.failed_issues.contains_key(&issue_number)
                 || self.launched_windows.contains_key(&issue_number)
                 || self.merged_issues.contains(&issue_number)
@@ -4122,6 +4137,9 @@ impl IssueMonitorState {
                 continue;
             }
 
+            // A positive disk failure with no matching disk release is newer
+            // than a stale process-local recovery fence.
+            self.released_failures.remove(&issue_number);
             self.failed_issues
                 .insert(issue_number, failed.message.clone());
             let needs_human = disk
@@ -5348,6 +5366,9 @@ impl IssueMonitorState {
             if available == 0 {
                 break;
             }
+            if !self.retry_ready(issue_number, now) {
+                continue;
+            }
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
                 continue;
             };
@@ -5410,11 +5431,16 @@ impl IssueMonitorState {
             return launches;
         }
         while self.config.enabled && self.gui_connected && self.active_launches.len() < max_active {
-            let Some(issue_number) = self.queue.front().copied() else {
+            let Some(issue_number) = self
+                .queue
+                .iter()
+                .copied()
+                .find(|issue_number| self.retry_ready(*issue_number, now))
+            else {
                 break;
             };
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
-                self.queue.pop_front();
+                self.queue.retain(|queued| *queued != issue_number);
                 continue;
             };
             if completed_probe(issue.number) && self.record_linked_pr_completion(issue.number) {
@@ -5644,6 +5670,23 @@ impl IssueMonitorState {
     ) -> bool {
         let claim_id = claim_id.into();
         let claim_owner = claim_owner.into();
+        // An exact ReleaseClaim is the durable compensation written when this
+        // claim crossed its remote-execution fence before a requeue/exclusion.
+        // Its late success is old-cycle evidence and may never start a launch.
+        if self.pending_effects.iter().any(|effect| {
+            matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number: pending_issue,
+                    claim_id: pending_claim,
+                    owner: pending_owner,
+                } if *pending_issue == issue_number
+                    && pending_claim == &claim_id
+                    && pending_owner == &claim_owner
+            )
+        }) {
+            return false;
+        }
         let Some(issue) = self
             .inbox_item(issue_number)
             .filter(|item| item.state == MonitorInboxState::Queued)
@@ -5663,6 +5706,10 @@ impl IssueMonitorState {
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
         let launch_session_strategy = self.take_launch_session_strategy(issue_number);
+        // Issue #3757 / SPEC #3165 FR-134: the confirmed claim and its durable
+        // delivery are the exact transition that starts the fresh lifecycle.
+        // Consume the recovery fence here, never by comparing timestamps.
+        self.released_failures.remove(&issue_number);
         self.record_claimed(issue, claim_id.clone());
         self.queue.retain(|queued| *queued != issue_number);
         if !self.active_launches.contains(&issue_number) {
@@ -6166,6 +6213,7 @@ impl IssueMonitorState {
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.failed_issues.remove(&issue_number);
+        self.released_failures.remove(&issue_number);
         self.merged_issues.insert(issue_number);
         self.set_inbox_state(issue_number, MonitorInboxState::Merged);
         // SPEC #3200 T-022: completion resets the autonomous lifecycle (attempts,
@@ -6183,6 +6231,7 @@ impl IssueMonitorState {
     pub fn record_released(&mut self, issue_number: u64) {
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
+        self.released_failures.remove(&issue_number);
         self.set_inbox_state(issue_number, MonitorInboxState::Released);
     }
 
@@ -6677,7 +6726,7 @@ impl IssueMonitorState {
         };
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
-        self.apply_failure_release(issue_number);
+        self.apply_failure_release(issue_number, true);
         self.push_autonomous_notice(
             "info",
             issue_number,
@@ -6694,13 +6743,21 @@ impl IssueMonitorState {
     /// the cross-process adoption of a release another process committed, so a
     /// converged process cannot land in a different state than the one that
     /// issued the recovery.
-    fn apply_failure_release(&mut self, issue_number: u64) {
+    fn apply_failure_release(&mut self, issue_number: u64, revoke_claims: bool) {
         let removed_banner = self
             .failed_issues
             .get(&issue_number)
             .map(|message| format!("issue #{issue_number}: {message}"));
         self.failed_issues.remove(&issue_number);
         self.failed_windows.remove(&issue_number);
+        self.clear_active_tracking(issue_number);
+        if revoke_claims {
+            revoke_uncommitted_claims_for_issue(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                issue_number,
+            );
+        }
         // The abandoned conversation is what stranded this issue; resuming it
         // would reproduce the failure the recovery is undoing.
         self.require_fresh_launch_session(issue_number);
@@ -6709,9 +6766,19 @@ impl IssueMonitorState {
             record.retry_not_before = None;
             record.retry_hold_reason = None;
             record.active_launch_id = None;
+            record.last_heartbeat = None;
             record.phase = AutonomousPhase::Idle;
         }
-        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Queued;
+            item.claim_id = None;
+            item.launched_window_id = None;
+            item.error_message = None;
+        }
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
         }
@@ -6744,9 +6811,70 @@ impl IssueMonitorState {
             self.released_failures
                 .insert(release.issue_number, release.clone());
             self.merge_requeue_audit(std::iter::once(release.clone()));
-            self.apply_failure_release(release.issue_number);
+            self.apply_failure_release(release.issue_number, true);
         }
         self.failure_release_version = observed.max(disk.failure_release_version);
+    }
+
+    /// Reapply active recovery fences after load and after every companion
+    /// merge. Adoption watermarks deduplicate release events, but cannot stop a
+    /// union merge from reintroducing the abandoned launch later.
+    fn enforce_failure_release_fences(&mut self) {
+        let issue_numbers = self.released_failures.keys().copied().collect::<Vec<_>>();
+        for issue_number in issue_numbers {
+            let terminal = self.merged_issues.contains(&issue_number)
+                || self.inbox_item(issue_number).is_some_and(|item| {
+                    matches!(
+                        item.state,
+                        MonitorInboxState::Merged | MonitorInboxState::Released
+                    )
+                });
+            if terminal {
+                self.released_failures.remove(&issue_number);
+                continue;
+            }
+            // Do not revoke Prepared claims repeatedly: a claim planned after
+            // the release is the legitimate fresh lifecycle. Newly created or
+            // newly adopted releases use `true` and revoke old claims once.
+            self.apply_failure_release(issue_number, false);
+        }
+    }
+
+    /// Consume a local fence only from positive disk evidence produced by the
+    /// exact confirmed-claim transaction. The disk watermark proves it had
+    /// observed the release; a durable active companion plus absence of both
+    /// release and failure then proves a fresh lifecycle superseded it.
+    fn consume_releases_superseded_by_disk_launches(&mut self, disk: &IssueMonitorPrefs) {
+        let disk_active = disk
+            .launched_issues
+            .iter()
+            .map(|launch| launch.issue_number)
+            .chain(
+                disk.launching_issues
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .chain(
+                disk.pending_launch_deliveries
+                    .iter()
+                    .map(|delivery| delivery.issue_number),
+            )
+            .collect::<BTreeSet<_>>();
+        self.released_failures.retain(|issue_number, release| {
+            let disk_keeps_release = disk
+                .released_failures
+                .iter()
+                .any(|disk_release| disk_release.issue_number == *issue_number);
+            let disk_has_failure = disk
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == *issue_number);
+            let exact_fresh_launch = disk.failure_release_version >= release.release_version
+                && disk_active.contains(issue_number)
+                && !disk_keeps_release
+                && !disk_has_failure;
+            !exact_fresh_launch
+        });
     }
 
     /// Merge operator reset evidence by release sequence and retain only the
@@ -10246,6 +10374,262 @@ mod tests {
                 "the release must remain published across a second hop"
             );
         }
+    }
+
+    /// Issue #3757 / SPEC #3165 Scenario 102: the release is an active fence,
+    /// not merely a one-shot attempt reset. A daemon that still holds the
+    /// abandoned launch and heartbeat must not turn the recovered row straight
+    /// back into a stuck attempt on its next rebase.
+    #[test]
+    fn requeue_release_fences_stale_active_lifecycle_across_rebase_and_restart() {
+        let mut recovering = agent_failed_monitor(42, "attempts exhausted");
+        for _ in 0..3 {
+            recovering.record_attempt(42);
+        }
+        assert!(matches!(
+            recovering.requeue_failed_issue(42, "operator recovery", "2026-08-26T00:10:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        let released = recovering.prefs();
+
+        let mut stale_daemon = launched_monitor(42, "tab-1::stale-agent");
+        stale_daemon.set_autonomous_mode(true);
+        for _ in 0..3 {
+            stale_daemon.record_attempt(42);
+        }
+        stale_daemon.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        stale_daemon.record_autonomous_heartbeat(42, "2026-08-25T20:00:00Z");
+
+        stale_daemon.rebase_daemon_driver_prefs(&released);
+
+        assert_eq!(stale_daemon.active_count(), 0);
+        assert!(stale_daemon.prefs().launched_issues.is_empty());
+        assert!(stale_daemon.prefs().launching_issues.is_empty());
+        assert!(stale_daemon.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(stale_daemon.attempt_count(42), 0);
+        assert_eq!(
+            stale_daemon
+                .autonomous_record(42)
+                .and_then(|record| record.last_heartbeat.as_deref()),
+            None
+        );
+        assert!(
+            stale_daemon
+                .recover_stuck_autonomous("2026-08-26T00:20:00Z")
+                .is_empty(),
+            "the abandoned heartbeat cannot spend the fresh retry budget"
+        );
+
+        let restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_daemon.prefs());
+        assert_eq!(restarted.active_count(), 0);
+        assert_eq!(restarted.attempt_count(42), 0);
+        assert!(restarted.queued_issue_numbers().contains(&42));
+    }
+
+    /// Issue #3757 / SPEC #3165 Scenario 104: only the exact durable fresh
+    /// claim transition may consume the release fence. A process still holding
+    /// the old release must then converge on that positive fresh-lifecycle
+    /// evidence rather than clearing it.
+    #[test]
+    fn confirmed_fresh_claim_consumes_requeue_fence_and_wins_stale_release() {
+        let mut recovered = agent_failed_monitor(42, "attempts exhausted");
+        assert!(matches!(
+            recovered.requeue_failed_issue(42, "operator recovery", "2026-08-26T00:10:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        let stale_release = recovered.prefs();
+
+        assert!(recovered.apply_confirmed_claim(
+            42,
+            "fresh-claim",
+            "host/session",
+            "fresh-effect",
+            "2026-08-26T00:11:00Z",
+        ));
+        let fresh = recovered.prefs();
+        assert!(
+            fresh.released_failures.is_empty(),
+            "the confirmed claim and durable delivery consume the active fence atomically"
+        );
+        assert_eq!(fresh.pending_launch_deliveries.len(), 1);
+
+        let mut stale_observer =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_release);
+        stale_observer.rebase_daemon_driver_prefs(&fresh);
+        assert!(stale_observer.prefs().released_failures.is_empty());
+        assert_eq!(stale_observer.active_issue_numbers(), vec![42]);
+        assert_eq!(stale_observer.prefs().pending_launch_deliveries.len(), 1);
+    }
+
+    /// Issue #3757 / SPEC #3165 FR-134: an AcquireClaim that crossed its
+    /// execution fence before requeue is explicitly compensated. Its late
+    /// success must release the remote claim without starting a local cycle.
+    #[test]
+    fn requeue_fence_rejects_pre_release_attempting_claim_result() {
+        let mut monitor = agent_failed_monitor(42, "attempts exhausted");
+        let key = monitor
+            .prepare_pending_effect(
+                "claim-before-release",
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    claim_id: "old-claim".to_string(),
+                    owner: "host/session".to_string(),
+                    heartbeat_at: "2026-08-26T00:00:00Z".to_string(),
+                    expires_at: "2026-08-26T00:30:00Z".to_string(),
+                    launched_work_id: Some("work/issue-42".to_string()),
+                },
+            )
+            .expect("prepare old claim");
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        assert!(matches!(
+            monitor.requeue_failed_issue(42, "operator recovery", "2026-08-26T00:10:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id,
+                owner,
+            } if claim_id == "old-claim" && owner == "host/session"
+        )));
+
+        assert!(!monitor.apply_confirmed_claim(
+            42,
+            "old-claim",
+            "host/session",
+            "claim-before-release",
+            "2026-08-26T00:11:00Z",
+        ));
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.released_failures.len(), 1);
+        assert!(prefs.launching_issues.is_empty());
+        assert!(prefs.pending_launch_deliveries.is_empty());
+    }
+
+    /// Issue #3757: a real terminal transition is stronger than a recovery
+    /// fence. Completion/close after requeue must never be reverted to Queued.
+    #[test]
+    fn terminal_transition_consumes_requeue_fence() {
+        let mut merged = agent_failed_monitor(42, "attempts exhausted");
+        assert!(matches!(
+            merged.requeue_failed_issue(42, "operator recovery", "2026-08-26T00:10:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        merged.record_merged(42);
+        assert!(merged.prefs().released_failures.is_empty());
+        let restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), merged.prefs());
+        assert!(restarted.merged_issues.contains(&42));
+        assert!(!restarted.queued_issue_numbers().contains(&42));
+
+        let mut released = agent_failed_monitor(43, "attempts exhausted");
+        assert!(matches!(
+            released.requeue_failed_issue(43, "operator recovery", "2026-08-26T00:10:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        released.record_released(43);
+        assert!(released.prefs().released_failures.is_empty());
+        assert!(!released.queued_issue_numbers().contains(&43));
+        assert_eq!(
+            released.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Released)
+        );
+    }
+
+    /// Issue #3757 / SPEC #3165 Scenario 105: the durable effect planner is a
+    /// claim boundary too. It must not prepare a remote claim while the retry
+    /// backoff is still in force, even though the Issue remains queued.
+    #[test]
+    fn claim_effect_planner_honors_autonomous_retry_backoff() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        monitor.autonomous_tuning.retry_backoff_base_secs = 60;
+        assert_eq!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "retry later",
+                "2026-08-26T00:00:00Z",
+            ),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+
+        assert_eq!(
+            monitor
+                .try_prepare_claim_effects_with_probe(
+                    "host/session",
+                    "2026-08-26T00:00:30Z",
+                    1,
+                    |_| Ok::<bool, std::convert::Infallible>(false),
+                )
+                .expect("infallible probe"),
+            0
+        );
+        assert!(monitor.pending_effects().is_empty());
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.attempt_count(42), 1);
+
+        assert_eq!(
+            monitor
+                .try_prepare_claim_effects_with_probe(
+                    "host/session",
+                    "2026-08-26T00:01:00Z",
+                    1,
+                    |_| Ok::<bool, std::convert::Infallible>(false),
+                )
+                .expect("infallible probe"),
+            1,
+            "claim planning resumes when the existing backoff expires"
+        );
+    }
+
+    /// Issue #3757: skipping a backoff-held head entry means queue cleanup must
+    /// remove the selected candidate, not blindly discard the queue head.
+    #[test]
+    fn synchronous_claim_cleanup_preserves_backoff_held_queue_head() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+        let github_issue = |number| IssueSnapshot {
+            number: IssueNumber(number),
+            title: format!("Issue {number}"),
+            body: String::new(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: Vec::new(),
+        };
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        client.seed(github_issue(43));
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(43));
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        assert_eq!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "retry later",
+                "2026-08-26T00:00:00Z",
+            ),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        monitor.queue.retain(|issue_number| *issue_number != 42);
+        monitor.queue.push_front(42);
+        monitor.inbox.retain(|item| item.issue.number != 43);
+
+        assert!(monitor
+            .claim_next_launch_requests(&client, "host-a/session-a", "2026-08-26T00:00:30Z")
+            .is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
     }
 
     #[test]

@@ -172,11 +172,28 @@ fn authority_owned_endpoint(
     }
     match matches.len() {
         1 => Ok(matches.pop().expect("one authority endpoint")),
-        0 => Err(format!(
-            "Issue Monitor authority fence pid {} has no usable endpoint in {}",
-            fence.pid,
-            daemon_dir.display()
-        )),
+        // #3766 AC-3: diagnose the incident shape (fence held, descriptor
+        // gone) instead of a bare permanent-looking failure. A live fence
+        // holder self-heals its descriptor within seconds, so this state is
+        // transient unless the fence pid is dead or the socket is gone.
+        0 => {
+            let descriptor_path = requested_scope.endpoint_path(gwt_home);
+            let socket_present = gwt_core::daemon::resolve_daemon_socket_path(&descriptor_path)
+                .map(|socket| socket.path.exists())
+                .unwrap_or(false);
+            Err(format!(
+                "Issue Monitor authority fence pid {} has no usable endpoint in {} \
+                 (diagnosis: fence pid alive={}, descriptor json present={}, \
+                 socket present={}; a live fence-holding daemon rewrites its missing \
+                 descriptor within seconds — retry, and restart the GWT app if this \
+                 persists)",
+                fence.pid,
+                daemon_dir.display(),
+                is_process_alive(fence.pid),
+                descriptor_path.exists(),
+                socket_present,
+            ))
+        }
         count => Err(format!(
             "Issue Monitor authority fence pid {} matched {count} endpoints in {}",
             fence.pid,
@@ -832,6 +849,66 @@ mod tests {
             crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
                 if message.contains("authority fence")
         ));
+    }
+
+    /// Issue #3766 AC-3: when a fence is active but no descriptor matches it,
+    /// the error must carry a diagnosis (fence pid liveness, descriptor and
+    /// socket presence) instead of the bare permanent-looking failure.
+    #[test]
+    fn fence_without_descriptor_reports_endpoint_diagnosis() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().expect("project tempdir");
+        let home = TempDir::new().expect("home tempdir");
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        crate::persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+        )
+        .expect("persist active authority fence");
+        // The #3766 incident shape: the daemon dir exists (socket bound by the
+        // fence holder) but the descriptor json is gone.
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
+            .expect("runtime scope");
+        let descriptor_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        std::fs::create_dir_all(descriptor_path.parent().expect("daemon dir parent"))
+            .expect("create daemon dir");
+
+        let error = publish_issue_monitor_control_with_timeout_and_liveness(
+            project.path(),
+            json!({"enabled": false}),
+            Duration::from_millis(100),
+            |_| true,
+        )
+        .expect_err("fence without descriptor cannot resolve an endpoint");
+
+        let message = match error {
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                message,
+            ) => message,
+            other => panic!("expected OutcomeUnknown, got {other:?}"),
+        };
+        assert!(
+            message.contains("has no usable endpoint"),
+            "diagnosis keeps the stable failure prefix: {message}"
+        );
+        assert!(
+            message.contains("fence pid alive=true"),
+            "diagnosis must report fence pid liveness: {message}"
+        );
+        assert!(
+            message.contains("descriptor json present=false"),
+            "diagnosis must report descriptor presence: {message}"
+        );
+        assert!(
+            message.contains("socket present="),
+            "diagnosis must report socket presence: {message}"
+        );
     }
 
     #[test]
