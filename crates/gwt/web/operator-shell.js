@@ -378,6 +378,8 @@ const RUNTIME_HEALTH_SORT_MODES = [
 ];
 const RUNTIME_HEALTH_LOAD_CPU_UNIT = 20;
 const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
+const RUNTIME_HEALTH_CPU_UNITS =
+  "Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%.";
 let runtimeHealthHideTimer = null;
 
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
@@ -387,13 +389,15 @@ export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
 
   const queue = snapshot.queue || {};
   const state = runtimeHealthState(snapshot.state);
+  const stateLabel = runtimeHealthStateLabel(state);
+  const cpuLabel = formatRuntimeAggregateCpu(snapshot.cpu_percent);
+  const memoryLabel = formatRuntimeMemory(snapshot.memory_bytes);
   cell.dataset.state = state;
   cell.hidden = false;
-  value.textContent = `${runtimeHealthStateLabel(state)} ${formatRuntimeCpu(
-    snapshot.cpu_percent,
-  )} ${formatRuntimeMemory(
-    snapshot.memory_bytes,
-  )}`;
+  value.textContent = `${stateLabel} ${cpuLabel} ${memoryLabel}`;
+  const accessibleLabel = `Runtime performance ${stateLabel} ${cpuLabel} ${memoryLabel}. ${RUNTIME_HEALTH_CPU_UNITS}`;
+  cell.setAttribute("aria-label", accessibleLabel);
+  value.setAttribute("aria-label", accessibleLabel);
   cell.setAttribute("title", runtimeHealthTitle(snapshot, queue));
   cell.dataset.runtimeHealthSort = runtimeHealthSortMode(cell.dataset.runtimeHealthSort);
   wireRuntimeHealthDetail(doc, cell);
@@ -422,6 +426,11 @@ function formatRuntimeCpu(cpu) {
   return `${Math.round(cpu)}%`;
 }
 
+function formatRuntimeAggregateCpu(cpu) {
+  if (typeof cpu !== "number" || !Number.isFinite(cpu)) return "--";
+  return formatRuntimeCpu(Math.min(100, Math.max(0, cpu)));
+}
+
 function formatRuntimeMemory(bytes) {
   const value = Number(bytes) || 0;
   if (value <= 0) return "--";
@@ -437,6 +446,7 @@ function signedDelta(value) {
 
 function runtimeHealthTitle(snapshot, queue) {
   return [
+    RUNTIME_HEALTH_CPU_UNITS,
     `state: ${runtimeHealthState(snapshot.state)}`,
     `processes: ${Number(snapshot.process_count) || 0}`,
     `runners: ${Number(snapshot.runner_count) || 0}`,
@@ -525,7 +535,7 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
   const summary = doc.createElement("div");
   summary.className = "op-runtime-health-detail__summary";
   appendRuntimeHealthChip(doc, summary, "STATE", runtimeHealthStateLabel(snapshot.state));
-  appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeCpu(snapshot.cpu_percent));
+  appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeAggregateCpu(snapshot.cpu_percent));
   appendRuntimeHealthChip(doc, summary, "MEM", formatRuntimeMemory(snapshot.memory_bytes));
   appendRuntimeHealthChip(
     doc,
@@ -534,6 +544,11 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
     `${Number(snapshot.process_count) || 0}/${Number(snapshot.runner_count) || 0}`,
   );
   detail.appendChild(summary);
+
+  const units = doc.createElement("p");
+  units.className = "op-runtime-health-detail__units";
+  units.textContent = RUNTIME_HEALTH_CPU_UNITS;
+  detail.appendChild(units);
 
   const queueBlock = doc.createElement("div");
   queueBlock.className = "op-runtime-health-detail__queue";

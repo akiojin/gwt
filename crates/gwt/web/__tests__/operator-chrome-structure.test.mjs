@@ -11,6 +11,8 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const runtimeCpuUnitsPattern =
+  /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 // Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
 const workspaceRenderSyncSource = readFileSync(
   resolve(here, "../workspace-render-sync.js"),
@@ -1285,6 +1287,12 @@ test("body markup wires Mission Briefing reveal lines (US-1 AS-1)", () => {
   assert.match(online.textContent, /OPERATOR ONLINE/);
 });
 
+test("head suppresses the browser's implicit favicon request", () => {
+  const favicon = document.querySelector('link[rel="icon"]');
+  assert.ok(favicon, "expected an explicit favicon declaration");
+  assert.equal(favicon.getAttribute("href"), "data:,");
+});
+
 test("font preload hints exist for Mona/Hubot/JetBrains", () => {
   const preloads = Array.from(document.querySelectorAll("link[rel=preload][as=font]")).map((l) => l.href);
   for (const expected of ["MonaSans.woff2", "HubotSans-Bold.woff2", "JetBrainsMono.woff2"]) {
@@ -1342,15 +1350,19 @@ test("Status Strip exposes a compact PERF cell for runtime health", () => {
   const cell = document.getElementById("op-strip-runtime-health");
   assert.ok(cell, "expected runtime health PERF cell");
   assert.match(cell.textContent ?? "", /PERF/);
-  assert.equal(cell.getAttribute("aria-label"), "Runtime performance");
+  assert.match(cell.getAttribute("aria-label") ?? "", /Runtime performance/);
+  assert.match(cell.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
+  assert.match(cell.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
   assert.match(operatorShellSource, /applyRuntimeHealth/);
 });
 
 test("Runtime health PERF detail uses structured diagnostic classes", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   for (const token of [
+    "formatRuntimeAggregateCpu",
     "runtimeHealthStateLabel",
     "op-runtime-health-detail__summary",
+    "op-runtime-health-detail__units",
     "op-runtime-health-detail__chip",
     "op-runtime-health-detail__queue",
     "op-runtime-health-detail__process-list",
@@ -1363,8 +1375,13 @@ test("Runtime health PERF detail uses structured diagnostic classes", () => {
   }
   assert.match(
     operatorShellSource,
-    /value\.textContent\s*=\s*`\$\{runtimeHealthStateLabel\(state\)\}\s+\$\{formatRuntimeCpu/,
-    "compact PERF value must be severity-first",
+    /const cpuLabel\s*=\s*formatRuntimeAggregateCpu\(snapshot\.cpu_percent\)/,
+    "compact PERF value must derive its CPU label from the aggregate-only formatter",
+  );
+  assert.match(
+    operatorShellSource,
+    /value\.textContent\s*=\s*`\$\{stateLabel\}\s+\$\{cpuLabel\}\s+\$\{memoryLabel\}`/,
+    "compact PERF value must remain severity-first and render the aggregate CPU label",
   );
   assert.match(
     css,

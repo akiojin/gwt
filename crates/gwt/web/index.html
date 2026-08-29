@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gwt — Operator</title>
+    <link rel="icon" href="data:," />
     <!-- SPEC-2356: theme bootstrap. Runs synchronously before paint to avoid FOUC. -->
     <script>
       (function () {
@@ -389,14 +390,14 @@
             id="op-strip-runtime-health"
             tabindex="0"
             data-state="warming"
-            aria-label="Runtime performance"
-            title="Runtime performance warming"
+            aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
+            title="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
           >
             <span class="op-status-strip__label">PERF</span>
             <span
               class="op-status-strip__value"
               id="op-strip-runtime-health-value"
-              aria-label="Runtime performance"
+              aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             >CPU -- MEM --</span>
           </div>
           <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
