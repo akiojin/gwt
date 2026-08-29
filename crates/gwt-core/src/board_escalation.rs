@@ -873,13 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn the_three_production_refusals_from_the_issue_are_all_classified() {
+    fn execution_refusals_require_typed_disposition_while_legacy_families_remain_classified() {
         assert_eq!(
             classify_operation_refusal(
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work"
             ),
-            Some(OperationRefusalKind::Immutability)
+            None,
+            "execution display wording must never decide escalation"
         );
         assert_eq!(
             classify_operation_refusal(

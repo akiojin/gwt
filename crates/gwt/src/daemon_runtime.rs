@@ -1734,6 +1734,61 @@ mod tests {
             .expect_err("mismatched receipt must be typed");
         assert!(receipt.contains("receipt_mismatch"), "{receipt}");
         receipt_server.receive();
+
+        let continuation_request = crate::AgentExecutionContinuationRequest {
+            schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+            operation_id: "continuation-reason-codes".to_string(),
+        };
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let transient_server = BindingProbeServer::start(
+                status,
+                serde_json::json!({
+                    "code": "temporarily_unavailable",
+                    "reason": "retry_later",
+                    "message": "the Host is temporarily unavailable"
+                }),
+            );
+            let refusal = send_execution_continuation_via_agent_bridge_detailed(
+                &HookForwardTarget {
+                    url: transient_server.forward_url.clone(),
+                    token: "continuation-transient-secret".to_string(),
+                },
+                &continuation_request,
+            )
+            .expect_err("transient continuation rejection must stay typed");
+            assert_eq!(
+                refusal.reason(),
+                AgentBridgeFailureReason::TransportFailure,
+                "{status} is retryable transport, not a human permission decision: {refusal}"
+            );
+            transient_server.receive();
+        }
+
+        let permission_server = BindingProbeServer::start(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "code": "invalid_request",
+                "reason": "operation_rejected",
+                "message": "the continuation operation is structurally refused"
+            }),
+        );
+        let permission = send_execution_continuation_via_agent_bridge_detailed(
+            &HookForwardTarget {
+                url: permission_server.forward_url.clone(),
+                token: "continuation-permission-secret".to_string(),
+            },
+            &continuation_request,
+        )
+        .expect_err("stable 400 continuation refusal must stay typed");
+        assert_eq!(
+            permission.reason(),
+            AgentBridgeFailureReason::OperationRejected
+        );
+        permission_server.receive();
     }
 
     #[test]

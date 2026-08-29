@@ -23768,6 +23768,278 @@ exit 1
             );
         }
 
+        #[test]
+        fn dirty_work_refusal_stays_local_then_commit_push_retry_completes() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+            fixture.append_event("terminal-update-awaiting-delivery");
+
+            let mut refused = TestEnv::new(fixture.repo.clone());
+            refused.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#
+                    .to_string();
+            assert_eq!(
+                crate::cli::json_envelope::dispatch(&mut refused, "gwtd"),
+                2
+            );
+            let payload: serde_json::Value =
+                serde_json::from_slice(&refused.stdout).expect("dirty refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "work_event_delivery_unsettled"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(
+                payload["refusal"]["recovery_action"],
+                "commit_and_push_work_events"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(&fixture.repo)
+                    .unwrap()
+                    .is_empty(),
+                "a dirty Work event is the current agent's next action"
+            );
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+
+            fixture.stage_events();
+            fixture.commit("chore(work): settle terminal Work event");
+            fixture.push();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+
+            let mut retried = TestEnv::new(fixture.repo.clone());
+            retried.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#
+                    .to_string();
+            assert_eq!(
+                crate::cli::json_envelope::dispatch(&mut retried, "gwtd"),
+                0
+            );
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Completed,
+                "the advertised commit/push/retry recovery must really complete"
+            );
+        }
+
+        #[test]
+        fn stale_verification_refusal_is_typed_and_never_escalated() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record("sess-op")).unwrap();
+            save_covering_evidence(repo.path(), "sess-op", false);
+            fs::write(
+                repo.path().join("changed-after-verification.rs"),
+                "fn changed() {}\n",
+            )
+            .unwrap();
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#
+                    .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("stale refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "verification_stale_fingerprint"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+            assert!(
+                gwt_core::coordination::load_open_escalations(repo.path())
+                    .unwrap()
+                    .is_empty(),
+                "stale verification must stay on the caller's verify.run path"
+            );
+        }
+
+        #[test]
+        fn repairable_integrity_refusal_advertises_repair_without_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-repairable";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let trusted_path = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+                .unwrap()
+                .join("execution-control.json");
+            let tampered = fs::read_to_string(&trusted_path)
+                .unwrap()
+                .replace("$gwt-execute", "$gwt-forged");
+            fs::write(&trusted_path, tampered).unwrap();
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.blocked","params":{"reason":"environment unavailable"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("integrity refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_record_integrity_failed"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "execution.repair");
+            assert!(
+                gwt_core::coordination::load_open_escalations(repo.path())
+                    .unwrap()
+                    .is_empty(),
+                "a reachable execution.repair action must not become needs_human"
+            );
+        }
+
+        #[test]
+        fn missing_session_identity_uses_execution_owner_for_human_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record("sess-owner")).unwrap();
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.client.seed(gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(3248),
+                title: "execution authority".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z".to_string()),
+                comments: Vec::new(),
+            });
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#
+                    .to_string();
+
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 1);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("authority refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_session_identity_unavailable"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].owners, vec!["3248".to_string()]);
+            assert_eq!(
+                env.client.comments(gwt_github::IssueNumber(3248)).len(),
+                1,
+                "the typed refusal must mirror to its owning Issue"
+            );
+
+            let mut status = String::new();
+            crate::cli::issue::run(
+                &mut env,
+                crate::cli::IssueCommand::MonitorStatus { project_root: None },
+                &mut status,
+            )
+            .unwrap();
+            let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+            assert_eq!(status["needs_human"], serde_json::json!([3248]));
+        }
+
+        #[test]
+        fn terminal_reopen_refusal_reaches_owner_comment_and_needs_human() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-terminal";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            settle(repo.path(), session_id, ExecutionSettlement::Completed).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.client.seed(gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(3248),
+                title: "terminal execution".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z".to_string()),
+                comments: Vec::new(),
+            });
+            env.stdin = r#"{"schema_version":1,"operation":"execution.reopen","params":{"reason":"new work"}}"#
+                .to_string();
+
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("terminal refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_reopen_record_terminal"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            assert_eq!(payload["refusal"]["escalation_kind"], "immutability");
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].owners, vec!["3248".to_string()]);
+            assert_eq!(
+                env.client.comments(gwt_github::IssueNumber(3248)).len(),
+                1
+            );
+            let mut status = String::new();
+            crate::cli::issue::run(
+                &mut env,
+                crate::cli::IssueCommand::MonitorStatus { project_root: None },
+                &mut status,
+            )
+            .unwrap();
+            let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+            assert_eq!(status["needs_human"], serde_json::json!([3248]));
+        }
+
         // T-111: a failing verification run never unlocks completion, while
         // execution.blocked stays available without evidence.
         #[test]
