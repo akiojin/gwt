@@ -28,7 +28,9 @@ use crate::{
 ///   primitives + GREEN integration). Older clients/daemons will
 ///   reject the handshake and force a respawn instead of attempting
 ///   to exchange frames they cannot parse.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
+/// - `3`: connection-bound GUI materializer subscription frame. Ordinary
+///   subscribers remain read-only observers regardless of channel selection.
+pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
 /// Runtime backend target for daemon-managed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +451,10 @@ pub enum ClientFrame {
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
     Subscribe { channels: Vec<String> },
+    /// Subscribe as the GUI process that materializes Issue Monitor launch
+    /// deliveries. Unlike [`Self::Subscribe`], the daemon binds a presence
+    /// lease to this IPC connection and releases it on disconnect.
+    SubscribeMaterializer { channels: Vec<String> },
     /// Publish a payload to a daemon broadcast channel. Subscribers of
     /// `channel` receive a [`DaemonFrame::Event`] with the same payload.
     /// This is the gwt → gwtd companion to `Subscribe`; it is what

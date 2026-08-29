@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 2;
 
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,17 @@ pub struct WorktreeInfo {
 /// Manages Git worktrees for a repository.
 pub struct WorktreeManager {
     repo_path: PathBuf,
+}
+
+/// Safety verdict for repointing an existing worktree without losing local
+/// state. Callers can map the reason to their own durable diagnostics before
+/// [`WorktreeManager::repoint_detached`] revalidates it at mutation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetachedRepointSafety {
+    Ready,
+    SymbolicHead { branch: String },
+    TrackedOrIndexChanges,
+    DetachedOnlyCommit,
 }
 
 struct GitOutput {
@@ -63,6 +75,76 @@ fn run_git_observing_operation_deadline(
         success: output.status.success(),
         stdout: output.stdout,
         stderr: output.stderr,
+    })
+}
+
+fn remote_tracking_fetch_spawn_options(
+    args: &[&str],
+    current_dir: &Path,
+) -> gwt_core::process_console::SpawnOptions {
+    gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
+        .current_dir(current_dir)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+}
+
+fn run_remote_tracking_fetch_command(
+    args: &[&str],
+    current_dir: &Path,
+) -> std::io::Result<GitOutput> {
+    let options = remote_tracking_fetch_spawn_options(args, current_dir);
+    let output = if let Some(deadline) = gwt_core::operation_deadline::ensure_remaining("git")? {
+        gwt_core::process_console::spawn_logged_blocking_with_deadline(
+            &gwt_core::process_console::global(),
+            gwt_core::process_console::ProcessKind::Git,
+            "git",
+            args,
+            options,
+            deadline,
+        )?
+    } else {
+        gwt_core::process_console::spawn_logged_blocking(
+            &gwt_core::process_console::global(),
+            gwt_core::process_console::ProcessKind::Git,
+            "git",
+            args,
+            options,
+        )?
+    };
+    Ok(GitOutput {
+        success: output.success(),
+        stdout: output.stdout.into_bytes(),
+        stderr: output.stderr.into_bytes(),
+    })
+}
+
+fn run_remote_tracking_fetch_with_retry(
+    context: &str,
+    mut run_fetch: impl FnMut() -> std::io::Result<GitOutput>,
+) -> Result<()> {
+    for attempt in 0..REMOTE_TRACKING_FETCH_MAX_ATTEMPTS {
+        let output = run_fetch().map_err(|error| GwtError::Git(format!("{context}: {error}")))?;
+        if output.success {
+            return Ok(());
+        }
+
+        let stderr = git_output_stderr(&output);
+        if attempt + 1 < REMOTE_TRACKING_FETCH_MAX_ATTEMPTS
+            && is_remote_tracking_ref_cas_conflict(&stderr)
+        {
+            continue;
+        }
+        return Err(GwtError::Git(format!("{context}: {stderr}")));
+    }
+
+    unreachable!("remote tracking fetch attempts are non-zero")
+}
+
+fn is_remote_tracking_ref_cas_conflict(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        line.contains("cannot lock ref 'refs/remotes/")
+            && line.contains(" is at ")
+            && line.contains(" but expected ")
     })
 }
 
@@ -100,18 +182,15 @@ impl WorktreeManager {
 
     /// Fetch latest refs from `origin`.
     pub fn fetch_origin(&self) -> Result<()> {
-        let output = gwt_core::process::run_git_logged(
-            &["fetch", "origin", "--prune"],
-            Some(&self.repo_path),
-        )
-        .map_err(|e| GwtError::Git(format!("fetch origin: {e}")))?;
+        self.fetch_origin_with(run_remote_tracking_fetch_command)
+    }
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(GwtError::Git(format!("fetch origin: {stderr}")));
-        }
-
-        Ok(())
+    fn fetch_origin_with(
+        &self,
+        mut run_fetch: impl FnMut(&[&str], &Path) -> std::io::Result<GitOutput>,
+    ) -> Result<()> {
+        let args = ["fetch", "origin", "--prune"];
+        run_remote_tracking_fetch_with_retry("fetch origin", || run_fetch(&args, &self.repo_path))
     }
 
     /// Whether this repository has an `origin` remote configured.
@@ -204,20 +283,13 @@ impl WorktreeManager {
             return Err(GwtError::Git("remote branch name is empty".to_string()));
         }
         let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
-        let output = gwt_core::process::run_git_logged(
-            &["fetch", "origin", "--prune", &refspec],
-            Some(&self.repo_path),
-        )
-        .map_err(|e| GwtError::Git(format!("fetch origin {refspec}: {e}")))?;
-
-        if !output.status.success() {
-            return Err(GwtError::Git(format!(
-                "fetch origin {refspec}: {}",
-                command_stderr(&output)
-            )));
-        }
-
-        Ok(())
+        let context = format!("fetch origin {refspec}");
+        run_remote_tracking_fetch_with_retry(&context, || {
+            run_remote_tracking_fetch_command(
+                &["fetch", "origin", "--prune", &refspec],
+                &self.repo_path,
+            )
+        })
     }
 
     /// Return whether a remote-tracking branch exists.
@@ -288,6 +360,183 @@ impl WorktreeManager {
         }
 
         Ok(())
+    }
+
+    /// Repoint an existing detached worktree to `target` without moving any
+    /// branch ref.
+    ///
+    /// The target is resolved to a commit before inspecting or mutating the
+    /// worktree. Symbolic HEADs, tracked/index changes, and detached-only
+    /// commits are rejected. The mutation uses an ordinary detached checkout,
+    /// so Git also rejects an untracked file that would be overwritten while
+    /// leaving ignored build output alone.
+    pub fn repoint_detached(&self, path: &Path, target: &str) -> Result<()> {
+        if target.trim().is_empty() || target.starts_with('-') {
+            return Err(GwtError::Git(format!(
+                "invalid detached worktree target: {target:?}"
+            )));
+        }
+
+        let target_commit = format!("{target}^{{commit}}");
+        let resolve = gwt_core::process::run_git_logged(
+            &["rev-parse", "--verify", &target_commit],
+            Some(&self.repo_path),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "resolve detached worktree target {target:?} in {}: {error}",
+                self.repo_path.display()
+            ))
+        })?;
+        if !resolve.status.success() {
+            return Err(GwtError::Git(format!(
+                "resolve detached worktree target {target:?} in {}: {}",
+                self.repo_path.display(),
+                command_stderr(&resolve)
+            )));
+        }
+        let resolved_commit = String::from_utf8_lossy(&resolve.stdout).trim().to_owned();
+        if resolved_commit.is_empty() {
+            return Err(GwtError::Git(format!(
+                "resolve detached worktree target {target:?} in {}: git returned an empty commit",
+                self.repo_path.display()
+            )));
+        }
+
+        match self.detached_repoint_safety(path)? {
+            DetachedRepointSafety::Ready => {}
+            DetachedRepointSafety::SymbolicHead { branch } => {
+                return Err(GwtError::Git(format!(
+                    "refusing to repoint branch worktree at {}: HEAD is symbolic ({branch})",
+                    path.display()
+                )));
+            }
+            DetachedRepointSafety::TrackedOrIndexChanges => {
+                return Err(GwtError::Git(format!(
+                    "refusing to repoint detached worktree at {}: tracked or index changes exist",
+                    path.display()
+                )));
+            }
+            DetachedRepointSafety::DetachedOnlyCommit => {
+                return Err(GwtError::Git(format!(
+                    "refusing to repoint detached worktree at {}: HEAD contains a commit unreachable from branches, tags, or remotes",
+                    path.display()
+                )));
+            }
+        }
+
+        let checkout = gwt_core::process::run_git_logged(
+            &[
+                "checkout",
+                "--detach",
+                "--no-overwrite-ignore",
+                &resolved_commit,
+            ],
+            Some(path),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "repoint detached worktree at {} to {resolved_commit}: {error}",
+                path.display()
+            ))
+        })?;
+        if !checkout.status.success() {
+            return Err(GwtError::Git(format!(
+                "repoint detached worktree at {} to {resolved_commit}: {}",
+                path.display(),
+                command_stderr(&checkout)
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Inspect whether `path` can be safely repointed as a detached worktree.
+    /// Untracked collision safety remains Git's responsibility at checkout,
+    /// avoiding a racy duplicate of Git's tree transition rules.
+    pub fn detached_repoint_safety(&self, path: &Path) -> Result<DetachedRepointSafety> {
+        let symbolic_head =
+            gwt_core::process::run_git_logged(&["symbolic-ref", "--quiet", "HEAD"], Some(path))
+                .map_err(|error| {
+                    GwtError::Git(format!(
+                        "inspect worktree HEAD at {}: {error}",
+                        path.display()
+                    ))
+                })?;
+        match symbolic_head.status.code() {
+            Some(0) => {
+                return Ok(DetachedRepointSafety::SymbolicHead {
+                    branch: String::from_utf8_lossy(&symbolic_head.stdout)
+                        .trim()
+                        .to_owned(),
+                });
+            }
+            Some(1) => {}
+            _ => {
+                return Err(GwtError::Git(format!(
+                    "inspect worktree HEAD at {}: {}",
+                    path.display(),
+                    command_stderr(&symbolic_head)
+                )));
+            }
+        }
+
+        for args in [
+            &["diff", "--quiet", "--"] as &[&str],
+            &["diff", "--cached", "--quiet", "--"],
+        ] {
+            let diff = gwt_core::process::run_git_logged(args, Some(path)).map_err(|error| {
+                GwtError::Git(format!(
+                    "inspect worktree changes at {}: {error}",
+                    path.display()
+                ))
+            })?;
+            match diff.status.code() {
+                Some(0) => {}
+                Some(1) => return Ok(DetachedRepointSafety::TrackedOrIndexChanges),
+                _ => {
+                    return Err(GwtError::Git(format!(
+                        "inspect worktree changes at {}: {}",
+                        path.display(),
+                        command_stderr(&diff)
+                    )));
+                }
+            }
+        }
+
+        let unreachable = gwt_core::process::run_git_logged(
+            &[
+                "rev-list",
+                "--max-count=1",
+                "HEAD",
+                "--not",
+                "--branches",
+                "--tags",
+                "--remotes",
+            ],
+            Some(path),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "inspect detached worktree commits at {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !unreachable.status.success() {
+            return Err(GwtError::Git(format!(
+                "inspect detached worktree commits at {}: {}",
+                path.display(),
+                command_stderr(&unreachable)
+            )));
+        }
+        if !String::from_utf8_lossy(&unreachable.stdout)
+            .trim()
+            .is_empty()
+        {
+            return Ok(DetachedRepointSafety::DetachedOnlyCommit);
+        }
+
+        Ok(DetachedRepointSafety::Ready)
     }
 
     /// Whether the worktree at `path` has uncommitted changes (tracked or
@@ -902,6 +1151,15 @@ fn command_stderr(output: &Output) -> String {
     }
 }
 
+fn git_output_stderr(output: &GitOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "git command failed without stderr".to_string()
+    } else {
+        stderr
+    }
+}
+
 fn normalize_remote_ref(remote_ref: &str) -> String {
     if let Some(stripped) = remote_ref.strip_prefix("refs/remotes/") {
         stripped.to_string()
@@ -1178,6 +1436,138 @@ fn matches_annotation(line: &str, key: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn git_output(success: bool, stderr: impl Into<Vec<u8>>) -> GitOutput {
+        GitOutput {
+            success,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn remote_tracking_fetch_retries_with_fresh_state_after_cas_conflict() {
+        let old_oid = "a11455208099e2197289ba600c21092dcccbdd07";
+        let new_oid = "7dd235625c479c3308e13c5e12bacde1487fd840";
+        let mut local_ref = old_oid;
+        let mut attempts = 0;
+
+        run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            if attempts == 1 {
+                local_ref = new_oid;
+                return Ok(git_output(
+                    false,
+                    format!(
+                        "error: cannot lock ref 'refs/remotes/origin/develop': is at {new_oid} but expected {old_oid}\n\
+                         ! [rejected] develop -> origin/develop (unable to update local ref)\n"
+                    ),
+                ));
+            }
+
+            assert_eq!(local_ref, new_oid, "retry must observe the advanced ref");
+            Ok(git_output(true, Vec::new()))
+        })
+        .expect("a fresh fetch attempt should recover the ref CAS race");
+
+        assert_eq!(attempts, 2, "the failed fetch must be restarted once");
+    }
+
+    #[test]
+    fn remote_tracking_fetch_does_not_retry_non_cas_failure() {
+        let mut attempts = 0;
+
+        let error = run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            Ok(git_output(
+                false,
+                b"fatal: could not read Username for 'https://github.com'\n".to_vec(),
+            ))
+        })
+        .expect_err("authentication failures are not transient ref races");
+
+        assert_eq!(attempts, 1);
+        assert!(
+            error.to_string().contains("could not read Username"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn remote_tracking_fetch_bounds_repeated_cas_failures() {
+        let mut attempts = 0;
+
+        let error = run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            Ok(git_output(
+                false,
+                format!(
+                    "error: cannot lock ref 'refs/remotes/origin/develop': is at new-{attempts} but expected old-{attempts}\n"
+                ),
+            ))
+        })
+        .expect_err("a persistent race must remain a bounded failure");
+
+        assert_eq!(attempts, 2);
+        assert!(error.to_string().contains("new-2"), "{error}");
+        assert!(error.to_string().contains("old-2"), "{error}");
+    }
+
+    #[test]
+    fn fetch_origin_restarts_after_the_tracking_ref_advances() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_git_repo(repository.path());
+        git_commit_allow_empty(repository.path(), "old develop");
+        let old_oid = git_rev_parse(repository.path(), "HEAD");
+        git_commit_allow_empty(repository.path(), "new develop");
+        let new_oid = git_rev_parse(repository.path(), "HEAD");
+        git_update_ref(repository.path(), "refs/remotes/origin/develop", &old_oid);
+
+        let manager = WorktreeManager::new(repository.path());
+        let mut attempts = 0;
+        manager
+            .fetch_origin_with(|args, current_dir| {
+                attempts += 1;
+                assert_eq!(args, ["fetch", "origin", "--prune"]);
+                assert_eq!(current_dir, repository.path());
+
+                if attempts == 1 {
+                    git_update_ref(
+                        repository.path(),
+                        "refs/remotes/origin/develop",
+                        &new_oid,
+                    );
+                    return Ok(git_output(
+                        false,
+                        format!(
+                            "error: cannot lock ref 'refs/remotes/origin/develop': is at {new_oid} but expected {old_oid}\n"
+                        ),
+                    ));
+                }
+
+                assert_eq!(
+                    git_rev_parse(repository.path(), "refs/remotes/origin/develop"),
+                    new_oid,
+                    "the restarted fetch must observe the externally advanced ref"
+                );
+                Ok(git_output(true, Vec::new()))
+            })
+            .expect("fetch_origin should restart after a remote-tracking ref CAS race");
+
+        assert_eq!(attempts, 2, "fetch_origin must launch a fresh attempt");
+    }
+
+    #[test]
+    fn remote_tracking_fetch_forces_stable_git_diagnostics() {
+        let options = remote_tracking_fetch_spawn_options(
+            &["fetch", "origin", "--prune"],
+            Path::new("repository"),
+        );
+        let envs: std::collections::HashMap<_, _> = options.envs.into_iter().collect();
+
+        assert_eq!(envs.get(std::ffi::OsStr::new("LC_ALL")).unwrap(), "C");
+        assert_eq!(envs.get(std::ffi::OsStr::new("LANG")).unwrap(), "C");
+    }
+
     #[test]
     fn worktree_listing_honors_the_active_operation_deadline() {
         let repository = tempfile::tempdir().expect("repository");
@@ -1280,6 +1670,27 @@ mod tests {
         assert!(output.status.success(), "git init --bare failed");
     }
 
+    fn git_rev_parse(path: &Path, revision: &str) -> String {
+        let output = gwt_core::process::run_git_logged(&["rev-parse", revision], Some(path))
+            .expect("git rev-parse");
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn git_update_ref(path: &Path, reference: &str, oid: &str) {
+        let output = gwt_core::process::run_git_logged(&["update-ref", reference, oid], Some(path))
+            .expect("git update-ref");
+        assert!(
+            output.status.success(),
+            "git update-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn slow_command() -> std::process::Command {
         if cfg!(windows) {
             let mut command = gwt_core::process::hidden_command("powershell");
@@ -1357,6 +1768,100 @@ mod tests {
             output.status.success(),
             "git commit failed: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_commit_file(path: &Path, relative_path: &str, content: &str, message: &str) -> String {
+        std::fs::write(path.join(relative_path), content).expect("write committed file");
+        let add = gwt_core::process::run_git_logged(&["add", relative_path], Some(path))
+            .expect("git add");
+        assert!(
+            add.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let commit = gwt_core::process::run_git_logged(&["commit", "-m", message], Some(path))
+            .expect("git commit");
+        assert!(
+            commit.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        git_head(path)
+    }
+
+    fn git_head(path: &Path) -> String {
+        let output = gwt_core::process::run_git_logged(&["rev-parse", "HEAD"], Some(path))
+            .expect("git rev-parse HEAD");
+        assert!(
+            output.status.success(),
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn git_local_heads_snapshot(path: &Path) -> String {
+        let output = gwt_core::process::run_git_logged(
+            &[
+                "for-each-ref",
+                "--sort=refname",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/",
+            ],
+            Some(path),
+        )
+        .expect("git for-each-ref refs/heads");
+        assert!(
+            output.status.success(),
+            "git for-each-ref refs/heads failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn git_index_tree(path: &Path) -> String {
+        let output =
+            gwt_core::process::run_git_logged(&["write-tree"], Some(path)).expect("git write-tree");
+        assert!(
+            output.status.success(),
+            "git write-tree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn assert_git_worktree_clean(path: &Path) {
+        let cached = gwt_core::process::run_git_logged(
+            &["diff", "--cached", "--quiet", "--exit-code"],
+            Some(path),
+        )
+        .expect("git diff --cached");
+        assert!(
+            cached.status.success(),
+            "repointed index differs from HEAD: {}",
+            String::from_utf8_lossy(&cached.stderr)
+        );
+
+        let worktree =
+            gwt_core::process::run_git_logged(&["diff", "--quiet", "--exit-code"], Some(path))
+                .expect("git diff");
+        assert!(
+            worktree.status.success(),
+            "repointed working tree differs from the index: {}",
+            String::from_utf8_lossy(&worktree.stderr)
+        );
+
+        let status = gwt_core::process::run_git_logged(
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+            Some(path),
+        )
+        .expect("git status --porcelain");
+        assert!(status.status.success(), "git status --porcelain failed");
+        assert!(
+            status.stdout.is_empty(),
+            "repointed worktree is not clean: {}",
+            String::from_utf8_lossy(&status.stdout)
         );
     }
 
@@ -1664,6 +2169,322 @@ prunable gitdir file points to non-existent location
             .find(|w| w.path.ends_with(".intake-abc123"))
             .expect("intake worktree present in list");
         assert!(entry.branch.is_none(), "intake worktree is branchless");
+    }
+
+    #[test]
+    fn repoint_detached_updates_head_and_content_to_the_target_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        let old_head = git_commit_file(&repo_path, "state.txt", "old", "old state");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let target_head = git_commit_file(&repo_path, "state.txt", "new", "new state");
+        let local_heads_before = git_local_heads_snapshot(&repo_path);
+
+        manager
+            .repoint_detached(&worktree_path, &target_head)
+            .unwrap();
+
+        assert_eq!(git_head(&worktree_path), target_head);
+        assert_eq!(git_local_heads_snapshot(&repo_path), local_heads_before);
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("state.txt")).unwrap(),
+            "new"
+        );
+        let branch =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&worktree_path))
+                .expect("git branch --show-current");
+        assert!(branch.status.success());
+        assert!(
+            String::from_utf8_lossy(&branch.stdout).trim().is_empty(),
+            "repointed worktree must remain detached"
+        );
+        assert_git_worktree_clean(&worktree_path);
+    }
+
+    #[test]
+    fn repoint_detached_rejects_a_branch_worktree_without_moving_its_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_file(&repo_path, "state.txt", "old", "old state");
+        git_checkout_new_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("branch-worktree");
+        manager
+            .create_from_base("develop", "feature/repoint-guard", &worktree_path)
+            .unwrap();
+        let old_branch_head = git_head(&worktree_path);
+        let target_head = git_commit_file(&repo_path, "state.txt", "new", "new state");
+        let old_index_tree = git_index_tree(&worktree_path);
+
+        manager
+            .repoint_detached(&worktree_path, &target_head)
+            .expect_err("a branch worktree must not be repointed");
+
+        assert_eq!(git_head(&worktree_path), old_branch_head);
+        let branch_ref = gwt_core::process::run_git_logged(
+            &["rev-parse", "refs/heads/feature/repoint-guard"],
+            Some(&repo_path),
+        )
+        .expect("git rev-parse branch ref");
+        assert!(branch_ref.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&branch_ref.stdout).trim(),
+            old_branch_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("state.txt")).unwrap(),
+            "old"
+        );
+        assert_eq!(git_index_tree(&worktree_path), old_index_tree);
+    }
+
+    #[test]
+    fn repoint_detached_rejects_an_invalid_target_without_changing_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        let old_head = git_commit_file(&repo_path, "state.txt", "old", "old state");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let old_index_tree = git_index_tree(&worktree_path);
+
+        manager
+            .repoint_detached(&worktree_path, "refs/heads/does-not-exist")
+            .expect_err("an invalid target must be rejected");
+
+        assert_eq!(git_head(&worktree_path), old_head);
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("state.txt")).unwrap(),
+            "old"
+        );
+        assert_eq!(git_index_tree(&worktree_path), old_index_tree);
+    }
+
+    #[test]
+    fn repoint_detached_rejects_an_option_like_target_without_changing_any_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        let old_head = git_commit_file(&repo_path, "state.txt", "old", "old state");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let old_index_tree = git_index_tree(&worktree_path);
+        let local_heads_before = git_local_heads_snapshot(&repo_path);
+
+        manager
+            .repoint_detached(&worktree_path, "--help")
+            .expect_err("an option-like target must be rejected");
+
+        assert_eq!(git_head(&worktree_path), old_head);
+        assert_eq!(git_index_tree(&worktree_path), old_index_tree);
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("state.txt")).unwrap(),
+            "old"
+        );
+        assert_eq!(git_local_heads_snapshot(&repo_path), local_heads_before);
+    }
+
+    #[test]
+    fn repoint_detached_rejects_tracked_and_index_changes_without_mutating_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        let old_head = git_commit_file(&repo_path, "state.txt", "commit A", "commit A");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let target_head = git_commit_file(&repo_path, "state.txt", "commit B", "commit B");
+
+        std::fs::write(worktree_path.join("state.txt"), "staged local bytes")
+            .expect("write staged tracked change");
+        let add = gwt_core::process::run_git_logged(&["add", "state.txt"], Some(&worktree_path))
+            .expect("stage tracked change");
+        assert!(add.status.success(), "git add failed");
+        let index_before = git_index_tree(&worktree_path);
+        std::fs::write(worktree_path.join("state.txt"), "unstaged local bytes")
+            .expect("write unstaged tracked change");
+        let bytes_before =
+            std::fs::read(worktree_path.join("state.txt")).expect("read local bytes");
+
+        let result = manager.repoint_detached(&worktree_path, &target_head);
+
+        assert_eq!(
+            (
+                result.is_err(),
+                git_head(&worktree_path),
+                git_index_tree(&worktree_path),
+                std::fs::read(worktree_path.join("state.txt")).expect("read retained local bytes"),
+            ),
+            (true, old_head, index_before, bytes_before),
+            "tracked/index local work must be rejected without mutating HEAD, index, or bytes"
+        );
+    }
+
+    #[test]
+    fn repoint_detached_rejects_detached_only_commits_without_losing_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        let old_head = git_commit_file(&repo_path, "state.txt", "commit A", "commit A");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let detached_commit = git_commit_file(
+            &worktree_path,
+            "state.txt",
+            "detached-only bytes",
+            "detached-only commit",
+        );
+        let detached_bytes =
+            std::fs::read(worktree_path.join("state.txt")).expect("read detached commit bytes");
+        let target_head = git_commit_file(&repo_path, "state.txt", "commit B", "commit B");
+
+        let result = manager.repoint_detached(&worktree_path, &target_head);
+
+        assert_eq!(
+            (
+                result.is_err(),
+                git_head(&worktree_path),
+                std::fs::read(worktree_path.join("state.txt"))
+                    .expect("read retained detached commit bytes"),
+            ),
+            (true, detached_commit, detached_bytes),
+            "a detached-only commit must remain checked out with its bytes intact"
+        );
+    }
+
+    #[test]
+    fn repoint_detached_preserves_ignored_build_output_while_advancing_to_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_file(&repo_path, ".gitignore", "target/\n", "ignore build output");
+        let old_head = git_commit_file(&repo_path, "state.txt", "commit A", "commit A");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let output_path = worktree_path.join("target/debug/gwtd");
+        std::fs::create_dir_all(output_path.parent().expect("build output parent"))
+            .expect("create build output directory");
+        let output_bytes = b"ignored local gwtd output";
+        std::fs::write(&output_path, output_bytes).expect("write ignored build output");
+        let target_head = git_commit_file(&repo_path, "state.txt", "commit B", "commit B");
+
+        manager
+            .repoint_detached(&worktree_path, &target_head)
+            .expect("ignored non-conflicting build output must not block repoint");
+
+        assert_eq!(git_head(&worktree_path), target_head);
+        assert_eq!(
+            std::fs::read(&output_path).expect("read preserved build output"),
+            output_bytes,
+            "ignored target/debug/gwtd must survive a successful repoint"
+        );
+    }
+
+    #[test]
+    fn repoint_detached_rejects_untracked_files_that_conflict_with_target_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        let old_head = git_commit_file(&repo_path, "state.txt", "commit A", "commit A");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+        let target_head = git_commit_file(
+            &repo_path,
+            "collision.txt",
+            "tracked bytes from commit B",
+            "commit B adds collision",
+        );
+        let local_bytes = b"untracked local bytes";
+        std::fs::write(worktree_path.join("collision.txt"), local_bytes)
+            .expect("write conflicting untracked file");
+
+        let result = manager.repoint_detached(&worktree_path, &target_head);
+
+        assert_eq!(
+            (
+                result.is_err(),
+                git_head(&worktree_path),
+                std::fs::read(worktree_path.join("collision.txt"))
+                    .expect("read retained untracked bytes"),
+            ),
+            (true, old_head, local_bytes.to_vec()),
+            "a target-path collision must be rejected without replacing untracked user bytes"
+        );
+    }
+
+    #[test]
+    fn repoint_detached_rejects_ignored_files_that_conflict_with_target_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_file(
+            &repo_path,
+            ".gitignore",
+            "collision.txt\n",
+            "ignore generated collision",
+        );
+        let old_head = git_commit_file(&repo_path, "state.txt", "commit A", "commit A");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join("pm-worktree");
+        manager.create_detached(&old_head, &worktree_path).unwrap();
+
+        std::fs::write(
+            repo_path.join("collision.txt"),
+            "tracked bytes from commit B",
+        )
+        .expect("write target collision");
+        let add = gwt_core::process::run_git_logged(
+            &["add", "--force", "--", "collision.txt"],
+            Some(&repo_path),
+        )
+        .expect("force-add target collision");
+        assert!(add.status.success(), "git add --force failed");
+        git_commit_allow_empty(&repo_path, "commit B adds ignored collision");
+        let target_head = git_head(&repo_path);
+
+        let local_bytes = b"ignored local bytes";
+        std::fs::write(worktree_path.join("collision.txt"), local_bytes)
+            .expect("write conflicting ignored file");
+
+        let result = manager.repoint_detached(&worktree_path, &target_head);
+
+        assert_eq!(
+            (
+                result.is_err(),
+                git_head(&worktree_path),
+                std::fs::read(worktree_path.join("collision.txt"))
+                    .expect("read retained ignored bytes"),
+            ),
+            (true, old_head, local_bytes.to_vec()),
+            "an ignored target-path collision must be rejected without replacing local bytes"
+        );
     }
 
     #[test]

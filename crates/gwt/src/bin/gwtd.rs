@@ -159,12 +159,16 @@ fn format_daemon_help() -> String {
         "",
         "Key params:",
         "  channels                                Required for daemon.subscribe",
+        "  project_root                            Optional for daemon.subscribe; selects the",
+        "                                          project authority instead of caller cwd",
         "  timeout_seconds                         Optional for daemon.subscribe; ends the",
         "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
+        "  - An explicit project_root must resolve to an existing directory; invalid roots",
+        "    fail closed and never fall back to cwd. Omitting it preserves cwd resolution.",
         "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
         "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
         "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
@@ -894,6 +898,23 @@ mod tests {
     #[test]
     fn family_help_resolves_search() {
         assert!(family_help("search").is_some());
+    }
+
+    #[test]
+    fn format_daemon_help_documents_project_root_authority_contract() {
+        let help = format_daemon_help();
+        for expected in [
+            "project_root",
+            "project authority instead of caller cwd",
+            "existing directory",
+            "fail closed",
+            "Omitting it preserves cwd resolution",
+        ] {
+            assert!(
+                help.contains(expected),
+                "daemon help must document {expected}. help:\n{help}"
+            );
+        }
     }
 
     #[test]
