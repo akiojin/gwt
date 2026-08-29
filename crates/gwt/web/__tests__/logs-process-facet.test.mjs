@@ -8,20 +8,58 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // SPEC-3064 Phase 3 (E6c): the Logs renderers moved from app.js into
 // board-logs-surface.js; source-pattern asserts scan both files so the
 // dispatcher case arms (app.js) and the moved renderers stay covered.
+const boardLogsSurfaceSource = readFileSync(
+  resolve(here, "../board-logs-surface.js"),
+  "utf8",
+);
 const appSource = [
   readFileSync(resolve(here, "../app.js"), "utf8"),
-  readFileSync(resolve(here, "../board-logs-surface.js"), "utf8"),
+  boardLogsSurfaceSource,
 ].join("\n");
 const indexSource = readFileSync(resolve(here, "../index.html"), "utf8");
 
 const KINDS = ["gh", "git", "docker", "agent", "runner"];
+
+async function importBoardLogsSurface() {
+  const source = boardLogsSurfaceSource.replace(
+    'from "/board-surface.js"',
+    `from "${pathToFileURL(resolve(here, "../board-surface.js")).href}"`,
+  );
+  return import(
+    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+  );
+}
+
+function createLogsSurface(createBoardLogsSurface) {
+  let activeProjectScope = "scope-alpha";
+  const surface = createBoardLogsSurface({
+    send() {},
+    createNode() {},
+    createKnowledgeMarkdownBody() {},
+    windowMap: new Map(),
+    focusWindowLocally() {},
+    pushAlertToast() {},
+    sendWindowFocus() {},
+    focusOrSpawnPreset() {},
+    activeWorkspace: () => ({ windows: [] }),
+    activeProjectTab: () => ({ project_scope: activeProjectScope }),
+    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
+    getActiveWorkProjection: () => null,
+  });
+  return {
+    surface,
+    selectProject(projectScope) {
+      activeProjectScope = projectScope;
+    },
+  };
+}
 
 test("Logs window state seeds processKind alongside severity/query", () => {
   // `ensureLogState` must initialize the new facet so existing call sites
@@ -108,4 +146,56 @@ test("index.html does not duplicate the Logs window scaffold", () => {
     /logs-process-kind-select/,
     "logs filter bar must not be defined in index.html",
   );
+});
+
+test("broadcast live logs append only to the Logs state with matching project scope", async () => {
+  const { createBoardLogsSurface } = await importBoardLogsSurface();
+  const { surface, selectProject } = createLogsSurface(createBoardLogsSurface);
+
+  selectProject("scope-alpha");
+  const alphaState = surface.ensureLogState("logs-alpha");
+  selectProject("scope-beta");
+  const betaState = surface.ensureLogState("logs-beta");
+  const betaEntry = {
+    id: "beta-event",
+    project_scope: "scope-beta",
+    severity: "info",
+    source: "gwt",
+    message: "beta-only",
+  };
+
+  surface.applyBoardLogsReceiveEvent({
+    kind: "log_entry_appended",
+    entry: betaEntry,
+  });
+
+  assert.deepEqual(
+    alphaState.entries,
+    [],
+    "a project-scoped broadcast must not contaminate another project's Logs state",
+  );
+  assert.deepEqual(betaState.entries, [betaEntry]);
+});
+
+test("unscoped machine live logs do not append to project Logs states", async () => {
+  const { createBoardLogsSurface } = await importBoardLogsSurface();
+  const { surface, selectProject } = createLogsSurface(createBoardLogsSurface);
+
+  selectProject("scope-alpha");
+  const alphaState = surface.ensureLogState("logs-alpha");
+  selectProject("scope-beta");
+  const betaState = surface.ensureLogState("logs-beta");
+
+  surface.applyBoardLogsReceiveEvent({
+    kind: "log_entry_appended",
+    entry: {
+      id: "machine-event",
+      severity: "warn",
+      source: "gwtd",
+      message: "machine-scoped only",
+    },
+  });
+
+  assert.deepEqual(alphaState.entries, []);
+  assert.deepEqual(betaState.entries, []);
 });

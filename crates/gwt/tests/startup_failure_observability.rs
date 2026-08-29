@@ -4,9 +4,9 @@
 //! `crates/gwt/src/main.rs` is built with `windows_subsystem = "windows"` and
 //! only attaches a parent console for non-GUI routes, so every `eprintln!` on
 //! the tray startup path is written to a detached handle and discarded. The
-//! canonical project log (`~/.gwt/projects/<hash>/logs/gwt.log.<date>`) is
-//! therefore the only surface a user can inspect once the process has exited,
-//! and every fatal front-door failure has to land there.
+//! machine diagnostics log (`~/.gwt/logs/gwt.log.<date>`) is therefore the
+//! only surface a user can inspect before a project has been resolved, and
+//! every fatal front-door failure has to land there.
 //!
 //! These tests spawn the real `gwt` binary against an isolated `HOME` so they
 //! exercise the production startup ordering rather than a helper in isolation.
@@ -91,43 +91,25 @@ fn wait_with_deadline(child: &mut Child) -> Option<i32> {
     }
 }
 
-/// Concatenate every rolling log file the child wrote under the isolated home.
-///
-/// The directory is discovered rather than recomputed from the project hash so
-/// the test asserts the user-visible outcome ("a log exists and explains the
-/// failure") instead of restating the path-derivation implementation.
-fn read_project_logs(home: &Path) -> String {
-    let projects = home.join(".gwt").join("projects");
+fn read_machine_logs(home: &Path) -> String {
+    let logs = home.join(".gwt").join("logs");
     let mut combined = String::new();
-    for log_file in collect_log_files(&projects) {
-        if let Ok(contents) = std::fs::read_to_string(&log_file) {
-            combined.push_str(&contents);
-        }
-    }
-    combined
-}
-
-fn collect_log_files(projects_dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let Ok(projects) = std::fs::read_dir(projects_dir) else {
-        return found;
+    let Ok(entries) = std::fs::read_dir(logs) else {
+        return combined;
     };
-    for project in projects.flatten() {
-        let Ok(logs) = std::fs::read_dir(project.path().join("logs")) else {
-            continue;
-        };
-        for entry in logs.flatten() {
-            let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(gwt_core::logging::LOG_FILE_BASENAME))
-            {
-                found.push(path);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(gwt_core::logging::LOG_FILE_BASENAME))
+        {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                combined.push_str(&contents);
             }
         }
     }
-    found
+    combined
 }
 
 fn isolated_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -146,7 +128,7 @@ fn isolated_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
 /// and the recovery hint have to reach the log, otherwise the user sees gwt
 /// vanish with no explanation anywhere.
 #[test]
-fn single_instance_lock_collision_is_recorded_in_the_project_log() {
+fn single_instance_lock_collision_is_recorded_in_machine_diagnostics() {
     let (_temp, home, workspace) = isolated_fixture();
 
     let _held = acquire_instance_lock(&home.join(".gwt"), &workspace, LockKind::Gui)
@@ -160,10 +142,10 @@ fn single_instance_lock_collision_is_recorded_in_the_project_log() {
         exit.stderr
     );
 
-    let logged = read_project_logs(&home);
+    let logged = read_machine_logs(&home);
     assert!(
         logged.contains("already running"),
-        "the single-instance failure must be recoverable from the project log, \
+        "the single-instance failure must be recoverable from machine diagnostics, \
          but the log did not mention it.\nlog:\n{logged}\nstderr:\n{}",
         exit.stderr
     );
@@ -179,7 +161,7 @@ fn single_instance_lock_collision_is_recorded_in_the_project_log() {
 /// contract: logging is initialised before anything that can terminate the
 /// front door.
 #[test]
-fn invalid_front_door_flag_failure_is_recorded_in_the_project_log() {
+fn invalid_front_door_flag_failure_is_recorded_in_machine_diagnostics() {
     let (_temp, home, workspace) = isolated_fixture();
 
     let exit = run_front_door(&home, &workspace, &["--no-such-flag"]);
@@ -190,10 +172,44 @@ fn invalid_front_door_flag_failure_is_recorded_in_the_project_log() {
         exit.stderr
     );
 
-    let logged = read_project_logs(&home);
+    let logged = read_machine_logs(&home);
     assert!(
         logged.contains("--no-such-flag"),
-        "the rejected flag must be recoverable from the project log.\nlog:\n{logged}\nstderr:\n{}",
+        "the rejected flag must be recoverable from machine diagnostics.\n\
+         log:\n{logged}\nstderr:\n{}",
         exit.stderr
+    );
+}
+
+/// Finder/Dock starts the app with cwd `/` on macOS. Before any project is
+/// known that root must not become a path-hashed project identity shared by
+/// every project the tray process later opens.
+#[cfg(unix)]
+#[test]
+fn root_cwd_startup_failure_uses_machine_logs_without_creating_a_project_store() {
+    let (_temp, home, _workspace) = isolated_fixture();
+
+    let exit = run_front_door(&home, Path::new("/"), &["--no-such-flag"]);
+    assert_eq!(
+        exit.code,
+        Some(2),
+        "an unknown front-door flag must exit 2 (stderr: {})",
+        exit.stderr
+    );
+
+    let machine = read_machine_logs(&home);
+    assert!(
+        machine.contains("--no-such-flag"),
+        "the project-free startup failure must be readable from machine diagnostics.\n\
+         log:\n{machine}\nstderr:\n{}",
+        exit.stderr
+    );
+    let root_store = home
+        .join(".gwt")
+        .join("projects")
+        .join(gwt_core::repo_hash::compute_path_hash(Path::new("/")).as_str());
+    assert!(
+        !root_store.exists(),
+        "cwd `/` must not materialize compute_path_hash(`/`) as a project store"
     );
 }

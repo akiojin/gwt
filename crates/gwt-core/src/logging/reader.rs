@@ -203,6 +203,7 @@ mod tests {
     const PROD_LINE_WARN: &str = r#"{"timestamp":"2026-05-20T09:00:00.020000+09:00","level":"WARN","fields":{"message":"slow flush","elapsed_ms":120},"target":"gwt::flush"}"#;
     const PROD_LINE_ERROR: &str = r#"{"timestamp":"2026-05-20T09:00:00.030000+09:00","level":"ERROR","fields":{"message":"git failed","detail":"exit status 128"},"target":"gwt::git"}"#;
     const PROD_LINE_NO_MESSAGE: &str = r#"{"timestamp":"2026-05-20T09:00:00.040000+09:00","level":"INFO","fields":{"k":"v"},"target":"gwt::nomsg"}"#;
+    const PROD_LINE_PROJECT_SCOPE: &str = r#"{"timestamp":"2026-05-20T09:00:00.045000+09:00","level":"INFO","fields":{"message":"project event"},"target":"gwt::project","project_scope":"0123456789abcdef"}"#;
     const UNKNOWN_FIELD_LINE: &str = r#"{"timestamp":"2026-05-20T09:00:00.050000+09:00","level":"INFO","fields":{"message":"with span"},"target":"gwt::span","span":{"name":"outer"},"spans":[{"name":"outer"}]}"#;
     const MALFORMED_LINE: &str = r#"{"foo":"bar"}"#;
 
@@ -242,6 +243,29 @@ mod tests {
             Some(&serde_json::Value::String("ok".to_string()))
         );
         assert!(!outcome.entries[2].fields.contains_key("detail"));
+    }
+
+    #[test]
+    fn reads_legacy_entry_without_project_scope_as_none() {
+        let (_dir, path) = write_lines(&[PROD_LINE_INFO]);
+
+        let outcome = read_log_file(&path).expect("read legacy entry");
+
+        assert_eq!(outcome.entries.len(), 1);
+        assert_eq!(outcome.entries[0].project_scope, None);
+    }
+
+    #[test]
+    fn reads_persisted_top_level_project_scope() {
+        let (_dir, path) = write_lines(&[PROD_LINE_PROJECT_SCOPE]);
+
+        let outcome = read_log_file(&path).expect("read project-scoped entry");
+
+        assert_eq!(outcome.entries.len(), 1);
+        assert_eq!(
+            outcome.entries[0].project_scope.as_deref(),
+            Some("0123456789abcdef")
+        );
     }
 
     #[test]
