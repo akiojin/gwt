@@ -13129,6 +13129,146 @@ fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_co
     );
 }
 
+/// Issue #3716 AC-2: Grok Build exact Resume is safe only when its official
+/// session summary exists for the same native id and worktree cwd.
+#[test]
+fn continue_work_provider_preflight_recognizes_grok_session_storage() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let grok_home = temp.path().join("grok-home");
+    let conversation_id = "01a0195c-fbd7-7352-8d29-da6f6f755010";
+    let session_dir = grok_home
+        .join("sessions")
+        .join("%2Ftmp%2Fworktree")
+        .join(conversation_id);
+    fs::create_dir_all(&session_dir).expect("create Grok session store");
+    fs::write(
+        session_dir.join("summary.json"),
+        serde_json::json!({
+            "info": {
+                "id": conversation_id,
+                "cwd": worktree,
+            }
+        })
+        .to_string(),
+    )
+    .expect("write Grok summary");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3716", gwt_agent::AgentId::GrokBuild);
+    session.agent_session_id = Some(conversation_id.to_string());
+
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Missing,
+        "a Grok summary without its authoritative updates log cannot resume",
+    );
+    fs::write(
+        session_dir.join("updates.jsonl"),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": conversation_id, "update": {"sessionUpdate": "agent_message_chunk"}}
+        })
+        .to_string()
+            + "\n",
+    )
+    .expect("write Grok updates");
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Present,
+    );
+
+    fs::write(
+        session_dir.join("summary.json"),
+        serde_json::json!({
+            "info": {
+                "id": "different-native-session",
+                "cwd": worktree,
+            }
+        })
+        .to_string(),
+    )
+    .expect("replace Grok summary with foreign id");
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Foreign,
+    );
+}
+
+/// Issue #3716: ordinary Continue Work must inspect the Grok store from the
+/// active launch Profile, with relative GROK_HOME resolved from the child cwd.
+#[test]
+fn continue_work_grok_preflight_uses_the_active_profile_environment() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _wrong_process_home = ScopedEnvVar::set("GROK_HOME", temp.path().join("wrong-store"));
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let tab = sample_project_tab("tab-1", "Repo", worktree.clone(), ProjectKind::Git, &[]);
+    let (runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let profile_path = runtime
+        .profile_config_path
+        .as_deref()
+        .expect("fixture profile config path");
+    let mut settings = Settings::default();
+    settings
+        .profiles
+        .set_env_var("default", "GROK_HOME", "relative-grok-home")
+        .expect("set relative Profile Grok home");
+    write_profile_config(profile_path, &settings);
+
+    let conversation_id = "01a0195c-fbd7-7352-8d29-da6f6f755016";
+    let profile_grok_home = worktree.join("relative-grok-home");
+    let session_dir = profile_grok_home
+        .join("sessions/%2Ffixture%2Fworktree")
+        .join(conversation_id);
+    fs::create_dir_all(&session_dir).expect("create Profile Grok session store");
+    fs::write(
+        session_dir.join("summary.json"),
+        serde_json::json!({"info":{"id":conversation_id,"cwd":worktree}}).to_string(),
+    )
+    .expect("write summary");
+    fs::write(
+        session_dir.join("updates.jsonl"),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": conversation_id, "update": {"sessionUpdate": "agent_message_chunk"}}
+        })
+        .to_string()
+            + "\n",
+    )
+    .expect("write updates");
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3716", gwt_agent::AgentId::GrokBuild);
+    session.agent_session_id = Some(conversation_id.to_string());
+
+    let resolved = runtime
+        .active_profile_grok_home_for_continuation(&session, &worktree)
+        .expect("resolve active Profile Grok home");
+    assert_eq!(resolved, profile_grok_home);
+    let mut config = super::launch_config_from_persisted_session(&session);
+    assert_eq!(
+        super::continuation::configure_provider_continuation_with_grok_home(
+            &mut config,
+            &session,
+            Some(&resolved),
+        ),
+        gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+    );
+    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(config.resume_session_id.as_deref(), Some(conversation_id));
+}
+
 #[test]
 fn persisted_session_launch_config_restores_path_independent_tool_runtime_provenance() {
     let temp = tempdir().expect("tempdir");
@@ -13231,6 +13371,8 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
                 issue_monitor_delivery_id: Some(delivery_id.clone()),
                 issue_monitor_project_root: Some(repo.clone()),
                 issue_monitor_session_mode: None,
+                issue_monitor_autonomous_handoff: None,
+                issue_monitor_autonomous_submit_started: false,
             },
         )
         .expect("start gated launch");
@@ -18444,6 +18586,8 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: Some(monitor_repo.clone()),
         issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
@@ -18663,6 +18807,8 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         issue_monitor_delivery_id: Some(delivery_id.to_string()),
         issue_monitor_project_root: Some(fixture.repo.clone()),
         issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
     });
     let readiness_nonce = pending.readiness_nonce.clone();
 
@@ -22489,6 +22635,8 @@ No viable candidates found in PATH \
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         }),
     );
 
@@ -22566,6 +22714,8 @@ No viable candidates found in PATH \
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         }),
     );
 
@@ -22612,6 +22762,8 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         }),
     );
 
@@ -22664,6 +22816,8 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         }),
     );
 
@@ -22737,6 +22891,8 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -22874,6 +23030,8 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -38802,6 +38960,8 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
 
@@ -38868,6 +39028,8 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
 
@@ -38926,6 +39088,8 @@ fn app_runtime_agent_failed_fallback_is_fail_closed_on_corrupt_prefs() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo),
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
 
@@ -40334,6 +40498,8 @@ fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -40416,6 +40582,8 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -41586,6 +41754,8 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
 
@@ -41922,6 +42092,7 @@ fn monitor_relaunch_fixture(
             gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
         holder_session.id = holder_session_id.clone();
         holder_session.agent_session_id = Some(holder_conversation_id);
+        holder_session.project_state_root = Some(repo.clone());
         holder_session.linked_issue_number = Some(3165);
         holder_session.status = if matches!(
             holder,
@@ -42131,10 +42302,123 @@ fn monitor_relaunch_fixture(
     }
 }
 
+fn convert_monitor_relaunch_fixture_to_grok(
+    fixture: &mut MonitorRelaunchFixture,
+    grok_home: &Path,
+) {
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(&fixture.sessions_dir)
+        .expect("read fixture sessions")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        let mut session = gwt_agent::Session::load(&path).expect("load fixture Session");
+        session.agent_id = gwt_agent::AgentId::GrokBuild;
+        session.launch_command = "grok".to_string();
+        session.display_name = "Grok Build".to_string();
+        session
+            .save(&fixture.sessions_dir)
+            .expect("save Grok Session");
+        if session.id == fixture.source_session_id {
+            session
+                .save(&gwt_core::paths::gwt_sessions_dir())
+                .expect("save globally discoverable Grok Session");
+        }
+        sessions.push(session);
+    }
+    for active in fixture.runtime.active_agent_sessions.values_mut() {
+        active.agent_id = "grok".to_string();
+        active.display_name = "Grok Build".to_string();
+    }
+    let mut agent_options = sample_agent_options();
+    agent_options.extend([
+        gwt::AgentOption {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            available: true,
+            installed_version: Some("latest".to_string()),
+            versions: vec!["latest".to_string()],
+            custom_agent: None,
+        },
+        gwt::AgentOption {
+            id: "grok".to_string(),
+            name: "Grok Build".to_string(),
+            available: true,
+            installed_version: Some("latest".to_string()),
+            versions: vec!["latest".to_string()],
+            custom_agent: None,
+        },
+    ]);
+    fixture.runtime.launch_wizard_cache =
+        LaunchWizardMemoryCache::load_with_agent_options(&fixture.sessions_dir, agent_options);
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Monitor prefs");
+    prefs.launch_profile = Some(gwt::IssueMonitorLaunchProfile {
+        agent_id: "grok".to_string(),
+        model: Some("grok-4.20-beta".to_string()),
+        reasoning: Some("high".to_string()),
+        version: Some("latest".to_string()),
+        session_mode: gwt_agent::SessionMode::Normal,
+        skip_permissions: true,
+        codex_fast_mode: false,
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+    });
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save Grok Monitor profile");
+
+    let summary = grok_home
+        .join("sessions/%2Ffixture%2Fworktree")
+        .join(&fixture.native_conversation_id)
+        .join("summary.json");
+    fs::create_dir_all(summary.parent().expect("Grok summary parent"))
+        .expect("create Grok summary parent");
+    fs::write(
+        &summary,
+        serde_json::json!({
+            "info": {
+                "id": fixture.native_conversation_id,
+                "cwd": fixture.worktree,
+            }
+        })
+        .to_string(),
+    )
+    .expect("write Grok summary");
+    fs::write(
+        summary
+            .parent()
+            .expect("Grok summary parent")
+            .join("updates.jsonl"),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": fixture.native_conversation_id,
+                "update": {"sessionUpdate": "agent_message_chunk"}
+            }
+        })
+        .to_string()
+            + "\n",
+    )
+    .expect("write Grok updates");
+}
+
 fn take_monitor_launch_complete(
     label: &str,
     events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> AgentLaunchResult {
+    take_monitor_launch_complete_event(label, events).1
+}
+
+fn take_monitor_launch_complete_event(
+    label: &str,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> (String, AgentLaunchResult) {
     // This integration-style fixture performs real Git setup plus managed
     // asset/trust materialization in a debug build. Under parallel CI load it
     // can legitimately exceed the generic 20-second unit-test poll budget.
@@ -42148,10 +42432,10 @@ fn take_monitor_launch_complete(
         .iter()
         .position(|event| matches!(event, UserEvent::LaunchComplete { .. }))
         .expect("launch complete event");
-    let UserEvent::LaunchComplete { result, .. } = events.remove(index) else {
+    let UserEvent::LaunchComplete { window_id, result } = events.remove(index) else {
         unreachable!("matched launch complete above")
     };
-    *result
+    (window_id, *result)
 }
 
 fn assert_monitor_exact_resume(result: AgentLaunchResult, fixture: &MonitorRelaunchFixture) {
@@ -42178,6 +42462,84 @@ fn assert_monitor_exact_resume(result: AgentLaunchResult, fixture: &MonitorRelau
     );
     assert_eq!(resumed.model.as_deref(), Some("gpt-5.4"));
     assert_eq!(resumed.reasoning_level.as_deref(), Some("low"));
+    let monitor_prefs = gwt::load_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+    )
+    .expect("load monitor prefs after exact Resume");
+    if monitor_prefs.autonomous_mode {
+        assert_eq!(
+            process
+                .env
+                .get(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV)
+                .map(String::as_str),
+            Some("1"),
+            "an autonomous exact Resume must retain the question guard marker",
+        );
+        assert_eq!(
+            process
+                .env
+                .get(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV)
+                .map(String::as_str),
+            Some("3165"),
+            "an autonomous exact Resume must retain its owner identity",
+        );
+    }
+    for handoff in &monitor_prefs.autonomous_handoffs {
+        if handoff.issue_number == 3165 {
+            if let Some(answer) = handoff.answer.as_deref() {
+                assert!(
+                    process
+                        .args
+                        .iter()
+                        .any(|argument| argument.contains(answer)),
+                    "the exact Resume must receive the one-shot human answer: {:?}",
+                    process.args,
+                );
+            }
+        }
+    }
+}
+
+fn seed_resumed_autonomous_handoff(fixture: &MonitorRelaunchFixture, answer: &str) {
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load monitor prefs");
+    prefs.autonomous_mode = true;
+    let source = gwt_agent::Session::load(
+        &fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id)),
+    )
+    .expect("load handoff source Session");
+    let mut handoff = gwt::autonomous_handoff::AutonomousQuestionHandoff::new(
+        "handoff-3716".to_string(),
+        &gwt::autonomous_handoff::AutonomousExecutionContext {
+            issue_number: 3165,
+            session_id: fixture.source_session_id.clone(),
+        },
+        &source.agent_id.to_string(),
+        "ask_user_question",
+        gwt::autonomous_handoff::ExtractedQuestion {
+            question: "Approve User Verification?".to_string(),
+            options: vec![gwt::autonomous_handoff::AutonomousHandoffOption {
+                label: "Approve".to_string(),
+                description: "Continue to the PR gate".to_string(),
+            }],
+        },
+        "2026-08-20T00:00:00Z",
+    );
+    handoff.state = gwt::autonomous_handoff::AutonomousHandoffState::Resumed;
+    handoff.answer = Some(answer.to_string());
+    handoff.answered_at = Some("2026-08-20T00:01:00Z".to_string());
+    prefs.autonomous_handoffs.push(handoff);
+    prefs
+        .queued_launch_session_strategies
+        .insert(3165, gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe);
+    for delivery in &mut prefs.pending_launch_deliveries {
+        if delivery.issue_number == 3165 {
+            delivery.launch_session_strategy = gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe;
+        }
+    }
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed resumed handoff");
 }
 
 fn assert_monitor_fresh_successor(result: AgentLaunchResult, fixture: &MonitorRelaunchFixture) {
@@ -42440,6 +42802,675 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
         &different.recorded_events,
     );
     assert_monitor_exact_resume(result, &different);
+}
+
+/// Issue #3716 AC-2: when the exact native conversation is still held by its
+/// live pane, a canonical Monitor answer continues that holder instead of
+/// spawning a fresh successor that cannot receive the parked decision.
+#[test]
+fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let grok_home = temp.path().join(".grok");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join("wrong-grok-home"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answered-live-holder",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        true,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    let mut settings = Settings::default();
+    settings
+        .profiles
+        .set_env_var(
+            "default",
+            "GROK_HOME",
+            grok_home.to_str().expect("UTF-8 Grok home"),
+        )
+        .expect("set profile Grok home");
+    write_profile_config(
+        fixture
+            .runtime
+            .profile_config_path
+            .as_deref()
+            .expect("fixture profile config path"),
+        &settings,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
+    let holder_window_id = fixture
+        .holder_window_id
+        .clone()
+        .expect("live holder window id");
+    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = blocking_tasks;
+    let delivery_id = fixture.delivery_id.clone().expect("durable delivery id");
+
+    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load delivered handoff");
+    assert!(
+        prefs.autonomous_handoffs[0].delivered_at.is_none(),
+        "scheduling a live delivery must not consume the answer before physical submit",
+    );
+    assert!(
+        events.is_empty(),
+        "completion is emitted by the worker callback: {events:#?}"
+    );
+    assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
+    assert!(matches!(
+        fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &holder_window_id
+    ));
+    let claimed = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load rebound live delivery");
+    assert!(matches!(
+        claimed.autonomous_handoffs[0].delivery,
+        gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
+    ));
+    let delivery = claimed
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| delivery.delivery_id == delivery_id)
+        .expect("pending live delivery");
+    assert_eq!(
+        delivery.materializer_window_id.as_deref(),
+        Some(holder_window_id.as_str()),
+        "the durable claim must be rebound from the proposed window to the exact holder",
+    );
+    assert_eq!(delivery.materialized_window_id, None);
+    assert_eq!(delivery.workspace_durable_window_id, None);
+
+    let task = queued_tasks
+        .lock()
+        .expect("queued tasks")
+        .pop()
+        .expect("answer delivery worker");
+    task();
+    let completion = {
+        let mut recorded = fixture.recorded_events.lock().expect("recorded events");
+        let index = recorded
+            .iter()
+            .position(|event| matches!(event, UserEvent::IssueMonitorAnswerDeliveryComplete(_)))
+            .expect("physical answer delivery completion");
+        recorded.remove(index)
+    };
+    let UserEvent::IssueMonitorAnswerDeliveryComplete(delivery) = completion else {
+        unreachable!("matched answer delivery completion")
+    };
+    assert!(
+        delivery.result.is_ok(),
+        "physical submit must succeed: {:?}",
+        delivery.result
+    );
+    let awaiting_callback = gwt::load_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+    )
+    .expect("load delivery awaiting physical callback");
+    assert!(awaiting_callback
+        .pending_launch_deliveries
+        .iter()
+        .any(|delivery| delivery.delivery_id == delivery_id));
+    let handoff = &awaiting_callback.autonomous_handoffs[0];
+    let target = match &handoff.delivery {
+        gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting {
+            target: Some(target),
+            ..
+        } => target,
+        other => panic!("expected bound answer target, got {other:?}"),
+    };
+    let receipt_identity = gwt::autonomous_handoff::AutonomousHandoffReceiptIdentity {
+        gwt_session_id: target.gwt_session_id.clone(),
+        native_session_id: target.native_session_id.clone(),
+        provider: target.provider.clone(),
+        issue_number: target.issue_number,
+        repo_hash: target.repo_hash.clone(),
+        project_state_root: target.project_state_root.clone(),
+    };
+    let body = gwt::issue_monitor::autonomous_handoff_answer_prompt(handoff);
+    let receipt_prompt = gwt::autonomous_handoff::protected_autonomous_handoff_answer_prompt(
+        &body,
+        &handoff.handoff_id,
+        &handoff.session_id,
+        1,
+    )
+    .expect("protected receipt prompt");
+    assert!(
+        gwt::acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+            &handoff.session_id,
+            &receipt_identity,
+            &receipt_prompt,
+            "2026-08-20T00:03:00Z",
+        )
+        .expect("acknowledge provider receipt before physical callback")
+    );
+    let receipted = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load provider receipt");
+    assert!(receipted.autonomous_handoffs[0].delivered_at.is_some());
+    assert!(receipted
+        .pending_launch_deliveries
+        .iter()
+        .any(|delivery| delivery.delivery_id == delivery_id));
+    let restored =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), receipted.clone());
+    assert_eq!(
+        restored.launched_window_issue(&holder_window_id),
+        None,
+        "the semantic receipt must not publish an undurable window before the physical callback"
+    );
+
+    let completion_events = fixture
+        .runtime
+        .handle_issue_monitor_answer_delivery_complete(delivery);
+    let settled = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load settled live delivery");
+    assert!(
+        settled.autonomous_handoffs[0].delivered_at.is_some(),
+        "the later physical callback must not rewind the provider receipt",
+    );
+    assert!(settled
+        .pending_launch_deliveries
+        .iter()
+        .all(|delivery| delivery.delivery_id != delivery_id));
+    let monitor =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), settled.clone());
+    assert_eq!(monitor.launched_window_issue(&holder_window_id), Some(3165));
+    assert!(!fixture
+        .runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(&delivery_id));
+    assert!(completion_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message == "Issue Monitor submitted the human answer; waiting for the provider receipt"
+    )));
+    assert!(fixture
+        .recorded_events
+        .lock()
+        .expect("recorded events")
+        .iter()
+        .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })));
+}
+
+/// Issue #3716 AC-2: once a worker may have written the prompt body, an error
+/// is outcome-ambiguous and must park instead of automatically replaying it.
+#[test]
+fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let grok_home = temp.path().join(".grok");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "failed-live-answer-delivery",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        true,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    seed_resumed_autonomous_handoff(&fixture, "Retry this answer");
+    let holder_window_id = fixture
+        .holder_window_id
+        .clone()
+        .expect("live holder window id");
+    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = blocking_tasks;
+    let delivery_id = fixture.delivery_id.clone().expect("durable delivery id");
+
+    assert!(fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events(
+            3165,
+            LinkedIssueKind::Spec,
+            Some(delivery_id.clone()),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        )
+        .is_empty());
+    fixture
+        .runtime
+        .runtimes
+        .get(&holder_window_id)
+        .expect("holder runtime")
+        .pane
+        .lock()
+        .expect("holder pane")
+        .shared_pty()
+        .invalidate_input_generation();
+    queued_tasks
+        .lock()
+        .expect("queued tasks")
+        .pop()
+        .expect("answer delivery worker")();
+    let completion = {
+        let mut recorded = fixture.recorded_events.lock().expect("recorded events");
+        let index = recorded
+            .iter()
+            .position(|event| matches!(event, UserEvent::IssueMonitorAnswerDeliveryComplete(_)))
+            .expect("failed answer delivery completion");
+        recorded.remove(index)
+    };
+    let UserEvent::IssueMonitorAnswerDeliveryComplete(delivery) = completion else {
+        unreachable!("matched answer delivery completion")
+    };
+    assert!(
+        delivery.result.is_err(),
+        "invalidated PTY must reject the delivery"
+    );
+    let events = fixture
+        .runtime
+        .handle_issue_monitor_answer_delivery_complete(delivery);
+
+    let parked = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load ambiguous delivery");
+    assert!(parked.autonomous_handoffs[0].delivered_at.is_none());
+    assert_eq!(
+        parked.autonomous_handoffs[0].state,
+        gwt::autonomous_handoff::AutonomousHandoffState::AwaitingHuman,
+    );
+    assert!(matches!(
+        parked.autonomous_handoffs[0].delivery,
+        gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Ambiguous { .. }
+    ));
+    assert!(parked
+        .pending_launch_deliveries
+        .iter()
+        .all(|delivery| delivery.delivery_id != delivery_id));
+    assert!(!fixture
+        .runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(&delivery_id));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, .. } if level == "error"
+    )));
+
+    let (retry_spawner, retry_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = retry_spawner;
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    assert!(
+        retry_tasks.lock().expect("retry tasks").is_empty(),
+        "an ambiguous submit must never enqueue a second physical write",
+    );
+}
+
+/// Issue #3716 AC-2: a materializing writer reservation is not yet a live
+/// conversation holder and must never receive the human answer.
+#[test]
+fn app_runtime_answered_handoff_waits_for_a_materializing_holder() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answered-materializing-holder",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::MaterializingSameConversation,
+        false,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Wait for the live holder");
+    let holder_window_id = fixture
+        .holder_window_id
+        .clone()
+        .expect("materializing holder id");
+    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = blocking_tasks;
+
+    assert!(fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events(
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        )
+        .is_empty());
+    assert!(queued_tasks.lock().expect("queued tasks").is_empty());
+    let pending = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load materializing handoff");
+    assert!(pending.autonomous_handoffs[0].delivered_at.is_none());
+    assert!(fixture
+        .recorded_events
+        .lock()
+        .expect("recorded events")
+        .iter()
+        .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })));
+}
+
+/// Issue #3716 AC-2: a queued answer belongs to the gwt Session recorded by
+/// the handoff, even when a newer resumable Session exists on the same branch.
+#[test]
+fn app_runtime_answered_handoff_ignores_a_newer_branch_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answered-exact-asking-session",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Approved for the asking session");
+    let source = gwt_agent::Session::load(
+        &fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id)),
+    )
+    .expect("load asking Session");
+    let mut newer = source.clone();
+    newer.id = "session-newer-same-branch".to_string();
+    newer.agent_session_id = Some("native-newer-same-branch".to_string());
+    newer.updated_at += chrono::Duration::hours(1);
+    newer.last_activity_at += chrono::Duration::hours(1);
+    newer
+        .save(&fixture.sessions_dir)
+        .expect("save newer Session");
+    let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").expect("isolated CODEX_HOME"));
+    let rollout_dir = codex_home.join("sessions/2026/08/20");
+    fs::create_dir_all(&rollout_dir).expect("create newer rollout directory");
+    fs::write(
+        rollout_dir.join("rollout-native-newer-same-branch.jsonl"),
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"native-newer-same-branch\",\"cwd\":{}}}}}\n",
+            serde_json::to_string(&fixture.worktree.display().to_string()).expect("serialize cwd"),
+        ),
+    )
+    .expect("write newer rollout");
+    fixture
+        .runtime
+        .apply_refreshed_launch_wizard_sessions(vec![source, newer]);
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result =
+        take_monitor_launch_complete("answered exact asking session", &fixture.recorded_events);
+    assert_monitor_exact_resume(result, &fixture);
+}
+
+/// Issue #3478 AC-1/AC-5 and Issue #3716 AC-2: a stopped holder still takes
+/// the exact native Resume path, gets the answer once, and retains autonomous
+/// markers so a later question is intercepted again.
+#[test]
+fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let grok_home = temp.path().join(".grok");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answered-exact-resume",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let (window_id, mut result) =
+        take_monitor_launch_complete_event("answered-exact-resume", &fixture.recorded_events);
+
+    let prepared = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load prepared exact Resume handoff");
+    assert!(
+        prepared.autonomous_handoffs[0].delivered_at.is_none(),
+        "preparing exact Resume must not consume the answer before launch completion",
+    );
+    assert_eq!(
+        result.as_ref().expect("exact Resume result").5,
+        gwt_agent::AgentId::GrokBuild,
+    );
+    assert_monitor_exact_resume(result.clone(), &fixture);
+    let process = &mut result.as_mut().expect("exact Resume result").0;
+    let provider_args = std::mem::take(&mut process.args);
+    assert!(provider_args
+        .iter()
+        .any(|argument| argument.contains("[gwt-autonomous-answer:v1:")));
+    if cfg!(windows) {
+        process.command = "cmd".to_string();
+        process.args = vec![
+            "/d".to_string(),
+            "/s".to_string(),
+            "/c".to_string(),
+            "ping -n 30 127.0.0.1 > nul".to_string(),
+        ];
+        process.args.extend(provider_args);
+    } else {
+        process.command = "/bin/sh".to_string();
+        process.args = vec![
+            "-lc".to_string(),
+            "sleep 30".to_string(),
+            "grok-test".to_string(),
+        ];
+        process.args.extend(provider_args);
+    }
+    process.pending_tool_runtime_migration = None;
+    fixture.runtime.handle_launch_complete(window_id, result);
+    let awaiting_receipt = gwt::load_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+    )
+    .expect("load completed exact Resume handoff");
+    assert!(
+        awaiting_receipt.autonomous_handoffs[0]
+            .delivered_at
+            .is_none(),
+        "child spawn success cannot stand in for the provider's UserPromptSubmit receipt",
+    );
+    assert!(matches!(
+        awaiting_receipt.autonomous_handoffs[0].delivery,
+        gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { .. }
+    ));
+}
+
+/// Issue #3716 AC-2: an exact Resume preparation failure occurs before the
+/// provider spawn boundary, so it keeps the bounded same-session retry ladder.
+#[test]
+fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let grok_home = temp.path().join(".grok");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "failed-exact-answer-resume",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    seed_resumed_autonomous_handoff(&fixture, "Retry exact Resume");
+    let delivery_id = fixture.delivery_id.clone().expect("delivery id");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut stale = gwt::load_issue_monitor_prefs(&prefs_path).expect("load stale strategy");
+    stale.pending_launch_deliveries[0].launch_session_strategy =
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired;
+    gwt::save_issue_monitor_prefs(&prefs_path, &stale).expect("save stale strategy");
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let (window_id, mut result) =
+        take_monitor_launch_complete_event("failed exact answer Resume", &fixture.recorded_events);
+    let process = &mut result.as_mut().expect("prepared exact Resume").0;
+    process.command = "/definitely/missing/gwt-answered-resume".to_string();
+    process.cwd = Some(fixture.worktree.clone());
+    fixture.runtime.handle_launch_complete(window_id, result);
+
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load failed exact Resume state");
+    assert!(prefs.autonomous_handoffs[0].delivered_at.is_none());
+    assert_eq!(
+        prefs.autonomous_handoffs[0].state,
+        gwt::autonomous_handoff::AutonomousHandoffState::Resumed,
+    );
+    assert!(
+        matches!(
+            prefs.autonomous_handoffs[0].delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::RetryBackoff {
+                attempt: 1,
+                ..
+            }
+        ),
+        "unexpected delivery state: {:?}",
+        prefs.autonomous_handoffs[0].delivery
+    );
+    assert!(prefs
+        .pending_launch_deliveries
+        .iter()
+        .all(|delivery| delivery.delivery_id != delivery_id));
+    assert_eq!(
+        prefs.queued_launch_session_strategies.get(&3165),
+        Some(&gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe),
+    );
+}
+
+/// Issue #3716 AC-2: an incomplete provider receipt is a retryable handoff
+/// preflight failure, not authority to launch a fresh successor.
+#[test]
+fn app_runtime_incomplete_grok_handoff_store_stays_retryable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let grok_home = temp.path().join(".grok");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "incomplete-grok-answer-store",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    seed_resumed_autonomous_handoff(&fixture, "Wait for provider receipt");
+    let updates = grok_home
+        .join("sessions/%2Ffixture%2Fworktree")
+        .join(&fixture.native_conversation_id)
+        .join("updates.jsonl");
+    fs::remove_file(updates).expect("remove authoritative updates log");
+    let delivery_id = fixture.delivery_id.clone().expect("delivery id");
+
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .expect("load incomplete store state");
+    assert!(prefs.autonomous_handoffs[0].delivered_at.is_none());
+    assert!(matches!(
+        prefs.autonomous_handoffs[0].delivery,
+        gwt::autonomous_handoff::AutonomousHandoffDeliveryState::RetryBackoff { .. }
+    ));
+    assert!(prefs
+        .pending_launch_deliveries
+        .iter()
+        .all(|delivery| delivery.delivery_id != delivery_id));
+    assert_eq!(
+        prefs.queued_launch_session_strategies.get(&3165),
+        Some(&gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe),
+    );
+    assert!(prefs
+        .failed_issues
+        .iter()
+        .all(|failed| failed.issue_number != 3165));
+    assert!(fixture
+        .recorded_events
+        .lock()
+        .expect("recorded events")
+        .iter()
+        .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })));
 }
 
 /// SPEC #3165 T-228 / FR-104: if another live gwt window wins the native
@@ -51067,6 +52098,8 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(repo_b.clone()),
             issue_monitor_session_mode: None,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         },
     );
 
