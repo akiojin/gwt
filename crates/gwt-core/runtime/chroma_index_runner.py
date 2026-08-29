@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
@@ -1628,6 +1629,91 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
                 pass
     finally:
         fh.close()
+
+
+@contextlib.contextmanager
+def _file_index_v2_pin(
+    repo_hash: str,
+    worktree_hash: str,
+    kind: str,
+    db_root: Optional[Path],
+) -> Iterator[Dict[str, Any]]:
+    """Publish one live GC pin while a v2 reader or migration owns its closure.
+
+    The registry lock makes marker setup/removal atomic with the Rust GC scan.
+    The per-pin advisory lock is the liveness source of truth; ``pin.json`` is
+    durable diagnostic data and supplies the conservative protected roots.
+    """
+    if kind not in {"reader", "migration", "continuation"}:
+        raise ValueError(f"unknown file-index-v2 pin kind: {kind}")
+    safe_repo_hash = _safe_artifact_id(repo_hash)
+    safe_worktree_hash = _safe_artifact_id(worktree_hash)
+    v2_root = resolve_file_index_v2_root(safe_repo_hash, db_root=db_root)
+    leases_root = v2_root / "leases"
+    pin_id = uuid.uuid4().hex
+    pin_dir = leases_root / pin_id
+    marker_path = pin_dir / "pin.json"
+    pin_lock = None
+    pin_lock_held = False
+    pin_dir_created = False
+    canonical = {
+        "schema_version": 1,
+        "pin_id": pin_id,
+        "kind": kind,
+        "repo_hash": safe_repo_hash,
+        "worktree_hash": safe_worktree_hash,
+        "protected_paths": [
+            "bases",
+            "cas",
+            f"worktrees/{safe_worktree_hash}",
+        ],
+        "owner_pid": os.getpid(),
+        "created_at": _file_index_timestamp(),
+    }
+    payload = {**canonical, "checksum": _sha256_json(canonical)}
+    try:
+        with acquire_lock(leases_root, exclusive=False):
+            pin_dir.mkdir(parents=False, exist_ok=False)
+            pin_dir_created = True
+            pin_lock = acquire_lock(pin_dir, exclusive=False)
+            pin_lock.__enter__()
+            pin_lock_held = True
+            _write_durable_json_atomic(marker_path, payload)
+        yield payload
+    finally:
+        # A GC scan takes the registry lock exclusively. Holding the shared
+        # handshake here prevents it from observing a half-created or
+        # half-removed pin directory. If reacquiring that handshake fails,
+        # always release the individual liveness lock and leave the directory
+        # for the next stale-pin sweep.
+        registry_lock = None
+        registry_lock_held = False
+        if pin_dir_created:
+            try:
+                registry_lock = acquire_lock(leases_root, exclusive=False)
+                registry_lock.__enter__()
+                registry_lock_held = True
+            except Exception:
+                registry_lock = None
+        try:
+            if registry_lock_held:
+                with contextlib.suppress(OSError):
+                    marker_path.unlink()
+                    _fsync_directory(pin_dir)
+        finally:
+            if pin_lock_held and pin_lock is not None:
+                with contextlib.suppress(Exception):
+                    pin_lock.__exit__(None, None, None)
+                pin_lock_held = False
+            if registry_lock_held:
+                with contextlib.suppress(OSError):
+                    (pin_dir / LOCK_FILENAME).unlink()
+                with contextlib.suppress(OSError):
+                    pin_dir.rmdir()
+                    _fsync_directory(leases_root)
+                assert registry_lock is not None
+                with contextlib.suppress(Exception):
+                    registry_lock.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------
@@ -4346,6 +4432,30 @@ def _validated_file_index_v2_action_inputs(
 
 
 def _action_index_files_protocol_v2(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    scope: str,
+    compatibility_descriptor: Optional[Dict[str, Any]],
+) -> dict:
+    with _file_index_v2_pin(
+        repo_hash,
+        worktree_hash,
+        "migration",
+        db_root,
+    ):
+        return _action_index_files_protocol_v2_pinned(
+            project_root,
+            repo_hash,
+            worktree_hash,
+            db_root,
+            scope,
+            compatibility_descriptor,
+        )
+
+
+def _action_index_files_protocol_v2_pinned(
     project_root: str,
     repo_hash: str,
     worktree_hash: str,
@@ -8032,7 +8142,12 @@ def _repair_file_index_v2_head_and_quarantine(
                 _write_file_index_v2_recovery_marker_atomic(
                     recovery_marker_path, marker
                 )
-                _write_file_index_v2_head_atomic(previous_head_path, source_head)
+                # A private component that is about to be quarantined must no
+                # longer be rooted by the durable journal. Publish the same
+                # verified fallback to both heads before moving the corrupt
+                # View/Overlay out of its canonical path.
+                journal_head = repaired if should_quarantine else source_head
+                _write_file_index_v2_head_atomic(previous_head_path, journal_head)
                 _write_file_index_v2_head_atomic(head_path, repaired)
             except OSError:
                 return False
@@ -8356,7 +8471,7 @@ def _search_failed_payload(
     }
 
 
-def action_search_multi_v2(
+def _action_search_multi_v2_pinned(
     repo_hash: str,
     worktree_hash: Optional[str],
     project_root: Optional[str],
@@ -8557,6 +8672,49 @@ def action_search_multi_v2(
     return payload
 
 
+def action_search_multi_v2(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    project_root: Optional[str],
+    query: str,
+    n_results: int,
+    scopes: Sequence[str],
+    db_root: Optional[Path] = None,
+    match_mode: str = "semantic",
+    file_index_protocol: str = "legacy",
+) -> Dict[str, Any]:
+    has_v2_file_scope = any(scope in {"files", "files-docs"} for scope in scopes)
+    if file_index_protocol == "v2" and has_v2_file_scope and worktree_hash:
+        with _file_index_v2_pin(
+            repo_hash,
+            worktree_hash,
+            "reader",
+            db_root,
+        ):
+            return _action_search_multi_v2_pinned(
+                repo_hash,
+                worktree_hash,
+                project_root,
+                query,
+                n_results,
+                scopes,
+                db_root,
+                match_mode,
+                file_index_protocol,
+            )
+    return _action_search_multi_v2_pinned(
+        repo_hash,
+        worktree_hash,
+        project_root,
+        query,
+        n_results,
+        scopes,
+        db_root,
+        match_mode,
+        file_index_protocol,
+    )
+
+
 # ---------------------------------------------------------------------
 # v2 status
 # ---------------------------------------------------------------------
@@ -8577,6 +8735,24 @@ def _runtime_status_v2() -> Dict[str, Any]:
 
 
 def _explicit_file_index_v2_status(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+) -> Dict[str, Dict[str, Any]]:
+    with _file_index_v2_pin(
+        repo_hash,
+        worktree_hash,
+        "reader",
+        db_root,
+    ):
+        return _explicit_file_index_v2_status_pinned(
+            repo_hash,
+            worktree_hash,
+            db_root,
+        )
+
+
+def _explicit_file_index_v2_status_pinned(
     repo_hash: str,
     worktree_hash: str,
     db_root: Optional[Path],

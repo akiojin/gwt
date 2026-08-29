@@ -544,6 +544,59 @@ fn rust_gc_honors_the_python_pin_file_schema_and_lock() {
 }
 
 #[test]
+fn stale_incomplete_pin_without_marker_is_reclaimed_before_sweep() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+    let v2_root = index_root.join(repo.as_str()).join("file-index-v2");
+    let stale_pin = v2_root.join("leases/crashed-before-marker");
+    fs::create_dir_all(&stale_pin).unwrap();
+    fs::write(stale_pin.join(".lock"), b"").unwrap();
+    let expired = v2_root
+        .join("bases")
+        .join(format!(".orphan.staging-{}-1", NOW_NS - 2 * HOUR_NS));
+    fs::create_dir_all(&expired).unwrap();
+
+    let report = sweep_file_index_v2(&gc_options(&index_root, repo, vec![], NOW_NS)).unwrap();
+
+    assert!(!stale_pin.exists(), "an unlocked partial pin is stale");
+    assert!(
+        !expired.exists(),
+        "a stale pin must not wedge later GC work"
+    );
+    assert!(report.deleted.contains(&stale_pin));
+    assert!(report.deleted.contains(&expired));
+}
+
+#[test]
+fn live_incomplete_pin_without_marker_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+    let v2_root = index_root.join(repo.as_str()).join("file-index-v2");
+    let live_pin = v2_root.join("leases/live-before-marker");
+    fs::create_dir_all(&live_pin).unwrap();
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(live_pin.join(".lock"))
+        .unwrap();
+    lock.lock_shared().unwrap();
+    let expired = v2_root
+        .join("bases")
+        .join(format!(".orphan.staging-{}-1", NOW_NS - 2 * HOUR_NS));
+    fs::create_dir_all(&expired).unwrap();
+
+    let result = sweep_file_index_v2(&gc_options(&index_root, repo, vec![], NOW_NS));
+
+    assert!(result.is_err(), "live pin metadata must be strict");
+    assert!(expired.is_dir(), "invalid live metadata must fail closed");
+    FileExt::unlock(&lock).unwrap();
+}
+
+#[test]
 fn removed_worktree_waits_for_grace_and_reader_pin_but_keeps_shared_base() {
     let tmp = tempfile::tempdir().unwrap();
     let index_root = tmp.path().join("index");

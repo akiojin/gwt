@@ -700,6 +700,39 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
             "the selected fallback head must be durable before quarantine",
         )
 
+    def test_quarantined_corrupt_view_is_removed_from_durable_journal(self):
+        first, second, _head = self._seed_legacy_and_two_views()
+        corrupt_view = self._worktree_root() / "views" / second["view_id"]
+        (corrupt_view / "descriptor.json").write_text(
+            "{corrupt active view", encoding="utf-8"
+        )
+
+        result = self._search_v2()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(
+            result["scopes"]["files"].get("view_id"), first["view_id"], result
+        )
+        repaired = runner._read_file_index_v2_head(self._head_path())
+        journal = runner._read_file_index_v2_head(
+            self._worktree_root() / "head.previous.json"
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(journal, repaired)
+        self.assertEqual(journal["active_view_id"], first["view_id"])
+        self.assertIsNone(journal["previous_view_id"])
+        self.assertTrue(
+            (self._worktree_root() / "views" / first["view_id"]).is_dir()
+        )
+        self.assertTrue(
+            list(
+                (self._worktree_root() / "views").glob(
+                    f".{second['view_id']}.quarantine-*"
+                )
+            ),
+            "the corrupt View must be quarantined only after the journal is normalized",
+        )
+
     def test_active_base_corruption_selects_previous_without_partial_pair(self):
         first, second, _head = self._seed_legacy_and_two_views(
             canonical_rebase=True
@@ -1824,6 +1857,38 @@ runner.action_index_files_v2(
                     _exclusive_lock_available(lock_path),
                     "released migration pin must release its advisory lock",
                 )
+
+    def test_pin_releases_individual_lock_when_registry_cleanup_fails(self):
+        v2_root = runner.resolve_file_index_v2_root(
+            REPO_HASH, db_root=self.db_root
+        )
+        real_acquire_lock = runner.acquire_lock
+        calls = 0
+
+        def fail_cleanup_registry(db_path, exclusive=True):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("simulated registry cleanup lock failure")
+            return real_acquire_lock(db_path, exclusive=exclusive)
+
+        with mock.patch.object(
+            runner, "acquire_lock", side_effect=fail_cleanup_registry
+        ):
+            with runner._file_index_v2_pin(
+                REPO_HASH,
+                WORKTREE_HASH,
+                "reader",
+                self.db_root,
+            ) as payload:
+                lock_path = v2_root / "leases" / payload["pin_id"] / ".lock"
+                self.assertFalse(_exclusive_lock_available(lock_path))
+
+        self.assertTrue(lock_path.is_file(), "failed cleanup leaves a stale marker")
+        self.assertTrue(
+            _exclusive_lock_available(lock_path),
+            "cleanup failure must never leak the individual advisory lock",
+        )
 
 
 if __name__ == "__main__":

@@ -318,6 +318,139 @@ where
     }
 }
 
+fn is_safe_relative_artifact_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component.len() <= 160
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+}
+
+/// Reason an immutable file-index artifact is temporarily rooted for GC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileIndexGcPinKind {
+    Reader,
+    Migration,
+    Continuation,
+}
+
+/// Cross-language descriptor for one live GC root.
+///
+/// Liveness is established by the sibling kernel-locked `.lock` file. This
+/// JSON is deliberately only the strictly validated description of which
+/// relative artifact roots that live owner protects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedFileIndexGcPinDescriptor")]
+pub struct FileIndexGcPinDescriptor {
+    pub schema_version: u32,
+    pub pin_id: String,
+    pub kind: FileIndexGcPinKind,
+    pub repo_hash: String,
+    pub worktree_hash: Option<String>,
+    pub protected_paths: Vec<String>,
+    pub owner_pid: u32,
+    pub created_at: String,
+    pub checksum: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedFileIndexGcPinDescriptor {
+    schema_version: u32,
+    pin_id: String,
+    kind: FileIndexGcPinKind,
+    repo_hash: String,
+    worktree_hash: Option<String>,
+    protected_paths: Vec<String>,
+    owner_pid: u32,
+    created_at: String,
+    checksum: String,
+}
+
+impl FileIndexGcPinDescriptor {
+    pub(crate) fn new(
+        pin_id: String,
+        kind: FileIndexGcPinKind,
+        repo_hash: String,
+        worktree_hash: Option<String>,
+        protected_paths: Vec<String>,
+        owner_pid: u32,
+        created_at: String,
+    ) -> Result<Self, String> {
+        let mut payload = serde_json::json!({
+            "schema_version": FILE_INDEX_SCHEMA_VERSION,
+            "pin_id": pin_id,
+            "kind": kind,
+            "repo_hash": repo_hash,
+            "worktree_hash": worktree_hash,
+            "protected_paths": protected_paths,
+            "owner_pid": owner_pid,
+            "created_at": created_at,
+        });
+        let checksum = canonical_json_sha256(&payload);
+        payload
+            .as_object_mut()
+            .expect("file-index GC pin serialization is an object")
+            .insert("checksum".to_string(), Value::String(checksum));
+        serde_json::from_value(payload).map_err(|error| error.to_string())
+    }
+}
+
+impl TryFrom<UncheckedFileIndexGcPinDescriptor> for FileIndexGcPinDescriptor {
+    type Error = String;
+
+    fn try_from(raw: UncheckedFileIndexGcPinDescriptor) -> Result<Self, Self::Error> {
+        if raw.schema_version != FILE_INDEX_SCHEMA_VERSION
+            || !is_safe_artifact_id(&raw.pin_id)
+            || !is_safe_artifact_id(&raw.repo_hash)
+            || raw
+                .worktree_hash
+                .as_deref()
+                .is_some_and(|value| !is_safe_artifact_id(value))
+            || raw.protected_paths.is_empty()
+            || !raw
+                .protected_paths
+                .iter()
+                .all(|path| is_safe_relative_artifact_path(path))
+            || raw.owner_pid == 0
+            || DateTime::parse_from_rfc3339(&raw.created_at).is_err()
+            || !is_lowercase_sha256(&raw.checksum)
+        {
+            return Err("invalid file-index GC pin descriptor".to_string());
+        }
+
+        let value = Self {
+            schema_version: raw.schema_version,
+            pin_id: raw.pin_id,
+            kind: raw.kind,
+            repo_hash: raw.repo_hash,
+            worktree_hash: raw.worktree_hash,
+            protected_paths: raw.protected_paths,
+            owner_pid: raw.owner_pid,
+            created_at: raw.created_at,
+            checksum: raw.checksum,
+        };
+        let mut checksum_payload =
+            serde_json::to_value(&value).map_err(|error| error.to_string())?;
+        checksum_payload
+            .as_object_mut()
+            .expect("file-index GC pin serialization is an object")
+            .remove("checksum");
+        if canonical_json_sha256(&checksum_payload) != value.checksum {
+            return Err("invalid file-index GC pin descriptor checksum".to_string());
+        }
+        Ok(value)
+    }
+}
+
 fn deserialize_document_counts<'de, D>(deserializer: D) -> Result<FileIndexDocumentCounts, D::Error>
 where
     D: serde::Deserializer<'de>,
