@@ -13,14 +13,15 @@
 //!   (`~/Library/LaunchAgents/<app>.plist`). These releases predate the
 //!   Background Task Management UI, so the display-name problem does not
 //!   exist there and the LaunchAgent path stays.
-//! - Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` via
-//!   `auto-launch`.
+//! - Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` via the
+//!   checkout-owned current-user registry implementation.
 //! - Linux: `~/.config/autostart/<app>.desktop` (XDG autostart) via
 //!   `auto-launch`.
 
 use std::path::PathBuf;
 
-use auto_launch::AutoLaunchBuilder;
+#[cfg(not(target_os = "windows"))]
+use auto_launch::{AutoLaunchBuilder, LinuxLaunchMode, MacOSLaunchMode};
 
 /// Identifier registered with the OS autostart mechanism. Persists
 /// across `gwt` upgrades so the install/uninstall toggle is idempotent
@@ -101,6 +102,9 @@ pub enum AutostartError {
     ExecutablePathUnavailable(std::io::Error),
     #[error("auto-launch backend error: {0}")]
     Backend(#[from] auto_launch::Error),
+    #[cfg(target_os = "windows")]
+    #[error("Windows current-user autostart registry error: {0}")]
+    WindowsRegistry(#[from] windows_result::Error),
     #[cfg(target_os = "macos")]
     #[error("SMAppService error: {0}")]
     AppService(String),
@@ -109,9 +113,9 @@ pub enum AutostartError {
 }
 
 /// Stateless wrapper around the per-OS autostart mechanism. macOS 13+ routes
-/// through `SMAppService`; every other target shares the exact same
-/// `(app_name, app_path, use_launch_agent)` triple via `build_auto_launch` so a
-/// mismatch here cannot silently leak orphan entries across calls.
+/// through `SMAppService`, Windows through the checkout-owned HKCU-only
+/// registry implementation, and the remaining supported paths through one
+/// shared `auto-launch` builder configuration.
 pub struct AutostartManager;
 
 impl AutostartManager {
@@ -127,9 +131,16 @@ impl AutostartManager {
         if matches!(mechanism, AutostartMechanism::AppService) {
             return macos_app_service::install();
         }
-        let auto = build_auto_launch()?;
-        auto.enable()?;
-        Ok(())
+        #[cfg(target_os = "windows")]
+        {
+            return windows_current_user_autostart::install();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let auto = build_auto_launch()?;
+            auto.enable()?;
+            Ok(())
+        }
     }
 
     /// Remove the autostart entry. Idempotent: a second `uninstall()`
@@ -143,9 +154,16 @@ impl AutostartManager {
         if matches!(mechanism, AutostartMechanism::AppService) {
             return macos_app_service::uninstall();
         }
-        let auto = build_auto_launch()?;
-        auto.disable()?;
-        Ok(())
+        #[cfg(target_os = "windows")]
+        {
+            return windows_current_user_autostart::uninstall();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let auto = build_auto_launch()?;
+            auto.disable()?;
+            Ok(())
+        }
     }
 
     /// Inspect the OS to determine whether autostart is currently enabled
@@ -163,26 +181,121 @@ impl AutostartManager {
         if matches!(mechanism, AutostartMechanism::AppService) {
             return macos_app_service::status();
         }
-        let auto = build_auto_launch()?;
-        let enabled = auto.is_enabled()?;
-        Ok(AutostartStatus {
-            enabled,
-            install_path: install_path_for_app(APP_NAME),
-            mechanism,
-        })
+        #[cfg(target_os = "windows")]
+        {
+            let enabled = windows_current_user_autostart::status()?;
+            return Ok(AutostartStatus {
+                enabled,
+                install_path: install_path_for_app(APP_NAME),
+                mechanism,
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let auto = build_auto_launch()?;
+            let enabled = auto.is_enabled()?;
+            Ok(AutostartStatus {
+                enabled,
+                install_path: install_path_for_app(APP_NAME),
+                mechanism,
+            })
+        }
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn build_auto_launch() -> Result<auto_launch::AutoLaunch, AutostartError> {
     let exe = std::env::current_exe().map_err(AutostartError::ExecutablePathUnavailable)?;
     let exe_str = exe.to_string_lossy().into_owned();
     let mut builder = AutoLaunchBuilder::new();
     builder.set_app_name(APP_NAME);
     builder.set_app_path(&exe_str);
-    // macOS 12 and earlier: pin the LaunchAgent plist so the toggle remains
-    // reversible from the file system. The flag is a no-op on Linux / Windows.
-    builder.set_use_launch_agent(true);
+    // Preserve the auto-launch 0.5 behavior on the paths that still use the
+    // crate: macOS 12 and earlier keep LaunchAgent, and Linux keeps the XDG
+    // `.config/autostart` entry.
+    builder.set_macos_launch_mode(MacOSLaunchMode::LaunchAgent);
+    builder.set_linux_launch_mode(LinuxLaunchMode::XdgAutostart);
     Ok(builder.build()?)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn startup_approved_value_is_enabled(bytes: &[u8]) -> bool {
+    bytes.len() < 8 || bytes.iter().rev().take(8).all(|value| *value == 0)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_run_command(executable: &str) -> String {
+    format!(r#""{executable}""#)
+}
+
+#[cfg(target_os = "windows")]
+mod windows_current_user_autostart {
+    use super::{startup_approved_value_is_enabled, windows_run_command, AutostartError, APP_NAME};
+    use windows_registry::{Type, CURRENT_USER};
+    use windows_result::HRESULT;
+
+    const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    const STARTUP_APPROVED_KEY: &str =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    const STARTUP_APPROVED_ENABLED: [u8; 12] = [
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    const E_FILE_NOT_FOUND: HRESULT = HRESULT::from_win32(0x80070002_u32);
+
+    pub(super) fn install() -> Result<(), AutostartError> {
+        let exe = std::env::current_exe().map_err(AutostartError::ExecutablePathUnavailable)?;
+        let exe = exe.to_string_lossy();
+        CURRENT_USER
+            .create(RUN_KEY)?
+            .set_string(APP_NAME, windows_run_command(&exe))?;
+
+        match CURRENT_USER.options().write().open(STARTUP_APPROVED_KEY) {
+            Ok(key) => key.set_bytes(APP_NAME, Type::Bytes, &STARTUP_APPROVED_ENABLED)?,
+            Err(error) if is_file_not_found(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    pub(super) fn uninstall() -> Result<(), AutostartError> {
+        match CURRENT_USER
+            .options()
+            .write()
+            .open(RUN_KEY)
+            .and_then(|key| key.remove_value(APP_NAME))
+        {
+            Ok(()) => Ok(()),
+            Err(error) if is_file_not_found(&error) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub(super) fn status() -> Result<bool, AutostartError> {
+        let registered = match CURRENT_USER
+            .open(RUN_KEY)
+            .and_then(|key| key.get_string(APP_NAME))
+        {
+            Ok(_) => true,
+            Err(error) if is_file_not_found(&error) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !registered {
+            return Ok(false);
+        }
+
+        match CURRENT_USER
+            .open(STARTUP_APPROVED_KEY)
+            .and_then(|key| key.get_value(APP_NAME))
+        {
+            Ok(value) => Ok(startup_approved_value_is_enabled(&value)),
+            Err(error) if is_file_not_found(&error) => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn is_file_not_found(error: &windows_result::Error) -> bool {
+        error.code() == E_FILE_NOT_FOUND
+    }
 }
 
 /// Compute the path the OS-native autostart entry would live at without
@@ -433,6 +546,31 @@ mod tests {
         assert!(sm_status_is_registered(1));
         assert!(sm_status_is_registered(2));
         assert!(!sm_status_is_registered(3));
+    }
+
+    #[test]
+    fn startup_approved_value_uses_auto_launch_0_5_compatibility() {
+        assert!(startup_approved_value_is_enabled(&[
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]));
+        assert!(!startup_approved_value_is_enabled(&[
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ]));
+        assert!(startup_approved_value_is_enabled(&[
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]));
+    }
+
+    #[test]
+    fn windows_run_command_quotes_executable_without_trailing_space() {
+        for executable in [
+            r"C:\Program Files\GWT\gwt.exe",
+            r"C:\利用者 データ\GWT\gwt.exe",
+        ] {
+            let command = windows_run_command(executable);
+            assert_eq!(command, format!(r#""{executable}""#));
+            assert!(!command.ends_with(' '));
+        }
     }
 
     #[test]
