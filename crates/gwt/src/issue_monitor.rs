@@ -5,7 +5,11 @@ use std::{
     path::Path,
 };
 
-use crate::autonomous_handoff::{AutonomousHandoffState, AutonomousQuestionHandoff};
+use crate::autonomous_handoff::{
+    parse_protected_autonomous_handoff_answer_prompt, protected_autonomous_handoff_answer_prompt,
+    AutonomousHandoffDeliveryState, AutonomousHandoffDeliveryTarget,
+    AutonomousHandoffReceiptIdentity, AutonomousHandoffState, AutonomousQuestionHandoff,
+};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -523,6 +527,11 @@ pub struct IssueMonitorPrefs {
     pub launch_profile: Option<IssueMonitorLaunchProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
+    /// Durable launch generation keyed by Issue number. Kept separate from the
+    /// compatibility `launched_issues` rows so older struct consumers remain
+    /// source-compatible while new readers can reject delayed window closes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launched_claims: BTreeMap<u64, String>,
     /// Issue #3222: claims whose agent window is not bound yet (`Launching`).
     /// Persisted so an in-flight claim survives the per-handler prefs
     /// roundtrip — otherwise a rescan re-claims the same issue (same-owner
@@ -631,6 +640,7 @@ impl Default for IssueMonitorPrefs {
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
             launched_issues: Vec::new(),
+            launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
             queued_launch_session_strategies: BTreeMap::new(),
@@ -1582,6 +1592,9 @@ pub struct IssueMonitorState {
     priority_order: Vec<u64>,
     launch_profile: Option<IssueMonitorLaunchProfile>,
     launched_windows: BTreeMap<u64, String>,
+    /// Durable generation for each launched window binding. A successor launch
+    /// receives a new claim even when its issue and window ids are reused.
+    launched_claims: BTreeMap<u64, String>,
     /// issue → work branch for currently launched Issues, used to look up the
     /// PR when checking whether the work has merged.
     launched_branches: BTreeMap<u64, String>,
@@ -1659,6 +1672,63 @@ pub struct AutonomousHandoffResumption {
     pub prompt: String,
 }
 
+/// One write-ahead answer-delivery attempt ready for a physical submit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousHandoffDeliveryAttempt {
+    pub handoff_id: String,
+    pub issue_number: u64,
+    pub session_id: String,
+    pub attempt: u32,
+    pub prompt_sha256: String,
+    /// Protected prompt whose trailing marker authenticates every field above.
+    pub prompt: String,
+}
+
+/// Result of atomically preparing an answered handoff for delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousHandoffDeliveryPreparation {
+    /// The `Attempting` write-ahead fence is durable; physical submit may begin.
+    Ready(AutonomousHandoffDeliveryAttempt),
+    /// A definitely-not-submitted retry remains inside its backoff window.
+    Backoff {
+        handoff_id: String,
+        session_id: String,
+        attempt: u32,
+        retry_not_before: String,
+    },
+    /// The exact target materializer is still alive. Callers wait for its
+    /// semantic receipt instead of treating a concurrent scan as a crash.
+    InFlight {
+        handoff_id: String,
+        session_id: String,
+        attempt: u32,
+        target_session_id: String,
+    },
+    /// An unresolved write-ahead attempt was observed again. No prompt is
+    /// returned, so an automatic replay is impossible.
+    Ambiguous {
+        handoff_id: String,
+        session_id: String,
+        attempt: u32,
+        reason: String,
+    },
+}
+
+/// Result of a failure proved to have happened before physical submit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousHandoffDeliveryFailureOutcome {
+    Retry {
+        attempt: u32,
+        retry_not_before: String,
+    },
+    Escalated {
+        attempt: u32,
+        reason: String,
+    },
+    /// The reported identity no longer owns the current Attempting fence.
+    Rejected,
+}
+
 /// Issue #3478 (AC-9): status-view projection of one waiting question.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousPendingQuestion {
@@ -1687,6 +1757,24 @@ enum PendingLaunchDeliveryMatch {
     Matched(usize),
     Missing,
     Mismatched,
+}
+
+/// Monotonic progress of one immutable human-answer identity. A new answer is
+/// ordered separately by `answer_revision`; within one answer, disk writers
+/// may only advance this tuple and can never make a submitted prompt replayable.
+fn autonomous_handoff_delivery_progress(delivery: &AutonomousHandoffDeliveryState) -> (u32, u8) {
+    match delivery {
+        AutonomousHandoffDeliveryState::Pending => (0, 0),
+        AutonomousHandoffDeliveryState::Attempting {
+            attempt, target, ..
+        } => (*attempt, if target.is_some() { 2 } else { 1 }),
+        AutonomousHandoffDeliveryState::RetryBackoff { attempt, .. } => (*attempt, 3),
+        AutonomousHandoffDeliveryState::Ambiguous { attempt, .. } => (*attempt, 4),
+        AutonomousHandoffDeliveryState::Exhausted { attempt, .. } => (*attempt, 5),
+        // An authenticated provider receipt is definitive and must dominate a
+        // concurrent restart/exit observer that can only infer ambiguity.
+        AutonomousHandoffDeliveryState::Delivered { attempt, .. } => (*attempt, 6),
+    }
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -2561,8 +2649,9 @@ Question you asked:\n{question}\n",
         }
     }
     prompt.push_str(&format!(
-        "\nHuman answer:\n{answer}\n\nContinue the work with this answer. Do not re-ask it.",
+        "\nHuman answer:\n{answer}\n\nDecision recorded at:\n{answered_at}\n\nContinue the work with this answer. Do not re-ask it.",
         answer = handoff.answer.as_deref().unwrap_or(""),
+        answered_at = handoff.answered_at.as_deref().unwrap_or("unknown"),
     ));
     prompt
 }
@@ -2578,28 +2667,355 @@ pub fn take_autonomous_resume_prompt_from_prefs(
     issue_number: u64,
     now: &str,
 ) -> Option<String> {
-    mutate_issue_monitor_prefs_recovering(
-        prefs_path,
-        &IssueMonitorPrefs::recovery_default(),
-        |prefs| {
-            let handoff = prefs.autonomous_handoffs.iter_mut().find(|handoff| {
-                handoff.issue_number == issue_number
-                    && handoff.state == AutonomousHandoffState::Resumed
-                    && handoff.delivered_at.is_none()
-            })?;
-            handoff.delivered_at = Some(now.to_string());
-            Some(autonomous_handoff_answer_prompt(handoff))
-        },
-    )
-    .map_err(|error| {
-        tracing::warn!(
-            error = %error,
-            path = %prefs_path.display(),
-            "failed to take autonomous resume prompt"
+    prepare_autonomous_handoff_delivery_from_prefs(prefs_path, issue_number, now)
+        .map_err(|error| {
+            tracing::warn!(
+                error = %error,
+                path = %prefs_path.display(),
+                "failed to prepare autonomous resume prompt"
+            );
+        })
+        .ok()
+        .flatten()
+        .and_then(|prepared| match prepared {
+            AutonomousHandoffDeliveryPreparation::Ready(attempt) => Some(attempt.prompt),
+            AutonomousHandoffDeliveryPreparation::Backoff { .. }
+            | AutonomousHandoffDeliveryPreparation::InFlight { .. }
+            | AutonomousHandoffDeliveryPreparation::Ambiguous { .. } => None,
+        })
+}
+
+/// Issue #3716 (AC-2): inspect the unanswered resumption for an Issue without
+/// consuming it. The asking gwt Session is part of the durable handoff and is
+/// the routing authority; branch recency must never replace it.
+pub fn pending_autonomous_handoff_resumption_from_prefs(
+    prefs_path: &Path,
+    issue_number: u64,
+) -> io::Result<Option<AutonomousHandoffResumption>> {
+    let prefs = load_issue_monitor_prefs(prefs_path)?;
+    Ok(prefs
+        .autonomous_handoffs
+        .iter()
+        .find(|handoff| {
+            handoff.issue_number == issue_number
+                && handoff.state == AutonomousHandoffState::Resumed
+                && handoff.delivered_at.is_none()
+                && matches!(
+                    handoff.delivery,
+                    AutonomousHandoffDeliveryState::Pending
+                        | AutonomousHandoffDeliveryState::Attempting { .. }
+                        | AutonomousHandoffDeliveryState::RetryBackoff { .. }
+                )
+        })
+        .map(|handoff| AutonomousHandoffResumption {
+            handoff_id: handoff.handoff_id.clone(),
+            issue_number: handoff.issue_number,
+            session_id: handoff.session_id.clone(),
+            prompt: autonomous_handoff_answer_prompt(handoff),
+        }))
+}
+
+/// Atomically write the `Attempting` fence before a caller may submit an
+/// answered handoff. Re-reading an unresolved fence performs crash recovery:
+/// it returns no prompt, transitions to Ambiguous/NeedsHuman, and removes all
+/// slot/delivery ownership in the same prefs transaction.
+pub fn prepare_autonomous_handoff_delivery_from_prefs(
+    prefs_path: &Path,
+    issue_number: u64,
+    now: &str,
+) -> io::Result<Option<AutonomousHandoffDeliveryPreparation>> {
+    let (_, prepared) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let prepared = monitor.prepare_autonomous_handoff_delivery(issue_number, now);
+        *prefs = monitor.prefs();
+        Ok(prepared)
+    })?;
+    Ok(prepared)
+}
+
+/// Bind a prepared prompt to the exact gwt/native Session and materializer
+/// that may submit it. This must commit after target Session creation and
+/// before a process spawn or live-pane write crosses the provider boundary.
+pub fn bind_autonomous_handoff_delivery_target_from_prefs(
+    prefs_path: &Path,
+    handoff_id: &str,
+    source_session_id: &str,
+    attempt: u32,
+    target_identity: &AutonomousHandoffDeliveryTarget,
+) -> io::Result<bool> {
+    if target_identity.gwt_session_id.is_empty()
+        || target_identity.native_session_id.is_empty()
+        || target_identity.provider.is_empty()
+        || target_identity.repo_hash.is_empty()
+        || target_identity.project_state_root.is_empty()
+        || target_identity.window_id.is_empty()
+        || target_identity.materializer_id.is_empty()
+        || target_identity.materializer_pid == 0
+        || target_identity.materializer_started_at == 0
+    {
+        return Ok(false);
+    }
+    let (_, bound) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let Some(handoff) = prefs.autonomous_handoffs.iter_mut().find(|handoff| {
+            handoff.handoff_id == handoff_id
+                && handoff.session_id == source_session_id
+                && handoff.issue_number == target_identity.issue_number
+                && handoff.provider == target_identity.provider
+                && handoff.state == AutonomousHandoffState::Resumed
+        }) else {
+            return Ok(false);
+        };
+        let AutonomousHandoffDeliveryState::Attempting {
+            attempt: current_attempt,
+            materializer_pid,
+            materializer_started_at,
+            target,
+            ..
+        } = &mut handoff.delivery
+        else {
+            return Ok(false);
+        };
+        if *current_attempt != attempt
+            || *materializer_pid != target_identity.materializer_pid
+            || *materializer_started_at != target_identity.materializer_started_at
+        {
+            return Ok(false);
+        }
+        match target {
+            Some(current) => Ok(current.as_ref() == target_identity),
+            None => {
+                *target = Some(Box::new(target_identity.clone()));
+                Ok(true)
+            }
+        }
+    })?;
+    Ok(bound)
+}
+
+/// Authenticated `UserPromptSubmit` receipt for an answered handoff.
+///
+/// Parsing happens before the lock only as an inexpensive rejection. The
+/// current canonical prompt is rebuilt and hashed again while holding the
+/// prefs lock, so a delayed receipt cannot acknowledge an updated answer.
+pub fn acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
+    prefs_path: &Path,
+    source_session_id: &str,
+    observed_target: &AutonomousHandoffReceiptIdentity,
+    prompt: &str,
+    now: &str,
+) -> io::Result<bool> {
+    let Some(marker) = parse_protected_autonomous_handoff_answer_prompt(prompt) else {
+        return Ok(false);
+    };
+    if marker.session_id != source_session_id {
+        return Ok(false);
+    }
+    let submitted_prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
+    let (_, acknowledged) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let Some(index) = monitor.autonomous_handoffs.iter().position(|handoff| {
+            handoff.handoff_id == marker.handoff_id
+                && handoff.session_id == marker.session_id
+                && handoff.issue_number == observed_target.issue_number
+                && handoff.provider == observed_target.provider
+                && handoff.state == AutonomousHandoffState::Resumed
+        }) else {
+            return Ok(false);
+        };
+        let handoff = &monitor.autonomous_handoffs[index];
+        let body = autonomous_handoff_answer_prompt(handoff);
+        let Some(canonical_prompt) = protected_autonomous_handoff_answer_prompt(
+            &body,
+            &handoff.handoff_id,
+            &handoff.session_id,
+            marker.attempt,
+        ) else {
+            return Ok(false);
+        };
+        let Some(canonical_marker) =
+            parse_protected_autonomous_handoff_answer_prompt(&canonical_prompt)
+        else {
+            return Ok(false);
+        };
+        if submitted_prompt != canonical_prompt
+            || canonical_marker != marker
+            || !matches!(
+                &handoff.delivery,
+                AutonomousHandoffDeliveryState::Attempting {
+                    attempt,
+                    prompt_sha256,
+                    target: Some(target),
+                    ..
+                } if *attempt == marker.attempt
+                    && prompt_sha256 == &marker.prompt_sha256
+                    && target.gwt_session_id == observed_target.gwt_session_id
+                    && target.native_session_id == observed_target.native_session_id
+                    && target.provider == observed_target.provider
+                    && target.issue_number == observed_target.issue_number
+                    && target.repo_hash == observed_target.repo_hash
+                    && target.project_state_root == observed_target.project_state_root
+            )
+        {
+            return Ok(false);
+        }
+        let target = match &monitor.autonomous_handoffs[index].delivery {
+            AutonomousHandoffDeliveryState::Attempting {
+                target: Some(target),
+                ..
+            } => target.clone(),
+            _ => return Ok(false),
+        };
+        let launch_already_durable = monitor
+            .active_launches
+            .contains(&observed_target.issue_number)
+            && monitor
+                .launched_windows
+                .get(&observed_target.issue_number)
+                .is_some_and(|window_id| {
+                    issue_monitor_window_ids_match(window_id, &target.window_id)
+                });
+        let mut complete_launch = false;
+        if let Some(delivery_id) = target.delivery_id.as_deref() {
+            match monitor.match_pending_launch_delivery(observed_target.issue_number, delivery_id) {
+                PendingLaunchDeliveryMatch::Matched(delivery_index) => {
+                    let delivery = &monitor.pending_launch_deliveries[delivery_index];
+                    if delivery.materializer_window_id.as_deref() != Some(target.window_id.as_str())
+                    {
+                        return Ok(false);
+                    }
+                    if delivery.materialized_window_id.as_deref() == Some(target.window_id.as_str())
+                        && delivery.workspace_durable_window_id.as_deref()
+                            == Some(target.window_id.as_str())
+                    {
+                        monitor.pending_launch_deliveries.remove(delivery_index);
+                        complete_launch = true;
+                    }
+                }
+                PendingLaunchDeliveryMatch::Mismatched => return Ok(false),
+                PendingLaunchDeliveryMatch::Missing if !launch_already_durable => return Ok(false),
+                PendingLaunchDeliveryMatch::Missing => {}
+            }
+        } else if !launch_already_durable {
+            return Ok(false);
+        }
+        if complete_launch {
+            monitor.complete_active_launch(observed_target.issue_number, target.window_id);
+        }
+        monitor.autonomous_handoffs[index].delivered_at = Some(now.to_string());
+        monitor.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::Delivered {
+            attempt: marker.attempt,
+            prompt_sha256: marker.prompt_sha256.clone(),
+            delivered_at: now.to_string(),
+        };
+        *prefs = monitor.prefs();
+        Ok(true)
+    })?;
+    Ok(acknowledged)
+}
+
+/// Persist a definitely-not-submitted delivery failure and apply its bounded
+/// exact-session backoff or terminal NeedsHuman transition atomically.
+pub fn record_autonomous_handoff_delivery_failure_from_prefs(
+    prefs_path: &Path,
+    handoff_id: &str,
+    session_id: &str,
+    attempt: u32,
+    message: &str,
+    now: &str,
+) -> io::Result<AutonomousHandoffDeliveryFailureOutcome> {
+    let (_, outcome) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let outcome = monitor.record_autonomous_handoff_delivery_failure(
+            handoff_id, session_id, attempt, message, now,
         );
-    })
-    .ok()
-    .and_then(|(_, prompt)| prompt)
+        *prefs = monitor.prefs();
+        Ok(outcome)
+    })?;
+    Ok(outcome)
+}
+
+/// Mark a worker-started or partially-written delivery as outcome-ambiguous.
+/// This is the only valid failure path after the pre-submit scheduling fence.
+pub fn mark_autonomous_handoff_delivery_ambiguous_from_prefs(
+    prefs_path: &Path,
+    handoff_id: &str,
+    session_id: &str,
+    attempt: u32,
+    reason: &str,
+    now: &str,
+) -> io::Result<bool> {
+    let (_, marked) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let marked = monitor.mark_autonomous_handoff_delivery_ambiguous(
+            handoff_id, session_id, attempt, reason, now,
+        );
+        *prefs = monitor.prefs();
+        Ok(marked)
+    })?;
+    Ok(marked)
+}
+
+/// Preserve exact-session routing for a durable answered handoff, including
+/// legacy or in-flight deliveries that still carry a stale FreshRequired bit.
+pub fn preserve_answered_handoff_resume_strategy_from_prefs(
+    prefs_path: &Path,
+    issue_number: u64,
+) -> io::Result<bool> {
+    let (_, answered_handoff_pending) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let answered_handoff_pending = prefs.autonomous_handoffs.iter().any(|handoff| {
+            handoff.issue_number == issue_number
+                && handoff.state == AutonomousHandoffState::Resumed
+                && handoff.delivered_at.is_none()
+        });
+        if !answered_handoff_pending {
+            return Ok(false);
+        }
+        prefs.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        for delivery in prefs
+            .pending_launch_deliveries
+            .iter_mut()
+            .filter(|delivery| delivery.issue_number == issue_number)
+        {
+            delivery.launch_session_strategy = IssueMonitorLaunchSessionStrategy::ResumeIfSafe;
+        }
+        Ok(true)
+    })?;
+    Ok(answered_handoff_pending)
+}
+
+/// Commit the one-shot marker for the exact handoff and asking Session after
+/// the runtime has proved that the answer reached its physical delivery
+/// boundary. A mismatched or already-consumed handoff is a no-op.
+pub fn mark_autonomous_handoff_delivered_from_prefs(
+    prefs_path: &Path,
+    handoff_id: &str,
+    session_id: &str,
+    now: &str,
+) -> io::Result<bool> {
+    let (_, marked) = try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let Some(handoff) = prefs.autonomous_handoffs.iter().find(|handoff| {
+            handoff.handoff_id == handoff_id
+                && handoff.session_id == session_id
+                && handoff.state == AutonomousHandoffState::Resumed
+        }) else {
+            return Ok(false);
+        };
+        // Compatibility query only. A physical-boundary callback without the
+        // protected UserPromptSubmit prompt cannot transition delivery state.
+        let _ = now;
+        Ok(matches!(
+            handoff.delivery,
+            AutonomousHandoffDeliveryState::Delivered { .. }
+        ))
+    })?;
+    Ok(marked)
 }
 
 /// Issue #3478 (FR-025): append one handoff to the project's Issue Monitor
@@ -2631,6 +3047,44 @@ pub fn record_autonomous_question_handoff(
 }
 
 impl IssueMonitorState {
+    fn autonomous_handoff_delivery_target_is_live(
+        &self,
+        target: &crate::autonomous_handoff::AutonomousHandoffDeliveryTarget,
+    ) -> bool {
+        if !Self::autonomous_handoff_materializer_is_live(
+            target.materializer_pid,
+            target.materializer_started_at,
+        ) {
+            return false;
+        }
+        let launched = self.active_launches.contains(&target.issue_number)
+            && self
+                .launched_windows
+                .get(&target.issue_number)
+                .is_some_and(|window_id| {
+                    issue_monitor_window_ids_match(window_id, &target.window_id)
+                });
+        if launched {
+            return true;
+        }
+        let Some(delivery_id) = target.delivery_id.as_deref() else {
+            return false;
+        };
+        self.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == target.issue_number
+                && delivery.delivery_id == delivery_id
+                && delivery.materializer_id.as_deref() == Some(target.materializer_id.as_str())
+                && delivery.materializer_window_id.as_deref() == Some(target.window_id.as_str())
+                && delivery.materializer_pid == Some(target.materializer_pid)
+        })
+    }
+
+    fn autonomous_handoff_materializer_is_live(pid: u32, started_at: u64) -> bool {
+        pid > 0
+            && started_at > 0
+            && crate::process::host_process_start_time(pid) == Some(started_at)
+    }
+
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
             config,
@@ -2646,6 +3100,7 @@ impl IssueMonitorState {
             priority_order: Vec::new(),
             launch_profile: None,
             launched_windows: BTreeMap::new(),
+            launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
             issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
@@ -2682,6 +3137,7 @@ impl IssueMonitorState {
         state.last_scan_at = prefs.last_scan_at;
         state.launch_profile = prefs.launch_profile;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
+        state.launched_claims = prefs.launched_claims;
         // Issue #3627: restore used to re-inject every persisted launch into
         // `active_launches` without consulting `config.max_active`, so a disk
         // snapshot holding more launches than the cap (11 slots against a cap
@@ -2734,13 +3190,22 @@ impl IssueMonitorState {
                 dropped_over_cap.push(launched.issue_number);
                 continue;
             }
+            let issue_number = launched.issue_number;
             state
                 .launched_windows
-                .insert(launched.issue_number, launched.window_id);
-            if !state.active_launches.contains(&launched.issue_number) {
-                state.active_launches.push(launched.issue_number);
+                .insert(issue_number, launched.window_id);
+            if !state.active_launches.contains(&issue_number) {
+                state.active_launches.push(issue_number);
             }
         }
+        let retained_claim_issues = state
+            .launched_windows
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        state
+            .launched_claims
+            .retain(|issue_number, _| retained_claim_issues.contains(issue_number));
         if !dropped_over_cap.is_empty() {
             tracing::warn!(
                 dropped = ?dropped_over_cap,
@@ -2840,6 +3305,7 @@ impl IssueMonitorState {
                     window_id: window_id.clone(),
                 })
                 .collect(),
+            launched_claims: self.launched_claims.clone(),
             launching_issues: self
                 .active_launches
                 .iter()
@@ -3440,6 +3906,7 @@ impl IssueMonitorState {
         &mut self,
         incoming: impl IntoIterator<Item = AutonomousQuestionHandoff>,
     ) {
+        let mut adopted_delivery_transitions = Vec::new();
         for handoff in incoming {
             match self
                 .autonomous_handoffs
@@ -3448,14 +3915,77 @@ impl IssueMonitorState {
             {
                 None => self.autonomous_handoffs.push(handoff),
                 Some(known) => {
-                    if handoff.state == AutonomousHandoffState::Answered
-                        && known.state == AutonomousHandoffState::AwaitingHuman
+                    let incoming_answer_is_newer = handoff.answer_revision > known.answer_revision;
+                    if incoming_answer_is_newer {
+                        if matches!(
+                            handoff.delivery,
+                            AutonomousHandoffDeliveryState::RetryBackoff { .. }
+                                | AutonomousHandoffDeliveryState::Ambiguous { .. }
+                                | AutonomousHandoffDeliveryState::Exhausted { .. }
+                        ) {
+                            adopted_delivery_transitions
+                                .push((handoff.issue_number, handoff.delivery.clone()));
+                        }
+                        *known = handoff;
+                        continue;
+                    }
+                    if handoff.answer_revision < known.answer_revision {
+                        // Older answer identities may be delayed writes. Never
+                        // let them replace the current delivery fence.
+                        continue;
+                    }
+                    if handoff.answer != known.answer || handoff.answered_at != known.answered_at {
+                        // Equal revisions with different payloads indicate a
+                        // legacy/concurrent conflict. This method is called
+                        // with the freshly locked disk record as `handoff`, so
+                        // disk wins rather than being overwritten by a stale
+                        // resident driver on its next save.
+                        *known = handoff;
+                        continue;
+                    }
+                    if autonomous_handoff_delivery_progress(&handoff.delivery)
+                        > autonomous_handoff_delivery_progress(&known.delivery)
                     {
-                        known.state = AutonomousHandoffState::Answered;
-                        known.answer = handoff.answer;
-                        known.answered_at = handoff.answered_at;
+                        known.delivery = handoff.delivery.clone();
+                        known.delivered_at = handoff.delivered_at.clone();
+                        known.state = handoff.state;
+                        adopted_delivery_transitions.push((handoff.issue_number, handoff.delivery));
                     }
                 }
+            }
+        }
+        for (issue_number, delivery) in adopted_delivery_transitions {
+            match delivery {
+                AutonomousHandoffDeliveryState::RetryBackoff {
+                    retry_not_before, ..
+                } => {
+                    self.clear_active_tracking(issue_number);
+                    self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+                    self.set_active_launch_id(issue_number, None);
+                    self.autonomous_record_mut(issue_number).retry_not_before =
+                        Some(retry_not_before);
+                    self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+                    if !self.queue.contains(&issue_number) {
+                        self.queue.push_back(issue_number);
+                        self.apply_priority_order_to_queue();
+                    }
+                    self.queued_launch_session_strategies.insert(
+                        issue_number,
+                        IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+                    );
+                }
+                AutonomousHandoffDeliveryState::Ambiguous { reason, .. } => {
+                    self.escalate_to_needs_human(issue_number, reason);
+                }
+                AutonomousHandoffDeliveryState::Exhausted { last_error, .. } => {
+                    self.escalate_to_needs_human(
+                        issue_number,
+                        format!("answered handoff delivery attempts are exhausted: {last_error}"),
+                    );
+                }
+                AutonomousHandoffDeliveryState::Pending
+                | AutonomousHandoffDeliveryState::Attempting { .. }
+                | AutonomousHandoffDeliveryState::Delivered { .. } => {}
             }
         }
     }
@@ -3468,9 +3998,54 @@ impl IssueMonitorState {
     /// Fail-closed like every other autonomous transition: a no-op while
     /// autonomous mode is off, so the SPEC #3165 human-gated flow is untouched.
     /// Idempotent — a handoff leaves `Pending` exactly once.
-    pub fn apply_pending_autonomous_handoffs(&mut self, _now: &str) -> Vec<u64> {
+    pub fn apply_pending_autonomous_handoffs(&mut self, now: &str) -> Vec<u64> {
         if !self.autonomous_mode {
             return Vec::new();
+        }
+        let unresolved = self
+            .autonomous_handoffs
+            .iter()
+            .filter_map(|handoff| match &handoff.delivery {
+                AutonomousHandoffDeliveryState::Attempting {
+                    attempt,
+                    target,
+                    materializer_pid,
+                    materializer_started_at,
+                    ..
+                } if handoff.state == AutonomousHandoffState::Resumed
+                    && handoff.delivered_at.is_none()
+                    && !target.as_ref().map_or_else(
+                        || {
+                            Self::autonomous_handoff_materializer_is_live(
+                                *materializer_pid,
+                                *materializer_started_at,
+                            )
+                        },
+                        |target| self.autonomous_handoff_delivery_target_is_live(target),
+                    ) =>
+                {
+                    Some((
+                        handoff.handoff_id.clone(),
+                        handoff.session_id.clone(),
+                        handoff.issue_number,
+                        *attempt,
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut parked = Vec::new();
+        for (handoff_id, session_id, issue_number, attempt) in unresolved {
+            if self.mark_autonomous_handoff_delivery_ambiguous(
+                &handoff_id,
+                &session_id,
+                attempt,
+                "unresolved submit fence observed during monitor restart reconciliation",
+                now,
+            ) && !parked.contains(&issue_number)
+            {
+                parked.push(issue_number);
+            }
         }
         let pending = self
             .autonomous_handoffs
@@ -3481,7 +4056,6 @@ impl IssueMonitorState {
                 (handoff.issue_number, handoff.rationale.clone())
             })
             .collect::<Vec<_>>();
-        let mut parked = Vec::new();
         for (issue_number, reason) in pending {
             self.escalate_to_needs_human(issue_number, reason);
             if !parked.contains(&issue_number) {
@@ -3504,7 +4078,311 @@ impl IssueMonitorState {
         };
         handoff.answer = Some(answer.to_string());
         handoff.answered_at = Some(now.to_string());
+        handoff.answer_revision = handoff.answer_revision.saturating_add(1);
+        // A new human answer is a new delivery identity. This is also the
+        // explicit recovery path from Ambiguous/Exhausted: a delayed receipt
+        // for the old answer can no longer match the canonical prompt hash.
+        handoff.delivered_at = None;
+        handoff.delivery = AutonomousHandoffDeliveryState::Pending;
         handoff.state = AutonomousHandoffState::Answered;
+        true
+    }
+
+    /// Commit the write-ahead delivery fence for an answered handoff.
+    ///
+    /// This method returns a prompt only for a newly committed `Attempting`
+    /// state. Re-observing an unresolved attempt converts it to `Ambiguous`,
+    /// parks the Issue in `NeedsHuman`, and releases every active/pending
+    /// launch anchor so restart can never replay the answer automatically.
+    pub fn prepare_autonomous_handoff_delivery(
+        &mut self,
+        issue_number: u64,
+        now: &str,
+    ) -> Option<AutonomousHandoffDeliveryPreparation> {
+        let index = self.autonomous_handoffs.iter().position(|handoff| {
+            handoff.issue_number == issue_number
+                && handoff.state == AutonomousHandoffState::Resumed
+                && handoff.delivered_at.is_none()
+        })?;
+        let delivery = self.autonomous_handoffs[index].delivery.clone();
+        let (attempt, ambiguity) = match delivery {
+            AutonomousHandoffDeliveryState::Pending => (1, None),
+            AutonomousHandoffDeliveryState::RetryBackoff {
+                attempt,
+                retry_not_before,
+                ..
+            } => {
+                let retry_ready = match (
+                    chrono::DateTime::parse_from_rfc3339(now),
+                    chrono::DateTime::parse_from_rfc3339(&retry_not_before),
+                ) {
+                    (Ok(now), Ok(not_before)) => now >= not_before,
+                    // A malformed clock must not strand an explicitly bounded
+                    // retry forever; fail open to the next attempt.
+                    _ => true,
+                };
+                if !retry_ready {
+                    let handoff = &self.autonomous_handoffs[index];
+                    return Some(AutonomousHandoffDeliveryPreparation::Backoff {
+                        handoff_id: handoff.handoff_id.clone(),
+                        session_id: handoff.session_id.clone(),
+                        attempt,
+                        retry_not_before,
+                    });
+                }
+                (attempt.saturating_add(1), None)
+            }
+            AutonomousHandoffDeliveryState::Attempting {
+                attempt,
+                prompt_sha256,
+                target,
+                materializer_pid,
+                materializer_started_at,
+                ..
+            } => {
+                let target_session_id = target.as_ref().and_then(|target| {
+                    self.autonomous_handoff_delivery_target_is_live(target)
+                        .then(|| target.gwt_session_id.clone())
+                });
+                let materializer_live = target_session_id.is_some()
+                    || (target.is_none()
+                        && Self::autonomous_handoff_materializer_is_live(
+                            materializer_pid,
+                            materializer_started_at,
+                        ));
+                if materializer_live {
+                    let handoff = &self.autonomous_handoffs[index];
+                    return Some(AutonomousHandoffDeliveryPreparation::InFlight {
+                        handoff_id: handoff.handoff_id.clone(),
+                        session_id: handoff.session_id.clone(),
+                        attempt,
+                        target_session_id: target_session_id.unwrap_or_default(),
+                    });
+                }
+                let reason = format!(
+                    "answered handoff delivery attempt {attempt} has an ambiguous submit outcome after restart"
+                );
+                self.autonomous_handoffs[index].delivery =
+                    AutonomousHandoffDeliveryState::Ambiguous {
+                        attempt,
+                        prompt_sha256,
+                        detected_at: now.to_string(),
+                        reason: reason.clone(),
+                    };
+                self.autonomous_handoffs[index].state = AutonomousHandoffState::AwaitingHuman;
+                (attempt, Some(reason))
+            }
+            AutonomousHandoffDeliveryState::Ambiguous {
+                attempt, reason, ..
+            } => (attempt, Some(reason)),
+            AutonomousHandoffDeliveryState::Exhausted {
+                attempt,
+                last_error,
+                ..
+            } => (
+                attempt,
+                Some(format!(
+                    "answered handoff delivery attempts are exhausted: {last_error}"
+                )),
+            ),
+            AutonomousHandoffDeliveryState::Delivered { .. } => return None,
+        };
+        if let Some(reason) = ambiguity {
+            if self
+                .autonomous_records
+                .get(&issue_number)
+                .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman)
+            {
+                self.escalate_to_needs_human(issue_number, reason.clone());
+            } else {
+                // Even if another process already projected NeedsHuman, an
+                // unresolved local delivery may still retain launch anchors.
+                self.clear_active_tracking(issue_number);
+                self.queue.retain(|queued| *queued != issue_number);
+            }
+            let handoff = &self.autonomous_handoffs[index];
+            return Some(AutonomousHandoffDeliveryPreparation::Ambiguous {
+                handoff_id: handoff.handoff_id.clone(),
+                session_id: handoff.session_id.clone(),
+                attempt,
+                reason,
+            });
+        }
+
+        let handoff = &self.autonomous_handoffs[index];
+        let body = autonomous_handoff_answer_prompt(handoff);
+        let prompt = protected_autonomous_handoff_answer_prompt(
+            &body,
+            &handoff.handoff_id,
+            &handoff.session_id,
+            attempt,
+        )?;
+        let marker = parse_protected_autonomous_handoff_answer_prompt(&prompt)?;
+        let prepared = AutonomousHandoffDeliveryAttempt {
+            handoff_id: handoff.handoff_id.clone(),
+            issue_number,
+            session_id: handoff.session_id.clone(),
+            attempt,
+            prompt_sha256: marker.prompt_sha256.clone(),
+            prompt,
+        };
+        let materializer_pid = std::process::id();
+        let materializer_started_at =
+            crate::process::host_process_start_time(materializer_pid).unwrap_or_default();
+        self.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::Attempting {
+            attempt,
+            prompt_sha256: marker.prompt_sha256,
+            started_at: now.to_string(),
+            materializer_pid,
+            materializer_started_at,
+            target: None,
+        };
+        self.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        for delivery in self
+            .pending_launch_deliveries
+            .iter_mut()
+            .filter(|delivery| delivery.issue_number == issue_number)
+        {
+            delivery.launch_session_strategy = IssueMonitorLaunchSessionStrategy::ResumeIfSafe;
+        }
+        Some(AutonomousHandoffDeliveryPreparation::Ready(prepared))
+    }
+
+    /// Record a failure proved to have occurred before any submit byte crossed
+    /// the provider boundary. Ambiguous failures deliberately do not use this
+    /// API: they remain `Attempting` until receipt or restart reconciliation.
+    pub fn record_autonomous_handoff_delivery_failure(
+        &mut self,
+        handoff_id: &str,
+        session_id: &str,
+        attempt: u32,
+        message: impl Into<String>,
+        now: &str,
+    ) -> AutonomousHandoffDeliveryFailureOutcome {
+        let message = message.into();
+        let Some(index) = self.autonomous_handoffs.iter().position(|handoff| {
+            handoff.handoff_id == handoff_id
+                && handoff.session_id == session_id
+                && handoff.state == AutonomousHandoffState::Resumed
+                && matches!(
+                    &handoff.delivery,
+                    AutonomousHandoffDeliveryState::Attempting {
+                        attempt: current_attempt,
+                        ..
+                    } if *current_attempt == attempt
+                )
+        }) else {
+            return AutonomousHandoffDeliveryFailureOutcome::Rejected;
+        };
+        let max_attempts = self.autonomous_tuning.max_attempts.max(1);
+        if attempt >= max_attempts {
+            let reason = format!(
+                "answered handoff delivery attempts exhausted ({attempt}/{max_attempts}): {message}"
+            );
+            self.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::Exhausted {
+                attempt,
+                failed_at: now.to_string(),
+                last_error: message,
+            };
+            self.autonomous_handoffs[index].state = AutonomousHandoffState::AwaitingHuman;
+            self.escalate_to_needs_human(
+                self.autonomous_handoffs[index].issue_number,
+                reason.clone(),
+            );
+            return AutonomousHandoffDeliveryFailureOutcome::Escalated { attempt, reason };
+        }
+
+        let backoff = autonomous_retry_backoff_secs(
+            attempt,
+            self.autonomous_tuning.retry_backoff_base_secs,
+            self.autonomous_tuning.retry_backoff_cap_secs,
+        );
+        let retry_not_before = rfc3339_plus_secs(now, backoff).unwrap_or_else(|| now.to_string());
+        let issue_number = self.autonomous_handoffs[index].issue_number;
+        self.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::RetryBackoff {
+            attempt,
+            retry_not_before: retry_not_before.clone(),
+            last_error: message.clone(),
+        };
+        self.push_autonomous_notice(
+            "warn",
+            issue_number,
+            format!(
+                "Issue #{issue_number} answered-handoff delivery {attempt}/{max_attempts} failed before submit (exact-session retry scheduled): {message}"
+            ),
+        );
+        self.clear_active_tracking(issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        self.set_active_launch_id(issue_number, None);
+        let record = self.autonomous_record_mut(issue_number);
+        record.retry_not_before = Some(retry_not_before.clone());
+        record.retry_hold_reason = None;
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
+        // Unlike a generic launch failure, an answered handoff must never
+        // switch to FreshRequired and strand its answer in another Session.
+        self.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        AutonomousHandoffDeliveryFailureOutcome::Retry {
+            attempt,
+            retry_not_before,
+        }
+    }
+
+    /// Resolve an exact write-ahead fence whose physical submit may have
+    /// started. This transition is terminal until the human records a new
+    /// answer: replay would risk delivering the same decision twice.
+    pub fn mark_autonomous_handoff_delivery_ambiguous(
+        &mut self,
+        handoff_id: &str,
+        session_id: &str,
+        attempt: u32,
+        reason: impl Into<String>,
+        now: &str,
+    ) -> bool {
+        let reason = reason.into();
+        let Some(index) = self.autonomous_handoffs.iter().position(|handoff| {
+            handoff.handoff_id == handoff_id
+                && handoff.session_id == session_id
+                && handoff.state == AutonomousHandoffState::Resumed
+                && matches!(
+                    &handoff.delivery,
+                    AutonomousHandoffDeliveryState::Attempting {
+                        attempt: current_attempt,
+                        ..
+                    } if *current_attempt == attempt
+                )
+        }) else {
+            return false;
+        };
+        let prompt_sha256 = match &self.autonomous_handoffs[index].delivery {
+            AutonomousHandoffDeliveryState::Attempting { prompt_sha256, .. } => {
+                prompt_sha256.clone()
+            }
+            _ => return false,
+        };
+        let issue_number = self.autonomous_handoffs[index].issue_number;
+        self.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::Ambiguous {
+            attempt,
+            prompt_sha256,
+            detected_at: now.to_string(),
+            reason: reason.clone(),
+        };
+        self.autonomous_handoffs[index].state = AutonomousHandoffState::AwaitingHuman;
+        self.escalate_to_needs_human(
+            issue_number,
+            format!(
+                "answered handoff delivery attempt {attempt} has an ambiguous submit outcome: {reason}"
+            ),
+        );
         true
     }
 
@@ -3552,13 +4430,12 @@ impl IssueMonitorState {
         issue_number: u64,
         now: &str,
     ) -> Option<String> {
-        let handoff = self.autonomous_handoffs.iter_mut().find(|handoff| {
-            handoff.issue_number == issue_number
-                && handoff.state == AutonomousHandoffState::Resumed
-                && handoff.delivered_at.is_none()
-        })?;
-        handoff.delivered_at = Some(now.to_string());
-        Some(autonomous_handoff_answer_prompt(handoff))
+        match self.prepare_autonomous_handoff_delivery(issue_number, now)? {
+            AutonomousHandoffDeliveryPreparation::Ready(attempt) => Some(attempt.prompt),
+            AutonomousHandoffDeliveryPreparation::Backoff { .. }
+            | AutonomousHandoffDeliveryPreparation::InFlight { .. }
+            | AutonomousHandoffDeliveryPreparation::Ambiguous { .. } => None,
+        }
     }
 
     /// Reverse exactly what [`escalate_to_needs_human`](Self::escalate_to_needs_human)
@@ -3570,6 +4447,21 @@ impl IssueMonitorState {
         self.last_error = None;
         self.set_autonomous_phase(issue_number, AutonomousPhase::Implementing);
         self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
+        // A human answer belongs to the parked conversation. It overrides a
+        // stale FreshRequired retry policy left by an earlier generic failure;
+        // otherwise the accepted answer would be stranded while a fresh agent
+        // starts without it.
+        self.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        for delivery in self
+            .pending_launch_deliveries
+            .iter_mut()
+            .filter(|delivery| delivery.issue_number == issue_number)
+        {
+            delivery.launch_session_strategy = IssueMonitorLaunchSessionStrategy::ResumeIfSafe;
+        }
         if let Some(item) = self
             .inbox
             .iter_mut()
@@ -3615,6 +4507,7 @@ impl IssueMonitorState {
     /// windows. Dropping the bindings is what makes OFF/ON a true reset.
     fn clear_launched_window_bindings(&mut self) {
         self.launched_windows.clear();
+        self.launched_claims.clear();
         self.launched_branches.clear();
         self.launching_claimed_at.clear();
     }
@@ -3768,6 +4661,50 @@ impl IssueMonitorState {
             disk,
             AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative,
         );
+    }
+
+    /// Rebase before applying an exact window-close control under the prefs
+    /// lock. A normal daemon scan keeps its same-Issue in-memory launch, but a
+    /// destructive CAS must compare against the generation that is currently
+    /// durable. Replace the window and claim together so a stale predecessor
+    /// cannot make its close match a same-window successor.
+    pub(crate) fn rebase_daemon_driver_prefs_for_exact_window_close(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+        issue_number: u64,
+    ) {
+        self.rebase_daemon_driver_prefs(disk);
+        let Some(disk_window_id) = disk
+            .launched_issues
+            .iter()
+            .rev()
+            .find(|launched| {
+                launched.issue_number == issue_number && !launched.window_id.is_empty()
+            })
+            .map(|launched| &launched.window_id)
+        else {
+            return;
+        };
+        let disk_claim_id = disk.launched_claims.get(&issue_number);
+        if self.launched_windows.get(&issue_number) == Some(disk_window_id)
+            && self.launched_claims.get(&issue_number) == disk_claim_id
+        {
+            return;
+        }
+
+        self.launched_windows
+            .insert(issue_number, disk_window_id.clone());
+        match disk_claim_id {
+            Some(claim_id) => {
+                self.launched_claims.insert(issue_number, claim_id.clone());
+            }
+            None => {
+                self.launched_claims.remove(&issue_number);
+            }
+        }
+        if !self.active_launches.contains(&issue_number) {
+            self.active_launches.push(issue_number);
+        }
     }
 
     /// Rebase a stale process-local state on the latest committed prefs before
@@ -4284,6 +5221,23 @@ impl IssueMonitorState {
             self.launched_windows
                 .entry(launched.issue_number)
                 .or_insert_with(|| launched.window_id.clone());
+            // PR #3787 review: a completion can clear the local claim while a
+            // newer window stays bound. Import the disk claim only when the
+            // retained window is the disk row's own window — a stale claim
+            // paired with a replaced window would invalidate the
+            // exact-identity fence (live_claim_id / stop_only /
+            // failover_restart / requeue_exact_window).
+            let window_matches_disk = self
+                .launched_windows
+                .get(&launched.issue_number)
+                .is_some_and(|window_id| *window_id == launched.window_id);
+            if window_matches_disk {
+                if let Some(claim_id) = disk.launched_claims.get(&launched.issue_number) {
+                    self.launched_claims
+                        .entry(launched.issue_number)
+                        .or_insert_with(|| claim_id.clone());
+                }
+            }
             if !self.active_launches.contains(&launched.issue_number) {
                 self.active_launches.push(launched.issue_number);
             }
@@ -5750,6 +6704,7 @@ impl IssueMonitorState {
         delivery_id: Option<&str>,
     ) -> bool {
         let window_id = window_id.into();
+        let mut launched_claim_id = None;
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
@@ -5760,6 +6715,7 @@ impl IssueMonitorState {
                     {
                         return false;
                     }
+                    launched_claim_id = Some(delivery.claim_id.clone());
                     self.pending_launch_deliveries.remove(index);
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
@@ -5767,7 +6723,7 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.complete_active_launch(issue_number, window_id);
+        self.complete_active_launch_with_claim(issue_number, window_id, launched_claim_id);
         true
     }
 
@@ -5857,13 +6813,29 @@ impl IssueMonitorState {
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
-        let window_id = window_id.into();
+        self.complete_active_launch_with_claim(issue_number, window_id.into(), None);
+    }
+
+    fn complete_active_launch_with_claim(
+        &mut self,
+        issue_number: u64,
+        window_id: String,
+        claim_id: Option<String>,
+    ) {
         self.launching_claimed_at.remove(&issue_number);
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
         self.launched_windows
             .insert(issue_number, window_id.clone());
+        match claim_id {
+            Some(claim_id) => {
+                self.launched_claims.insert(issue_number, claim_id);
+            }
+            None => {
+                self.launched_claims.remove(&issue_number);
+            }
+        }
         if let Some(branch) = self
             .inbox_item(issue_number)
             .and_then(|item| item.launch_plan.as_ref())
@@ -6049,6 +7021,7 @@ impl IssueMonitorState {
             .retain(|active| *active != issue_number);
         self.launching_claimed_at.remove(&issue_number);
         self.launched_windows.remove(&issue_number);
+        self.launched_claims.remove(&issue_number);
         self.launched_branches.remove(&issue_number);
         // #3165 error-window lifecycle: terminal transitions (merged / released /
         // needs-human) and retry all funnel through here; drop any retained stale
@@ -6533,10 +7506,15 @@ impl IssueMonitorState {
     /// row still knows it. Both are consulted so the answer is the same in the
     /// daemon and in a bare `gwtd` process.
     pub fn live_claim_id(&self, issue_number: u64) -> Option<String> {
-        self.pending_launch_deliveries
-            .iter()
-            .find(|delivery| delivery.issue_number == issue_number)
-            .map(|delivery| delivery.claim_id.clone())
+        self.launched_claims
+            .get(&issue_number)
+            .cloned()
+            .or_else(|| {
+                self.pending_launch_deliveries
+                    .iter()
+                    .find(|delivery| delivery.issue_number == issue_number)
+                    .map(|delivery| delivery.claim_id.clone())
+            })
             .or_else(|| {
                 self.inbox_item(issue_number)
                     .and_then(|item| item.claim_id.clone())
@@ -7057,6 +8035,18 @@ impl IssueMonitorState {
         )
     }
 
+    /// Requeue only the exact persisted launch generation named by `target`.
+    ///
+    /// A detached close may finish after a successor has reused both the issue
+    /// number and window id. The claim id is the durable launch generation, so
+    /// the stale close becomes an inert CAS miss instead of revoking that
+    /// successor.
+    pub fn requeue_exact_window(&mut self, target: &IssueMonitorStopTarget) -> Option<u64> {
+        let window_id = self.resolve_exact_launch(target).ok().flatten()?;
+        self.requeue_window(&window_id)
+            .filter(|issue_number| *issue_number == target.issue_number)
+    }
+
     /// [`Self::requeue_window`] with an injected clock for the backoff floor.
     ///
     /// SPEC-3431 FR-066: a close is a bounded retry, not a free one. It used to
@@ -7134,6 +8124,7 @@ impl IssueMonitorState {
         // #3165 error-window lifecycle: retain the stale agent window id so an
         // explicit Launch Now can close it before relaunching. Prefer the
         // tracked launched window; fall back to the inbox item's window id.
+        self.launched_claims.remove(&issue_number);
         let stale_window = self.launched_windows.remove(&issue_number).or_else(|| {
             self.inbox
                 .iter()
@@ -8129,6 +9120,44 @@ mod tests {
     }
 
     #[test]
+    fn merge_from_disk_keeps_stale_claim_away_from_replaced_window() {
+        // PR #3787 review: a delivery completion can clear the local claim
+        // while retaining the (newer) window. A later disk rebase must not
+        // pair that window with the stale claim of the previous generation —
+        // the imported claim would invalidate the exact-identity fence used
+        // by live_claim_id / stop_only / failover_restart / requeue.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-new");
+        let disk = IssueMonitorPrefs {
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-old".to_string(),
+            }],
+            launched_claims: BTreeMap::from([(42, "claim-old".to_string())]),
+            ..IssueMonitorPrefs::default()
+        };
+        monitor.merge_inflight_launches_from_disk(&disk);
+        assert_eq!(
+            monitor.live_claim_id(42),
+            None,
+            "a stale disk claim must not attach to a replaced window"
+        );
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-new"), Some(42));
+
+        // Control: with no local window the disk row imports window and claim.
+        let mut fresh = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        fresh.merge_inflight_launches_from_disk(&disk);
+        assert_eq!(fresh.live_claim_id(42).as_deref(), Some("claim-old"));
+        assert_eq!(fresh.launched_window_issue("tab-1::agent-old"), Some(42));
+    }
+
+    #[test]
     fn cross_process_rebase_unions_equal_marker_failures_with_terminal_precedence() {
         let local_failure = IssueMonitorFailedIssue {
             issue_number: 45,
@@ -8650,6 +9679,45 @@ mod tests {
             "closing an unmerged window returns to pending, never a fake done state"
         );
         assert_eq!(monitor.queue_len(), 1);
+    }
+
+    #[test]
+    fn delayed_exact_window_close_cannot_requeue_a_same_id_successor() {
+        let mut predecessor = launched_monitor(42, "tab-1::agent-1");
+        predecessor
+            .launched_claims
+            .insert(42, "claim-predecessor".to_string());
+        let stale_close = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: Some("claim-predecessor".to_string()),
+            delivery_id: None,
+            window_id: Some("tab-1::agent-1".to_string()),
+        };
+
+        let durable = predecessor.prefs();
+        assert_eq!(
+            durable.launched_claims.get(&42).map(String::as_str),
+            Some("claim-predecessor"),
+            "the close generation must survive the prefs roundtrip"
+        );
+        let mut successor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        successor
+            .launched_claims
+            .insert(42, "claim-successor".to_string());
+
+        assert_eq!(successor.requeue_exact_window(&stale_close), None);
+        assert_eq!(successor.active_count(), 1, "the successor keeps its slot");
+        assert_eq!(
+            successor.launched_window_issue("tab-1::agent-1"),
+            Some(42),
+            "the successor binding remains live"
+        );
+
+        let current_close = IssueMonitorStopTarget {
+            claim_id: Some("claim-successor".to_string()),
+            ..stale_close
+        };
+        assert_eq!(successor.requeue_exact_window(&current_close), Some(42));
     }
 
     /// SPEC-3431 FR-069: the reset instant to hold a launch until, when the
@@ -12131,13 +13199,17 @@ mod tests {
             "tab-1::agent-42",
             Some("launch:effect-42"),
         ));
-        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+        let acked = monitor.prefs();
+        assert_eq!(acked.pending_launch_deliveries.len(), 1);
         assert_eq!(
-            monitor.prefs().pending_launch_deliveries[0].issue_number,
-            43
+            acked.launched_claims.get(&42).map(String::as_str),
+            Some("claim-42"),
+            "the consumed delivery claim becomes the durable window generation"
         );
+        assert_eq!(acked.pending_launch_deliveries[0].issue_number, 43);
 
         assert!(monitor.complete_active_launch_delivery(43, "tab-1::legacy-43", None));
+        assert!(!monitor.prefs().launched_claims.contains_key(&43));
         assert_eq!(
             monitor.prefs().pending_launch_deliveries.len(),
             1,

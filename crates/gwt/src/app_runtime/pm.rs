@@ -229,8 +229,12 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
 pub(crate) enum PmEnsureTrigger {
     /// Project open / startup restore. Honours the opt-out.
     Automatic,
-    /// Launcher click, Restart, crash recovery. Ignores the opt-out.
+    /// Launcher click or crash recovery. Ignores the opt-out.
     Explicit,
+    /// Profile restart after the predecessor registration was deliberately
+    /// cleared. The accepted close still finalizes in the background, but its
+    /// generic anti-respawn fence must not suppress this requested successor.
+    Restart,
 }
 
 impl AppRuntime {
@@ -290,6 +294,14 @@ impl AppRuntime {
             return Vec::new();
         }
         let project_root = tab.project_root.clone();
+        if trigger != PmEnsureTrigger::Restart && self.pending_pm_closes.contains_key(&project_root)
+        {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM ensure skipped while explicit pane close is finalizing"
+            );
+            return Vec::new();
+        }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
         let prefs = match pm_registry::load_pm_prefs(&prefs_path) {
             Ok(prefs) => prefs,
@@ -551,7 +563,7 @@ impl AppRuntime {
         }
         // The ensure gate broadcasts the post-restart pm_status itself, so the
         // panel is refreshed exactly once rather than twice per restart.
-        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Explicit));
+        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Restart));
         events
     }
 
@@ -1533,7 +1545,7 @@ impl AppRuntime {
     }
 
     /// Keep the per-broadcast PM marker in step with the durable record.
-    fn sync_pm_session_cache(
+    pub(super) fn sync_pm_session_cache(
         &mut self,
         project_root: &Path,
         registration: Option<&PmRegistration>,
@@ -1556,23 +1568,33 @@ impl AppRuntime {
     ///
     /// Returns whether this close actually deregistered a PM, so the caller can
     /// refresh the settings panel only for the close that changed PM state.
-    pub(super) fn deregister_pm_for_closed_window(
-        &mut self,
+    pub(super) fn deregister_pm_for_closed_window_in_background(
         project_root: &Path,
         session_id: &str,
-    ) -> bool {
+    ) -> (bool, Option<BackendEvent>) {
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         match pm_registry::deregister_pm(&prefs_path, session_id) {
-            Ok((_, true)) => {
+            Ok((prefs, true)) => {
                 tracing::info!(%session_id, "PM pane closed; registration cleared");
-                self.sync_pm_session_cache(project_root, None);
                 Self::cleanup_pm_worktree(project_root);
-                true
+                let configured = prefs.settings.launch_profile_or_default();
+                let status = BackendEvent::PmStatus {
+                    auto_start: prefs.settings.auto_start,
+                    agent_options: Self::pm_agent_options(&configured.agent_id),
+                    configured_agent_id: configured.agent_id,
+                    configured_model: configured.model,
+                    configured_reasoning: configured.reasoning,
+                    running_agent_id: None,
+                    running_model: None,
+                    running_reasoning: None,
+                    is_running: false,
+                };
+                (true, Some(status))
             }
-            Ok((_, false)) => false,
+            Ok((_, false)) => (false, None),
             Err(error) => {
                 tracing::warn!(%error, "failed to deregister PM on window close");
-                false
+                (false, None)
             }
         }
     }

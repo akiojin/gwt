@@ -124,8 +124,11 @@ impl HookKind {
 /// `session_id` into a required session id type before using it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookEvent {
+    #[serde(alias = "toolName")]
     pub tool_name: Option<String>,
+    #[serde(alias = "toolInput")]
     pub tool_input: Option<serde_json::Value>,
+    #[serde(alias = "transcriptPath")]
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
 }
@@ -266,7 +269,23 @@ pub fn run_daemon_hook<E: CliEnv>(
 
     fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
         match output.serialize_to(env.stdout()) {
-            Ok(()) => output.exit_code(),
+            Ok(()) => {
+                if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
+                    // Grok's gate-hook runner uses exit 2 for denial but reads
+                    // the user-visible reason from stderr's first line rather
+                    // than Claude's hookSpecificOutput JSON envelope.
+                    let headline = deny_reason.lines().next().unwrap_or(deny_reason).trim();
+                    // Grok truncates the first stderr line to 256 characters.
+                    // Keep the terminal action in that bounded prefix; the
+                    // full provider-neutral detail remains in stdout for
+                    // adapters that consume the structured envelope.
+                    let grok_reason = format!(
+                        "{headline}. Stop working on this Issue now if human judgment is still required; it is parked in NeedsHuman."
+                    );
+                    let _ = writeln!(env.stderr(), "{grok_reason}");
+                }
+                output.exit_code()
+            }
             Err(err) => {
                 let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
                 1

@@ -336,6 +336,13 @@ Hard limits, no exceptions:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- A structured autonomous question is different from a generic
+  escalation. Read it with `issue.monitor.questions`, preserve its
+  exact handoff ID and options when presenting it, then apply the
+  user's decision with `issue.monitor.question.answer`. A Board
+  decision or `pm.message.send` is not the answer transport. The
+  Monitor delivers the accepted answer once to the exact live or
+  resumed agent session.
 
 ## Blocked escalations from agents
 
@@ -617,6 +624,8 @@ mod tests {
             "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            "`issue.monitor.questions`",
+            "`issue.monitor.question.answer`",
             // FR-015: the PM must be able to account for its own ordering.
             "explain the current order",
             // FR-016: PM ordering beats a GUI reorder (後勝ち).
