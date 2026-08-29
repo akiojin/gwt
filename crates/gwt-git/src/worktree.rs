@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 2;
 
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +78,76 @@ fn run_git_observing_operation_deadline(
     })
 }
 
+fn remote_tracking_fetch_spawn_options(
+    args: &[&str],
+    current_dir: &Path,
+) -> gwt_core::process_console::SpawnOptions {
+    gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
+        .current_dir(current_dir)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+}
+
+fn run_remote_tracking_fetch_command(
+    args: &[&str],
+    current_dir: &Path,
+) -> std::io::Result<GitOutput> {
+    let options = remote_tracking_fetch_spawn_options(args, current_dir);
+    let output = if let Some(deadline) = gwt_core::operation_deadline::ensure_remaining("git")? {
+        gwt_core::process_console::spawn_logged_blocking_with_deadline(
+            &gwt_core::process_console::global(),
+            gwt_core::process_console::ProcessKind::Git,
+            "git",
+            args,
+            options,
+            deadline,
+        )?
+    } else {
+        gwt_core::process_console::spawn_logged_blocking(
+            &gwt_core::process_console::global(),
+            gwt_core::process_console::ProcessKind::Git,
+            "git",
+            args,
+            options,
+        )?
+    };
+    Ok(GitOutput {
+        success: output.success(),
+        stdout: output.stdout.into_bytes(),
+        stderr: output.stderr.into_bytes(),
+    })
+}
+
+fn run_remote_tracking_fetch_with_retry(
+    context: &str,
+    mut run_fetch: impl FnMut() -> std::io::Result<GitOutput>,
+) -> Result<()> {
+    for attempt in 0..REMOTE_TRACKING_FETCH_MAX_ATTEMPTS {
+        let output = run_fetch().map_err(|error| GwtError::Git(format!("{context}: {error}")))?;
+        if output.success {
+            return Ok(());
+        }
+
+        let stderr = git_output_stderr(&output);
+        if attempt + 1 < REMOTE_TRACKING_FETCH_MAX_ATTEMPTS
+            && is_remote_tracking_ref_cas_conflict(&stderr)
+        {
+            continue;
+        }
+        return Err(GwtError::Git(format!("{context}: {stderr}")));
+    }
+
+    unreachable!("remote tracking fetch attempts are non-zero")
+}
+
+fn is_remote_tracking_ref_cas_conflict(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        line.contains("cannot lock ref 'refs/remotes/")
+            && line.contains(" is at ")
+            && line.contains(" but expected ")
+    })
+}
+
 /// Outcome of an optional remote-branch delete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteDeleteOutcome {
@@ -111,18 +182,15 @@ impl WorktreeManager {
 
     /// Fetch latest refs from `origin`.
     pub fn fetch_origin(&self) -> Result<()> {
-        let output = gwt_core::process::run_git_logged(
-            &["fetch", "origin", "--prune"],
-            Some(&self.repo_path),
-        )
-        .map_err(|e| GwtError::Git(format!("fetch origin: {e}")))?;
+        self.fetch_origin_with(run_remote_tracking_fetch_command)
+    }
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(GwtError::Git(format!("fetch origin: {stderr}")));
-        }
-
-        Ok(())
+    fn fetch_origin_with(
+        &self,
+        mut run_fetch: impl FnMut(&[&str], &Path) -> std::io::Result<GitOutput>,
+    ) -> Result<()> {
+        let args = ["fetch", "origin", "--prune"];
+        run_remote_tracking_fetch_with_retry("fetch origin", || run_fetch(&args, &self.repo_path))
     }
 
     /// Whether this repository has an `origin` remote configured.
@@ -215,20 +283,13 @@ impl WorktreeManager {
             return Err(GwtError::Git("remote branch name is empty".to_string()));
         }
         let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
-        let output = gwt_core::process::run_git_logged(
-            &["fetch", "origin", "--prune", &refspec],
-            Some(&self.repo_path),
-        )
-        .map_err(|e| GwtError::Git(format!("fetch origin {refspec}: {e}")))?;
-
-        if !output.status.success() {
-            return Err(GwtError::Git(format!(
-                "fetch origin {refspec}: {}",
-                command_stderr(&output)
-            )));
-        }
-
-        Ok(())
+        let context = format!("fetch origin {refspec}");
+        run_remote_tracking_fetch_with_retry(&context, || {
+            run_remote_tracking_fetch_command(
+                &["fetch", "origin", "--prune", &refspec],
+                &self.repo_path,
+            )
+        })
     }
 
     /// Return whether a remote-tracking branch exists.
@@ -1090,6 +1151,15 @@ fn command_stderr(output: &Output) -> String {
     }
 }
 
+fn git_output_stderr(output: &GitOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "git command failed without stderr".to_string()
+    } else {
+        stderr
+    }
+}
+
 fn normalize_remote_ref(remote_ref: &str) -> String {
     if let Some(stripped) = remote_ref.strip_prefix("refs/remotes/") {
         stripped.to_string()
@@ -1366,6 +1436,138 @@ fn matches_annotation(line: &str, key: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn git_output(success: bool, stderr: impl Into<Vec<u8>>) -> GitOutput {
+        GitOutput {
+            success,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn remote_tracking_fetch_retries_with_fresh_state_after_cas_conflict() {
+        let old_oid = "a11455208099e2197289ba600c21092dcccbdd07";
+        let new_oid = "7dd235625c479c3308e13c5e12bacde1487fd840";
+        let mut local_ref = old_oid;
+        let mut attempts = 0;
+
+        run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            if attempts == 1 {
+                local_ref = new_oid;
+                return Ok(git_output(
+                    false,
+                    format!(
+                        "error: cannot lock ref 'refs/remotes/origin/develop': is at {new_oid} but expected {old_oid}\n\
+                         ! [rejected] develop -> origin/develop (unable to update local ref)\n"
+                    ),
+                ));
+            }
+
+            assert_eq!(local_ref, new_oid, "retry must observe the advanced ref");
+            Ok(git_output(true, Vec::new()))
+        })
+        .expect("a fresh fetch attempt should recover the ref CAS race");
+
+        assert_eq!(attempts, 2, "the failed fetch must be restarted once");
+    }
+
+    #[test]
+    fn remote_tracking_fetch_does_not_retry_non_cas_failure() {
+        let mut attempts = 0;
+
+        let error = run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            Ok(git_output(
+                false,
+                b"fatal: could not read Username for 'https://github.com'\n".to_vec(),
+            ))
+        })
+        .expect_err("authentication failures are not transient ref races");
+
+        assert_eq!(attempts, 1);
+        assert!(
+            error.to_string().contains("could not read Username"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn remote_tracking_fetch_bounds_repeated_cas_failures() {
+        let mut attempts = 0;
+
+        let error = run_remote_tracking_fetch_with_retry("fetch origin", || {
+            attempts += 1;
+            Ok(git_output(
+                false,
+                format!(
+                    "error: cannot lock ref 'refs/remotes/origin/develop': is at new-{attempts} but expected old-{attempts}\n"
+                ),
+            ))
+        })
+        .expect_err("a persistent race must remain a bounded failure");
+
+        assert_eq!(attempts, 2);
+        assert!(error.to_string().contains("new-2"), "{error}");
+        assert!(error.to_string().contains("old-2"), "{error}");
+    }
+
+    #[test]
+    fn fetch_origin_restarts_after_the_tracking_ref_advances() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_git_repo(repository.path());
+        git_commit_allow_empty(repository.path(), "old develop");
+        let old_oid = git_rev_parse(repository.path(), "HEAD");
+        git_commit_allow_empty(repository.path(), "new develop");
+        let new_oid = git_rev_parse(repository.path(), "HEAD");
+        git_update_ref(repository.path(), "refs/remotes/origin/develop", &old_oid);
+
+        let manager = WorktreeManager::new(repository.path());
+        let mut attempts = 0;
+        manager
+            .fetch_origin_with(|args, current_dir| {
+                attempts += 1;
+                assert_eq!(args, ["fetch", "origin", "--prune"]);
+                assert_eq!(current_dir, repository.path());
+
+                if attempts == 1 {
+                    git_update_ref(
+                        repository.path(),
+                        "refs/remotes/origin/develop",
+                        &new_oid,
+                    );
+                    return Ok(git_output(
+                        false,
+                        format!(
+                            "error: cannot lock ref 'refs/remotes/origin/develop': is at {new_oid} but expected {old_oid}\n"
+                        ),
+                    ));
+                }
+
+                assert_eq!(
+                    git_rev_parse(repository.path(), "refs/remotes/origin/develop"),
+                    new_oid,
+                    "the restarted fetch must observe the externally advanced ref"
+                );
+                Ok(git_output(true, Vec::new()))
+            })
+            .expect("fetch_origin should restart after a remote-tracking ref CAS race");
+
+        assert_eq!(attempts, 2, "fetch_origin must launch a fresh attempt");
+    }
+
+    #[test]
+    fn remote_tracking_fetch_forces_stable_git_diagnostics() {
+        let options = remote_tracking_fetch_spawn_options(
+            &["fetch", "origin", "--prune"],
+            Path::new("repository"),
+        );
+        let envs: std::collections::HashMap<_, _> = options.envs.into_iter().collect();
+
+        assert_eq!(envs.get(std::ffi::OsStr::new("LC_ALL")).unwrap(), "C");
+        assert_eq!(envs.get(std::ffi::OsStr::new("LANG")).unwrap(), "C");
+    }
+
     #[test]
     fn worktree_listing_honors_the_active_operation_deadline() {
         let repository = tempfile::tempdir().expect("repository");
@@ -1466,6 +1668,27 @@ mod tests {
             .output()
             .expect("git init --bare");
         assert!(output.status.success(), "git init --bare failed");
+    }
+
+    fn git_rev_parse(path: &Path, revision: &str) -> String {
+        let output = gwt_core::process::run_git_logged(&["rev-parse", revision], Some(path))
+            .expect("git rev-parse");
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn git_update_ref(path: &Path, reference: &str, oid: &str) {
+        let output = gwt_core::process::run_git_logged(&["update-ref", reference, oid], Some(path))
+            .expect("git update-ref");
+        assert!(
+            output.status.success(),
+            "git update-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn slow_command() -> std::process::Command {
