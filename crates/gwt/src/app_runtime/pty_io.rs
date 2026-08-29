@@ -403,6 +403,40 @@ pub(super) fn write_pane_input_then_submit(
     Ok(())
 }
 
+/// Write one pane payload and wait for the physical submit byte to complete.
+/// This is only the physical boundary for autonomous-answer delivery; the
+/// provider's UserPromptSubmit hook remains the durable acknowledgment. Run it
+/// through [`super::BlockingTaskSpawner`] rather than the application loop.
+pub(super) fn write_pane_input_and_submit_blocking(
+    pane: &Arc<Mutex<Pane>>,
+    text: &str,
+) -> Result<(), String> {
+    let (body, submit) = split_pane_submit(text);
+    let Some(submit) = submit else {
+        return if body.is_empty() {
+            Ok(())
+        } else {
+            pane.lock()
+                .map_err(|error| error.to_string())?
+                .write_input(body.as_bytes())
+                .map_err(|error| error.to_string())
+        };
+    };
+    let pty = pane.lock().map_err(|error| error.to_string())?.shared_pty();
+    let reservation = pty
+        .reserve_input_transaction()
+        .map_err(|error| error.to_string())?;
+    if !body.is_empty() {
+        reservation
+            .write_input(body.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    thread::sleep(PANE_SUBMIT_SETTLE);
+    reservation
+        .write_input(submit.to_string().as_bytes())
+        .map_err(|error| error.to_string())
+}
+
 /// Issue #3705 AC-3: name the pane whose teardown stalled so a hung
 /// `pane.*` channel can be diagnosed from `~/.gwt/logs/` without guessing.
 pub(crate) fn pane_teardown_stall_message(window_id: &str, stage: &str, elapsed_ms: u64) -> String {

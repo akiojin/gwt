@@ -1388,6 +1388,9 @@ enum UserEvent {
         /// daemon I/O.
         vanished_window_failures: Vec<String>,
     },
+    /// Completion of an off-event-loop physical answer submit to an exact
+    /// live pane. Durable delivery acknowledgment begins only on this event.
+    IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -9103,6 +9106,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {
+                clients.dispatch(app.handle_issue_monitor_answer_delivery_complete(delivery));
             }
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
                 let events = app.handle_shell_launch_complete(window_id, *result);

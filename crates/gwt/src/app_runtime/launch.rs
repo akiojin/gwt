@@ -2556,7 +2556,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let is_continue_work = self.pending_continue_work.contains_key(&window_id);
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
-        let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
+        let mut launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
@@ -2583,6 +2583,68 @@ impl AppRuntime {
                     expected_execution_identity,
                     active_launch_handshake,
                 } = runtime_context;
+                let autonomous_target_binding = (|| -> Result<(), String> {
+                    let Some((context, handoff)) =
+                        launch_feedback_context.as_ref().and_then(|context| {
+                            context
+                                .issue_monitor_autonomous_handoff
+                                .as_ref()
+                                .map(|handoff| (context, handoff))
+                        })
+                    else {
+                        return Ok(());
+                    };
+                    let project_root =
+                        context
+                            .issue_monitor_project_root
+                            .as_deref()
+                            .ok_or_else(|| {
+                                "answered handoff target Project State is unavailable".to_string()
+                            })?;
+                    let target_session = gwt_agent::Session::load(
+                        &self.sessions_dir.join(format!("{session_id}.toml")),
+                    )
+                    .map_err(|error| {
+                        format!("answered handoff target Session is unavailable: {error}")
+                    })?;
+                    if target_session.id != session_id || target_session.agent_id != agent_id {
+                        return Err(
+                            "answered handoff target Session changed before provider spawn"
+                                .to_string(),
+                        );
+                    }
+                    let target = super::autonomous_handoff_delivery_target_for_session(
+                        &target_session,
+                        handoff.issue_number,
+                        &window_id,
+                        context.issue_monitor_delivery_id.as_deref(),
+                        &self.issue_monitor_materializer_id,
+                    )?;
+                    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                    match gwt::bind_autonomous_handoff_delivery_target_from_prefs(
+                        &prefs_path,
+                        &handoff.handoff_id,
+                        &handoff.session_id,
+                        handoff.attempt,
+                        &target,
+                    ) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(
+                            "answered handoff target no longer matches its durable attempt"
+                                .to_string(),
+                        ),
+                        Err(error) => {
+                            Err(format!("failed to bind answered handoff target: {error}"))
+                        }
+                    }
+                })();
+                if let Err(error) = autonomous_target_binding {
+                    return self.launch_error_events_with_continue_work(
+                        window_id,
+                        error,
+                        launch_feedback_context,
+                    );
+                }
                 let mut active_launch_handshake_cleanup = ActiveLaunchHandshakeCleanup {
                     sessions_dir: self.sessions_dir.clone(),
                     handshake: active_launch_handshake,
@@ -2866,6 +2928,11 @@ impl AppRuntime {
                 };
                 match spawn_result {
                     Ok(()) => {
+                        if let Some(context) = launch_feedback_context.as_mut() {
+                            if context.issue_monitor_autonomous_handoff.is_some() {
+                                context.issue_monitor_autonomous_submit_started = true;
+                            }
+                        }
                         if let Err(error) = active_launch_handshake_cleanup.finish() {
                             self.stop_window_runtime_without_session_projection(&window_id);
                             self.active_agent_sessions.remove(&window_id);
@@ -3082,12 +3149,41 @@ impl AppRuntime {
                             is_fresh_execution_launch
                                 .then(|| "Waiting for authenticated SessionStart...".to_string()),
                         ));
+                        let autonomous_handoff_delivery =
+                            launch_feedback_context.as_ref().and_then(|context| {
+                                context
+                                    .issue_monitor_autonomous_handoff
+                                    .as_ref()
+                                    .map(|handoff| (context, handoff))
+                            });
+                        if let Some((context, handoff)) = autonomous_handoff_delivery {
+                            let answer_project_root = context
+                                .issue_monitor_project_root
+                                .as_deref()
+                                .unwrap_or(&project_root);
+                            events.extend(self.issue_monitor_launch_completed_delivery_events(
+                                answer_project_root,
+                                handoff.issue_number,
+                                &window_id,
+                                context.issue_monitor_delivery_id.as_deref(),
+                            ));
+                            if let Some(delivery_id) = context.issue_monitor_delivery_id.as_deref()
+                            {
+                                if self.autonomous_answer_receipt_settled_delivery(
+                                    answer_project_root,
+                                    delivery_id,
+                                    &handoff.handoff_id,
+                                ) {
+                                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                                }
+                            }
+                        }
                         // A fresh execution launch is not producing yet: its
                         // delivery ACK is emitted from the SessionStart
                         // finalizer in `continuation.rs`, which owns the same
                         // `launch_feedback_context` (and therefore the same
                         // delivery id).
-                        if !is_fresh_execution_launch {
+                        if !is_fresh_execution_launch && autonomous_handoff_delivery.is_none() {
                             if let Some(issue_number) = launch_feedback_context
                                 .as_ref()
                                 .and_then(|context| context.issue_monitor_issue_number)
@@ -3113,13 +3209,19 @@ impl AppRuntime {
                         events
                     }
                     Err(error) => {
-                        if matches!(
+                        let child_started = matches!(
                             active_launch_handshake_cleanup
                                 .handshake
                                 .as_ref()
                                 .map(|marker| &marker.phase),
                             Some(gwt_agent::SessionActiveLaunchPhase::ChildSpawned { .. })
-                        ) {
+                        );
+                        if child_started {
+                            if let Some(context) = launch_feedback_context.as_mut() {
+                                if context.issue_monitor_autonomous_handoff.is_some() {
+                                    context.issue_monitor_autonomous_submit_started = true;
+                                }
+                            }
                             // The gate may have been released before the PTY
                             // handoff reported an uncertain failure. Preserve
                             // the durable marker so a later owner+Session
@@ -3166,29 +3268,47 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.pending_tool_runtime_migrations.remove(&window_id);
+        let is_answered_handoff = launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_autonomous_handoff.is_some());
         // Activation is the irreversible continuation commit. Reconcile its
         // exact durable/live state before the generic launch-error path can
         // tear down the pane, Session, or capability needed for readback and
         // waiter fan-out. An uncertain readback intentionally leaves the
         // pending receipt intact for the correlated retry path.
-        if let Some(pending) = self.pending_continue_work.get(&window_id) {
-            match pending_execution_activation_status(pending) {
-                Some(true) | Some(false) => {
-                    return self.continue_work_launch_failed_events(&window_id, &detail);
+        if !is_answered_handoff {
+            if let Some(pending) = self.pending_continue_work.get(&window_id) {
+                match pending_execution_activation_status(pending) {
+                    Some(true) | Some(false) => {
+                        return self.continue_work_launch_failed_events(&window_id, &detail);
+                    }
+                    None => return Vec::new(),
                 }
-                None => return Vec::new(),
+            }
+            if let Some(pending) = self.pending_fresh_execution_launches.get(&window_id) {
+                match pending_fresh_execution_activation_status(pending) {
+                    Some(true) | Some(false) => {
+                        return self.fresh_execution_launch_failed_events(&window_id, &detail);
+                    }
+                    None => return Vec::new(),
+                }
             }
         }
-        if let Some(pending) = self.pending_fresh_execution_launches.get(&window_id) {
-            match pending_fresh_execution_activation_status(pending) {
-                Some(true) | Some(false) => {
-                    return self.fresh_execution_launch_failed_events(&window_id, &detail);
-                }
-                None => return Vec::new(),
-            }
+        let mut events = Vec::new();
+        if is_answered_handoff {
+            // Execution-generation rollback may persist a stale copy of the
+            // handoff. Settle that infrastructure state first, then let the
+            // exact answered-attempt transition be the final disk writer.
+            events.extend(self.continue_work_launch_failed_events(&window_id, &detail));
+            events.extend(self.fresh_execution_launch_failed_events(&window_id, &detail));
+            events.extend(self.launch_error_events(window_id, detail, launch_feedback_context));
+            return events;
         }
-        let mut events =
-            self.launch_error_events(window_id.clone(), detail.clone(), launch_feedback_context);
+        events.extend(self.launch_error_events(
+            window_id.clone(),
+            detail.clone(),
+            launch_feedback_context,
+        ));
         events.extend(self.continue_work_launch_failed_events(&window_id, &detail));
         events.extend(self.fresh_execution_launch_failed_events(&window_id, &detail));
         events
