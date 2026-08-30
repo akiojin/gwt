@@ -14234,6 +14234,7 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
 #[test]
 fn continue_work_empty_operation_identity_failure_is_not_cached() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
 
     let events = runtime.continue_work_events(
@@ -14266,6 +14267,7 @@ fn continue_work_empty_operation_identity_failure_is_not_cached() {
 #[test]
 fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waiters() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let operation_id = "immutable-operation";
     runtime.continue_work_outcomes.insert(
