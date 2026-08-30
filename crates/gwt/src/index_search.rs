@@ -2630,23 +2630,26 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo directory");
         run_git_at(&repo, &["init", "-q", "-b", "develop"]);
-        run_git_at(
-            &repo,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://example.com/deadline-repair.git",
-            ],
-        );
+        // The production coordinator is host-wide and keys repo-shared jobs
+        // by the origin-derived repo hash. Give every fixture invocation its
+        // own identity so an earlier run or another checkout cannot coalesce
+        // this repair before the runner closure reaches the marker.
+        let remote_suffix = temp
+            .path()
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("tempdir name");
+        let remote = format!("https://example.com/deadline-repair-{remote_suffix}.git");
+        run_git_at(&repo, &["remote", "add", "origin", remote.as_str()]);
         let marker = temp.path().join("rebuild-started.marker");
         let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_HANG", "1");
         let _marker = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_MARKER", &marker);
-        // Instrumented Windows test binaries can take more than 1.5 seconds
-        // to enter the ignored child fixture. Keep the fixture hang well past
-        // this deadline so the assertion still proves deadline inheritance,
-        // while allowing enough startup time to reach the production runner.
-        let expires_at = Instant::now() + Duration::from_secs(5);
+        // Coverage instrumentation makes startup of the child test binary
+        // materially slower than an idle production runner. Leave enough
+        // startup budget to reach the fixture while keeping the inherited
+        // deadline shorter than the fixture's deliberate hang.
+        let inherited_budget = Duration::from_secs(8);
+        let expires_at = Instant::now() + inherited_budget;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expires_at);
 
         queue_scope_rebuilds(
@@ -2656,14 +2659,18 @@ mod tests {
         );
 
         let marker_wait_started = Instant::now();
-        while !marker.exists() && marker_wait_started.elapsed() < Duration::from_secs(6) {
+        while !marker.exists()
+            && marker_wait_started.elapsed() < inherited_budget + Duration::from_secs(1)
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let settled = wait_for_index_search_repairs(Duration::from_secs(7));
+        let settlement_wait =
+            expires_at.saturating_duration_since(Instant::now()) + Duration::from_secs(3);
+        let settled = wait_for_index_search_repairs(settlement_wait);
         if !settled {
             // Let the pre-fix raw child finish before failing, keeping the
             // singleton tracker clean for the rest of the test process.
-            let _ = wait_for_index_search_repairs(Duration::from_secs(6));
+            let _ = wait_for_index_search_repairs(Duration::from_secs(20));
         }
 
         assert!(
