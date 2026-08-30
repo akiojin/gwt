@@ -2371,6 +2371,7 @@ mod tests {
             enabled: true,
             autonomous_mode: true,
             has_launch_profile: true,
+            quota_hold: None,
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
@@ -2390,6 +2391,7 @@ mod tests {
             enabled: true,
             autonomous_mode: true,
             has_launch_profile: true,
+            quota_hold: None,
             needs_human: vec![2338],
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 issue_number: 2338,
@@ -2476,6 +2478,7 @@ mod tests {
                 enabled: true,
                 autonomous_mode: true,
                 has_launch_profile: true,
+                quota_hold: None,
                 needs_human: vec![2338],
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     issue_number: 2338,
@@ -2536,6 +2539,7 @@ mod tests {
             enabled: true,
             autonomous_mode: true,
             has_launch_profile: true,
+            quota_hold: None,
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
