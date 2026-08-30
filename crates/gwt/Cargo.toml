@@ -66,8 +66,8 @@ ammonia.workspace = true
 tempfile.workspace = true
 sysinfo.workspace = true
 tray-icon = "0.24"
-auto-launch = "0.5"
-whoami = "1.5"
+auto-launch = "0.6"
+whoami = "2.1"
 # SPEC #2920 Phase 4: the tray-icon crate needs RGBA bytes, so decode the
 # embedded `assets/icons/icon.png` at runtime via `image` on every host
 # OS. The legacy Windows/Linux-only gate stayed when the GUI route only
@@ -90,6 +90,10 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry = "0.6"
+windows-result = "0.4"
 
 [features]
 # Issue #3675 AC-2: arms the unsandboxed-gh spawn guard at process start (see

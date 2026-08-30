@@ -35196,16 +35196,20 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
         .pending_settle_token
         .expect("settle token");
 
-    thread::sleep(Duration::from_millis(180));
-
-    let events = proxy_events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        UserEvent::RuntimeApprovalSettle { id, token: queued }
-            if id == &window_id && *queued == token
-    )));
+    wait_for_recorded_event_with_timeout(
+        "runtime approval settle timer event",
+        &proxy_events,
+        Duration::from_secs(2),
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::RuntimeApprovalSettle { id, token: queued }
+                        if id == &window_id && *queued == token
+                )
+            })
+        },
+    );
 }
 
 #[test]

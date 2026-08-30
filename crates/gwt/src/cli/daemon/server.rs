@@ -3519,7 +3519,11 @@ fn scan_issue_monitor_once_blocking(
             format!("live issue list failed; cache proposal discarded: {error}"),
         ));
     }
-    let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
+    let monitor_owner = format!(
+        "{}:{}",
+        crate::process::current_username(),
+        std::process::id()
+    );
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
         &loaded,
