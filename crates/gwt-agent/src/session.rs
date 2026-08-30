@@ -1289,6 +1289,60 @@ where
     })
 }
 
+/// Mutate one Session only when its complete durable snapshot still matches
+/// the caller's preflight value.
+///
+/// The callback runs while the per-Session lock is held. Callers may use this
+/// to coordinate an owner-ledger commit with the Session publication, but
+/// must acquire the owner lease before calling this helper. The Session write
+/// happens only after the callback succeeds; a stale replacement reports
+/// [`SessionSnapshotUpdateOutcome::SnapshotChanged`] without invoking the
+/// callback or changing durable bytes.
+#[must_use]
+#[derive(Debug)]
+pub enum SessionSnapshotUpdateOutcome<T> {
+    SnapshotChanged,
+    SnapshotUnreadable(io::Error),
+    Updated(T),
+    MutationFailed(io::Error),
+}
+
+pub fn update_session_if_unchanged_with<T, F>(
+    sessions_dir: &Path,
+    expected: &Session,
+    mutate: F,
+) -> io::Result<SessionSnapshotUpdateOutcome<T>>
+where
+    F: FnOnce(&mut Session) -> io::Result<T>,
+{
+    validate_session_id_path_component(&expected.id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let expected_content = serialize_session_toml(expected)?;
+    with_session_path_lease(sessions_dir, &expected.id, |state| {
+        let path = session_file_path(sessions_dir, &expected.id);
+        let mut session = match state {
+            SessionPathState::Present(session) => *session,
+            SessionPathState::Missing => return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged),
+            SessionPathState::Error(error) => {
+                return Ok(SessionSnapshotUpdateOutcome::SnapshotUnreadable(error))
+            }
+        };
+        if serialize_session_toml(&session)? != expected_content {
+            return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged);
+        }
+        let before = serialize_session_toml(&session)?;
+        let value = match mutate(&mut session) {
+            Ok(value) => value,
+            Err(error) => return Ok(SessionSnapshotUpdateOutcome::MutationFailed(error)),
+        };
+        let after = serialize_session_toml(&session)?;
+        if after != before {
+            write_session_toml_atomic(&path, &after)?;
+        }
+        Ok(SessionSnapshotUpdateOutcome::Updated(value))
+    })
+}
+
 /// Remove one uncommitted Session only when its durable execution binding
 /// still matches the exact Prepared candidate selected by the caller.
 ///
@@ -2931,6 +2985,90 @@ display_name = "Codex"
             .expect("inspect a genuinely missing Session under its lease");
 
         assert!(observed);
+    }
+
+    #[test]
+    fn exact_snapshot_update_is_atomic_fail_closed_and_preserves_noop_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::new(dir.path(), "work/exact-update", AgentId::Codex);
+        session.id = "exact-snapshot-update".to_string();
+        session.save(dir.path()).expect("save Session");
+        let path = dir.path().join(format!("{}.toml", session.id));
+        let original = fs::read_to_string(&path).expect("read Session");
+        fs::write(&path, format!("# retained comment\n{original}"))
+            .expect("add non-semantic formatting");
+        let expected = Session::load(&path).expect("load exact expected Session");
+        let no_op_bytes = fs::read(&path).expect("read no-op baseline");
+
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |_| Ok(()))
+                .expect("run exact no-op"),
+            SessionSnapshotUpdateOutcome::Updated(())
+        ));
+        assert_eq!(
+            fs::read(&path).expect("read no-op result"),
+            no_op_bytes,
+            "a semantic no-op must retain the original TOML bytes"
+        );
+
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |current| {
+                current.display_name = "Adopting Session".to_string();
+                Ok(())
+            })
+            .expect("persist exact mutation"),
+            SessionSnapshotUpdateOutcome::Updated(())
+        ));
+        let mutated = Session::load(&path).expect("load mutated Session");
+        assert_eq!(mutated.display_name, "Adopting Session");
+
+        let callback_ran = std::cell::Cell::new(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify stale snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotChanged
+        ));
+        assert!(!callback_ran.get());
+
+        let before_error = fs::read(&path).expect("read callback-error baseline");
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |current| {
+                current.display_name = "must not persist".to_string();
+                Err::<(), _>(io::Error::other("simulated mutation failure"))
+            })
+            .expect("surface callback error separately"),
+            SessionSnapshotUpdateOutcome::MutationFailed(error)
+                if error.to_string() == "simulated mutation failure"
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before_error);
+
+        fs::write(&path, b"broken = [").expect("corrupt Session");
+        callback_ran.set(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify unreadable snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotUnreadable(_)
+        ));
+        assert!(!callback_ran.get());
+        assert_eq!(fs::read(&path).unwrap(), b"broken = [");
+
+        fs::remove_file(&path).expect("remove Session");
+        callback_ran.set(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify missing snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotChanged
+        ));
+        assert!(!callback_ran.get());
     }
 
     #[test]
