@@ -3894,8 +3894,8 @@ impl AppRuntime {
                             // quota block is not silently downgraded to a
                             // terminal agent failure when the daemon is down.
                             Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
+                                provider,
                                 resets_at,
-                                ..
                             }) => {
                                 let issue_number = issue_number_hint
                                     .or_else(|| monitor.launched_window_issue(window_id));
@@ -3905,6 +3905,7 @@ impl AppRuntime {
                                 match monitor.try_hold_provider_usage_limit(
                                     issue_number,
                                     window_id,
+                                    provider,
                                     message.to_string(),
                                     resets_at.as_deref(),
                                     &now,

@@ -84,6 +84,7 @@ export function createKnowledgeKanbanSurface({
         max_active_agents: 1,
         total_candidates: 0,
         autonomous_mode: false,
+        quota_hold: null,
       };
 
       function issueMonitorStateText(state) {
@@ -94,6 +95,8 @@ export function createKnowledgeKanbanSurface({
             return "Auth required";
           case "settings_required":
             return "Settings required";
+          case "quota_hold":
+            return "Quota hold";
           default: {
             const value = String(state || (issueMonitorStatus.enabled ? "idle" : "disabled"));
             return value.charAt(0).toUpperCase() + value.slice(1);
@@ -112,6 +115,33 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
+      function normalizedIssueMonitorQuotaHold(status) {
+        const quotaHold = status?.quota_hold;
+        if (!quotaHold || typeof quotaHold !== "object" || Array.isArray(quotaHold)) {
+          return null;
+        }
+        const provider =
+          typeof quotaHold.provider === "string" ? quotaHold.provider.trim() : "";
+        const resetAt =
+          typeof quotaHold.reset_at === "string" ? quotaHold.reset_at.trim() : "";
+        return provider && resetAt ? { provider, reset_at: resetAt } : null;
+      }
+
+      function effectiveIssueMonitorState(status, quotaHold) {
+        if (!status.enabled) return "disabled";
+        const state = String(status.state || "idle");
+        if (["disabled", "error", "auth_required"].includes(state)) {
+          return state;
+        }
+        if (
+          quotaHold &&
+          ["quota_hold", "active", "launching", "settings_required", "idle"].includes(state)
+        ) {
+          return "quota_hold";
+        }
+        return state === "quota_hold" ? "idle" : state;
+      }
+
       function renderIssueMonitorControls(element) {
         const panel = element?.querySelector(".knowledge-monitor-panel");
         if (!panel) return;
@@ -121,11 +151,17 @@ export function createKnowledgeKanbanSurface({
         );
         const summary = panel.querySelector(".knowledge-monitor-summary");
         if (summary) {
+          const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorStatus);
+          const state = effectiveIssueMonitorState(issueMonitorStatus, quotaHold);
           const parts = [
-            issueMonitorStateText(issueMonitorStatus.state),
+            issueMonitorStateText(state),
             `Queue ${issueMonitorStatus.queue_len || 0}`,
             `Active ${issueMonitorStatus.active_count || 0}/${maxActive}`,
           ];
+          if (state === "quota_hold") {
+            parts.push(`Provider ${quotaHold.provider}`);
+            parts.push(`Reset ${quotaHold.reset_at}`);
+          }
           if (issueMonitorStatus.total_candidates) {
             parts.push(`Total ${issueMonitorStatus.total_candidates}`);
           }
@@ -173,7 +209,11 @@ export function createKnowledgeKanbanSurface({
       }
 
       function applyIssueMonitorStatus(nextStatus) {
-        issueMonitorStatus = { ...issueMonitorStatus, ...(nextStatus || {}) };
+        issueMonitorStatus = {
+          ...issueMonitorStatus,
+          ...(nextStatus || {}),
+          quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+        };
         renderAllIssueMonitorControls();
       }
 

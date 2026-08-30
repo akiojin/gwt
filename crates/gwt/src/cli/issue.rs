@@ -2418,6 +2418,7 @@ mod tests {
                     issue_number: 42,
                     retry_not_before: Some("2026-08-22T03:46:00Z".to_string()),
                     retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                    retry_hold_provider: Some("codex".to_string()),
                     ..crate::AutonomousIssueRecord::new(42)
                 }],
                 ..crate::IssueMonitorPrefs::default()
@@ -2447,6 +2448,7 @@ mod tests {
             .expect("the record survives");
         assert_eq!(record.retry_not_before, None);
         assert_eq!(record.retry_hold_reason, None);
+        assert_eq!(record.retry_hold_provider, None);
     }
 
     /// Issue #3655 AC-4: an open unblock request has to be visible in the one
@@ -2526,6 +2528,7 @@ mod tests {
             enabled: true,
             autonomous_mode: true,
             has_launch_profile: true,
+            quota_hold: None,
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
@@ -2545,6 +2548,7 @@ mod tests {
             enabled: true,
             autonomous_mode: true,
             has_launch_profile: true,
+            quota_hold: None,
             needs_human: vec![2338],
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 issue_number: 2338,
@@ -2631,6 +2635,7 @@ mod tests {
                 enabled: true,
                 autonomous_mode: true,
                 has_launch_profile: true,
+                quota_hold: None,
                 needs_human: vec![2338],
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     issue_number: 2338,
@@ -2691,6 +2696,7 @@ mod tests {
             enabled: true,
             autonomous_mode: true,
             has_launch_profile: true,
+            quota_hold: None,
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),

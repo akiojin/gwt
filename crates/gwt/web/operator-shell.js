@@ -253,10 +253,35 @@ function wireIssueMonitorStatusCell(doc, cell) {
   });
 }
 
+function normalizedIssueMonitorQuotaHold(status) {
+  const quotaHold = status?.quota_hold;
+  if (!quotaHold || typeof quotaHold !== "object" || Array.isArray(quotaHold)) {
+    return null;
+  }
+  const provider =
+    typeof quotaHold.provider === "string" ? quotaHold.provider.trim() : "";
+  const resetAt =
+    typeof quotaHold.reset_at === "string" ? quotaHold.reset_at.trim() : "";
+  return provider && resetAt ? { provider, reset_at: resetAt } : null;
+}
+
 function issueMonitorStatusStripView(status = {}) {
   const enabled = Boolean(status.enabled);
+  const quotaHold = normalizedIssueMonitorQuotaHold(status);
   const rawState = String(status.state || (enabled ? "idle" : "disabled"));
-  const state = enabled ? rawState : "disabled";
+  let state = enabled ? rawState : "disabled";
+  const quotaHoldEligible = [
+    "quota_hold",
+    "active",
+    "launching",
+    "settings_required",
+    "idle",
+  ].includes(rawState);
+  if (enabled && quotaHold && quotaHoldEligible) {
+    state = "quota_hold";
+  } else if (state === "quota_hold") {
+    state = "idle";
+  }
   const queue = Math.max(0, Number(status.queue_len || 0));
   const active = Math.max(0, Number(status.active_count || 0));
   const maxActive = Math.max(1, Number(status.max_active_agents || 1));
@@ -274,13 +299,18 @@ function issueMonitorStatusStripView(status = {}) {
   if (state === "error") label = "Error";
   else if (state === "auth_required") label = "Auth";
   else if (state === "launching" || state === "active") label = "Run";
+  else if (state === "quota_hold") label = "Hold";
 
   const value = `${label} Q${queue} A${active}/${maxActive}`;
   const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
+  const quotaHoldDetail = state === "quota_hold"
+    ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}`
+    : "";
+  const detail = [quotaHoldDetail, lastError].filter(Boolean).join(" | ");
   return {
     state,
     value,
-    title: lastError ? `Issue Monitor: ${value} | ${lastError}` : `Issue Monitor: ${value}`,
+    title: detail ? `Issue Monitor: ${value} | ${detail}` : `Issue Monitor: ${value}`,
     alert: state === "error" || state === "auth_required",
   };
 }
