@@ -1609,6 +1609,12 @@ pub enum BackendEvent {
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
     },
+    /// Issue #3783: bounded lifecycle/watcher update. The browser replaces
+    /// live membership and scalar fields while preserving its existing Work,
+    /// journal, and per-agent Session history for the same projection id.
+    ActiveWorkProjectionPatch {
+        projection: Box<ActiveWorkProjectionView>,
+    },
     WindowList {
         windows: Vec<PersistedWindowState>,
     },
@@ -1647,6 +1653,15 @@ pub enum BackendEvent {
         id: String,
         data_base64: String,
     },
+    /// Origin-client completion receipt for one authenticated pane snapshot
+    /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
+    /// sets explain every authorized pane that produced no frame.
+    PaneSyncComplete {
+        empty_window_ids: Vec<String>,
+        busy_window_ids: Vec<String>,
+        unavailable_window_ids: Vec<String>,
+        failed_window_ids: Vec<String>,
+    },
     TerminalStatus {
         id: String,
         status: WindowProcessStatus,
@@ -1661,7 +1676,11 @@ pub enum BackendEvent {
     },
     /// Origin-connection-only terminal result for one privileged PM message.
     /// `queued` is reserved for a future durable payload queue; this slice
-    /// emits only `delivered` after exact acknowledgement or `failed`.
+    /// emits `delivered` after exact acknowledgement, `unverified` when the
+    /// prompt reached the pane but no acknowledgement arrived inside the
+    /// operation's budget, and `failed` when the input never committed.
+    /// `unverified` is deliberately not folded into `failed` (Issue #3608):
+    /// the two demand opposite responses from the caller.
     PmMessageSendResult {
         operation_id: String,
         status: String,
@@ -1681,6 +1700,15 @@ pub enum BackendEvent {
         request_id: String,
         window_id: String,
     },
+    /// Client-scoped reply to a peer-pane `close_window` request on the agent
+    /// pane route (Issue #3629 AC-10/AC-12): every close outcome — success,
+    /// refusal, or a window record that could not be removed — answers
+    /// explicitly instead of silently producing no events.
+    PaneCloseResult {
+        ok: bool,
+        window_id: String,
+        reason: Option<String>,
+    },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
     ///
@@ -1692,7 +1720,10 @@ pub enum BackendEvent {
         auto_start: bool,
         configured_agent_id: String,
         configured_model: Option<String>,
+        configured_reasoning: Option<String>,
         running_agent_id: Option<String>,
+        running_model: Option<String>,
+        running_reasoning: Option<String>,
         is_running: bool,
         agent_options: Vec<PmAgentOption>,
     },
@@ -2376,6 +2407,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "active_work_projection_patch",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "window_list",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2421,6 +2457,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pane_sync_complete",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "terminal_status",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2444,6 +2485,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
     // the newest one matters.
@@ -2873,6 +2919,7 @@ impl BackendEvent {
         match self {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
+            BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
             BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
@@ -2881,6 +2928,7 @@ impl BackendEvent {
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
@@ -2888,6 +2936,7 @@ impl BackendEvent {
                 "issue_monitor_scan_request_result"
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
+            BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
@@ -3102,6 +3151,20 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #3755 AC-2: the final availability receipt is origin-client
+    /// state and must survive outbound pressure like the pane snapshot itself.
+    #[test]
+    fn pane_sync_completion_has_client_scoped_snapshot_policy() {
+        let policy =
+            backend_event_policy("pane_sync_complete").expect("pane_sync_complete delivery policy");
+
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,
@@ -3840,6 +3903,16 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false),
             "Work cleanup must default to local-only deletion"
+        );
+        let BackendEvent::ActiveWorkProjection { projection } = event else {
+            unreachable!("constructed full projection")
+        };
+        let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
+            .expect("serialize bounded active work projection patch");
+        assert_eq!(
+            patch.get("kind"),
+            Some(&Value::String("active_work_projection_patch".to_string())),
+            "bounded lifecycle updates need merge semantics on the frontend"
         );
     }
 

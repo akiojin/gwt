@@ -18,7 +18,10 @@
         findTitlebarDockTarget,
         resolveDragReleasePoint,
       } from "/window-docking.js";
-      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import {
+        createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
+        mergeActiveWorkProjectionPatch,
+      } from "/workspace-kanban-surface.js";
       import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -1507,6 +1510,10 @@
         "claude code": "Claude Code",
         claude_code: "Claude Code",
         codex: "Codex",
+        grok: "Grok Build",
+        "grok-build": "Grok Build",
+        "grok build": "Grok Build",
+        grok_build: "Grok Build",
         agy: "Antigravity CLI",
         antigravity: "Antigravity CLI",
         "antigravity-cli": "Antigravity CLI",
@@ -5736,6 +5743,24 @@
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+            );
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
+            workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
+            recomputeOperatorTelemetry();
+            break;
+          case "active_work_projection_patch":
+            activeWorkProjection = mergeActiveWorkProjectionPatch(
+              activeWorkProjection,
+              event.projection || null,
+            );
             cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
             syncCurrentProjectWorkspaceIds(
               deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),

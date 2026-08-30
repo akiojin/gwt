@@ -24,8 +24,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install tray + GTK dependencies (Linux)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+          sudo bash scripts/ci-apt.sh update
+          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -60,6 +61,22 @@ jobs:
             CHANGELOG.md
       - name: Validate SKILL.md frontmatter
         run: bash scripts/validate-skill-frontmatter.sh
+
+  lint-windows:
+    name: Clippy (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-windows
+        continue-on-error: true
+      - name: Run Windows Clippy
+        run: cargo clippy -p gwt -p gwt-core --all-targets --all-features -- -D warnings
+        timeout-minutes: 30
 
   commitlint:
     name: Commit Message Lint

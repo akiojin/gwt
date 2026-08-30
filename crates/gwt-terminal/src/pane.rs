@@ -1,6 +1,6 @@
 //! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::SystemTime};
 
 use crate::{
     pty::{PendingPty, PtyHandle, SpawnConfig},
@@ -18,6 +18,82 @@ pub enum PaneStatus {
 
 const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
 
+/// Trailing screen rows folded into the logged PTY exit record, and the
+/// character budget that keeps one log line readable (Issue #3341).
+const EXIT_LOG_TAIL_LINES: usize = 3;
+const EXIT_LOG_TAIL_MAX_CHARS: usize = 240;
+
+/// Tracing target shared with `gwt_core::process`, so an agent PTY exit lands
+/// in the same Process facet stream as every logged `git` spawn instead of
+/// leaving the most consequential child process unrecorded (Issue #3341).
+const EXIT_SUMMARY_TARGET: &str = "gwt.process.summary";
+
+/// Exact receipt of one PTY child exit.
+///
+/// [`PaneStatus`] is a display contract: it collapses every failure to
+/// `Completed(1)` and every success to `Completed(0)`, so on its own it cannot
+/// answer "did the agent exit cleanly, or was it signalled?". This record keeps
+/// what `portable_pty::ExitStatus` actually reported, which is the difference
+/// between diagnosing an agent that vanished mid-turn and guessing about it
+/// (Issue #3341).
+///
+/// # Reporting a mid-turn agent death upstream
+///
+/// Three sources together identify whether the provider or gwt dropped the
+/// turn. All three must be collected before filing upstream (e.g. against
+/// `openai/codex`):
+///
+/// 1. **gwt exit record** — this receipt, logged at
+///    `target = "gwt.process.summary"`, `kind = "agent"` with the exit code,
+///    signal, observation time, child pid, and final screen tail. The same
+///    values are persisted on the owning gwt Session as `last_exit_code` /
+///    `last_exit_signal` / `last_exited_at`, so they survive a gwt restart.
+///    A `signal = none, exit_code = 0` receipt rules out both signal death and
+///    a gwt-side kill, leaving the provider's own clean shutdown.
+/// 2. **provider rollout tail** — the last events of the provider transcript
+///    for the `agent_session_id` recorded on that Session, which shows whether
+///    the provider logged a shutdown or simply went silent.
+/// 3. **provider file log** — for Codex, `$CODEX_HOME/log/codex-tui.log`
+///    (default `~/.codex/log/codex-tui.log`), which gwt enables by exporting
+///    `RUST_LOG` on every Codex launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneExit {
+    /// Exit code as reported by the platform. `portable-pty` reports `1` for a
+    /// signalled child, so [`Self::signal`] is what separates the two cases.
+    pub exit_code: u32,
+    /// Platform signal name when the child was terminated by a signal.
+    /// `None` means the child returned [`Self::exit_code`] on its own.
+    pub signal: Option<String>,
+    /// When the child was reaped. Recorded at observation time because the
+    /// status only reaches durable storage after event-loop and persistence
+    /// latency, which has already been mistaken for a much later death.
+    pub observed_at: SystemTime,
+    /// OS process id of the direct child, when it was still known at spawn.
+    pub child_pid: Option<u32>,
+}
+
+impl PaneExit {
+    /// Whether the child ended on its own with a success status.
+    pub fn is_clean(&self) -> bool {
+        self.signal.is_none() && self.exit_code == 0
+    }
+}
+
+fn unix_millis(at: SystemTime) -> u64 {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push('…');
+    truncated
+}
+
 /// A terminal pane integrating PTY, vt100 parser, and scrollback.
 ///
 /// `pty` is wrapped in an `Arc` so that callers who only need to write input
@@ -31,6 +107,13 @@ pub struct Pane {
     parser: vt100::Parser,
     scrollback: ScrollbackStorage,
     status: PaneStatus,
+    /// Direct child pid captured at spawn. Kept separately because the pid is
+    /// no longer reliably readable from the handle once the child is reaped,
+    /// and it is what correlates a PTY exit with OS-level evidence.
+    child_pid: Option<u32>,
+    /// Exit receipt captured on the `Running` → exited transition, which
+    /// happens exactly once per pane (Issue #3341).
+    last_exit: Option<PaneExit>,
     /// Accumulator for incomplete lines from raw PTY output. Holds raw bytes
     /// (including SGR escape sequences) until a `\n` boundary is reached, then
     /// the completed line is split off and pushed into `scrollback` with both
@@ -59,12 +142,15 @@ impl PendingPane {
 
     pub fn release(self) -> Result<Pane, TerminalError> {
         let pty = Arc::new(self.pty.release()?);
+        let child_pid = pty.process_id();
         Ok(Pane {
             id: self.id,
             pty,
             parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
             scrollback: ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY),
             status: PaneStatus::Running,
+            child_pid,
+            last_exit: None,
             line_buf: Vec::new(),
         })
     }
@@ -108,6 +194,7 @@ impl Pane {
         let rows = config.rows;
         let cols = config.cols;
         let pty = Arc::new(PtyHandle::spawn(config)?);
+        let child_pid = pty.process_id();
         let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
         let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
@@ -117,6 +204,8 @@ impl Pane {
             parser,
             scrollback,
             status: PaneStatus::Running,
+            child_pid,
+            last_exit: None,
             line_buf: Vec::new(),
         })
     }
@@ -227,6 +316,12 @@ impl Pane {
     }
 
     /// Check and update the pane's process status.
+    ///
+    /// The `Running` guard makes the exited transition happen exactly once per
+    /// pane no matter how many watchers poll concurrently, which is why the
+    /// exit receipt is captured and logged here rather than at a call site
+    /// (Issue #3341): every teardown path above this layer drops the pane, and
+    /// a clean `exit 0` leaves no other durable evidence at all.
     pub fn check_status(&mut self) -> Result<&PaneStatus, TerminalError> {
         if self.status == PaneStatus::Running {
             if let Some(exit_status) = self.pty.try_wait()? {
@@ -235,9 +330,71 @@ impl Pane {
                 } else {
                     self.status = PaneStatus::Completed(1);
                 }
+                let exit = PaneExit {
+                    exit_code: exit_status.exit_code(),
+                    signal: exit_status.signal().map(str::to_string),
+                    observed_at: SystemTime::now(),
+                    child_pid: self.child_pid,
+                };
+                self.log_child_exit(&exit);
+                self.last_exit = Some(exit);
             }
         }
         Ok(&self.status)
+    }
+
+    /// The exit receipt captured when this pane's child was reaped.
+    ///
+    /// `None` while the child is alive, and also for a pane that only reached
+    /// [`Self::mark_error`] — a display-only error never waited on the child,
+    /// so it has no exit evidence to report.
+    pub fn last_exit(&self) -> Option<&PaneExit> {
+        self.last_exit.as_ref()
+    }
+
+    /// Join the last `max_lines` non-empty screen rows into a single line.
+    ///
+    /// The final frame is the only readable trace of what the child was doing
+    /// when it went away. Shared by the logged exit record (Issue #3341) and
+    /// the persistent error detail (Issue #3274) so both describe the same
+    /// frame instead of drifting apart.
+    pub fn screen_tail(&self, max_lines: usize) -> Option<String> {
+        if max_lines == 0 {
+            return None;
+        }
+        let contents = self.parser.screen().contents();
+        let lines: Vec<&str> = contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(max_lines);
+        let tail = lines[start..].join(" ");
+        (!tail.is_empty()).then_some(tail)
+    }
+
+    /// Record the child exit in the Process facet log stream, mirroring the
+    /// `gwt.process.summary` end event that every logged `git` spawn emits.
+    /// See [`PaneExit`] for how these fields combine into an upstream report.
+    fn log_child_exit(&self, exit: &PaneExit) {
+        let tail = self
+            .screen_tail(EXIT_LOG_TAIL_LINES)
+            .map(|tail| truncate_chars(&tail, EXIT_LOG_TAIL_MAX_CHARS))
+            .unwrap_or_default();
+        tracing::info!(
+            target: EXIT_SUMMARY_TARGET,
+            kind = "agent",
+            label = %format!("pty {}", self.id),
+            phase = "end",
+            window_id = %self.id,
+            child_pid = exit.child_pid.unwrap_or_default(),
+            exit_code = exit.exit_code,
+            signal = exit.signal.as_deref().unwrap_or("none"),
+            exited_at_unix_ms = unix_millis(exit.observed_at),
+            success = exit.is_clean(),
+            screen_tail = %tail,
+            "pty child exit",
+        );
     }
 
     /// Probe the child directly, independent of the display-facing pane
@@ -297,13 +454,107 @@ impl Pane {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
     use std::time::Duration;
 
     use super::*;
+    #[cfg(unix)]
+    use crate::test_util::self_terminate_command;
     use crate::test_util::{
-        answer_cursor_position_query, echo_command, lock_pty_test, read_until_contains,
-        read_with_timeout, sleep_command, stdin_echo_command, success_command, TestCommand,
+        answer_cursor_position_query, echo_command, exit_code_command, lock_pty_test,
+        read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
+        TestCommand,
     };
+
+    /// Collect the fields of every `gwt.process.summary` event emitted while
+    /// the returned subscriber is active, so a test can assert on the record
+    /// that reaches the log file.
+    #[derive(Clone, Default)]
+    struct SummaryFieldCapture(std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+    impl tracing::field::Visit for SummaryFieldCapture {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SummaryFieldCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != EXIT_SUMMARY_TARGET {
+                return;
+            }
+            let mut visitor = self.clone();
+            event.record(&mut visitor);
+        }
+    }
+
+    impl SummaryFieldCapture {
+        fn field(&self, name: &str) -> Option<String> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+
+        fn count(&self, name: &str) -> usize {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .filter(|(key, _)| key == name)
+                .count()
+        }
+    }
+
+    /// Drain the PTY output the way the production reader thread does.
+    ///
+    /// Not optional for an exit test: on macOS a session leader that owns the
+    /// slave tty stays in "trying to exit" until its output is consumed, so an
+    /// undrained pane never reaches a reapable child and `check_status` polls
+    /// `Running` forever.
+    fn drain_pty_output(pane: &Pane) {
+        let Ok(mut reader) = pane.reader() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while reader.read(&mut buffer).is_ok_and(|read| read > 0) {}
+        });
+    }
+
+    /// Drive `check_status` until the child is reaped, then return the exit
+    /// receipt Issue #3341 requires the pane to keep.
+    fn wait_for_exit(pane: &mut Pane) -> PaneExit {
+        drain_pty_output(pane);
+        for _ in 0..100 {
+            if pane
+                .check_status()
+                .is_ok_and(|status| *status != PaneStatus::Running)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pane.last_exit()
+            .cloned()
+            .expect("a reaped child must leave an exit receipt")
+    }
 
     fn test_pane(id: &str, command: TestCommand) -> Pane {
         Pane::new(
@@ -1183,6 +1434,163 @@ mod tests {
 
         assert!(completed, "Process should have completed");
         assert_eq!(pane.status(), &PaneStatus::Completed(0));
+    }
+
+    /// Issue #3341: `PaneStatus` collapses every failure to `Completed(1)`,
+    /// so the real exit code has to survive somewhere else. Without it, a
+    /// sudden agent death cannot be told apart from an ordinary error exit.
+    #[test]
+    fn check_status_keeps_the_real_exit_code() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-code", exit_code_command(7));
+
+        let exit = wait_for_exit(&mut pane);
+
+        assert_eq!(exit.exit_code, 7, "the child's real exit code must survive");
+        assert_eq!(exit.signal, None, "an exit code is not a signal death");
+        assert_eq!(
+            pane.status(),
+            &PaneStatus::Completed(1),
+            "the display-facing status contract must not change"
+        );
+    }
+
+    /// Issue #3341: a clean `exit 0` is the case with no other evidence at
+    /// all, so the receipt must be recorded for success too.
+    #[test]
+    fn check_status_keeps_a_clean_exit_receipt() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-clean", success_command());
+
+        let exit = wait_for_exit(&mut pane);
+
+        assert_eq!(exit.exit_code, 0);
+        assert_eq!(exit.signal, None);
+        assert_eq!(pane.status(), &PaneStatus::Completed(0));
+        assert!(
+            exit.observed_at
+                .elapsed()
+                .is_ok_and(|since| since < Duration::from_secs(60)),
+            "the receipt must carry when the exit was observed"
+        );
+    }
+
+    /// Issue #3341: signal death is the hypothesis a clean `exit 0` rules
+    /// out, so the signal name has to be distinguishable from exit code 1.
+    #[cfg(unix)]
+    #[test]
+    fn check_status_keeps_the_terminating_signal_name() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-signal", self_terminate_command());
+
+        let exit = wait_for_exit(&mut pane);
+
+        assert!(
+            exit.signal.is_some(),
+            "a signalled child must report its signal, got {exit:?}"
+        );
+    }
+
+    /// Issue #3341: the exit receipt is captured exactly once, on the
+    /// `Running` → exited transition, so repeated polling cannot overwrite it
+    /// with a later observation time or duplicate the log record.
+    #[test]
+    fn check_status_captures_the_exit_receipt_once() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-once", exit_code_command(3));
+
+        let first = wait_for_exit(&mut pane);
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = pane.check_status();
+
+        assert_eq!(
+            pane.last_exit(),
+            Some(&first),
+            "re-polling a reaped pane must not re-stamp the receipt"
+        );
+    }
+
+    /// Issue #3341: a `mark_error` pane never waited on the child, so it has
+    /// no exit evidence and must not fabricate any.
+    #[test]
+    fn display_only_error_leaves_no_exit_receipt() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-display-error", sleep_command("60"));
+        pane.mark_error("display-only failure");
+
+        assert_eq!(pane.last_exit(), None);
+        let _ = pane.kill();
+    }
+
+    /// Issue #3341: the final screen tail is the only readable trace of what
+    /// the agent was doing when it died. `compose_agent_error_detail` (#3274)
+    /// keeps it for `Error` exits only; the shared extraction lives here so a
+    /// clean `Stopped` exit can log it too.
+    #[test]
+    fn screen_tail_returns_trailing_non_empty_lines() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-exit-tail", sleep_command("60"));
+        pane.process_bytes(b"first\r\nsecond\r\n\r\nthird\r\n");
+
+        assert_eq!(
+            pane.screen_tail(2).as_deref(),
+            Some("second third"),
+            "blank rows must not consume the tail budget"
+        );
+        let _ = pane.kill();
+    }
+
+    /// Issue #3341: gwt logged every `git` spawn but nothing at all for the
+    /// agent PTY that matters most. A clean `exit 0` in particular reached no
+    /// log line, and the final screen tail was kept only for `Error` exits, so
+    /// there was nothing to read after a mid-turn death.
+    #[test]
+    fn child_exit_is_logged_with_the_receipt_and_screen_tail() {
+        let _pty_guard = lock_pty_test();
+        let capture = SummaryFieldCapture::default();
+        let mut pane = test_pane("test-exit-log", success_command());
+        pane.process_bytes(b"thinking about the next step\r\n");
+
+        {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            tracing::subscriber::with_default(subscriber, || {
+                let exit = wait_for_exit(&mut pane);
+                assert!(exit.is_clean());
+            });
+        }
+
+        assert_eq!(capture.field("kind").as_deref(), Some("agent"));
+        assert_eq!(capture.field("phase").as_deref(), Some("end"));
+        assert_eq!(capture.field("window_id").as_deref(), Some("test-exit-log"));
+        assert_eq!(capture.field("exit_code").as_deref(), Some("0"));
+        assert_eq!(capture.field("signal").as_deref(), Some("none"));
+        assert_eq!(capture.field("success").as_deref(), Some("true"));
+        assert!(
+            capture
+                .field("exited_at_unix_ms")
+                .is_some_and(|value| value.parse::<u64>().is_ok_and(|millis| millis > 0)),
+            "the exit record must carry when the exit was observed"
+        );
+        assert_eq!(
+            capture.field("screen_tail").as_deref(),
+            Some("thinking about the next step"),
+            "a clean exit must still log the final screen tail"
+        );
+        assert_eq!(
+            capture.count("exit_code"),
+            1,
+            "the exit must be logged exactly once"
+        );
+    }
+
+    #[test]
+    fn screen_tail_is_absent_for_a_blank_screen() {
+        let _pty_guard = lock_pty_test();
+        let pane = test_pane("test-exit-tail-blank", sleep_command("60"));
+
+        assert_eq!(pane.screen_tail(3), None);
+        let _ = pane.kill();
     }
 
     #[test]

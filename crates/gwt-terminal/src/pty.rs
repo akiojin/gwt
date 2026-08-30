@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -58,6 +59,10 @@ const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
 const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
 const START_GATE_HELLO: u8 = 1;
 const START_GATE_RELEASE: u8 = 2;
+/// `CSI 1 ; 1 R` — the reply Windows ConPTY waits for before it lets a console
+/// client finish attaching.
+#[cfg(windows)]
+const CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
 
 /// A PTY child that has completed its private start-gate handshake but whose
 /// real target has not begun executing.
@@ -124,11 +129,28 @@ impl SpawnedChildGuard {
     }
 
     fn terminate(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-        }
         if let Some(group) = self.process_group.as_mut() {
             group.terminate();
+        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            reap_child_in_background(Arc::new(Mutex::new(child)));
         }
     }
 
@@ -245,6 +267,15 @@ impl PtyHandle {
             .insert(START_GATE_TARGET_ENV.to_string(), target);
 
         let handle = Self::spawn(gate_config)?;
+        // Windows ConPTY parks a freshly attached console client inside its
+        // startup handshake until the terminal answers the cursor-position
+        // query the pseudoconsole emitted on creation. A gated launch only
+        // installs its pane — and therefore its frontend terminal — after
+        // release, so the gate helper would never reach the handshake below.
+        // Answering here is what a real terminal does anyway; conhost consumes
+        // the report instead of forwarding it to the released target.
+        #[cfg(windows)]
+        let _ = handle.write_input(CURSOR_POSITION_REPORT);
         if handle.process_id().is_none() {
             return Err(pending_spawn_error(
                 handle,
@@ -414,7 +445,10 @@ impl PtyHandle {
         })
     }
 
-    #[cfg(test)]
+    // Only the unix reaping tests inject a spawn failure; gating on `test`
+    // alone left this dead on Windows, where `-D warnings` then failed a lint
+    // CI never runs (its clippy job is Linux-only).
+    #[cfg(all(test, unix))]
     fn spawn_with_test_failure(
         config: SpawnConfig,
         failure: SpawnTestFailure,
@@ -484,11 +518,20 @@ impl PtyHandle {
         })
     }
 
-    /// Invalidate this writer generation at the physical-write commit point.
-    /// Once this method returns, no writer from this generation can begin a
-    /// later PTY mutation.
-    pub fn invalidate_input_generation(&self) {
+    /// Revoke this writer generation without waiting for an in-flight physical
+    /// write. New transactions fail immediately; teardown can finish the
+    /// physical commit barrier on a background worker.
+    pub fn revoke_input_generation(&self) {
         self.generation_active.store(false, Ordering::Release);
+    }
+
+    /// Finish invalidating this writer generation at the physical-write commit
+    /// point. Logical lifecycle transitions should call
+    /// [`Self::revoke_input_generation`] first so new input is rejected without
+    /// waiting for an in-flight writer; background teardown then calls this
+    /// barrier before releasing the registry entry.
+    pub fn invalidate_input_generation(&self) {
+        self.revoke_input_generation();
         let _writer = self
             .writer
             .lock()
@@ -632,15 +675,12 @@ impl PtyHandle {
     /// open the master reader does not observe EOF, which would otherwise
     /// strand the reader thread (and its `Arc<Mutex<Pane>>`) and prevent the
     /// Drop chain from running.
+    ///
+    /// This must not wait for the child to reap. `portable-pty`'s Unix
+    /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
+    /// run on the GUI event loop and freeze every `pane.*` operation during
+    /// consecutive live-PTY closes (Issue #3705).
     pub fn kill(&self) -> Result<(), TerminalError> {
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        let kill_result = child.kill();
-        drop(child);
-
-        // Always sweep descendants, even if the direct kill failed: the group
-        // terminate is idempotent and uses an independent kernel path.
         let mut group = match self.process_group.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -648,9 +688,42 @@ impl PtyHandle {
         group.terminate();
         drop(group);
 
-        kill_result.map_err(|e| TerminalError::PtyIoError {
-            details: e.to_string(),
-        })
+        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
+            details: format!("lock poisoned: {e}"),
+        })?;
+        if child
+            .try_wait()
+            .map_err(|e| TerminalError::PtyIoError {
+                details: e.to_string(),
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+        let reaped = child.try_wait().ok().flatten().is_some();
+        drop(child);
+        if !reaped {
+            // Reap off the caller thread. Immediate try_wait after SIGKILL
+            // often misses the exit, and a zombie still looks alive to
+            // `kill(pid, 0)` (Issue #3705 / pty lifecycle tests).
+            reap_child_in_background(Arc::clone(&self.child));
+        }
+        Ok(())
     }
 
     /// Returns the OS process id of the spawned child, if available.
@@ -683,6 +756,23 @@ impl PtyHandle {
             details: e.to_string(),
         })
     }
+}
+
+fn reap_child_in_background(child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match child.lock() {
+                Ok(mut guard) => {
+                    if guard.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
 }
 
 fn pending_spawn_error(handle: PtyHandle, reason: String) -> TerminalError {
@@ -1037,29 +1127,11 @@ fn is_executable_file(path: &Path) -> bool {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         // Best-effort termination: must never panic from Drop and must not
-        // block the caller for long. Tolerate poisoned mutexes.
-        let mut guard = match self.child.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let _ = guard.kill();
-
-        // Short reap loop so subsequent try_wait callers observe the exit.
-        // Capped at ~500ms so Drop never stalls the UI thread.
-        for _ in 0..20 {
-            match guard.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            }
-        }
-        drop(guard);
-
-        // Belt-and-suspenders: explicitly terminate the group in case `kill`
-        // was never called (e.g. the handle was dropped without going through
-        // stop_window_runtime). ProcessGroup::terminate is idempotent.
-        if let Ok(mut group) = self.process_group.lock() {
-            group.terminate();
-        }
+        // block the caller. Issue #3705: the previous reap loop slept up to
+        // 500ms on the GUI event loop when a live PTY was dropped during
+        // pane.close. Reuse `kill` so a child whose pgid is not its pid still
+        // receives a direct SIGKILL.
+        let _ = self.kill();
     }
 }
 
@@ -1067,7 +1139,7 @@ impl Drop for PtyHandle {
 mod tests {
     use std::{
         sync::{Arc, Mutex},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -1429,6 +1501,48 @@ mod tests {
         assert!(exited, "Process should have exited after kill");
     }
 
+    /// Issue #3705 AC-2: `portable-pty` waits up to ~200ms after SIGHUP before
+    /// SIGKILL. A TUI that installs a SIGHUP handler (Codex at a usage-limit
+    /// prompt) made that wait land on the GUI event loop and freeze pane.*.
+    #[cfg(unix)]
+    #[test]
+    fn kill_of_sighup_resistant_child_returns_without_blocking() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "trap '' HUP; exec /bin/sleep 60".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn failed");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        handle.kill().expect("kill should succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "PtyHandle::kill blocked for {elapsed:?}; live PTY close must not wait for SIGHUP reap"
+        );
+        let mut exited = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            exited,
+            "SIGHUP-resistant child must still be reaped after non-blocking kill"
+        );
+    }
+
     #[test]
     fn test_try_wait_running() {
         let _pty_guard = lock_pty_test();
@@ -1648,6 +1762,23 @@ mod tests {
             .expect("invalidation completes after the physical write commit point");
         invalidator.join().expect("invalidation thread");
 
+        assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn generation_revocation_is_non_blocking_while_physical_invalidation_waits() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let writer = handle.writer.lock().expect("hold physical writer");
+
+        handle.revoke_input_generation();
+
+        assert!(
+            Arc::clone(&handle).reserve_input_transaction().is_err(),
+            "logical close must reject new input without waiting for the physical writer"
+        );
+        drop(writer);
+        handle.invalidate_input_generation();
         assert!(handle.write_input(b"late input").is_err());
     }
 

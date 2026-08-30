@@ -160,6 +160,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::LastSettings,
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
+            quota_hold: None,
             autonomous_issues: Vec::new(),
         },
     };
@@ -191,6 +192,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
             body: Some("Issue body".to_string()),
             url: Some("https://github.com/example/repo/issues/42".to_string()),
             readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
         },
         state: MonitorInboxState::Queued,
         claim_id: Some("claim-a".to_string()),
@@ -257,6 +259,7 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
                 body: None,
                 url: None,
                 readiness: gwt::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             },
             state,
             claim_id: None,

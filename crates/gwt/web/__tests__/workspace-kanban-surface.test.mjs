@@ -5,7 +5,88 @@ import {
 } from "../launch-pending-controller.js";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
-import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
+import {
+  createWorkspaceKanbanSurface,
+  mergeActiveWorkProjectionPatch,
+} from "../workspace-kanban-surface.js";
+
+test("bounded Active Work patches preserve history while replacing live membership", () => {
+  const previousSession = {
+    agent_session_id: "conversation-old",
+    started_at: "2026-08-29T00:00:00Z",
+  };
+  const previous = {
+    id: "work-1",
+    title: "Previous title",
+    journal_entries: [{ id: "journal-old" }],
+    works: [{ id: "history-old" }],
+    agents: [{ session_id: "session-old", sessions: [previousSession] }],
+    unassigned_agents: [],
+    active_works: [{
+      id: "workspace-1",
+      agents: [{ session_id: "session-old", sessions: [previousSession] }],
+      works: [{
+        id: "child-1",
+        agents: [{ session_id: "session-old", sessions: [previousSession] }],
+      }],
+    }],
+  };
+  const patch = {
+    id: "work-1",
+    title: "Fresh title",
+    journal_entries: [],
+    works: [],
+    agents: [{ session_id: "session-old", sessions: [] }],
+    unassigned_agents: [{ session_id: "session-new", sessions: [] }],
+    active_works: [{
+      id: "workspace-1",
+      agents: [{ session_id: "session-old", sessions: [] }],
+      works: [{
+        id: "child-1",
+        agents: [{ session_id: "session-old", sessions: [] }],
+      }],
+    }],
+  };
+
+  const merged = mergeActiveWorkProjectionPatch(previous, patch);
+
+  assert.equal(merged.title, "Fresh title", "patch fields stay authoritative");
+  assert.deepEqual(merged.journal_entries, previous.journal_entries);
+  assert.deepEqual(merged.works, previous.works);
+  assert.deepEqual(merged.agents[0].sessions, [previousSession]);
+  assert.deepEqual(merged.active_works[0].agents[0].sessions, [previousSession]);
+  assert.deepEqual(
+    merged.active_works[0].works[0].agents[0].sessions,
+    [previousSession],
+  );
+  assert.deepEqual(merged.unassigned_agents[0].sessions, []);
+  assert.equal(
+    merged.agents.some((agent) => agent.session_id === "session-removed"),
+    false,
+    "the patch owns current membership rather than retaining vanished agents",
+  );
+});
+
+test("Active Work patches never graft history across project identities", () => {
+  const patch = {
+    id: "work-new",
+    journal_entries: [],
+    works: [],
+    agents: [{ session_id: "session-old", sessions: [] }],
+    unassigned_agents: [],
+    active_works: [],
+  };
+
+  assert.deepEqual(
+    mergeActiveWorkProjectionPatch({
+      id: "work-old",
+      journal_entries: [{ id: "foreign" }],
+      works: [{ id: "foreign" }],
+      agents: [{ session_id: "session-old", sessions: [{ agent_session_id: "foreign" }] }],
+    }, patch),
+    patch,
+  );
+});
 
 test("Workspace Overview renders a readable Workspace list with compact filters", () => {
   const fixture = createFixture();
@@ -1134,6 +1215,55 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
     ),
     ["custom-hyphen-session", "custom-compact-session"],
     "unknown custom IDs keep their trimmed command spelling; punctuation is identity-significant",
+  );
+});
+
+test("Work detail collapses Grok Build builtin aliases into one Agent identity", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "grok-empty-command",
+      agent_id: "grok",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "grok-usable-display",
+      agent_id: "Grok Build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "grok-conversation",
+        started_at: "2026-08-13T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "grok-empty-hyphen",
+      agent_id: "grok-build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "grok-usable-display",
   );
 });
 
