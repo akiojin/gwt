@@ -2002,6 +2002,7 @@ mod tests {
                     issue_number: 42,
                     retry_not_before: Some("2026-08-22T03:46:00Z".to_string()),
                     retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                    retry_hold_provider: Some("codex".to_string()),
                     ..crate::AutonomousIssueRecord::new(42)
                 }],
                 ..crate::IssueMonitorPrefs::default()
@@ -2031,6 +2032,7 @@ mod tests {
             .expect("the record survives");
         assert_eq!(record.retry_not_before, None);
         assert_eq!(record.retry_hold_reason, None);
+        assert_eq!(record.retry_hold_provider, None);
     }
 
     /// Issue #3655 AC-4: an open unblock request has to be visible in the one

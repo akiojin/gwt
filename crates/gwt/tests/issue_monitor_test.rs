@@ -1525,6 +1525,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         acceptance_snapshot: None,
         retry_not_before: None,
         retry_hold_reason: None,
+        retry_hold_provider: None,
         last_heartbeat: Some("2026-07-20T00:00:00Z".to_string()),
         pr_number: None,
         reviewed_sha: None,
