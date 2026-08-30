@@ -229,7 +229,7 @@ fn format_pr_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  pr.current | pr.view | pr.checks | pr.reviews | pr.review_threads",
+        "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
         "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
         "  pr.review_threads.reply_and_resolve",
         "",

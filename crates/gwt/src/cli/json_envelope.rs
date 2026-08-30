@@ -358,6 +358,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.list" => CliCommand::Pr(PrCommand::List),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -2763,6 +2764,10 @@ mod tests {
         assert!(matches!(
             ok("pr.current", json!({})),
             CliCommand::Pr(PrCommand::Current)
+        ));
+        assert!(matches!(
+            ok("pr.list", json!({})),
+            CliCommand::Pr(PrCommand::List)
         ));
         assert!(matches!(
             ok(

@@ -656,7 +656,9 @@ impl AppRuntime {
             prompt: format!(
                 "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
                  Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
-                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 triage the new items. Inventory open PRs with `pr.list`; stale / SUPERSEDED / \
+                 owner-Issue-closed rows are digest escalations, never auto-close. \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 reasons.join(", "),
                 escalations = open_escalation_prompt_section(project_root),
             ),
@@ -731,7 +733,9 @@ impl AppRuntime {
             prompt: format!(
                 "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
                  fresh `issue.monitor.status` snapshot, check the running agents' \
-                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 `last_activity_at` and any NeedsHuman rows, and inventory open PRs with \
+                 `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows are digest \
+                 escalations, never auto-close). {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 escalations = open_escalation_prompt_section(project_root),
             ),
         })
