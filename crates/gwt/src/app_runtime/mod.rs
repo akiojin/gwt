@@ -2043,7 +2043,11 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                                     })
                             });
                         local_claim_proposal = Some((
-                            format!("{}:{}", whoami::username(), std::process::id()),
+                            format!(
+                                "{}:{}",
+                                gwt::process::current_username(),
+                                std::process::id()
+                            ),
                             completed_issues,
                         ));
                     }
@@ -5031,7 +5035,11 @@ impl AppRuntime {
                                 })
                                 .collect();
                             local_claim_proposal = Some((
-                                format!("{}:{}", whoami::username(), std::process::id()),
+                                format!(
+                                    "{}:{}",
+                                    gwt::process::current_username(),
+                                    std::process::id()
+                                ),
                                 completed_issues,
                             ));
                         }
