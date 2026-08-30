@@ -202,6 +202,7 @@ struct PreparedOutbound {
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
 
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
+    gwt::error_report::record_backend_event(event);
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id) = match event {
         gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone())),
