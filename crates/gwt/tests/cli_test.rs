@@ -1038,9 +1038,11 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
         updated_at: UpdatedAt::new("cached"),
         comments: Vec::new(),
     };
-    Cache::new(tmp.path().to_path_buf())
-        .write_snapshot(&snapshot)
-        .unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap());
     env.client.seed(IssueSnapshot {
         title: "Fetched title".to_string(),
         updated_at: UpdatedAt::new("fetched"),
@@ -1121,9 +1123,11 @@ fn red_99_dispatch_issue_comments_prefers_cache() {
             updated_at: UpdatedAt::new("cached"),
         }],
     };
-    Cache::new(tmp.path().to_path_buf())
-        .write_snapshot(&snapshot)
-        .unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap());
 
     let code = dispatch(&mut env, &argv(&["gwt", "issue", "comments", "42"]));
     assert_eq!(code, 0);
