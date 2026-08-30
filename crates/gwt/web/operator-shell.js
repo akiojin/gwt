@@ -289,36 +289,80 @@ function issueMonitorStatusStripView(status = {}) {
 // Provider usage pill (SPEC-2970)
 // ------------------------------------------------------------
 
-const USAGE_PROVIDER_ICON = { codex: "⬡", claude_code: "◇" };
+const USAGE_PROVIDER_LABEL = { codex: "CX", claude_code: "CC" };
+const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
 
-function usageWindowByKind(account, kind) {
-  return (account.windows || []).find((w) => w.kind === kind) || null;
+function usageProviderLabel(provider) {
+  const known = USAGE_PROVIDER_LABEL[provider];
+  if (known) return known;
+  const compact = String(provider || "")
+    .replace(/[^a-z0-9]+/gi, "")
+    .slice(0, 2)
+    .toUpperCase();
+  return compact || "?";
 }
 
-// Stable, glanceable per-provider summary value for the status strip (weekly %
-// when available, else a short degraded token). No rotation.
+function usageSummaryPercent(account) {
+  const percentages = (account.windows || [])
+    .map((window) => window.used_percent)
+    .filter(
+      (percent) =>
+        typeof percent === "number" ||
+        (typeof percent === "string" && percent.trim() !== ""),
+    )
+    .map(Number)
+    .filter(Number.isFinite)
+    .map((percent) => Math.max(0, Math.min(100, percent)));
+  return percentages.length ? Math.max(...percentages) : null;
+}
+
+// Stable, glanceable per-provider summary value for the status strip (the
+// window nearest its limit when available, else a short degraded token).
 function usageSummaryValue(account) {
   const kind = (account.state || {}).kind || "ok";
   if (kind === "disabled") return "off";
   if (kind === "no_data") return "—";
   if (kind === "unavailable") return "n/a";
-  const week = usageWindowByKind(account, "weekly");
-  const five = usageWindowByKind(account, "five_hour");
-  if (week) return `${Math.round(week.used_percent)}%`;
-  if (five) return `${Math.round(five.used_percent)}%`;
+  const percent = usageSummaryPercent(account);
+  if (percent != null) return `${Math.round(percent)}%`;
   return "—";
 }
 
+function usageSeverity(account) {
+  if (account.limit_reached) return "danger";
+  const percent = usageSummaryPercent(account);
+  if (percent == null) return "";
+  if (percent >= 95) return "danger";
+  if (percent >= 80) return "warning";
+  return "normal";
+}
+
+function usageCriticality(account) {
+  if (account.limit_reached) return 101;
+  return usageSummaryPercent(account) ?? -1;
+}
+
 // SPEC-2970 — status-strip USAGE cell: a stable, consolidated summary
-// (`USAGE ⬡ 23% ◇ 9%`). Hover shows the full consolidated popover (all windows
-// + consumption) via the app-provided hooks; click opens the detail modal. No
-// ticker rotation — everything is visible at a glance / on hover.
+// (`USAGE CX 23% CC 9%`). Hover, focus, and click all show the same consolidated
+// popover (all windows + consumption) via the app-provided hooks. No ticker
+// rotation — everything is visible at a glance / in the popover.
 export function applyProviderUsage(doc, snapshot = {}) {
   const cell = doc.getElementById("op-strip-usage");
   if (!cell) return;
+  const win = doc.defaultView || window;
   const accounts = snapshot.accounts || [];
   if (!accounts.length) {
+    while (cell.firstChild) cell.removeChild(cell.firstChild);
     cell.hidden = true;
+    cell.setAttribute("aria-expanded", "false");
+    cell.setAttribute("aria-label", "Provider usage and limits");
+    cell.title = "Provider usage & limits";
+    delete cell.dataset.limit;
+    try {
+      win.__gwtHideUsageHover?.({ immediate: true });
+    } catch {
+      /* no-op */
+    }
     return;
   }
   while (cell.firstChild) cell.removeChild(cell.firstChild);
@@ -326,41 +370,89 @@ export function applyProviderUsage(doc, snapshot = {}) {
   label.className = "op-status-strip__label";
   label.textContent = "USAGE";
   cell.appendChild(label);
-  for (const account of accounts) {
+  const summaries = accounts.map((account) => ({
+    account,
+    label: usageProviderLabel(account.provider),
+    accessibleLabel:
+      USAGE_PROVIDER_NAME[account.provider] || usageProviderLabel(account.provider),
+    value: usageSummaryValue(account),
+    severity: usageSeverity(account),
+    accessibleSeverity: account.limit_reached
+      ? "limit reached"
+      : usageSeverity(account),
+    criticality: usageCriticality(account),
+  }));
+  const visibleSummaries =
+    summaries.length <= 2
+      ? summaries
+      : [
+          summaries.reduce((mostCritical, summary) =>
+            summary.criticality > mostCritical.criticality ? summary : mostCritical,
+          ),
+        ];
+  for (const summary of visibleSummaries) {
+    const { account } = summary;
     const chip = doc.createElement("span");
     chip.className = "op-usage-sum";
     chip.dataset.provider = account.provider;
     if (account.limit_reached) chip.dataset.limit = "true";
-    chip.textContent = `${USAGE_PROVIDER_ICON[account.provider] || ""} ${usageSummaryValue(
-      account,
-    )}`;
+    if (summary.severity) chip.dataset.severity = summary.severity;
+    chip.textContent = `${summary.label} ${summary.value}`;
     cell.appendChild(chip);
   }
+  if (summaries.length > 2) {
+    const more = doc.createElement("span");
+    more.className = "op-usage-more";
+    more.textContent = `+${summaries.length - 1}`;
+    more.title = `${summaries.length - 1} more providers`;
+    cell.appendChild(more);
+  }
+  const accessibleSummary = `Provider usage: ${summaries
+    .map(
+      (summary) =>
+        `${summary.accessibleLabel} ${summary.value}${
+          summary.accessibleSeverity ? ` ${summary.accessibleSeverity}` : ""
+        }`,
+    )
+    .join(", ")}`;
+  cell.setAttribute("aria-label", accessibleSummary);
+  cell.setAttribute("aria-controls", "provider-usage-popover");
+  if (!cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
+  cell.title = accessibleSummary;
   if (accounts.some((a) => a.limit_reached)) cell.dataset.limit = "true";
   else delete cell.dataset.limit;
   cell.hidden = false;
 
-  const win = doc.defaultView || window;
   // No modal: hover (or click, for touch/non-hover) shows the full popover.
-  cell.onclick = () => {
+  const showUsagePopover = () => {
     try {
       win.__gwtShowUsageHover?.(cell);
     } catch {
       /* no-op */
     }
   };
-  cell.onmouseenter = () => {
-    try {
-      win.__gwtShowUsageHover?.(cell);
-    } catch {
-      /* no-op */
-    }
-  };
-  cell.onmouseleave = () => {
+  const hideUsagePopover = () => {
     try {
       win.__gwtHideUsageHover?.();
     } catch {
       /* no-op */
+    }
+  };
+  cell.onclick = showUsagePopover;
+  cell.onmouseenter = showUsagePopover;
+  cell.onfocus = showUsagePopover;
+  cell.onmouseleave = hideUsagePopover;
+  cell.onblur = (event) => {
+    if (win.__gwtUsageHoverContains?.(event?.relatedTarget)) return;
+    hideUsagePopover();
+  };
+  cell.onkeydown = (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      showUsagePopover();
+      win.requestAnimationFrame?.(() => win.__gwtFocusUsageHover?.());
+    } else if (event.key === "Escape") {
+      win.__gwtHideUsageHover?.({ immediate: true });
     }
   };
 }
