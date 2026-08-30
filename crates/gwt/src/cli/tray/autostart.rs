@@ -133,7 +133,7 @@ impl AutostartManager {
         }
         #[cfg(target_os = "windows")]
         {
-            return windows_current_user_autostart::install();
+            windows_current_user_autostart::install()
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -156,7 +156,7 @@ impl AutostartManager {
         }
         #[cfg(target_os = "windows")]
         {
-            return windows_current_user_autostart::uninstall();
+            windows_current_user_autostart::uninstall()
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -184,11 +184,11 @@ impl AutostartManager {
         #[cfg(target_os = "windows")]
         {
             let enabled = windows_current_user_autostart::status()?;
-            return Ok(AutostartStatus {
+            Ok(AutostartStatus {
                 enabled,
                 install_path: install_path_for_app(APP_NAME),
                 mechanism,
-            });
+            })
         }
         #[cfg(not(target_os = "windows"))]
         {
