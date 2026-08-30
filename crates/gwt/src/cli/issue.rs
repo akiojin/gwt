@@ -844,6 +844,23 @@ fn run_monitor_requeue<E: CliEnv>(
             return Ok(1);
         }
         crate::IssueMonitorRequeueOutcome::NotHeld => {
+            // Issue #3683 (AC-3): a `BlockedByClaim` hold lives only in the
+            // driving process's inbox, never in the prefs this process reads,
+            // so the failure gate above cannot see it. Ask the live daemon's
+            // status projection whether the row is claim-blocked and publish
+            // an operator release if so; the driver adopts it on its next
+            // prefs rebase. Without a daemon there is no in-memory hold to
+            // release and the `not_held` refusal stands.
+            if monitor_projection_reports_blocked_by_claim(&project_root, number) {
+                return run_monitor_release_claim_block(
+                    &prefs_path,
+                    &project_root,
+                    number,
+                    reason,
+                    &now,
+                    out,
+                );
+            }
             out.push_str(
                 &serde_json::json!({
                     "number": number,
@@ -884,6 +901,121 @@ fn run_monitor_requeue<E: CliEnv>(
     out.push('\n');
     // The release itself is committed even when the follow-up scan authority is
     // unavailable; scan delivery is reported truthfully in the JSON fields.
+    Ok(0)
+}
+
+/// Issue #3683 (AC-3): whether the live daemon's status projection reports
+/// this issue as `blocked_by_claim`. A missing daemon or an unreadable
+/// projection means no verifiable in-memory claim hold, so the caller keeps
+/// the fail-closed `not_held` refusal.
+fn monitor_projection_reports_blocked_by_claim(
+    project_root: &std::path::Path,
+    number: u64,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root)
+        else {
+            return false;
+        };
+        let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status) else {
+            return false;
+        };
+        agent_status_reports_blocked_by_claim(&status, number)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (project_root, number);
+        false
+    }
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn agent_status_reports_blocked_by_claim(
+    status: &crate::IssueMonitorAgentStatus,
+    number: u64,
+) -> bool {
+    status.inbox.iter().any(|row| {
+        row.issue_number == number && row.state == crate::MonitorInboxState::BlockedByClaim
+    })
+}
+
+/// Issue #3683 (AC-3): publish an operator release for a daemon-reported
+/// `BlockedByClaim` hold and request an immediate scan, mirroring the
+/// requeue-success contract. Safe even if the block was just re-recorded: the
+/// next acquire re-validates against the live GitHub claims and re-records the
+/// block while a foreign claim is genuinely active.
+fn run_monitor_release_claim_block(
+    prefs_path: &std::path::Path,
+    project_root: &std::path::Path,
+    number: u64,
+    reason: &str,
+    now: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.release_claim_block(number, reason, now);
+        if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    match outcome {
+        crate::IssueMonitorRequeueOutcome::Requeued { .. } => {}
+        // The projection race window is real: a launch can go live between the
+        // daemon read and this mutation. Fail closed exactly like the failure
+        // path.
+        crate::IssueMonitorRequeueOutcome::LaunchLive => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "refusal": "launch_live",
+                    "detail": "a launch still owns this issue — use issue.monitor.stop or issue.monitor.failover, which verify the exact live launch identity",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+        crate::IssueMonitorRequeueOutcome::NotHeld => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "refusal": "not_held",
+                    "detail": "no failure is holding this issue out of the queue",
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    }
+
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(project_root));
+
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "requeued",
+            "released_hold": "blocked_by_claim",
+            "reason": reason,
+            "released_at": now,
+            "failure_release_version": prefs.failure_release_version,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
+        })
+        .to_string(),
+    );
+    out.push('\n');
     Ok(0)
 }
 
@@ -1791,6 +1923,31 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    /// Issue #3683 (AC-3): the claim-block probe reads the exact wire format
+    /// the daemon status projection serves, so the state match must survive
+    /// the snake_case serialization of `MonitorInboxState`.
+    #[test]
+    fn agent_status_probe_matches_only_the_blocked_by_claim_row() {
+        let status: crate::IssueMonitorAgentStatus = serde_json::from_value(serde_json::json!({
+            "queue": [7],
+            "active_launches": [],
+            "max_active": 1,
+            "enabled": true,
+            "autonomous_mode": false,
+            "has_launch_profile": false,
+            "inbox": [
+                {"issue_number": 7, "state": "queued"},
+                {"issue_number": 42, "state": "blocked_by_claim",
+                 "blocked_by_owner": "AkioJinsenji:9720"},
+            ],
+        }))
+        .expect("projection wire format deserializes");
+
+        assert!(agent_status_reports_blocked_by_claim(&status, 42));
+        assert!(!agent_status_reports_blocked_by_claim(&status, 7));
+        assert!(!agent_status_reports_blocked_by_claim(&status, 99));
     }
 
     fn set_modified(path: &Path, modified: SystemTime) {
