@@ -5259,6 +5259,7 @@ impl IssueMonitorState {
     /// destructive CAS must compare against the generation that is currently
     /// durable. Replace the window and claim together so a stale predecessor
     /// cannot make its close match a same-window successor.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn rebase_daemon_driver_prefs_for_exact_window_close(
         &mut self,
         disk: &IssueMonitorPrefs,

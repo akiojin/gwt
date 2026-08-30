@@ -123,6 +123,7 @@ fn resolve_scope(env: &impl CliEnv) -> Result<RuntimeScope, SpecOpsError> {
 /// An explicit root is an authorization boundary: it must exist and be a
 /// directory, and it must never degrade to the caller's cwd. Omitting the
 /// root retains the pre-#3596 cwd-derived scope unchanged.
+#[cfg(unix)]
 fn resolve_subscribe_scope(
     env: &impl CliEnv,
     project_root: Option<&Path>,
