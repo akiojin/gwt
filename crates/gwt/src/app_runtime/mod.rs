@@ -4162,6 +4162,7 @@ impl AppRuntime {
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
     ) -> WindowCloseMonitorResult {
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let window_id = target.window_id.as_deref().unwrap_or_default();
 
         #[cfg(unix)]
