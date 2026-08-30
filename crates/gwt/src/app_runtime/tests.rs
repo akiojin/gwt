@@ -6792,6 +6792,7 @@ fn issue_monitor_autonomous_record(
         acceptance_snapshot: None,
         retry_not_before: None,
         retry_hold_reason: None,
+        retry_hold_provider: None,
         last_heartbeat: None,
         pr_number: None,
         reviewed_sha: None,
@@ -40492,6 +40493,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,
@@ -40613,6 +40615,103 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             if level == "error" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+}
+
+#[test]
+fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let window_id = "tab-1::agent-1";
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed provider launch");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.provider_quota_holds.insert(
+        window_id.to_string(),
+        gwt::IssueMonitorFailure::ProviderUsageLimit {
+            provider: "codex".to_string(),
+            resets_at: Some("2099-08-22T04:00:00Z".to_string()),
+        },
+    );
+
+    let _events = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        "Codex usage limit reached",
+        Some(42),
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon not running".to_string(),
+            ),
+        ),
+    );
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload quota prefs");
+    assert_eq!(
+        persisted
+            .provider_quota_holds
+            .get("codex")
+            .map(String::as_str),
+        Some("2099-08-22T04:00:00Z")
+    );
+    assert!(!persisted.provider_quota_holds.contains_key("claude"));
+    let mut restored =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    assert_eq!(
+        restored.status_view_at("2026-08-22T03:00:00Z").quota_hold,
+        None,
+        "the saved Claude profile must not project the Codex hold"
+    );
+    restored.set_gui_connected(true);
+    restored.record_candidate(gwt::IssueMonitorIssue {
+        number: 43,
+        title: "Healthy provider candidate".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert_eq!(
+        restored
+            .try_prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T03:00:00Z",
+                1,
+                |_| Ok::<bool, std::convert::Infallible>(false),
+            )
+            .expect("infallible probe"),
+        1
+    );
 }
 
 #[test]

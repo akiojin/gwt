@@ -117,6 +117,112 @@ test("monitor state renderer is exhaustive and never aliases an unknown state to
   assert.equal(monitorStateView(""), null);
 });
 
+test("Issue Monitor panel presents and clears the quota-hold provider and reset", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const summary = body.querySelector(".knowledge-monitor-summary");
+
+  surface.applyIssueMonitorStatus({
+    enabled: true,
+    state: "idle",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    launch_profile_source: "saved",
+    launch_profile_summary: "configured",
+    quota_hold: {
+      provider: "codex",
+      reset_at: "2026-09-04T09:30:00Z",
+    },
+  });
+
+  const quotaHoldText = summary.textContent;
+
+  surface.applyIssueMonitorStatus({
+    enabled: true,
+    state: "idle",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    launch_profile_source: "saved",
+    launch_profile_summary: "configured",
+  });
+
+  assert.equal(summary.textContent, "Idle | Queue 3 | Active 0/2");
+  assert.doesNotMatch(
+    summary.textContent,
+    /Quota hold|Provider codex|Reset 2026-09-04T09:30:00Z/i,
+  );
+  assert.match(quotaHoldText, /Quota hold/i);
+  assert.match(quotaHoldText, /Provider codex/i);
+  assert.match(quotaHoldText, /Reset 2026-09-04T09:30:00Z/i);
+});
+
+test("Issue Monitor panel preserves higher-priority states around quota-hold metadata", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const summary = body.querySelector(".knowledge-monitor-summary");
+  const error = body.querySelector(".knowledge-monitor-error");
+  const quotaHold = {
+    provider: "codex",
+    reset_at: "2026-09-04T09:30:00Z",
+  };
+
+  surface.applyIssueMonitorStatus({
+    enabled: true,
+    state: "error",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    last_error: "issue #3785: failed",
+    quota_hold: quotaHold,
+  });
+
+  assert.equal(summary.textContent, "Error | Queue 3 | Active 0/2");
+  assert.equal(error.textContent, "issue #3785: failed");
+  assert.doesNotMatch(summary.textContent, /Quota hold|Provider|Reset/);
+
+  surface.applyIssueMonitorStatus({
+    enabled: false,
+    state: "disabled",
+    queue_len: 3,
+    active_count: 0,
+    max_active_agents: 2,
+    quota_hold: quotaHold,
+  });
+
+  assert.equal(summary.textContent, "Stopped | Queue 3 | Active 0/2");
+  assert.doesNotMatch(summary.textContent, /Quota hold|Provider|Reset/);
+
+  for (const state of ["active", "launching"]) {
+    surface.applyIssueMonitorStatus({
+      enabled: true,
+      state,
+      queue_len: 3,
+      active_count: 1,
+      max_active_agents: 2,
+      quota_hold: quotaHold,
+    });
+
+    assert.equal(
+      summary.textContent,
+      "Quota hold | Queue 3 | Active 1/2 | Provider codex | Reset 2026-09-04T09:30:00Z",
+    );
+  }
+
+  surface.applyIssueMonitorStatus({
+    enabled: true,
+    state: "launching",
+    queue_len: 3,
+    active_count: 1,
+    max_active_agents: 2,
+    quota_hold: {},
+  });
+
+  assert.equal(summary.textContent, "Launching | Queue 3 | Active 1/2");
+  assert.doesNotMatch(summary.textContent, /Quota hold|Provider|Reset|undefined/);
+});
+
 test("Issue rows render monitor projections and send controls from the full canonical queue", async (t) => {
   const { body, document, sent, surface, load } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
