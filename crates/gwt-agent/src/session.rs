@@ -2167,6 +2167,47 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
     Ok(true)
 }
 
+/// Clear or restore startup window recreation while the caller already holds
+/// the exact producing Session lease. A replaced or unreadable same-id Session
+/// is retained byte-for-byte and returns `false`.
+pub fn persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    restore: bool,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    let Some(mut session) = exact_durable_session_under_lease(sessions_dir, expected)? else {
+        return Ok(false);
+    };
+    if session.restore_window_on_startup == restore {
+        return Ok(true);
+    }
+    session.restore_window_on_startup = restore;
+    session.updated_at = Utc::now();
+    let content = serialize_session_toml(&session)?;
+    write_session_toml_atomic(
+        &session_file_path(sessions_dir, &expected.session_id),
+        &content,
+    )?;
+    Ok(true)
+}
+
+/// Process-local convenience wrapper for callers that do not already hold the
+/// Session lease.
+pub fn persist_session_restore_window_on_startup_if_execution_identity_matches(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    restore: bool,
+) -> io::Result<bool> {
+    with_session_path_lease(sessions_dir, &expected.session_id, |_| {
+        persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+            sessions_dir,
+            expected,
+            restore,
+        )
+    })
+}
+
 /// Persist terminal status for an exact runtime namespace while the caller
 /// already holds the matching Session lease.
 ///
@@ -5265,6 +5306,52 @@ display_name = "Claude Code"
         assert_eq!(
             fs::read(runtime_path).expect("read sidecar after missing CAS"),
             sentinel_bytes
+        );
+    }
+
+    #[test]
+    fn exact_restore_persistence_updates_only_the_matching_execution_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.restore_window_on_startup = true;
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        assert!(
+            persist_session_restore_window_on_startup_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                false,
+            )
+            .expect("clear exact restore state")
+        );
+        let durable = Session::load(&dir.path().join(format!("{}.toml", session.id)))
+            .expect("load updated Session");
+        assert!(!durable.restore_window_on_startup);
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.restore_window_on_startup = true;
+        replacement.save(dir.path()).expect("save replacement");
+        let replacement_path = dir.path().join(format!("{}.toml", session.id));
+        let replacement_bytes = fs::read(&replacement_path).expect("read replacement bytes");
+
+        assert!(
+            !persist_session_restore_window_on_startup_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                false,
+            )
+            .expect("reject replacement")
+        );
+        assert_eq!(
+            fs::read(replacement_path).expect("retain replacement bytes"),
+            replacement_bytes
         );
     }
 

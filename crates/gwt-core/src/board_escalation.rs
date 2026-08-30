@@ -174,6 +174,30 @@ impl BoardEscalationStore {
         changed
     }
 
+    /// Put a historical `blocked` post back into the index without replaying
+    /// the rest of the stream.
+    ///
+    /// A hot-window rebuild (`from_entries` on the 500-entry projection)
+    /// drops overflowed unblock requests. The next `params.resolves` still
+    /// names those ids, and closing them must not depend on folding every
+    /// later Board post — or on `superseded_by`, which would treat a
+    /// recovered older row as a restatement of a newer one.
+    pub fn restore_lost_blocked(&mut self, entry: &BoardEntry) -> bool {
+        if entry.kind != BoardEntryKind::Blocked {
+            return false;
+        }
+        if self
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == entry.id)
+        {
+            return false;
+        }
+        self.escalations.push(BoardEscalation::from_entry(entry));
+        self.updated_at = Utc::now();
+        true
+    }
+
     /// Replay a whole event stream. Entries must already be ordered oldest
     /// first, which is the order both the segment loader and the hot
     /// projection produce.
@@ -641,6 +665,41 @@ mod tests {
             .unwrap();
         assert_eq!(closed.resolved_by_entry_id.as_deref(), Some("r1"));
         assert!(closed.resolved_at.is_some());
+    }
+
+    #[test]
+    fn restore_lost_blocked_reinserts_a_historical_row_without_superseding_others() {
+        let mut first = blocked("b1", &["2338"]);
+        first.origin_session_id = Some("session-a".to_string());
+        let mut later = blocked("b2", &["2338"]);
+        later.origin_session_id = Some("session-a".to_string());
+
+        let mut store = BoardEscalationStore::default();
+        store.apply_entry(&later);
+        assert!(store.restore_lost_blocked(&first));
+        assert!(!store.restore_lost_blocked(&first), "restore is idempotent");
+
+        assert_eq!(
+            store.open().count(),
+            2,
+            "repair must not replay superseded_by"
+        );
+        assert!(store
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == "b1" && escalation.is_open()));
+        assert!(store
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == "b2" && escalation.is_open()));
+    }
+
+    #[test]
+    fn restore_lost_blocked_ignores_non_blocked_history() {
+        let mut store = BoardEscalationStore::default();
+        let status = entry("s1", BoardEntryKind::Status, &["2338"], "noise");
+        assert!(!store.restore_lost_blocked(&status));
+        assert!(store.escalations.is_empty());
     }
 
     #[test]

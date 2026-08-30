@@ -59,6 +59,18 @@ const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const ISSUE_MONITOR_PREFS_TIMEOUT: Duration = Duration::from_millis(250);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn issue_monitor_prefs_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS")
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        .filter(|timeout| *timeout <= 60_000)
+    {
+        return Duration::from_millis(timeout);
+    }
+    ISSUE_MONITOR_PREFS_TIMEOUT
+}
+
 /// How often a serving daemon re-checks that its endpoint descriptor is still
 /// on disk and still describes this process (#3766 AC-2 self-heal). A cheap
 /// stat per tick; short enough that CLI callers recover within seconds after
@@ -1498,6 +1510,7 @@ enum IssueMonitorControl {
     },
     WindowClosed {
         window_id: String,
+        target: Option<crate::IssueMonitorStopTarget>,
     },
 }
 
@@ -2070,10 +2083,27 @@ fn apply_routine_issue_monitor_control(
                 true
             }
         },
-        IssueMonitorControl::WindowClosed { window_id } => {
-            monitor.requeue_window(&window_id);
-            true
-        }
+        IssueMonitorControl::WindowClosed { target, .. } => match target {
+            Some(target) => monitor.requeue_exact_window(&target).is_some(),
+            // Pre-generation publishers can still be decoded for wire
+            // compatibility, but a window id alone is not authority to revoke
+            // a possibly newer same-id launch.
+            None => false,
+        },
+    }
+}
+
+fn rebase_issue_monitor_control_candidate(
+    monitor: &mut crate::IssueMonitorState,
+    disk: &crate::IssueMonitorPrefs,
+    control: &IssueMonitorControl,
+) {
+    match control {
+        IssueMonitorControl::WindowClosed {
+            target: Some(target),
+            ..
+        } => monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, target.issue_number),
+        _ => monitor.rebase_daemon_driver_prefs(disk),
     }
 }
 
@@ -2160,7 +2190,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         &recovery_baseline,
         on_first_contention,
         |disk| {
-            candidate.rebase_daemon_driver_prefs(disk);
+            rebase_issue_monitor_control_candidate(&mut candidate, disk, &accepted.control);
             if let Some(receipt) = disk
                 .last_control_receipt
                 .as_ref()
@@ -2176,7 +2206,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     // durable receipt snapshot before ACKing.
                     let mut converged = monitor.clone();
                     if !typed_failure {
-                        converged.rebase_daemon_driver_prefs(disk);
+                        rebase_issue_monitor_control_candidate(
+                            &mut converged,
+                            disk,
+                            &accepted.control,
+                        );
                     }
                     let authority_epoch_before = converged.effect_authority_epoch();
                     let converged_result =
@@ -2481,7 +2515,22 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
             }
             if let Some(window_closed) = payload.get("window_closed") {
                 let window_id = window_closed.get("window_id")?.as_str()?.to_string();
-                return Some(IssueMonitorControl::WindowClosed { window_id });
+                let target = window_closed
+                    .get("issue_number")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|issue_number| crate::IssueMonitorStopTarget {
+                        issue_number,
+                        claim_id: window_closed
+                            .get("claim_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                        delivery_id: window_closed
+                            .get("delivery_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                        window_id: Some(window_id.clone()),
+                    });
+                return Some(IssueMonitorControl::WindowClosed { window_id, target });
             }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
@@ -2605,7 +2654,7 @@ fn persist_daemon_issue_monitor_state(
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + ISSUE_MONITOR_PREFS_TIMEOUT,
+        Instant::now() + issue_monitor_prefs_timeout(),
     );
     let recovery_baseline = monitor.prefs();
     match crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
@@ -6223,6 +6272,147 @@ exit 0
     }
 
     #[test]
+    fn window_closed_control_requeues_only_the_exact_durable_claim() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                launched_claims: std::collections::BTreeMap::from([(
+                    42,
+                    "claim-successor".to_string(),
+                )]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let close_payload = |claim_id: &str| {
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "window_closed": {
+                        "issue_number": 42,
+                        "claim_id": claim_id,
+                        "delivery_id": null,
+                        "window_id": "tab-1::agent-42",
+                    }
+                }),
+                std::process::id() + 1,
+            )
+        };
+
+        let stale = decode_issue_monitor_control(close_payload("claim-predecessor"))
+            .expect("stale exact close decodes");
+        assert!(!apply_issue_monitor_control(&mut monitor, stale));
+        assert_eq!(monitor.active_count(), 1, "successor remains active");
+
+        let current = decode_issue_monitor_control(close_payload("claim-successor"))
+            .expect("current exact close decodes");
+        assert!(apply_issue_monitor_control(&mut monitor, current));
+        assert_eq!(monitor.active_count(), 0, "current close releases the slot");
+    }
+
+    #[test]
+    fn window_closed_transaction_adopts_disk_successor_claim_before_exact_cas() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let predecessor = crate::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-42".to_string(),
+            }],
+            launched_claims: std::collections::BTreeMap::from([(
+                42,
+                "claim-predecessor".to_string(),
+            )]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut stale_daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            predecessor.clone(),
+        );
+        let successor = crate::IssueMonitorPrefs {
+            launched_claims: std::collections::BTreeMap::from([(
+                42,
+                "claim-successor".to_string(),
+            )]),
+            ..predecessor
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &successor).expect("seed successor prefs");
+
+        let committed = super::try_apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut stale_daemon,
+            IssueMonitorControl::WindowClosed {
+                window_id: "tab-1::agent-42".to_string(),
+                target: Some(crate::IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: Some("claim-predecessor".to_string()),
+                    delivery_id: None,
+                    window_id: Some("tab-1::agent-42".to_string()),
+                }),
+            },
+        );
+
+        assert_eq!(
+            committed,
+            super::IssueMonitorControlCommit::Committed {
+                should_scan: false,
+                authority_changed: false,
+            },
+            "a stale close is a committed CAS miss, not a successor close"
+        );
+        let durable = crate::load_issue_monitor_prefs(&prefs_path).expect("reload successor prefs");
+        assert_eq!(
+            durable.launched_claims.get(&42).map(String::as_str),
+            Some("claim-successor")
+        );
+        assert_eq!(durable.launched_issues, successor.launched_issues);
+        assert_eq!(stale_daemon.active_count(), 1);
+        assert_eq!(stale_daemon.prefs(), durable);
+    }
+
+    #[test]
+    fn targetless_window_closed_control_is_a_fail_closed_noop() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                launched_claims: std::collections::BTreeMap::from([(
+                    42,
+                    "claim-current".to_string(),
+                )]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let legacy =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "window_closed": {
+                        "window_id": "tab-1::agent-42",
+                    }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("legacy targetless close still decodes");
+
+        assert!(!apply_issue_monitor_control(&mut monitor, legacy));
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.prefs().launched_claims.get(&42).map(String::as_str),
+            Some("claim-current")
+        );
+    }
+
+    #[test]
     fn routine_controls_invalidate_scan_without_revoking_effects() {
         let attempting = crate::PendingIssueMonitorEffect {
             effect_id: "claim:42:stable".to_string(),
@@ -8500,7 +8690,7 @@ exit 0
             &fake_gh,
             r#"#!/bin/sh
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
+  printf '%s\n' '[{"number":42,"title":"Issue 42","body":"Body 42","labels":[{"name":"bug"},{"name":"hold"}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"2026-07-27T00:00:00Z"}]'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
@@ -12239,6 +12429,10 @@ exit 1
 
     #[test]
     fn daemon_persist_waits_for_sibling_lock_and_rebases_committed_state() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_timeout = ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_PREFS_TIMEOUT_MS", "2000");
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let unrelated_failure = crate::IssueMonitorFailedIssue {
@@ -12825,7 +13019,7 @@ exit 1
             &fake_gh,
             r#"#!/bin/sh
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
+  printf '%s\n' '[{"number":42,"title":"Issue 42","body":"Body 42","labels":[{"name":"bug"},{"name":"hold"}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"2026-07-27T00:00:00Z"}]'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then

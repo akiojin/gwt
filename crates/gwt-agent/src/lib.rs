@@ -68,6 +68,8 @@ pub use session::{
     mark_session_active_launch_handshake_child_spawned_under_lease, persist_agent_session_id,
     persist_session_completed_stop, persist_session_execution_binding, persist_session_exit,
     persist_session_hook_event, persist_session_restore_window_on_startup,
+    persist_session_restore_window_on_startup_if_execution_identity_matches,
+    persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease,
     persist_session_running_state_if_execution_identity_matches, persist_session_status,
     persist_session_terminal_status_for_exact_runtime_under_lease,
     persist_session_terminal_status_if_execution_identity_matches,
