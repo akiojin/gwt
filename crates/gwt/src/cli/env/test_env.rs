@@ -46,6 +46,7 @@ pub struct TestEnv {
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
+    pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
     pub prs: HashMap<u64, PrStatus>,
@@ -95,6 +96,7 @@ impl TestEnv {
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
             linked_prs: HashMap::new(),
+            linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
             prs: HashMap::new(),
@@ -162,6 +164,10 @@ impl TestEnv {
 
     pub fn seed_linked_prs(&mut self, number: u64, linked_prs: Vec<LinkedPrSummary>) {
         self.linked_prs.insert(number, linked_prs);
+    }
+
+    pub fn seed_linked_pr_error(&mut self, number: u64, message: impl Into<String>) {
+        self.linked_pr_errors.insert(number, message.into());
     }
 
     pub fn linked_pr_calls(&self) -> Vec<u64> {
@@ -300,6 +306,9 @@ impl CliEnv for TestEnv {
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
         self.linked_pr_call_log.push(number.0);
+        if let Some(message) = self.linked_pr_errors.get(&number.0) {
+            return Err(io::Error::other(message.clone()));
+        }
         Ok(self.linked_prs.get(&number.0).cloned().unwrap_or_default())
     }
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
