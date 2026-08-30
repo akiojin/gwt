@@ -930,6 +930,7 @@ fn monitor_projection_reports_blocked_by_claim(
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn agent_status_reports_blocked_by_claim(
     status: &crate::IssueMonitorAgentStatus,
     number: u64,
