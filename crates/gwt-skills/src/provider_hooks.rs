@@ -220,12 +220,15 @@ fn bridge_hermes_credentials(source_home: &Path, dest_home: &Path) -> io::Result
     fs::create_dir_all(dest_home)?;
     for name in [".env", "auth.json"] {
         let src = source_home.join(name);
+        let dst = dest_home.join(name);
         if !src.exists() {
+            if fs::symlink_metadata(&dst).is_ok() {
+                fs::remove_file(&dst)?;
+            }
             continue;
         }
-        let dst = dest_home.join(name);
         if fs::symlink_metadata(&dst).is_ok() {
-            let _ = fs::remove_file(&dst);
+            fs::remove_file(&dst)?;
         }
         if symlink_file(&src, &dst).is_err() {
             fs::copy(&src, &dst)?;

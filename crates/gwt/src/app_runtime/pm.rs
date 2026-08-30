@@ -1605,24 +1605,28 @@ impl AppRuntime {
     /// arbitrary path. Fail-closed: any uncertainty keeps the worktree.
     fn cleanup_pm_worktree(project_root: &Path) {
         let worktree = pm_registry::pm_worktree_path_for_repo_path(project_root);
-        if !worktree.exists() {
-            return;
-        }
-        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
-        match manager.ephemeral_worktree_has_local_work(&worktree) {
-            Ok(false) => {
-                if let Err(error) = manager.remove_force_twice(&worktree) {
-                    tracing::warn!(%error, "failed to remove the clean PM worktree");
-                }
+        match pm_registry::cleanup_pm_worktree_for_repo_path(project_root, |worktree, entry| {
+            crate::runtime_support::intake_hook_config_is_disposable(worktree, entry)
+        }) {
+            Ok(pm_registry::PmWorktreeCleanupOutcome::Absent) => {}
+            Ok(pm_registry::PmWorktreeCleanupOutcome::Removed) => {
+                tracing::info!(
+                    worktree = %worktree.display(),
+                    "clean PM worktree removed"
+                );
             }
-            Ok(true) => {
+            Ok(pm_registry::PmWorktreeCleanupOutcome::RetainedLocalWork) => {
                 tracing::info!(
                     worktree = %worktree.display(),
                     "PM worktree has local work; keeping it for reuse"
                 );
             }
             Err(error) => {
-                tracing::warn!(%error, "PM worktree local-work check failed; keeping it");
+                tracing::warn!(
+                    %error,
+                    worktree = %worktree.display(),
+                    "PM worktree cleanup failed closed; keeping it"
+                );
             }
         }
     }
@@ -1760,35 +1764,21 @@ impl AppRuntime {
         }
         let mut config = builder.build();
         config.suppress_execution_control = true;
+        if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {
+            config.env_vars.insert(
+                "GWT_PM_SCRATCH_DIR".to_string(),
+                scratch.to_string_lossy().into_owned(),
+            );
+        }
         config
     }
 
     /// Dedicated detached worktree for the PM session (research R-10). Its
     /// lifecycle is bound to the PM registration; T-016 adds GC.
     fn ensure_pm_worktree(project_root: &Path) -> Result<PathBuf, String> {
-        let path = pm_registry::pm_worktree_path_for_repo_path(project_root);
-        if path.join(".git").exists() {
-            return Ok(path);
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
-        manager
-            .create_detached("HEAD", &path)
-            .map_err(|error| error.to_string())?;
-        Ok(path)
-    }
-
-    /// Issue #3497: the opened project root is not always a repository — the
-    /// bare layout (`parent/` holding `parent/<name>.git` plus worktrees) is
-    /// exactly what the launch paths already resolve through
-    /// `main_worktree_root`. Every PM `WorktreeManager` goes through the same
-    /// resolution, or `git worktree` dies with "not a git repository" and the
-    /// PM silently never comes up.
-    fn pm_git_root(project_root: &Path) -> PathBuf {
-        gwt_git::worktree::main_worktree_root(project_root)
-            .unwrap_or_else(|_| project_root.to_path_buf())
+        pm_registry::refresh_pm_worktree_for_repo_path(project_root)
+            .map(|outcome| outcome.worktree)
+            .map_err(|error| error.to_string())
     }
 }
 

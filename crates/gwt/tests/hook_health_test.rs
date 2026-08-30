@@ -932,13 +932,8 @@ fn codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies() 
     for path in &paths {
         let rendered = fs::read_to_string(path).expect("read repaired hooks");
         assert!(
-            rendered.contains("command -v"),
-            "{} kept the unguarded legacy template: {rendered}",
-            path.display()
-        );
-        assert!(
-            rendered.contains(&hook_bin.path().display().to_string()),
-            "{} did not converge on the expected binary: {rendered}",
+            rendered.contains("GWT_BIN_PATH"),
+            "{} did not receive the host-native runtime selector: {rendered}",
             path.display()
         );
     }

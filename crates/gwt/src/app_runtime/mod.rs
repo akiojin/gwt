@@ -227,7 +227,14 @@ use launch::{
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     maybe_register_codex_managed_hook_trust_for_launch,
 };
-pub(crate) use launch::{continue_work_readiness_decision, ReadinessDeadlineDecision};
+pub(crate) use launch::{
+    continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
+};
+// Production callers only ever pass this through from
+// `AppRuntime::readiness_pane_evidence`, so the name itself is needed by the
+// readiness policy tests alone (Issue #3482).
+#[cfg(test)]
+pub(crate) use launch::ReadinessPaneEvidence;
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
 pub use launch::{
     AgentLaunchResult, ContinueWorkReadinessWatch, LaunchWizardMemoryCache, ProcessLaunch,
@@ -4156,6 +4163,7 @@ impl AppRuntime {
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
     ) -> WindowCloseMonitorResult {
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let window_id = target.window_id.as_deref().unwrap_or_default();
 
         #[cfg(unix)]
