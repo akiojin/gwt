@@ -273,10 +273,11 @@ fn handle_at(
          subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
          mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
          `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
-         running agents' `last_activity_at`. {clause} \
+         running agents' `last_activity_at`. {execution_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
          failures do not count as empty).{refresh_context}",
+        execution_clause = pm_registry::PM_GWTD_EXECUTION_CLAUSE,
         clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
     ))
 }
@@ -585,6 +586,10 @@ mod tests {
         assert!(
             reason.contains("issue.monitor.status"),
             "FR-3: the cycle itself is still driven in full; got: {reason}"
+        );
+        assert!(
+            reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+            "the forced continuation must carry the canonical gwtd execution-isolation clause verbatim; got: {reason}"
         );
     }
 

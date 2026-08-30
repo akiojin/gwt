@@ -293,6 +293,41 @@ Hard limits, no exceptions:
   In particular, do not use the legacy paths `tasks/todo.md`,
   `tasks/pm-notes.md`, or root `pm-notes.md`.
 
+## gwtd execution isolation
+
+Keep the PM turn responsive even when gwtd or its endpoint is slow.
+
+- Run only short read-only gwtd operations directly. Set the execution
+  tool's outer wall-clock deadline to 10 seconds or less; an operation's
+  internal timeout does not replace the outer wall-clock deadline of 10 seconds.
+- Treat `daemon.subscribe` with a timeout above that budget, batch mutations,
+  repeated `pane.read`, and any operation that has already reached the deadline
+  as long-running or hang-risk work. Delegate it to a
+  background job or exactly one in-session sub-agent. A background job owns one
+  bounded operation; it does not start another daemon process.
+- Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
+  from the operation, normalized target and parameters, and logical effect.
+  While that key is pending, do not run or delegate the same logical operation
+  again. Collect the result only from the harness's task-completion notification;
+  do not synchronously poll the task or repeat its gwtd call yourself.
+- After the task-completion notification, reconcile the result against a fresh
+  authoritative snapshot or receipt before acting, reporting success, or
+  clearing the pending operation key. A stale task result is never mutation
+  authority.
+- When a read fails or reaches its deadline, wait at least 5 seconds, then
+  retry that read at most once, through the detached path.
+- Never blindly retry a mutation after a timeout, transport loss, or unverified
+  receipt. First obtain authoritative readback; retry only when it proves the
+  effect is absent, and
+  reuse the same operation ID when the operation supports one. Otherwise keep
+  the outcome unknown and the key pending.
+- A delegated sub-agent inherits the PM boundary: it never edits production
+  code and must not run `workspace.*`, `build.*`, `execution.*`, `verify.*`, or
+  `pr.*` with the root PM session's lifecycle authority.
+- If the harness offers neither background jobs nor sub-agents, skip the long
+  operation and continue the cycle with bounded snapshot polling. Never turn it
+  into a foreground wait.
+
 ## Resident loop (unattended)
 
 - Every resident cycle begins by reading `pm.status` worktree freshness.
@@ -609,6 +644,17 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // Issue #3776: a slow gwtd process cannot own the PM turn.
+            "## gwtd execution isolation",
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
             // T248: session notes live outside the disposable PM worktree.
             "`$GWT_PM_SCRATCH_DIR` is the only storage location for PM session notes and checklists",
             "Never write scratch files inside the PM worktree",
@@ -664,6 +710,45 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
+    /// the resident PM's conversational turn. The detailed contract belongs in
+    /// one section so the compact wake/Stop reminder cannot become an
+    /// incomplete second policy.
+    #[test]
+    fn contract_isolates_gwtd_execution_from_the_pm_turn() {
+        let execution = SKILL_BODY_EN
+            .split_once("## gwtd execution isolation")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("gwtd execution isolation section must be present");
+
+        for phrase in [
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "`daemon.subscribe`",
+            "batch mutations",
+            "repeated `pane.read`",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "retry that read at most once",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            "`workspace.*`",
+            "`build.*`",
+            "`execution.*`",
+            "`verify.*`",
+            "`pr.*`",
+        ] {
+            assert!(
+                execution.contains(phrase),
+                "gwtd execution isolation contract is missing: {phrase}"
+            );
+        }
     }
 
     #[test]
