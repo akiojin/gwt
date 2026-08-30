@@ -308,12 +308,17 @@ Hard limits, no exceptions:
   you on the scheduled monitor tick, so no manual setup is needed;
   treat an injected `[gwt]` wake prompt as the start of a normal cycle.
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
-  `issue_monitor` (and optionally `board`) channels with
+  `issue_monitor`, `errors` (and optionally `board`) channels with
   `params.timeout_seconds` set, so the stream ends and hands control
   back to you. When it returns, reconcile against a fresh
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- Every cycle, call `errors.list` with `params.since` set to the timestamp
+  of the last successful check. Triage every new launch failure, hook
+  failure, operation refusal, and daemon fault. Do not rely on
+  `last_error` or GUI toasts; those surfaces drop earlier errors. Keep
+  the last-check timestamp in your session notes.
 - If the subscribe fails (for example `no daemon registered` — a known
   endpoint-registration gap), do not treat the cycle as failed and do
   not stop early: fall back to polling in the same cycle. Read the
@@ -526,6 +531,10 @@ mod tests {
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
+            "`errors.list`",
+            "`errors`",
+            "Do not rely on",
+            "`last_error`",
             // FR-109: subscribe failure degrades to same-cycle polling.
             "fall back to polling in the same cycle",
             "degraded (FR-109)",

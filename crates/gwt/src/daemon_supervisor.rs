@@ -179,13 +179,24 @@ impl DaemonSupervisor {
     /// it is missing or has died.
     #[cfg(unix)]
     pub fn ensure_running(&self, project_root: &Path) -> Result<DaemonEnsureOutcome, String> {
-        self.ensure_running_with(
+        let result = self.ensure_running_with(
             project_root,
             DaemonEnsureInputs {
                 gwt_home: gwt_core::paths::gwt_home(),
                 is_process_alive: &crate::process::is_process_alive,
             },
-        )
+        );
+        if let Err(ref error) = result {
+            crate::error_report::report_error_and_publish(
+                gwt_core::error_ledger::ErrorKind::DaemonFault,
+                error.clone(),
+                gwt_core::error_ledger::ErrorTarget {
+                    project_root: Some(project_root.display().to_string()),
+                    ..gwt_core::error_ledger::ErrorTarget::default()
+                },
+            );
+        }
+        result
     }
 
     #[cfg(not(unix))]
