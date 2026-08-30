@@ -6792,6 +6792,7 @@ fn issue_monitor_autonomous_record(
         acceptance_snapshot: None,
         retry_not_before: None,
         retry_hold_reason: None,
+        retry_hold_provider: None,
         last_heartbeat: None,
         pr_number: None,
         reviewed_sha: None,
@@ -26123,9 +26124,9 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 /// #3474: the `.codex/hooks.json` committed before the guarded template landed
 /// reports ONLY `managed hook binary missing:` when its bare fallback cannot be
 /// resolved, so the loop breaker below skipped it on every launch and the file
-/// never converged. The missing `command -v` guard is now its own issue class,
-/// so a legacy config is repaired — and the repaired file no longer raises it,
-/// so this still cannot loop.
+/// never converged. A missing host-native runtime guard is now its own issue
+/// class, so a legacy config is repaired — and the repaired file no longer
+/// raises it, so this still cannot loop.
 #[test]
 fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
     // Issue #3609: the other 387 acquisitions in this binary recover from a
@@ -26136,36 +26137,86 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
-    let missing_pin = root.path().join("missing/gwtd");
+    let fixture_id = root
+        .path()
+        .file_name()
+        .expect("temporary root basename")
+        .to_string_lossy();
+    let missing_pin = PathBuf::from(format!(
+        r"C:\Users\AKIOJI~1\AppData\Local\Temp\gwt self-heal {fixture_id}\missing\gwtd.exe"
+    ));
+    assert!(
+        !missing_pin.exists(),
+        "the synthetic Windows fixture must remain unresolved: {}",
+        missing_pin.display()
+    );
     let config = worktree.join(".codex/hooks.json");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     // The legacy template, pinned to a binary that no longer exists: the ONLY
     // issue it can raise through the binary audit is `managed hook binary
     // missing:`, which is exactly what the loop breaker skips.
-    fs::write(
-        &config,
-        format!(
-            r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart"}}]}}]}}}}"#,
-            missing_pin.display()
-        ),
-    )
-    .unwrap();
+    let legacy = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!(
+                        "gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart",
+                        missing_pin.display()
+                    )
+                }]
+            }]
+        }
+    });
+    fs::write(&config, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&config).unwrap())
+        .expect("legacy managed-hook fixture must be valid JSON");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    let expected_hook_bin = missing_pin.display().to_string();
+    let mut health_input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worktree);
+    health_input.runtime_state_path = None;
+    health_input.expected_hook_bin = Some(expected_hook_bin.clone());
+    let legacy_health = gwt::cli::hook::health::read_managed_hook_health(&health_input);
+    assert!(
+        legacy_health
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
+        "{:?}",
+        legacy_health.issues
+    );
 
     super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
         [worktree.as_path()],
-        Some(&missing_pin.display().to_string()),
+        Some(&expected_hook_bin),
     );
 
-    let rendered = fs::read_to_string(&config).unwrap();
-    assert!(rendered.contains("command -v"), "{rendered}");
+    let healed_health = gwt::cli::hook::health::read_managed_hook_health(&health_input);
+    assert!(
+        !healed_health
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
+        "{:?}",
+        healed_health.issues
+    );
+    assert!(
+        !healed_health.issues.is_empty()
+            && healed_health
+                .issues
+                .iter()
+                .all(|issue| issue.starts_with("managed hook binary missing:")),
+        "{:?}",
+        healed_health.issues
+    );
 
     // A second pass over the converged file must be a no-op: the guard issue is
     // gone and only the unresolvable pin remains, which the loop breaker skips.
     let converged = fs::read(&config).unwrap();
     super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
         [worktree.as_path()],
-        Some(&missing_pin.display().to_string()),
+        Some(&expected_hook_bin),
     );
     assert_eq!(fs::read(&config).unwrap(), converged);
 }
@@ -40438,6 +40489,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,
@@ -40559,6 +40611,103 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             if level == "error" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+}
+
+#[test]
+fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let window_id = "tab-1::agent-1";
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed provider launch");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.provider_quota_holds.insert(
+        window_id.to_string(),
+        gwt::IssueMonitorFailure::ProviderUsageLimit {
+            provider: "codex".to_string(),
+            resets_at: Some("2099-08-22T04:00:00Z".to_string()),
+        },
+    );
+
+    let _events = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        "Codex usage limit reached",
+        Some(42),
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon not running".to_string(),
+            ),
+        ),
+    );
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload quota prefs");
+    assert_eq!(
+        persisted
+            .provider_quota_holds
+            .get("codex")
+            .map(String::as_str),
+        Some("2099-08-22T04:00:00Z")
+    );
+    assert!(!persisted.provider_quota_holds.contains_key("claude"));
+    let mut restored =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    assert_eq!(
+        restored.status_view_at("2026-08-22T03:00:00Z").quota_hold,
+        None,
+        "the saved Claude profile must not project the Codex hold"
+    );
+    restored.set_gui_connected(true);
+    restored.record_candidate(gwt::IssueMonitorIssue {
+        number: 43,
+        title: "Healthy provider candidate".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert_eq!(
+        restored
+            .try_prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T03:00:00Z",
+                1,
+                |_| Ok::<bool, std::convert::Infallible>(false),
+            )
+            .expect("infallible probe"),
+        1
+    );
 }
 
 #[test]

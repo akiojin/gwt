@@ -1944,6 +1944,7 @@ mod tests {
             launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            quota_hold: None,
         };
         let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "status",
