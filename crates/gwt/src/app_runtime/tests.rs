@@ -56846,6 +56846,68 @@ fn pm_close_window_deregisters_pm() {
 }
 
 #[test]
+fn stale_pm_close_completion_cannot_overwrite_the_active_project_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    fs::create_dir_all(&repo_a).expect("repo a");
+    fs::create_dir_all(&repo_b).expect("repo b");
+    let tabs = vec![
+        sample_project_tab("tab-a", "Repo A", repo_a.clone(), ProjectKind::Git, &[]),
+        sample_project_tab("tab-b", "Repo B", repo_b.clone(), ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-b"));
+    let stale_status = BackendEvent::PmStatus {
+        available: true,
+        auto_start: false,
+        loop_interval_secs: 10,
+        loop_interval_secs_decimal: "10".to_string(),
+        configured_agent_id: "codex".to_string(),
+        configured_model: None,
+        configured_reasoning: None,
+        running_agent_id: None,
+        running_model: None,
+        running_reasoning: None,
+        is_running: false,
+        agent_options: Vec::new(),
+    };
+
+    let after_switch = runtime.handle_window_close_finalized(
+        "tab-a::pm-a",
+        Some(&repo_a),
+        Some("pm-a"),
+        true,
+        true,
+        Some(stale_status.clone()),
+        super::WindowCloseMonitorResult::Noop,
+    );
+    assert!(
+        after_switch
+            .iter()
+            .all(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. })),
+        "a delayed close from repo A must not replace repo B's current PM status"
+    );
+
+    runtime.active_tab_id = None;
+    let after_last_tab_close = runtime.handle_window_close_finalized(
+        "tab-a::pm-a-final",
+        Some(&repo_a),
+        Some("pm-a"),
+        true,
+        false,
+        Some(stale_status),
+        super::WindowCloseMonitorResult::Noop,
+    );
+    assert!(
+        after_last_tab_close
+            .iter()
+            .all(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. })),
+        "a delayed close after the last tab closed must not restore stale PM settings"
+    );
+}
+
+#[test]
 fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -57511,24 +57573,26 @@ fn set_pm_loop_interval_rejects_below_floor_without_mutation_or_status() {
     .expect("seed registration");
     let before = fs::read(&prefs_path).expect("read seeded prefs");
 
-    let events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::SetPmLoopInterval {
-            loop_interval_secs: 9,
-        },
-    );
+    for rejected in [0, 9] {
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SetPmLoopInterval {
+                loop_interval_secs: rejected,
+            },
+        );
 
-    assert_eq!(
-        fs::read(&prefs_path).expect("read rejected prefs"),
-        before,
-        "a rejected backend value must leave pm.json byte-identical"
-    );
-    assert!(
-        events
-            .iter()
-            .all(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. })),
-        "a rejected write must not broadcast a misleading committed status"
-    );
+        assert_eq!(
+            fs::read(&prefs_path).expect("read rejected prefs"),
+            before,
+            "a rejected backend value must leave pm.json byte-identical"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. })),
+            "a rejected write must not broadcast a misleading committed status"
+        );
+    }
     assert!(
         runtime.live_pm_window_id("pm-session-live").is_some(),
         "rejection must not touch the live PM pane"

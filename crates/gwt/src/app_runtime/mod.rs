@@ -4336,7 +4336,11 @@ impl AppRuntime {
                 .get(project_root)
                 .is_none_or(|current| Some(current.as_str()) == closing_session_id)
         });
-        if !window_id_reused && pm_completion_is_current {
+        let pm_completion_is_for_active_project = project_root.is_none_or(|project_root| {
+            self.active_project_root()
+                .is_some_and(|active_root| same_worktree_path(active_root, project_root))
+        });
+        if !window_id_reused && pm_completion_is_current && pm_completion_is_for_active_project {
             if let Some(pm_status) = pm_status {
                 // The worker materialized this from the committed prefs so Tao
                 // does not reopen the PM file or resolve agent binaries.
