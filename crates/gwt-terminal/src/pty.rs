@@ -533,11 +533,20 @@ impl PtyHandle {
         })
     }
 
-    /// Invalidate this writer generation at the physical-write commit point.
-    /// Once this method returns, no writer from this generation can begin a
-    /// later PTY mutation.
-    pub fn invalidate_input_generation(&self) {
+    /// Revoke this writer generation without waiting for an in-flight physical
+    /// write. New transactions fail immediately; teardown can finish the
+    /// physical commit barrier on a background worker.
+    pub fn revoke_input_generation(&self) {
         self.generation_active.store(false, Ordering::Release);
+    }
+
+    /// Finish invalidating this writer generation at the physical-write commit
+    /// point. Logical lifecycle transitions should call
+    /// [`Self::revoke_input_generation`] first so new input is rejected without
+    /// waiting for an in-flight writer; background teardown then calls this
+    /// barrier before releasing the registry entry.
+    pub fn invalidate_input_generation(&self) {
+        self.revoke_input_generation();
         let _writer = self
             .writer
             .lock()
@@ -1889,6 +1898,23 @@ mod tests {
         assert!(handle.has_unsent_user_input());
         handle.write_input(b"\r").expect("submit");
         assert!(!handle.has_unsent_user_input());
+    }
+
+    #[test]
+    fn generation_revocation_is_non_blocking_while_physical_invalidation_waits() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let writer = handle.writer.lock().expect("hold physical writer");
+
+        handle.revoke_input_generation();
+
+        assert!(
+            Arc::clone(&handle).reserve_input_transaction().is_err(),
+            "logical close must reject new input without waiting for the physical writer"
+        );
+        drop(writer);
+        handle.invalidate_input_generation();
+        assert!(handle.write_input(b"late input").is_err());
     }
 
     #[test]

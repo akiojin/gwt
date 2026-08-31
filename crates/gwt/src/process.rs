@@ -15,6 +15,27 @@
 //! front door's endpoint-slot handling entirely rather than by giving it a
 //! second liveness definition.
 
+fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
+    whoami_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_value.map(str::trim).filter(|value| !value.is_empty()))
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Return the current username, falling back to the platform environment.
+pub fn current_username() -> String {
+    let whoami_value = whoami::username().ok();
+    let env_var = if cfg!(target_os = "windows") {
+        "USERNAME"
+    } else {
+        "USER"
+    };
+    let env_value = std::env::var(env_var).ok();
+    resolve_username(whoami_value.as_deref(), env_value.as_deref())
+}
+
 /// Return `true` when `pid` refers to a live process visible to the
 /// current user on a Unix host.
 ///
@@ -139,6 +160,20 @@ pub fn exact_pty_process_tree_is_alive(child_pid: u32, child_started_at: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn username_resolution_prefers_whoami_then_env_then_unknown() {
+        assert_eq!(
+            resolve_username(Some("  whoami-user  "), Some("  env-user  ")),
+            "whoami-user"
+        );
+        assert_eq!(
+            resolve_username(Some("  "), Some("  env-user  ")),
+            "env-user"
+        );
+        assert_eq!(resolve_username(None, Some(" runner ")), "runner");
+        assert_eq!(resolve_username(None, None), "unknown");
+    }
 
     #[test]
     fn pid_zero_is_never_alive() {

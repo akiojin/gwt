@@ -286,8 +286,55 @@ Hard limits, no exceptions:
   verdict, and never alter acceptance-criteria snapshots. The merge gate
   decides merges on its own and is not yours to influence.
 
+## PM scratch storage
+
+- `$GWT_PM_SCRATCH_DIR` is the only storage location for PM session
+  notes and checklists. Never write scratch files inside the PM worktree.
+  In particular, do not use the legacy paths `tasks/todo.md`,
+  `tasks/pm-notes.md`, or root `pm-notes.md`.
+
+## gwtd execution isolation
+
+Keep the PM turn responsive even when gwtd or its endpoint is slow.
+
+- Run only short read-only gwtd operations directly. Set the execution
+  tool's outer wall-clock deadline to 10 seconds or less; an operation's
+  internal timeout does not replace the outer wall-clock deadline of 10 seconds.
+- Treat `daemon.subscribe` with a timeout above that budget, batch mutations,
+  repeated `pane.read`, and any operation that has already reached the deadline
+  as long-running or hang-risk work. Delegate it to a
+  background job or exactly one in-session sub-agent. A background job owns one
+  bounded operation; it does not start another daemon process.
+- Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
+  from the operation, normalized target and parameters, and logical effect.
+  While that key is pending, do not run or delegate the same logical operation
+  again. Collect the result only from the harness's task-completion notification;
+  do not synchronously poll the task or repeat its gwtd call yourself.
+- After the task-completion notification, reconcile the result against a fresh
+  authoritative snapshot or receipt before acting, reporting success, or
+  clearing the pending operation key. A stale task result is never mutation
+  authority.
+- When a read fails or reaches its deadline, wait at least 5 seconds, then
+  retry that read at most once, through the detached path.
+- Never blindly retry a mutation after a timeout, transport loss, or unverified
+  receipt. First obtain authoritative readback; retry only when it proves the
+  effect is absent, and
+  reuse the same operation ID when the operation supports one. Otherwise keep
+  the outcome unknown and the key pending.
+- A delegated sub-agent inherits the PM boundary: it never edits production
+  code and must not run `workspace.*`, `build.*`, `execution.*`, `verify.*`, or
+  `pr.*` with the root PM session's lifecycle authority.
+- If the harness offers neither background jobs nor sub-agents, skip the long
+  operation and continue the cycle with bounded snapshot polling. Never turn it
+  into a foreground wait.
+
 ## Resident loop (unattended)
 
+- Every resident cycle begins by reading `pm.status` worktree freshness.
+  A state of `stale` or `unknown` is reported immediately and not batched
+  into a digest. Until freshness is `fresh`, the PM must not claim it is
+  observing current code or the current specification; all code-derived
+  claims are degraded.
 - Periodic wakeups (FR-108): if your harness has a native scheduler
   (Claude Code exposes a wakeup-scheduling tool), register a periodic
   wakeup job for your loop interval at the start of residency, and
@@ -296,12 +343,17 @@ Hard limits, no exceptions:
   you on the scheduled monitor tick, so no manual setup is needed;
   treat an injected `[gwt]` wake prompt as the start of a normal cycle.
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
-  `issue_monitor` (and optionally `board`) channels with
+  `issue_monitor`, `errors` (and optionally `board`) channels with
   `params.timeout_seconds` set, so the stream ends and hands control
   back to you. When it returns, reconcile against a fresh
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- Every cycle, call `errors.list` with `params.since` set to the timestamp
+  of the last successful check. Triage every new launch failure, hook
+  failure, operation refusal, and daemon fault. Do not rely on
+  `last_error` or GUI toasts; those surfaces drop earlier errors. Keep
+  the last-check timestamp in your session notes.
 - If the subscribe fails (for example `no daemon registered` — a known
   endpoint-registration gap), do not treat the cycle as failed and do
   not stop early: fall back to polling in the same cycle. Read the
@@ -317,6 +369,29 @@ Hard limits, no exceptions:
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
+## Open PR inventory
+
+Every resident cycle inventories open pull requests. Do not wait to
+be asked, and do not skip the inventory because the Issue Monitor
+queue looks quiet — agent windows disappear, PRs do not.
+
+- Read the inventory with JSON operation `pr.list`. Do not call
+  `gh pr list`.
+- Each row already carries a `lifecycle` class and a `default_action`.
+  Classify nothing yourself; act on those fields.
+- Classes and default actions:
+  - `MERGE-CANDIDATE`: mark Ready if draft, otherwise propose merge
+  - `CONFLICTED`: relaunch the owner to resolve the conflict
+  - `BEHIND`: update the PR branch
+  - `CI-RED`: relaunch the owner to fix CI
+  - `SUPERSEDED`: propose close in the digest
+  - `IN-PROGRESS`: leave it unless `stale` is true
+- A PR is stale when `stale` is true (no `updated_at` bump for 72h).
+  Stale PRs are an escalation: present them to the user in the digest
+  with the recommended action. They are never a silent "no change".
+- `SUPERSEDED` rows and rows with `owner_issue_closed` true are close
+  proposals in the digest. Never auto-close a PR.
+
 ## NeedsHuman
 
 - When `issue.monitor.status` lists an issue under `needs_human`,
@@ -324,6 +399,13 @@ Hard limits, no exceptions:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- A structured autonomous question is different from a generic
+  escalation. Read it with `issue.monitor.questions`, preserve its
+  exact handoff ID and options when presenting it, then apply the
+  user's decision with `issue.monitor.question.answer`. A Board
+  decision or `pm.message.send` is not the answer transport. The
+  Monitor delivers the accepted answer once to the exact live or
+  resumed agent session.
 
 ## Blocked escalations from agents
 
@@ -373,9 +455,11 @@ and urgency.
   an implementation agent launched, a PR opened, a merge landed, a
   `needs_human` escalation, the first detection of a new `waiting`
   episode, and a fatal failure. Collapse a run of milestones into one
-  digest instead of narrating each one.
-- `needs_human` and fatal failures are always presented immediately and
-  are never held for a digest.
+  digest instead of narrating each one. The immediate-reporting
+  conditions below are exceptions to this rule.
+- `needs_human`, fatal failures, and `stale` or `unknown` worktree
+  freshness are always presented immediately and are never held for a
+  digest.
 - The first detection of a new `waiting` episode must be reported
   immediately under the one-report-per-episode rule above and is never
   held for a digest. Continued observations of that episode stay
@@ -457,6 +541,29 @@ mod tests {
         unwrapped(SKILL_BODY_EN)
     }
 
+    fn markdown_bullets(section: &str) -> Vec<String> {
+        let mut bullets = Vec::new();
+        let mut current = None::<String>;
+        for line in section.lines() {
+            if let Some(first_line) = line.strip_prefix("- ") {
+                if let Some(previous) = current.replace(first_line.to_string()) {
+                    bullets.push(unwrapped(&previous));
+                }
+            } else if line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+                if let Some(current) = current.as_mut() {
+                    current.push(' ');
+                    current.push_str(line.trim());
+                }
+            } else if let Some(previous) = current.take() {
+                bullets.push(unwrapped(&previous));
+            }
+        }
+        if let Some(last) = current {
+            bullets.push(unwrapped(&last));
+        }
+        bullets
+    }
+
     /// Canonical phrases the PM contract must always carry (FR anchors).
     fn required_phrases() -> &'static [&'static str] {
         &[
@@ -482,6 +589,10 @@ mod tests {
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
+            "`errors.list`",
+            "`errors`",
+            "Do not rely on",
+            "`last_error`",
             // FR-109: subscribe failure degrades to same-cycle polling.
             "fall back to polling in the same cycle",
             "degraded (FR-109)",
@@ -565,8 +676,44 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // Issue #3776: a slow gwtd process cannot own the PM turn.
+            "## gwtd execution isolation",
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            // Issue #3781: open PR inventory is a standing resident-cycle duty.
+            "`pr.list`",
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+            "Never auto-close a PR",
+            "no `updated_at` bump for 72h",
+            // T248: session notes live outside the disposable PM worktree.
+            "`$GWT_PM_SCRATCH_DIR` is the only storage location for PM session notes and checklists",
+            "Never write scratch files inside the PM worktree",
+            "`tasks/todo.md`",
+            "`tasks/pm-notes.md`",
+            "root `pm-notes.md`",
+            // T248: every resident cycle is gated by PM worktree freshness.
+            "Every resident cycle begins by reading `pm.status` worktree freshness",
+            "`stale` or `unknown` is reported immediately",
+            "not batched into a digest",
+            "Until freshness is `fresh`",
+            "must not claim it is observing current code or the current specification",
+            "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            "`issue.monitor.questions`",
+            "`issue.monitor.question.answer`",
             // FR-015: the PM must be able to account for its own ordering.
             "explain the current order",
             // FR-016: PM ordering beats a GUI reorder (後勝ち).
@@ -607,6 +754,110 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
+    /// the resident PM's conversational turn. The detailed contract belongs in
+    /// one section so the compact wake/Stop reminder cannot become an
+    /// incomplete second policy.
+    #[test]
+    fn contract_isolates_gwtd_execution_from_the_pm_turn() {
+        let execution = SKILL_BODY_EN
+            .split_once("## gwtd execution isolation")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("gwtd execution isolation section must be present");
+
+        for phrase in [
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "`daemon.subscribe`",
+            "batch mutations",
+            "repeated `pane.read`",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "retry that read at most once",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            "`workspace.*`",
+            "`build.*`",
+            "`execution.*`",
+            "`verify.*`",
+            "`pr.*`",
+        ] {
+            assert!(
+                execution.contains(phrase),
+                "gwtd execution isolation contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3781 AC-1/AC-3: PR lifecycle is a standing PM duty, not a
+    /// discretionary `gh pr list` glance. The classes and the no-auto-close
+    /// rule have to live in the contract so a quiet queue cannot skip them.
+    #[test]
+    fn contract_inventories_open_prs_every_resident_cycle() {
+        let body = body();
+        assert!(body.contains("## Open PR inventory"));
+        assert!(body.contains("`pr.list`"));
+        assert!(body.contains("Do not call `gh pr list`"));
+        assert!(body.contains("Classify nothing yourself"));
+        assert!(body.contains("Never auto-close a PR"));
+        assert!(body.contains("no `updated_at` bump for 72h"));
+        for class in [
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+        ] {
+            assert!(body.contains(class), "missing class {class}");
+        }
+    }
+
+    #[test]
+    fn reporting_cadence_reports_non_fresh_worktrees_immediately() {
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence section must be followed by another section");
+        let bullets = markdown_bullets(reporting);
+        assert!(
+            bullets.iter().any(|bullet| {
+                bullet.contains("stale")
+                    && bullet.contains("unknown")
+                    && bullet.contains("immediately")
+                    && (bullet.contains("never held for a digest")
+                        || bullet.contains("not batched into a digest"))
+            }),
+            "one Reporting cadence bullet must relate stale/unknown freshness to immediate, non-digest reporting; bullets: {bullets:?}"
+        );
+    }
+
+    #[test]
+    fn reporting_cadence_milestone_rule_acknowledges_freshness_exception() {
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence section must be followed by another section");
+        let milestone_rule = markdown_bullets(reporting)
+            .into_iter()
+            .find(|bullet| bullet.contains("only at milestones"))
+            .expect("Reporting cadence must retain its milestone reporting rule");
+        let points_to_exception =
+            milestone_rule.contains("except") && milestone_rule.contains("below");
+        let names_freshness_exception =
+            milestone_rule.contains("stale") && milestone_rule.contains("unknown");
+        assert!(
+            points_to_exception || names_freshness_exception,
+            "the milestone rule must acknowledge its stale/unknown freshness exception: {milestone_rule}"
+        );
+    }
+
     /// Issue #3632 FR-2/AC-4 (user ruling 2026-08-17): a cycle that found
     /// nothing to report ends without saying anything. The cadence already
     /// described milestone-only reporting, but never stated the quiet case, so
@@ -639,6 +890,19 @@ mod tests {
             body.contains("silence is about the report, not about the cycle"),
             "省略してよいのは出力であって周回ではない（FR-3）"
         );
+    }
+
+    #[test]
+    fn markdown_bullet_parser_does_not_absorb_unindented_paragraphs() {
+        let fixture = "- worktree freshness is stale or unknown\n\
+This paragraph says it is reported immediately and never held for a digest.\n\
+- another bullet";
+        let bullets = markdown_bullets(fixture);
+        assert_eq!(
+            bullets,
+            ["worktree freshness is stale or unknown", "another bullet"]
+        );
+        assert!(bullets.iter().all(|bullet| !bullet.contains("immediately")));
     }
 
     #[test]

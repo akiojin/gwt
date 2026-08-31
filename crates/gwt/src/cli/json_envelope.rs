@@ -1,6 +1,4 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
-use gwt_core::paths::ProjectScopeSource;
-use gwt_core::repo_hash::RepoIdentitySource;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::str::FromStr;
@@ -74,7 +72,10 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
-                _ => super::board::auto_file_operation_refusal(env, &operation, &output),
+                _ => {
+                    report_operation_refusal(env, &operation, &output);
+                    super::board::auto_file_operation_refusal(env, &operation, &output);
+                }
             }
             code
         }
@@ -97,6 +98,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             // depending on the agent noticing it is stuck. Answering the caller
             // comes first — the escalation must never delay or replace the
             // operation's own reply.
+            report_operation_refusal(env, &operation, &message);
             super::board::auto_file_operation_refusal(env, &operation, &message);
             1
         }
@@ -117,6 +119,22 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
 /// Absent when the operation never resolved a project store — including when it
 /// failed before doing so. Absence therefore means "no store was touched", not
 /// "the store is fine".
+fn report_operation_refusal<E: CliEnv>(env: &E, operation: &str, error: &str) {
+    let session_id = std::env::var(GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    crate::error_report::report_error(
+        gwt_core::error_ledger::ErrorKind::OperationRefusal,
+        format!("{operation}: {error}"),
+        gwt_core::error_ledger::ErrorTarget {
+            session_id,
+            project_root: Some(env.repo_path().display().to_string()),
+            ..gwt_core::error_ledger::ErrorTarget::default()
+        },
+    );
+}
+
 fn attach_project_store(payload: &mut Value) {
     let Some(store) = gwt_core::paths::operation_project_store() else {
         return;
@@ -124,43 +142,10 @@ fn attach_project_store(payload: &mut Value) {
     let Some(object) = payload.as_object_mut() else {
         return;
     };
-    // Windows canonicalization yields `\\?\` verbatim paths. Reporting those
-    // would hand the caller a path it cannot paste back into a shell.
-    let readable = |path: &std::path::Path| {
-        gwt_core::paths::normalize_windows_child_process_path_text(&path.display().to_string())
-    };
-    let mut reported = serde_json::json!({
-        "project_root": readable(&store.project_root),
-        "hash": store.scope.hash.as_str(),
-        "source": store.scope.source.as_str(),
-        "identity_resolved": store.scope.source.identity_resolved(),
-        "store_path": readable(&store.store_path),
-    });
-    match &store.scope.source {
-        // The bare repository that lent the layout root its identity. Without
-        // it, "nested_bare_repository" names the mechanism but not the repo.
-        ProjectScopeSource::Repository(RepoIdentitySource::NestedBareRepository(path)) => {
-            reported["repository_path"] = Value::from(readable(path));
-        }
-        // Every rejected candidate, so a human can see *why* no identity was
-        // chosen rather than only that none was.
-        ProjectScopeSource::AmbiguousNestedBareRepositories(candidates) => {
-            reported["candidates"] = Value::Array(
-                candidates
-                    .iter()
-                    .map(|candidate| {
-                        serde_json::json!({
-                            "path": readable(&candidate.path),
-                            "normalized_origin": candidate.normalized_origin,
-                            "hash": candidate.hash.as_str(),
-                        })
-                    })
-                    .collect(),
-            );
-        }
-        ProjectScopeSource::Repository(RepoIdentitySource::Origin)
-        | ProjectScopeSource::PathFallback => {}
-    }
+    let reported = serde_json::to_value(
+        crate::runtime_daemon_events::ProjectStoreIdentity::from_operation_store(&store),
+    )
+    .expect("project store identity serializes");
     object.insert("project_store".to_string(), reported);
 }
 
@@ -393,6 +378,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.list" => CliCommand::Pr(PrCommand::List),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -642,6 +628,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?,
         }),
         "search" => search(params)?,
+        "errors.list" => errors_list(params)?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
@@ -1016,10 +1003,16 @@ fn memory_add(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
 }
 
 fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(
+        params,
+        &["channels", "project_root", "timeout_seconds"],
+        "daemon.subscribe",
+    )?;
     let channels = optional_string_vec(params, "channels")?;
     if channels.is_empty() {
         return Err(CliParseError::MissingFlag("channels"));
     }
+    let project_root = optional_path(params, "project_root")?;
     let timeout_seconds = optional_u64(params, "timeout_seconds")?;
     if timeout_seconds == Some(0) {
         return Err(CliParseError::InvalidValue {
@@ -1029,6 +1022,7 @@ fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
     }
     Ok(CliCommand::Daemon(DaemonCommand::Subscribe {
         channels,
+        project_root,
         timeout_seconds,
     }))
 }
@@ -1152,6 +1146,17 @@ fn skill_state(
             reason: optional_string(params, "reason")?,
         }),
     }
+}
+
+fn errors_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["since"], "errors.list")?;
+    let since = optional_string(params, "since")?;
+    if let Some(raw) = since.as_deref() {
+        super::diagnostics::errors::parse_since(raw)?;
+    }
+    Ok(CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList {
+        since,
+    }))
 }
 
 fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1527,9 +1532,9 @@ fn optional_json_array(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, HookCommand, IndexCommand,
-        IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
-        WorkflowCommand, WorkspaceCommand,
+        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
+        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
+        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
@@ -1571,6 +1576,7 @@ mod tests {
     #[test]
     fn operation_failures_answer_with_an_ok_false_envelope() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
         let mut env = TestEnv::new(temp.path().to_path_buf());
         env.stdin = envelope("issue.view", json!({ "number": 4242 }));
 
@@ -1592,6 +1598,14 @@ mod tests {
         assert!(
             stderr.contains("gwtd issue.view:"),
             "the human-readable stderr line must stay: {stderr}"
+        );
+        let listed = gwt_core::error_ledger::list_since(None).expect("error ledger");
+        assert!(
+            listed.iter().any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::OperationRefusal
+                    && row.message.contains("issue.view")
+            }),
+            "operation refusal must land in the error ledger: {listed:?}"
         );
     }
 
@@ -2793,6 +2807,10 @@ mod tests {
             CliCommand::Pr(PrCommand::Current)
         ));
         assert!(matches!(
+            ok("pr.list", json!({})),
+            CliCommand::Pr(PrCommand::List)
+        ));
+        assert!(matches!(
             ok(
                 "pr.create",
                 json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": true})
@@ -2954,6 +2972,12 @@ mod tests {
                 ..
             })
         ));
+        match ok("daemon.subscribe", json!({"channels": ["errors"]})) {
+            CliCommand::Daemon(DaemonCommand::Subscribe { channels, .. }) => {
+                assert_eq!(channels, vec!["errors".to_string()]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
         // Zero would mean "return before reading anything", which is never
         // what a caller wants and silently degrades the loop to a busy poll.
         assert!(err(
@@ -2962,6 +2986,60 @@ mod tests {
         )
         .to_string()
         .contains("timeout_seconds"));
+    }
+
+    /// Issue #3596: an explicit target must survive JSON parsing so runtime
+    /// daemon discovery does not silently fall back to the gwtd process cwd.
+    #[test]
+    fn daemon_subscribe_preserves_explicit_project_root_in_command() {
+        let command = ok(
+            "daemon.subscribe",
+            json!({
+                "channels": ["issue_monitor"],
+                "project_root": "/tmp/gwt-issue-3596-explicit-root"
+            }),
+        );
+
+        match command {
+            CliCommand::Daemon(DaemonCommand::Subscribe { project_root, .. }) => assert_eq!(
+                project_root.as_deref(),
+                Some(std::path::Path::new("/tmp/gwt-issue-3596-explicit-root"))
+            ),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// Issue #3596: omitting the optional target preserves the legacy cwd
+    /// resolution path by transporting `None` explicitly.
+    #[test]
+    fn daemon_subscribe_defaults_project_root_to_none() {
+        let command = ok("daemon.subscribe", json!({"channels": ["issue_monitor"]}));
+
+        match command {
+            CliCommand::Daemon(DaemonCommand::Subscribe { project_root, .. }) => {
+                assert_eq!(project_root, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// Issue #3596: misspelling a scope parameter must fail closed instead of
+    /// subscribing to whichever project happens to own the process cwd.
+    #[test]
+    fn daemon_subscribe_rejects_unknown_params() {
+        match err(
+            "daemon.subscribe",
+            json!({
+                "channels": ["issue_monitor"],
+                "project_rooot": "/tmp/gwt-issue-3596-typo"
+            }),
+        ) {
+            CliParseError::InvalidJson(message) => assert!(
+                message.contains("daemon.subscribe does not accept the parameter project_rooot"),
+                "unexpected error message: {message}"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -3229,6 +3307,27 @@ mod tests {
             err("search", json!({"query": "q", "match_mode": "fuzzy"})),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn errors_list_parses_optional_since() {
+        assert!(matches!(
+            ok("errors.list", json!({})),
+            CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList { since: None })
+        ));
+        match ok("errors.list", json!({"since": "2026-08-30T00:00:00Z"})) {
+            CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList { since }) => {
+                assert_eq!(since.as_deref(), Some("2026-08-30T00:00:00Z"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match err("errors.list", json!({"since": "yesterday"})) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "since");
+                assert!(reason.contains("RFC3339"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

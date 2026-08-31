@@ -18,7 +18,7 @@
 #   GWT_PLAYWRIGHT_VERSION          pinned version (default: scripts/playwright-version.txt)
 #   GWT_PLAYWRIGHT_CLI              Playwright CLI command (default: npx --yes playwright@<version>)
 #   GWT_PLAYWRIGHT_SYSTEM_DEPS      auto | always | never (default: auto)
-#   GWT_PLAYWRIGHT_INSTALL_TIMEOUT  seconds allowed per attempt (default: 150)
+#   GWT_PLAYWRIGHT_INSTALL_TIMEOUT  seconds allowed per attempt (default: 300)
 #   GWT_PLAYWRIGHT_INSTALL_RETRIES  attempts per phase (default: 3)
 #   GWT_PLAYWRIGHT_RETRY_DELAY      seconds between attempts (default: 30)
 #   GWT_PLAYWRIGHT_APT_CONF_DIR     apt drop-in directory (default: /etc/apt/apt.conf.d)
@@ -39,7 +39,10 @@ esac
 
 PLAYWRIGHT_VERSION="${GWT_PLAYWRIGHT_VERSION:-$(tr -d '[:space:]' <"${VERSION_FILE}")}"
 SYSTEM_DEPS_MODE="${GWT_PLAYWRIGHT_SYSTEM_DEPS:-auto}"
-TIMEOUT_SECONDS="${GWT_PLAYWRIGHT_INSTALL_TIMEOUT:-150}"
+# 300s, not 150s: two consecutive CI runs saw a healthy (non-stalled) apt
+# transaction exceed 150s, so the tighter budget converted slow mirrors into
+# guaranteed first-attempt timeouts.
+TIMEOUT_SECONDS="${GWT_PLAYWRIGHT_INSTALL_TIMEOUT:-300}"
 RETRIES="${GWT_PLAYWRIGHT_INSTALL_RETRIES:-3}"
 RETRY_DELAY="${GWT_PLAYWRIGHT_RETRY_DELAY:-30}"
 APT_CONF_DIR="${GWT_PLAYWRIGHT_APT_CONF_DIR:-/etc/apt/apt.conf.d}"
@@ -176,6 +179,13 @@ harden_apt() {
 
   local conf="${APT_CONF_DIR}/99-gwt-playwright-acquire"
   local body
+  # DPkg::Lock::Timeout: a timed-out attempt cannot kill the apt-get that
+  # `playwright install-deps` started through sudo (the unprivileged timeout
+  # gets EPERM against the root process), so that apt-get survives as an
+  # orphan holding /var/lib/dpkg/lock-frontend. The acquire timeouts above
+  # bound how long the orphan can live; the lock timeout makes the next
+  # attempt wait for it to finish instead of failing instantly with
+  # "Could not get lock", which turned one timeout into 3/3 failed attempts.
   body="$(
     cat <<'CONF'
 Acquire::Retries "3";

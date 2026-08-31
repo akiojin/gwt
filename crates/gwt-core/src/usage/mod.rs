@@ -11,6 +11,7 @@
 pub mod claude;
 pub mod codex;
 pub mod consumption;
+pub mod grok;
 pub mod limit_notice;
 pub mod model_context;
 pub mod state;
