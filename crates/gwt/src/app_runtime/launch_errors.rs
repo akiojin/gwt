@@ -221,6 +221,21 @@ impl AppRuntime {
             error = %sanitized_error,
             "launch wizard action failed"
         );
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            sanitized_error,
+            gwt_core::error_ledger::ErrorTarget {
+                issue: view
+                    .linked_issue_number
+                    .or(session.issue_monitor_launch_issue_number),
+                window_id: Some(session.wizard_id.clone()),
+                session_id: session
+                    .manual_holder_intent
+                    .as_ref()
+                    .map(|intent| intent.predecessor.session_id.clone()),
+                project_root: None,
+            },
+        );
     }
 
     fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
@@ -251,6 +266,22 @@ impl AppRuntime {
             branch = %branch_name,
             error = %sanitized_error,
             "window launch failed"
+        );
+        let project_root = self.window_lookup.get(window_id).and_then(|address| {
+            self.tabs
+                .iter()
+                .find(|tab| tab.id == address.tab_id)
+                .map(|tab| tab.project_root.display().to_string())
+        });
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            sanitized_error,
+            gwt_core::error_ledger::ErrorTarget {
+                window_id: Some(window_id.to_string()),
+                session_id: session.map(|session| session.session_id.clone()),
+                project_root,
+                issue: None,
+            },
         );
     }
 

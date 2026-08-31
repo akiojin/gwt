@@ -90,6 +90,7 @@ fn print_help() {
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
+    println!("  errors      List host-wide persistent error ledger rows");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -116,6 +117,7 @@ fn family_help(family: &str) -> Option<String> {
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
+        "errors" => Some(format_errors_help()),
         _ => None,
     }
 }
@@ -138,6 +140,29 @@ fn format_workspace_help() -> String {
         "  purpose                                Short Agent/window title purpose",
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_errors_help() -> String {
+    [
+        "errors.* — Host-wide persistent error ledger via JSON envelope.",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"errors.list\",\"params\":{\"since\":\"2026-08-30T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  errors.list                             List errors recorded at or after `since`",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 timestamp; omitted lists all",
+        "",
+        "Notes:",
+        "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
+        "  - Live rows are also published on the daemon `errors` channel.",
         "",
     ]
     .join("\n")
@@ -898,6 +923,14 @@ mod tests {
     #[test]
     fn family_help_resolves_search() {
         assert!(family_help("search").is_some());
+    }
+
+    #[test]
+    fn family_help_resolves_errors_and_documents_list() {
+        let help = family_help("errors").expect("errors help");
+        assert!(help.contains("errors.list"));
+        assert!(help.contains("since"));
+        assert!(help.contains("errors"));
     }
 
     #[test]
