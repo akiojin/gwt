@@ -411,6 +411,8 @@ std::thread_local! {
         const { AgentDispatchTestHook::new(None) };
     static AGENT_LEASED_MUTATION_TEST_HOOK: AgentDispatchTestHook =
         const { AgentDispatchTestHook::new(None) };
+    static AGENT_PEER_CLOSE_AFTER_ACCEPTANCE_TEST_HOOK: AgentDispatchTestHook =
+        const { AgentDispatchTestHook::new(None) };
 }
 
 #[cfg(test)]
@@ -423,6 +425,13 @@ fn set_agent_after_durable_check_test_hook(hook: impl FnOnce() + 'static) {
 #[cfg(test)]
 fn set_agent_leased_mutation_test_hook(hook: impl FnOnce() + 'static) {
     AGENT_LEASED_MUTATION_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+#[cfg(test)]
+fn set_agent_peer_close_after_acceptance_test_hook(hook: impl FnOnce() + 'static) {
+    AGENT_PEER_CLOSE_AFTER_ACCEPTANCE_TEST_HOOK.with(|slot| {
         assert!(slot.replace(Some(Box::new(hook))).is_none());
     });
 }
@@ -1065,6 +1074,9 @@ pub struct AppRuntime {
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
     pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    /// Issue #3702: one coalesced wake waiting for the PM composer to submit
+    /// or clear. Keyed by the live PM window id.
+    pub(crate) pending_pm_wakes: HashMap<String, pm::PmWakeDecision>,
     /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
     /// runs once the frontend reports canvas bounds (same deferral rule as
     /// startup auto-resume — agent panes never spawn before the canvas is
@@ -2043,7 +2055,11 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                                     })
                             });
                         local_claim_proposal = Some((
-                            format!("{}:{}", whoami::username(), std::process::id()),
+                            format!(
+                                "{}:{}",
+                                gwt::process::current_username(),
+                                std::process::id()
+                            ),
                             completed_issues,
                         ));
                     }
@@ -2253,6 +2269,7 @@ impl AppRuntime {
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
@@ -3894,8 +3911,8 @@ impl AppRuntime {
                             // quota block is not silently downgraded to a
                             // terminal agent failure when the daemon is down.
                             Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
+                                provider,
                                 resets_at,
-                                ..
                             }) => {
                                 let issue_number = issue_number_hint
                                     .or_else(|| monitor.launched_window_issue(window_id));
@@ -3905,6 +3922,7 @@ impl AppRuntime {
                                 match monitor.try_hold_provider_usage_limit(
                                     issue_number,
                                     window_id,
+                                    provider,
                                     message.to_string(),
                                     resets_at.as_deref(),
                                     &now,
@@ -4162,6 +4180,7 @@ impl AppRuntime {
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
     ) -> WindowCloseMonitorResult {
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let window_id = target.window_id.as_deref().unwrap_or_default();
 
         #[cfg(unix)]
@@ -5029,7 +5048,11 @@ impl AppRuntime {
                                 })
                                 .collect();
                             local_claim_proposal = Some((
-                                format!("{}:{}", whoami::username(), std::process::id()),
+                                format!(
+                                    "{}:{}",
+                                    gwt::process::current_username(),
+                                    std::process::id()
+                                ),
                                 completed_issues,
                             ));
                         }
@@ -6579,6 +6602,36 @@ impl AppRuntime {
                         ),
                     },
                 )])
+            }
+            AgentFrontendRequest::CloseWindow {
+                id,
+                request_id: None,
+                responder: None,
+            } => {
+                // Issue #3816: peer close may fence the target capability in
+                // `queue_window_close_finalizer`. Accept the caller generation
+                // first, then release the registry read lock before target
+                // teardown needs the same registry's write lock.
+                let Some(principal) = issuer.accept_current_grant(&grant) else {
+                    return AgentFrontendDispatchOutcome::StaleCapability;
+                };
+                #[cfg(test)]
+                run_agent_dispatch_test_hook(&AGENT_PEER_CLOSE_AFTER_ACCEPTANCE_TEST_HOOK);
+                tracing::debug!(
+                    target: "gwt.pane.teardown",
+                    stage = "peer_close_grant_accepted",
+                    window_id = %id,
+                    "accepted peer pane close before target capability handoff"
+                );
+                AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
+                    client_id,
+                    principal,
+                    AgentFrontendRequest::CloseWindow {
+                        id,
+                        request_id: None,
+                        responder: None,
+                    },
+                ))
             }
             AgentFrontendRequest::PmSendInput {
                 operation_id,

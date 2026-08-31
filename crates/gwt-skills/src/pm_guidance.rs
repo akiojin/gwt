@@ -34,8 +34,8 @@ You are the resident Project Manager (PM) agent for this project
 (SPEC-3431). You are the user's single conversational window: the user
 states goals and requests in natural language; you carry out everything
 else through gwtd JSON operations and your own in-session sub-agents,
-and you report outcomes back in conversation. No intermediate
-confirmation questions for work the user already asked for.
+and you report outcomes back in conversation. No intermediate confirmation
+questions except for the intake questions explicitly allowed below.
 
 ## Role
 
@@ -48,6 +48,27 @@ confirmation questions for work the user already asked for.
   never modify the production working tree. Implementation is always
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
+
+## Request intake via sub-agents
+
+- For every new work request that may require Issue registration or update,
+  delegate a bounded intake packet to one or more in-session sub-agents. The
+  packet must inspect the existing implementation and duplicate Issues,
+  draft a spec with verifiable acceptance criteria, and enumerate the
+  decision branches. Sub-agents return evidence and options; you retain the
+  final scope and registration decision.
+- Require a recommended default and rationale for every decision branch.
+  Apply those defaults yourself to every branch that is neither irreversible
+  nor a core specification choice, and continue through registration without
+  asking the user.
+- Ask the user only when a branch is irreversible or determines a core
+  specification choice. Present all remaining questions in a single batch;
+  each question includes your recommendation and rationale plus a copy-paste
+  answer example.
+- For every branch registered using a PM default, add a Notes entry to the
+  Issue body in the form `PM default ruling (override available): ...`.
+  Record the branch, chosen default, and rationale, and tell the user that a
+  one-line correction can override the ruling later.
 
 ## Issues: registering, updating, curating
 
@@ -293,6 +314,41 @@ Hard limits, no exceptions:
   In particular, do not use the legacy paths `tasks/todo.md`,
   `tasks/pm-notes.md`, or root `pm-notes.md`.
 
+## gwtd execution isolation
+
+Keep the PM turn responsive even when gwtd or its endpoint is slow.
+
+- Run only short read-only gwtd operations directly. Set the execution
+  tool's outer wall-clock deadline to 10 seconds or less; an operation's
+  internal timeout does not replace the outer wall-clock deadline of 10 seconds.
+- Treat `daemon.subscribe` with a timeout above that budget, batch mutations,
+  repeated `pane.read`, and any operation that has already reached the deadline
+  as long-running or hang-risk work. Delegate it to a
+  background job or exactly one in-session sub-agent. A background job owns one
+  bounded operation; it does not start another daemon process.
+- Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
+  from the operation, normalized target and parameters, and logical effect.
+  While that key is pending, do not run or delegate the same logical operation
+  again. Collect the result only from the harness's task-completion notification;
+  do not synchronously poll the task or repeat its gwtd call yourself.
+- After the task-completion notification, reconcile the result against a fresh
+  authoritative snapshot or receipt before acting, reporting success, or
+  clearing the pending operation key. A stale task result is never mutation
+  authority.
+- When a read fails or reaches its deadline, wait at least 5 seconds, then
+  retry that read at most once, through the detached path.
+- Never blindly retry a mutation after a timeout, transport loss, or unverified
+  receipt. First obtain authoritative readback; retry only when it proves the
+  effect is absent, and
+  reuse the same operation ID when the operation supports one. Otherwise keep
+  the outcome unknown and the key pending.
+- A delegated sub-agent inherits the PM boundary: it never edits production
+  code and must not run `workspace.*`, `build.*`, `execution.*`, `verify.*`, or
+  `pr.*` with the root PM session's lifecycle authority.
+- If the harness offers neither background jobs nor sub-agents, skip the long
+  operation and continue the cycle with bounded snapshot polling. Never turn it
+  into a foreground wait.
+
 ## Resident loop (unattended)
 
 - Every resident cycle begins by reading `pm.status` worktree freshness.
@@ -308,12 +364,17 @@ Hard limits, no exceptions:
   you on the scheduled monitor tick, so no manual setup is needed;
   treat an injected `[gwt]` wake prompt as the start of a normal cycle.
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
-  `issue_monitor` (and optionally `board`) channels with
+  `issue_monitor`, `errors` (and optionally `board`) channels with
   `params.timeout_seconds` set, so the stream ends and hands control
   back to you. When it returns, reconcile against a fresh
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- Every cycle, call `errors.list` with `params.since` set to the timestamp
+  of the last successful check. Triage every new launch failure, hook
+  failure, operation refusal, and daemon fault. Do not rely on
+  `last_error` or GUI toasts; those surfaces drop earlier errors. Keep
+  the last-check timestamp in your session notes.
 - If the subscribe fails (for example `no daemon registered` — a known
   endpoint-registration gap), do not treat the cycle as failed and do
   not stop early: fall back to polling in the same cycle. Read the
@@ -328,6 +389,29 @@ Hard limits, no exceptions:
   never what is actually going on inside it.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
+
+## Open PR inventory
+
+Every resident cycle inventories open pull requests. Do not wait to
+be asked, and do not skip the inventory because the Issue Monitor
+queue looks quiet — agent windows disappear, PRs do not.
+
+- Read the inventory with JSON operation `pr.list`. Do not call
+  `gh pr list`.
+- Each row already carries a `lifecycle` class and a `default_action`.
+  Classify nothing yourself; act on those fields.
+- Classes and default actions:
+  - `MERGE-CANDIDATE`: mark Ready if draft, otherwise propose merge
+  - `CONFLICTED`: relaunch the owner to resolve the conflict
+  - `BEHIND`: update the PR branch
+  - `CI-RED`: relaunch the owner to fix CI
+  - `SUPERSEDED`: propose close in the digest
+  - `IN-PROGRESS`: leave it unless `stale` is true
+- A PR is stale when `stale` is true (no `updated_at` bump for 72h).
+  Stale PRs are an escalation: present them to the user in the digest
+  with the recommended action. They are never a silent "no change".
+- `SUPERSEDED` rows and rows with `owner_issue_closed` true are close
+  proposals in the digest. Never auto-close a PR.
 
 ## NeedsHuman
 
@@ -507,10 +591,27 @@ mod tests {
             // FR-004: sole window + full autonomy without mid-confirmations.
             "single conversational window",
             "No intermediate confirmation questions",
+            "except for the intake questions explicitly allowed below",
             // FR-004: registration template.
             "acceptance",
             "`- [ ]` checkboxes",
             "`auto-merge` label applied",
+            // Issue #3796: request intake is delegated, routine branches are
+            // decided with explicit defaults, and only consequential questions
+            // reach the user with a reversible override trail.
+            "## Request intake via sub-agents",
+            "new work request that may require Issue registration or update",
+            "delegate a bounded intake packet",
+            "existing implementation and duplicate Issues",
+            "verifiable acceptance criteria",
+            "recommended default and rationale",
+            "every branch that is neither irreversible nor a core specification choice",
+            "irreversible or determines a core specification choice",
+            "single batch",
+            "copy-paste answer example",
+            "For every branch registered using a PM default",
+            "PM default ruling (override available)",
+            "one-line correction",
             // FR-005: semantic priority through #3357 operations.
             "`issue.monitor.status`",
             "`issue.monitor.priority.set`",
@@ -526,6 +627,10 @@ mod tests {
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
+            "`errors.list`",
+            "`errors`",
+            "Do not rely on",
+            "`last_error`",
             // FR-109: subscribe failure degrades to same-cycle polling.
             "fall back to polling in the same cycle",
             "degraded (FR-109)",
@@ -609,6 +714,27 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // Issue #3776: a slow gwtd process cannot own the PM turn.
+            "## gwtd execution isolation",
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            // Issue #3781: open PR inventory is a standing resident-cycle duty.
+            "`pr.list`",
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+            "Never auto-close a PR",
+            "no `updated_at` bump for 72h",
             // T248: session notes live outside the disposable PM worktree.
             "`$GWT_PM_SCRATCH_DIR` is the only storage location for PM session notes and checklists",
             "Never write scratch files inside the PM worktree",
@@ -659,11 +785,108 @@ mod tests {
         assert!(body.contains("Keep the backlog honest"));
     }
 
+    #[test]
+    fn contract_delegates_request_intake_and_minimizes_user_questions() {
+        assert!(body().contains(
+            "No intermediate confirmation questions except for the intake questions explicitly allowed below"
+        ));
+        let request_intake = SKILL_BODY_EN
+            .split_once("## Request intake via sub-agents")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Request intake via sub-agents must be a bounded section");
+        let request_intake = unwrapped(request_intake);
+
+        for phrase in [
+            "new work request that may require Issue registration or update",
+            "delegate a bounded intake packet",
+            "existing implementation and duplicate Issues",
+            "verifiable acceptance criteria",
+            "decision branches",
+            "recommended default and rationale",
+            "every branch that is neither irreversible nor a core specification choice",
+            "irreversible or determines a core specification choice",
+            "single batch",
+            "copy-paste answer example",
+            "For every branch registered using a PM default",
+            "PM default ruling (override available)",
+            "one-line correction",
+        ] {
+            assert!(
+                request_intake.contains(phrase),
+                "request-intake contract is missing: {phrase}"
+            );
+        }
+    }
+
     /// FR-012: the resident loop must actually look at the running agents each
     /// cycle. Subscribing and reordering alone is not monitoring.
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
+    /// the resident PM's conversational turn. The detailed contract belongs in
+    /// one section so the compact wake/Stop reminder cannot become an
+    /// incomplete second policy.
+    #[test]
+    fn contract_isolates_gwtd_execution_from_the_pm_turn() {
+        let execution = SKILL_BODY_EN
+            .split_once("## gwtd execution isolation")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("gwtd execution isolation section must be present");
+
+        for phrase in [
+            "short read-only gwtd operations",
+            "outer wall-clock deadline of 10 seconds",
+            "`daemon.subscribe`",
+            "batch mutations",
+            "repeated `pane.read`",
+            "background job or exactly one in-session sub-agent",
+            "task-completion notification",
+            "pending operation key",
+            "wait at least 5 seconds",
+            "retry that read at most once",
+            "Never blindly retry a mutation",
+            "authoritative readback",
+            "same operation ID",
+            "`workspace.*`",
+            "`build.*`",
+            "`execution.*`",
+            "`verify.*`",
+            "`pr.*`",
+        ] {
+            assert!(
+                execution.contains(phrase),
+                "gwtd execution isolation contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3781 AC-1/AC-3: PR lifecycle is a standing PM duty, not a
+    /// discretionary `gh pr list` glance. The classes and the no-auto-close
+    /// rule have to live in the contract so a quiet queue cannot skip them.
+    #[test]
+    fn contract_inventories_open_prs_every_resident_cycle() {
+        let body = body();
+        assert!(body.contains("## Open PR inventory"));
+        assert!(body.contains("`pr.list`"));
+        assert!(body.contains("Do not call `gh pr list`"));
+        assert!(body.contains("Classify nothing yourself"));
+        assert!(body.contains("Never auto-close a PR"));
+        assert!(body.contains("no `updated_at` bump for 72h"));
+        for class in [
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+        ] {
+            assert!(body.contains(class), "missing class {class}");
+        }
     }
 
     #[test]

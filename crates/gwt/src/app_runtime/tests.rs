@@ -10,7 +10,15 @@ use std::{
 };
 
 use fs2::FileExt;
+use futures_util::{SinkExt, Stream, StreamExt};
 use tempfile::tempdir;
+use tokio::runtime::Runtime as TokioRuntime;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest, Error as WebSocketError, Message as WebSocketMessage,
+    },
+};
 
 use base64::Engine;
 use chrono::{TimeZone, Utc};
@@ -3588,6 +3596,7 @@ fn sample_runtime_with_events(
         pending_pm_closes: HashMap::new(),
         pm_sessions: HashMap::new(),
         pm_wake_seen: HashMap::new(),
+        pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
@@ -5280,6 +5289,639 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+/// Issue #3816: the Tao dispatch path must release the caller capability
+/// registry read lock before close teardown fences the target capability.
+/// Otherwise `pane.close` self-deadlocks before its acknowledgement and every
+/// later request on the same event loop stalls behind it.
+#[test]
+fn current_peer_pane_close_releases_caller_grant_lock_before_target_handoff() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-target",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let target_session_id = "session-close-target";
+    assert!(tab
+        .workspace
+        .set_session_id("agent-target", Some(target_session_id.to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-target");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &project,
+        target_session_id,
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let issuer = install_manual_holder_capability(&mut runtime, &project, &window_id, &holder);
+    let stale_caller = issuer
+        .issue(&project, "session-close-caller")
+        .expect("issue stale peer caller capability");
+    let stale_caller_grant = issuer
+        .grant_for_test(&stale_caller.token)
+        .expect("authenticate stale peer caller capability");
+    let caller = issuer
+        .issue(&project, "session-close-caller")
+        .expect("issue peer caller capability");
+    let caller_grant = issuer
+        .grant_for_test(&caller.token)
+        .expect("authenticate peer caller capability");
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let stale_close = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        stale_caller_grant,
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(matches!(
+        stale_close,
+        super::AgentFrontendDispatchOutcome::StaleCapability
+    ));
+    assert!(
+        runtime.tracked_window_exists(&window_id),
+        "rotation before acceptance must reject the close without touching its target"
+    );
+    assert!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a close rejected before acceptance must not queue teardown"
+    );
+
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let thread_home = temp.path().to_path_buf();
+    let worker_window_id = window_id.clone();
+    let worker = thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(&thread_home);
+        let started = Instant::now();
+        let close = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant.clone(),
+            AgentFrontendRequest::CloseWindow {
+                id: worker_window_id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        );
+        let close_elapsed = started.elapsed();
+        let reclose = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant.clone(),
+            AgentFrontendRequest::CloseWindow {
+                id: worker_window_id,
+                request_id: None,
+                responder: None,
+            },
+        );
+        let list_started = Instant::now();
+        let listed = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant,
+            AgentFrontendRequest::ListWindows,
+        );
+        result_tx
+            .send((
+                close,
+                reclose,
+                listed,
+                close_elapsed,
+                list_started.elapsed(),
+            ))
+            .expect("report peer close outcomes");
+    });
+
+    let (close, reclose, listed, close_elapsed, list_elapsed) = result_rx
+        .recv_timeout(Duration::from_millis(400))
+        .expect("peer close and the following bridge requests must not deadlock");
+    worker.join().expect("join peer close dispatch");
+    assert!(matches!(
+        close,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: true, .. },
+                    ..
+                })
+            )
+    ));
+    assert!(matches!(
+        reclose,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: false, .. },
+                    ..
+                })
+            )
+    ));
+    assert!(matches!(
+        listed,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events) if !events.is_empty()
+    ));
+    assert!(
+        close_elapsed < Duration::from_millis(400),
+        "peer close acknowledgement took {close_elapsed:?}"
+    );
+    assert!(
+        list_elapsed < Duration::from_secs(1),
+        "pane.list after a failed re-close took {list_elapsed:?}"
+    );
+    assert_eq!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "only the accepted close may queue background teardown"
+    );
+    let queued = {
+        let mut finalizers = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalizers.drain(..).collect::<Vec<_>>()
+    };
+    for finalizer in queued {
+        finalizer();
+    }
+}
+
+/// Issue #3816: once the caller grant has crossed the acceptance snapshot,
+/// rotating that caller must not cancel the already accepted peer operation.
+#[test]
+fn accepted_peer_close_snapshot_survives_caller_rotation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-target",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-target");
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let caller = issuer
+        .issue(&project, "session-close-caller")
+        .expect("issue peer caller capability");
+    let caller_grant = issuer
+        .grant_for_test(&caller.token)
+        .expect("authenticate peer caller capability");
+    let asserted_grant = caller_grant.clone();
+    let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let thread_home = temp.path().to_path_buf();
+    let worker_window_id = window_id.clone();
+    let worker = thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(&thread_home);
+        super::set_agent_peer_close_after_acceptance_test_hook(move || {
+            accepted_tx
+                .send(())
+                .expect("signal peer close acceptance snapshot");
+            resume_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("resume accepted peer close");
+        });
+        let outcome = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant,
+            AgentFrontendRequest::CloseWindow {
+                id: worker_window_id,
+                request_id: None,
+                responder: None,
+            },
+        );
+        (runtime, outcome)
+    });
+
+    accepted_rx
+        .recv_timeout(Duration::from_millis(400))
+        .expect("production dispatch reached the post-acceptance barrier");
+    let rotation_issuer = issuer.clone();
+    let rotation_project = project.clone();
+    let (rotation_tx, rotation_rx) = mpsc::sync_channel(1);
+    let rotation = thread::spawn(move || {
+        rotation_tx
+            .send(rotation_issuer.issue(&rotation_project, "session-close-caller"))
+            .expect("report caller rotation");
+    });
+    rotation_rx
+        .recv_timeout(Duration::from_millis(400))
+        .expect("caller rotation must not wait on the accepted dispatch")
+        .expect("rotate caller after acceptance");
+    rotation.join().expect("join caller rotation");
+    assert!(
+        !issuer.grant_is_current(&asserted_grant),
+        "the accepted grant must now be stale in the registry"
+    );
+    resume_tx.send(()).expect("resume accepted peer close");
+    let (runtime, outcome) = worker.join().expect("join accepted peer close dispatch");
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: true, .. },
+                    ..
+                })
+            )
+    ));
+    assert!(
+        !runtime.tracked_window_exists(&window_id),
+        "rotation after acceptance must not cancel the accepted close"
+    );
+    let queued = {
+        let mut finalizers = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalizers.drain(..).collect::<Vec<_>>()
+    };
+    for finalizer in queued {
+        finalizer();
+    }
+}
+
+async fn next_test_agent_websocket_event<S>(
+    socket: &mut S,
+    expected_kind: &str,
+    deadline: Duration,
+) -> serde_json::Value
+where
+    S: Stream<Item = Result<WebSocketMessage, WebSocketError>> + Unpin,
+{
+    tokio::time::timeout(deadline, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WebSocketMessage::Text(payload))) => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(payload.as_ref()).expect("agent WebSocket JSON");
+                    if value.get("kind").and_then(serde_json::Value::as_str) == Some(expected_kind)
+                    {
+                        return value;
+                    }
+                }
+                Some(Ok(
+                    WebSocketMessage::Ping(_)
+                    | WebSocketMessage::Pong(_)
+                    | WebSocketMessage::Binary(_)
+                    | WebSocketMessage::Frame(_),
+                )) => {}
+                Some(Ok(WebSocketMessage::Close(frame))) => {
+                    panic!("agent WebSocket closed before {expected_kind}: {frame:?}")
+                }
+                Some(Err(error)) => {
+                    panic!("agent WebSocket failed before {expected_kind}: {error}")
+                }
+                None => panic!("agent WebSocket ended before {expected_kind}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("agent WebSocket did not return {expected_kind} within {deadline:?}")
+    })
+}
+
+/// Issue #3816 AC-3/AC-5/AC-6: exercise the real TCP WebSocket bridge, its
+/// capability gate, the Tao-shaped UserEvent queue, and AppRuntime dispatch as
+/// one loop. Wire-level close (also used by the parser-proven `pane.stop`
+/// alias), list/read, and self pane send must remain responsive on the same
+/// authenticated connection.
+#[test]
+fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated HOME");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    let caller_session_id = "session-ws-caller";
+    let target_session_id = "session-ws-target";
+    let caller_binding = materialize_active_agent_pane_binding(&project, caller_session_id);
+
+    let mut tab = sample_project_tab(
+        "tab-project",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent, WindowPreset::Agent],
+    );
+    let raw_window_ids = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect::<Vec<_>>();
+    let caller_window_id = combined_window_id("tab-project", &raw_window_ids[0]);
+    let target_window_id = combined_window_id("tab-project", &raw_window_ids[1]);
+    assert!(tab
+        .workspace
+        .set_session_id(&raw_window_ids[0], Some(caller_session_id.to_string())));
+    assert!(tab
+        .workspace
+        .set_session_id(&raw_window_ids[1], Some(target_session_id.to_string())));
+
+    let (mut app, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    for window_id in [&caller_window_id, &target_window_id] {
+        insert_test_pane_runtime(&mut app, window_id);
+    }
+    let caller_pane = app
+        .runtimes
+        .get(&caller_window_id)
+        .expect("caller runtime")
+        .pane
+        .clone();
+    let mut caller_reader = caller_pane
+        .lock()
+        .expect("caller pane")
+        .reader()
+        .expect("caller PTY reader");
+    let caller_output_thread = thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while std::io::Read::read(&mut caller_reader, &mut buffer).is_ok_and(|read| read > 0) {}
+    });
+    caller_pane
+        .lock()
+        .expect("caller pane")
+        .process_bytes(b"caller snapshot remains readable after peer close\n");
+    let caller_child_pid = caller_pane
+        .lock()
+        .expect("caller pane")
+        .pty()
+        .process_id()
+        .expect("caller child pid");
+    let caller_child_started_at = gwt::process::host_process_start_time(caller_child_pid)
+        .expect("caller child process start time");
+    app.register_pty_writer(&caller_window_id, &caller_pane);
+
+    let mut caller_session = sample_active_agent_session("tab-project", &caller_window_id);
+    caller_session.session_id = caller_session_id.to_string();
+    caller_session.worktree_path = project.clone();
+    caller_session.agent_project_root = project.display().to_string();
+    let mut target_session = sample_active_agent_session("tab-project", &target_window_id);
+    target_session.session_id = target_session_id.to_string();
+    target_session.worktree_path = project.clone();
+    target_session.agent_project_root = project.display().to_string();
+    app.active_agent_sessions
+        .insert(caller_window_id.clone(), caller_session);
+    app.active_agent_sessions
+        .insert(target_window_id.clone(), target_session);
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    app.blocking_tasks = spawner;
+
+    let tokio = TokioRuntime::new().expect("Tokio runtime");
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    app.proxy = proxy.clone();
+    let clients = crate::embedded_server::ClientHub::default();
+    let mut server = crate::embedded_server::EmbeddedServer::start(
+        &tokio,
+        proxy,
+        clients.clone(),
+        Arc::clone(&app.pty_writers),
+        AttachmentUploadStore::in_system_temp(),
+    )
+    .expect("embedded server");
+    let issuer = server.agent_capability_issuer();
+    let caller = issuer
+        .issue_bound(&project, caller_session_id, caller_binding)
+        .expect("active caller capability");
+    let target = issuer
+        .issue(&project, target_session_id)
+        .expect("peer target capability");
+    app.agent_capability_issuer = Some(issuer.clone());
+    app.agent_capability_tokens
+        .insert(caller_window_id.clone(), caller.token.clone());
+    app.agent_capability_tokens
+        .insert(target_window_id.clone(), target.token);
+
+    let (stop_tx, stop_rx) = mpsc::sync_channel(1);
+    let driver_home = temp.path().to_path_buf();
+    let driver_events = Arc::clone(&recorded_events);
+    let driver_clients = clients.clone();
+    let driver = thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(&driver_home);
+        loop {
+            match stop_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let event = {
+                let mut events = driver_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                events
+                    .iter()
+                    .position(|event| matches!(event, UserEvent::AgentFrontend { .. }))
+                    .map(|position| events.remove(position))
+            };
+            let Some(UserEvent::AgentFrontend {
+                client_id,
+                grant,
+                request,
+            }) = event
+            else {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            let outcome =
+                app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
+            crate::apply_agent_frontend_dispatch_outcome(&driver_clients, &client_id, outcome);
+        }
+        app
+    });
+
+    let pane_url = issuer.agent_pane_websocket_url().to_string();
+    tokio.block_on(async {
+        let mut request = pane_url
+            .as_str()
+            .into_client_request()
+            .expect("agent pane WebSocket request");
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", caller.token)
+                .parse()
+                .expect("bearer header"),
+        );
+        let (mut socket, _) = connect_async(request)
+            .await
+            .expect("real agent pane WebSocket");
+
+        socket
+            .send(WebSocketMessage::Text(
+                r#"{"kind":"list_windows"}"#.to_string().into(),
+            ))
+            .await
+            .expect("seed authenticated pane scope");
+        let _ =
+            next_test_agent_websocket_event(&mut socket, "workspace_state", Duration::from_secs(1))
+                .await;
+
+        let close_started = Instant::now();
+        socket
+            .send(WebSocketMessage::Text(
+                serde_json::json!({"kind": "close_window", "id": target_window_id})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send peer close");
+        let close = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_close_result",
+            Duration::from_millis(400),
+        )
+        .await;
+        assert_eq!(close["ok"], true);
+        assert_eq!(close["window_id"], target_window_id);
+        assert!(
+            close_started.elapsed() < Duration::from_millis(400),
+            "real WebSocket peer close exceeded the bridge budget"
+        );
+
+        let reclose_started = Instant::now();
+        socket
+            .send(WebSocketMessage::Text(
+                serde_json::json!({"kind": "close_window", "id": target_window_id})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send failed peer re-close");
+        let reclose = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_close_result",
+            Duration::from_millis(400),
+        )
+        .await;
+        assert_eq!(reclose["ok"], false);
+        assert!(
+            reclose_started.elapsed() < Duration::from_millis(400),
+            "real WebSocket failed peer re-close exceeded the bridge budget"
+        );
+
+        socket
+            .send(WebSocketMessage::Text(
+                r#"{"kind":"list_windows"}"#.to_string().into(),
+            ))
+            .await
+            .expect("send list after failed close");
+        let listed =
+            next_test_agent_websocket_event(&mut socket, "workspace_state", Duration::from_secs(1))
+                .await;
+        let listed_windows = listed["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .expect("listed windows");
+        assert!(listed_windows
+            .iter()
+            .any(|window| window["id"] == caller_window_id));
+        assert!(listed_windows
+            .iter()
+            .all(|window| window["id"] != target_window_id));
+
+        socket
+            .send(WebSocketMessage::Text(
+                r#"{"kind":"frontend_ready"}"#.to_string().into(),
+            ))
+            .await
+            .expect("send read sync after peer close");
+        let snapshot = next_test_agent_websocket_event(
+            &mut socket,
+            "terminal_snapshot",
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(snapshot["id"], caller_window_id);
+        let snapshot_bytes = base64::engine::general_purpose::STANDARD
+            .decode(snapshot["data_base64"].as_str().expect("snapshot base64"))
+            .expect("decode caller snapshot");
+        assert!(String::from_utf8_lossy(&snapshot_bytes)
+            .contains("caller snapshot remains readable after peer close"));
+
+        socket
+            .send(WebSocketMessage::Text(
+                serde_json::json!({
+                    "kind": "pane_send_input",
+                    "session_id": caller_session_id,
+                    "text": "status after peer close"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send caller pane input after peer close");
+        let sent = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_send_result",
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(sent["ok"], true);
+        assert_eq!(sent["window_id"], caller_window_id);
+        socket.close(None).await.expect("close test WebSocket");
+    });
+
+    stop_tx.send(()).expect("stop Tao-shaped event driver");
+    let mut app = driver.join().expect("join Tao-shaped event driver");
+    server.shutdown();
+    assert_eq!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "the accepted peer close owns one background finalizer"
+    );
+    let queued = {
+        let mut finalizers = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalizers.drain(..).collect::<Vec<_>>()
+    };
+    for finalizer in queued {
+        finalizer();
+    }
+    app.stop_window_runtime_without_session_projection(&caller_window_id);
+    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    while gwt::process::exact_pty_process_tree_is_alive(caller_child_pid, caller_child_started_at) {
+        assert!(
+            Instant::now() < cleanup_deadline,
+            "caller PTY process tree survived explicit test cleanup"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    caller_output_thread
+        .join()
+        .expect("join caller PTY output drain");
+}
+
 /// Issue #3667 AC-1/AC-3 at the runtime dispatch layer: a settled grant (an
 /// in-memory Active binding whose durable record is stale) still observes its
 /// scoped state while producing mutation stays refused.
@@ -6792,6 +7434,7 @@ fn issue_monitor_autonomous_record(
         acceptance_snapshot: None,
         retry_not_before: None,
         retry_hold_reason: None,
+        retry_hold_provider: None,
         last_heartbeat: None,
         pr_number: None,
         reviewed_sha: None,
@@ -14228,6 +14871,201 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
         1,
         "the in-flight operation must remain the sole Prepared owner"
     );
+}
+
+#[test]
+fn continue_work_empty_operation_identity_failure_is_not_cached() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+    let events = runtime.continue_work_events(
+        "client-invalid",
+        String::new(),
+        "work-a".to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if operation_id.is_empty()
+            && work_id == "work-a"
+            && code == "invalid_request"
+            && !retryable
+    )));
+    assert!(
+        !runtime.continue_work_outcomes.contains_key(""),
+        "an invalid operation identity must never become a replay-cache key"
+    );
+}
+
+#[test]
+fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waiters() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let operation_id = "immutable-operation";
+    runtime.continue_work_outcomes.insert(
+        operation_id.to_string(),
+        CachedContinueWorkOutcome {
+            work_id: "work-a".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            message: None,
+            error_code: None,
+            retryable: false,
+        },
+    );
+    runtime.continue_work_waiters.insert(
+        operation_id.to_string(),
+        HashSet::from(["client-waiter".to_string()]),
+    );
+
+    let invalid = runtime.continue_work_events(
+        "client-invalid",
+        operation_id.to_string(),
+        String::new(),
+        canvas_bounds(),
+    );
+
+    assert!(invalid.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id: emitted_operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if emitted_operation_id == operation_id
+            && work_id.is_empty()
+            && code == "invalid_request"
+            && !retryable
+    )));
+    let cached_preserved = runtime
+        .continue_work_outcomes
+        .get(operation_id)
+        .is_some_and(|cached| {
+            cached.work_id == "work-a"
+                && cached.outcome == gwt::ContinueWorkOutcomeKind::ContinuedConversation
+                && cached.error_code.is_none()
+        });
+    let waiter_preserved = runtime
+        .continue_work_waiters
+        .get(operation_id)
+        .is_some_and(|waiters| waiters == &HashSet::from(["client-waiter".to_string()]));
+    let invalid_replied_only_to_caller = invalid.len() == 1
+        && matches!(
+            &invalid[0].target,
+            DispatchTarget::Client(client_id) if client_id == "client-invalid"
+        );
+    assert!(
+        cached_preserved && waiter_preserved && invalid_replied_only_to_caller,
+        "invalid identity mutated replay state: cached={:?}, waiters={:?}, events={invalid:?}",
+        runtime.continue_work_outcomes.get(operation_id),
+        runtime.continue_work_waiters.get(operation_id),
+    );
+
+    let replay = runtime.continue_work_events(
+        "client-replay",
+        operation_id.to_string(),
+        "work-a".to_string(),
+        canvas_bounds(),
+    );
+    let replay_clients = replay
+        .iter()
+        .filter_map(|event| match (&event.target, &event.event) {
+            (
+                DispatchTarget::Client(client_id),
+                BackendEvent::ContinueWorkOutcome {
+                    operation_id: emitted_operation_id,
+                    work_id,
+                    outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                    error_code: None,
+                    retryable: false,
+                    ..
+                },
+            ) if emitted_operation_id == operation_id && work_id == "work-a" => {
+                Some(client_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replay_clients.len(),
+        2,
+        "a valid replay must emit exactly one cached outcome per recipient: {replay:?}"
+    );
+    assert_eq!(
+        replay_clients
+            .iter()
+            .filter(|client_id| **client_id == "client-replay")
+            .count(),
+        1,
+        "the replay caller must receive the cached outcome exactly once: {replay:?}"
+    );
+    assert_eq!(
+        replay_clients
+            .iter()
+            .filter(|client_id| **client_id == "client-waiter")
+            .count(),
+        1,
+        "the retained waiter must receive the cached outcome exactly once: {replay:?}"
+    );
+    assert!(!runtime.continue_work_waiters.contains_key(operation_id));
+
+    let conflict = runtime.continue_work_events(
+        "client-conflict",
+        operation_id.to_string(),
+        "work-b".to_string(),
+        canvas_bounds(),
+    );
+    assert!(conflict.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id: emitted_operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if emitted_operation_id == operation_id
+            && work_id == "work-b"
+            && code == "operation_conflict"
+            && !retryable
+    )));
+    assert_eq!(
+        conflict
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    operation_id: emitted_operation_id,
+                    work_id,
+                    error_code: Some(code),
+                    ..
+                } if emitted_operation_id == operation_id
+                    && work_id == "work-b"
+                    && code == "operation_conflict"
+            ))
+            .count(),
+        1,
+        "a conflicting replay must emit exactly one conflict outcome: {conflict:?}"
+    );
+    assert!(runtime
+        .continue_work_outcomes
+        .get(operation_id)
+        .is_some_and(|cached| {
+            cached.work_id == "work-a"
+                && cached.outcome == gwt::ContinueWorkOutcomeKind::ContinuedConversation
+                && cached.error_code.is_none()
+        }));
 }
 
 #[test]
@@ -26123,9 +26961,9 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 /// #3474: the `.codex/hooks.json` committed before the guarded template landed
 /// reports ONLY `managed hook binary missing:` when its bare fallback cannot be
 /// resolved, so the loop breaker below skipped it on every launch and the file
-/// never converged. The missing `command -v` guard is now its own issue class,
-/// so a legacy config is repaired — and the repaired file no longer raises it,
-/// so this still cannot loop.
+/// never converged. A missing host-native runtime guard is now its own issue
+/// class, so a legacy config is repaired — and the repaired file no longer
+/// raises it, so this still cannot loop.
 #[test]
 fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
     // Issue #3609: the other 387 acquisitions in this binary recover from a
@@ -26136,36 +26974,86 @@ fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
-    let missing_pin = root.path().join("missing/gwtd");
+    let fixture_id = root
+        .path()
+        .file_name()
+        .expect("temporary root basename")
+        .to_string_lossy();
+    let missing_pin = PathBuf::from(format!(
+        r"C:\Users\AKIOJI~1\AppData\Local\Temp\gwt self-heal {fixture_id}\missing\gwtd.exe"
+    ));
+    assert!(
+        !missing_pin.exists(),
+        "the synthetic Windows fixture must remain unresolved: {}",
+        missing_pin.display()
+    );
     let config = worktree.join(".codex/hooks.json");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     // The legacy template, pinned to a binary that no longer exists: the ONLY
     // issue it can raise through the binary audit is `managed hook binary
     // missing:`, which is exactly what the loop breaker skips.
-    fs::write(
-        &config,
-        format!(
-            r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart"}}]}}]}}}}"#,
-            missing_pin.display()
-        ),
-    )
-    .unwrap();
+    let legacy = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!(
+                        "gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart",
+                        missing_pin.display()
+                    )
+                }]
+            }]
+        }
+    });
+    fs::write(&config, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&config).unwrap())
+        .expect("legacy managed-hook fixture must be valid JSON");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    let expected_hook_bin = missing_pin.display().to_string();
+    let mut health_input = gwt::cli::hook::health::ManagedHookHealthInput::new(&worktree);
+    health_input.runtime_state_path = None;
+    health_input.expected_hook_bin = Some(expected_hook_bin.clone());
+    let legacy_health = gwt::cli::hook::health::read_managed_hook_health(&health_input);
+    assert!(
+        legacy_health
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
+        "{:?}",
+        legacy_health.issues
+    );
 
     super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
         [worktree.as_path()],
-        Some(&missing_pin.display().to_string()),
+        Some(&expected_hook_bin),
     );
 
-    let rendered = fs::read_to_string(&config).unwrap();
-    assert!(rendered.contains("command -v"), "{rendered}");
+    let healed_health = gwt::cli::hook::health::read_managed_hook_health(&health_input);
+    assert!(
+        !healed_health
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("managed hook runtime guard missing:")),
+        "{:?}",
+        healed_health.issues
+    );
+    assert!(
+        !healed_health.issues.is_empty()
+            && healed_health
+                .issues
+                .iter()
+                .all(|issue| issue.starts_with("managed hook binary missing:")),
+        "{:?}",
+        healed_health.issues
+    );
 
     // A second pass over the converged file must be a no-op: the guard issue is
     // gone and only the unresolvable pin remains, which the loop breaker skips.
     let converged = fs::read(&config).unwrap();
     super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
         [worktree.as_path()],
-        Some(&missing_pin.display().to_string()),
+        Some(&expected_hook_bin),
     );
     assert_eq!(fs::read(&config).unwrap(), converged);
 }
@@ -35145,16 +36033,20 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
         .pending_settle_token
         .expect("settle token");
 
-    thread::sleep(Duration::from_millis(180));
-
-    let events = proxy_events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        UserEvent::RuntimeApprovalSettle { id, token: queued }
-            if id == &window_id && *queued == token
-    )));
+    wait_for_recorded_event_with_timeout(
+        "runtime approval settle timer event",
+        &proxy_events,
+        Duration::from_secs(2),
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::RuntimeApprovalSettle { id, token: queued }
+                        if id == &window_id && *queued == token
+                )
+            })
+        },
+    );
 }
 
 #[test]
@@ -40438,6 +41330,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,
@@ -40559,6 +41452,103 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             if level == "error" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+}
+
+#[test]
+fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let window_id = "tab-1::agent-1";
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed provider launch");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.provider_quota_holds.insert(
+        window_id.to_string(),
+        gwt::IssueMonitorFailure::ProviderUsageLimit {
+            provider: "codex".to_string(),
+            resets_at: Some("2099-08-22T04:00:00Z".to_string()),
+        },
+    );
+
+    let _events = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        "Codex usage limit reached",
+        Some(42),
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon not running".to_string(),
+            ),
+        ),
+    );
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload quota prefs");
+    assert_eq!(
+        persisted
+            .provider_quota_holds
+            .get("codex")
+            .map(String::as_str),
+        Some("2099-08-22T04:00:00Z")
+    );
+    assert!(!persisted.provider_quota_holds.contains_key("claude"));
+    let mut restored =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    assert_eq!(
+        restored.status_view_at("2026-08-22T03:00:00Z").quota_hold,
+        None,
+        "the saved Claude profile must not project the Codex hold"
+    );
+    restored.set_gui_connected(true);
+    restored.record_candidate(gwt::IssueMonitorIssue {
+        number: 43,
+        title: "Healthy provider candidate".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert_eq!(
+        restored
+            .try_prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T03:00:00Z",
+                1,
+                |_| Ok::<bool, std::convert::Infallible>(false),
+            )
+            .expect("infallible probe"),
+        1
+    );
 }
 
 #[test]
@@ -57816,6 +58806,18 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         prompt.contains("issue.monitor.status"),
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
     );
+    assert!(
+        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+        "{label} must carry the canonical gwtd execution-isolation clause verbatim; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("`pr.list`"),
+        "{label} must inventory open PRs each cycle (Issue #3781); got: {prompt}"
+    );
+    assert!(
+        prompt.contains("never auto-close"),
+        "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
+    );
 }
 
 /// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
@@ -58032,6 +59034,243 @@ fn delta_and_periodic_wakes_do_not_double_fire_in_one_window() {
             .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
             .is_none(),
         "the delta wake's stamp must suppress the periodic wake"
+    );
+}
+
+fn seed_quiet_standing_supervision(repo: &Path) {
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..gwt::IssueMonitorConfig::default()
+        },
+        gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-10T00:00:00Z",
+    );
+    monitor.complete_active_launch(42, "tab-1::other-window");
+    gwt::save_issue_monitor_prefs(&monitor_prefs_path, &monitor.prefs()).expect("save prefs");
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop");
+}
+
+fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) {
+    insert_test_pane_runtime(runtime, window_id);
+}
+
+fn assert_pm_pane_is_not_in_protected_inject(runtime: &AppRuntime, window_id: &str) {
+    let pty = runtime
+        .runtimes
+        .get(window_id)
+        .expect("live PM pane")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    let reservation = pty
+        .reserve_input_transaction()
+        .expect("a composing PM pane must not already have a protected wake inject in flight");
+    drop(reservation);
+}
+
+/// Issue #3702 AC-1/AC-3: typing into the PM composer must not let a
+/// scheduled supervision tick splice `[gwt] ...` into the unsent line.
+#[test]
+fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let compose = runtime.terminal_input_events(&pm_window_id, "ちゃんとbunx/npxで実行されてい");
+    assert!(compose.is_empty());
+    assert!(
+        runtime
+            .runtimes
+            .get(&pm_window_id)
+            .expect("live PM pane")
+            .pane
+            .lock()
+            .expect("pane lock")
+            .has_unsent_user_input(),
+        "the typed prefix must remain unsent"
+    );
+
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+    assert!(
+        runtime
+            .runtimes
+            .get(&pm_window_id)
+            .expect("live PM pane")
+            .pane
+            .lock()
+            .expect("pane lock")
+            .has_unsent_user_input(),
+        "holding the tick must not consume the user's unsent composer"
+    );
+}
+
+/// Issue #3702 AC-1: the Issue Monitor activity wake uses the same inject
+/// path and must also wait while the user is mid-prompt.
+#[test]
+fn issue_monitor_activity_wake_does_not_inject_while_pm_pane_has_unsent_input() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let baseline = [pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued)];
+    assert!(runtime.pm_wake_events(&repo, &baseline).is_empty());
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "PMはあなた自身が全てを");
+    let escalated = [
+        pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued),
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    let _ = runtime.pm_wake_events(&repo, &escalated);
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+}
+
+/// Issue #3702 AC-4: an idle composer still receives the tick immediately.
+#[test]
+fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    let pty = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("live PM pane")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    match pty.reserve_input_transaction() {
+        Ok(_) => panic!("idle delivery must start the protected inject"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("another protected PTY input transaction is active"),
+            "{error}"
+        ),
+    }
+}
+
+/// Issue #3702 AC-2: a held tick is delivered once (coalesced) after submit.
+#[test]
+fn held_supervision_tick_is_delivered_after_the_composer_submits() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "実行されてい");
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+    assert!(
+        runtime
+            .pending_pm_wakes
+            .get(&pm_window_id)
+            .is_some_and(|decision| decision.prompt.contains("Scheduled supervision tick")),
+        "the held prompt must be the scheduled tick"
+    );
+
+    // A second tick while still composing stays one pending entry.
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("re-quiet the loop");
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:05:00Z");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1, "ticks must coalesce");
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
+    assert!(
+        runtime.pending_pm_wakes.is_empty(),
+        "submit must deliver and clear the held tick"
+    );
+    let pty = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("live PM pane")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    match pty.reserve_input_transaction() {
+        Ok(_) => panic!("the held tick must inject after submit"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("another protected PTY input transaction is active"),
+            "{error}"
+        ),
+    }
+}
+
+/// Issue #3702 AC-2: clearing the composer (Ctrl+C) also releases the tick.
+#[test]
+fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "途中の入力");
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    assert!(
+        runtime.pending_pm_wakes.is_empty(),
+        "Ctrl+C must deliver the held tick"
     );
 }
 
