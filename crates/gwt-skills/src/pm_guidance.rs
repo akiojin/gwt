@@ -159,14 +159,20 @@ drive them.
   recent scrollback. Map an issue to its pane with `launched_window_id`
   from the inbox rows in `issue.monitor.status`.
 - When `pane.list` reports a pane as `waiting`, treat one continuous
-  `waiting` state as one waiting episode. For each episode, run one
-  bounded `pane.read` for that pane with `params.lines` set to `50` and
-  report it to the user once. Summarize only the prompt category and the
-  decision requested. Never include raw command text, filesystem paths,
-  tokens, secrets, or tool arguments in the summary. Do not read or
-  report it again while the pane remains `waiting`; only after
-  `pane.list` observes that the pane leaves `waiting` and later re-enters
-  it may you begin another episode. Do not answer the prompt yourself.
+  `waiting` state as one waiting episode and read the prompt once per
+  continuous `waiting` episode. At the start of the episode, run one
+  bounded `pane.read` for that pane with `params.lines` set to `50`, then
+  retain only the prompt category and the decision requested for later
+  reminders. Never include raw command text, filesystem paths, tokens,
+  secrets, or tool arguments in the summary. Do not read it again while
+  the pane remains `waiting`; only after `pane.list` observes that the
+  pane leaves `waiting` and later re-enters it may you begin another read
+  episode. In every resident cycle while the wait remains unresolved,
+  report the sanitized summary using the pane's window title and the
+  action required from the user. Never identify a pane to the user only
+  by its pane or window ID. If the window title is unavailable, identify
+  the owning Issue and say `title unavailable`; do not promote a pane or
+  window ID to the primary identity. Do not answer the prompt yourself.
   Do not call `pm.message.send`, `pane.send`, or any other input operation
   to select an option; only the human may resolve it in that pane.
 - A `waiting` pane is a runtime observation state, including for manually
@@ -472,19 +478,36 @@ and urgency.
 
 ## Reporting cadence
 
+- Default each user-facing report to 3-6 lines. Lead with the outcome,
+  identify affected agents by window title, and move supporting detail to
+  the owning Issue or Board entry. A pane or window ID may accompany a
+  diagnostic artifact, but it is never the only user-facing identity. If
+  the window title is unavailable, identify the owning Issue and say
+  `title unavailable`.
 - Report on your own initiative only at milestones: an Issue registered,
   an implementation agent launched, a PR opened, a merge landed, a
-  `needs_human` escalation, the first detection of a new `waiting`
-  episode, and a fatal failure. Collapse a run of milestones into one
-  digest instead of narrating each one. The immediate-reporting
-  conditions below are exceptions to this rule.
+  `needs_human` escalation, and a fatal failure. Collapse a run of
+  milestones into one digest instead of narrating each one. The
+  immediate-reporting conditions below are exceptions to this rule.
 - `needs_human`, fatal failures, and `stale` or `unknown` worktree
   freshness are always presented immediately and are never held for a
   digest.
-- The first detection of a new `waiting` episode must be reported
-  immediately under the one-report-per-episode rule above and is never
-  held for a digest. Continued observations of that episode stay
-  suppressed; only a leave-then-re-enter transition rearms reporting.
+- Every unresolved user-input or decision wait is an escalation. Report it
+  immediately when first detected and again in every resident cycle until
+  it is resolved, using the affected window title and the action required
+  from the user. For a decision wait, include the question, your
+  recommendation and rationale, and a copy-paste answer example. Never
+  reduce the handoff to an instruction to write something in another
+  window. Reuse the sanitized episode summary; recurring reports do not
+  authorize another `pane.read`.
+- Build a stalled-item inventory every cycle covering `needs_human`,
+  decision waits, ownerless pull requests, and quiet agents. Advance at
+  least one item from that inventory in every cycle through a launch,
+  requeue, priority correction, escalation resolution, or concrete user
+  handoff. Treat every required inventory advance or handoff as a
+  reportable milestone or escalation under the conditional rule below.
+  Only an empty stalled-item inventory may end silently; a non-empty
+  inventory is not a no-change cycle.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
 - A cycle that produced no milestone and no escalation ends with no
@@ -655,13 +678,14 @@ mod tests {
             // bounded human-attention observation, not Monitor lifecycle.
             "both manually launched project Agent panes and Monitor-launched project Agent panes",
             "one continuous `waiting` state as one waiting episode",
+            "read the prompt once per continuous `waiting` episode",
             "one bounded `pane.read`",
             "`params.lines` set to `50`",
-            "report it to the user once",
-            "Do not read or report it again while the pane remains `waiting`",
+            "Do not read it again while the pane remains `waiting`",
             "leaves `waiting` and later re-enters it",
-            "first detection of a new `waiting` episode",
-            "must be reported immediately",
+            "Every unresolved user-input or decision wait is an escalation",
+            "every resident cycle until it is resolved",
+            "pane's window title",
             "Do not call `pm.message.send`",
             "only the human may resolve it in that pane",
             "does not create or imply an Issue Monitor `needs_human` record",
@@ -759,6 +783,10 @@ mod tests {
             // FR-017: milestone-only digest, escalations never batched.
             "one digest",
             "never held for a digest",
+            "Default each user-facing report to 3-6 lines",
+            "Build a stalled-item inventory every cycle",
+            "Advance at least one item from that inventory in every cycle",
+            "Only an empty stalled-item inventory may end silently",
             // Issue #3632: the quiet case is stated out loud — a cycle with
             // nothing to report ends silently, and liveness is proven outside
             // the conversation.
@@ -817,6 +845,68 @@ mod tests {
                 "request-intake contract is missing: {phrase}"
             );
         }
+    }
+
+    /// Issue #3791 / SPEC-3431 FR-149〜153: user-facing supervision must use
+    /// the identity the user sees, keep reminders concise, and drive stalled
+    /// work instead of suppressing a still-unresolved wait as an old episode.
+    #[test]
+    fn contract_reports_unresolved_waits_concisely_and_drives_each_cycle() {
+        let observation = SKILL_BODY_EN
+            .split_once("## Observing the running agents")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("agent observation must be a bounded section");
+        let observation = unwrapped(observation);
+        for phrase in [
+            "window title",
+            "Never identify a pane to the user only by its pane or window ID",
+            "identify the owning Issue and say `title unavailable`",
+            "do not promote a pane or window ID to the primary identity",
+            "read the prompt once per continuous `waiting` episode",
+        ] {
+            assert!(
+                observation.contains(phrase),
+                "agent-observation contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            !observation.contains("report it to the user once"),
+            "unresolved waits must not retain the old report-once suppression"
+        );
+        assert!(
+            !observation
+                .contains("Do not read or report it again while the pane remains `waiting`"),
+            "bounded reads and recurring reports must be separate obligations"
+        );
+
+        let reporting = SKILL_BODY_EN
+            .split_once("## Reporting cadence")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Reporting cadence must be a bounded section");
+        let reporting = unwrapped(reporting);
+        for phrase in [
+            "Default each user-facing report to 3-6 lines",
+            "Every unresolved user-input or decision wait is an escalation",
+            "every resident cycle until it is resolved",
+            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "Build a stalled-item inventory every cycle",
+            "`needs_human`, decision waits, ownerless pull requests, and quiet agents",
+            "Advance at least one item from that inventory in every cycle",
+            "Treat every required inventory advance or handoff as a reportable milestone or escalation",
+            "Only an empty stalled-item inventory may end silently",
+            "identify the owning Issue and say `title unavailable`",
+        ] {
+            assert!(
+                reporting.contains(phrase),
+                "reporting contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            !reporting.contains("the first detection of a new `waiting` episode"),
+            "the recurring-wait rule must be the sole reporting cadence for waiting episodes"
+        );
     }
 
     /// FR-012: the resident loop must actually look at the running agents each
