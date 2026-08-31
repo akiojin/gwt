@@ -256,7 +256,11 @@ hook は同期的な `gwt hook ...` dispatch にフォールバックし、複�
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます
+  Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
+  開かず、Issue ウィンドウの右ペインに読み取り専用でミラー表示されます。入力
+  したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
+  の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
+  `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Profile` — environment/profile 管理
 - `File Tree` — 実リポジトリの read-only tree

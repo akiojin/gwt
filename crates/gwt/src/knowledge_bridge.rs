@@ -126,6 +126,25 @@ pub struct KnowledgeListItem {
     /// Human-readable reason for a non-terminal monitor exclusion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<String>,
+    /// SPEC-3671 FR-012: identity of the Works the backend already correlated to
+    /// this row (the same correlation that produces `related_work_count`). The
+    /// Issue surface joins these against the `active_work_projection` it already
+    /// receives, so Work lifecycle / attention / PR state reach the Issue row
+    /// without a second derivation or a new data path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_work_refs: Vec<KnowledgeWorkRefView>,
+}
+
+/// SPEC-3671 FR-012: the join key between a cached Issue row and the active Work
+/// projection. Identity only — every display field stays owned by the projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeWorkRefView {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1024,6 +1043,7 @@ fn issue_list_item(
         monitor_state: None,
         queue_position: None,
         exclusion_reason: None,
+        related_work_refs: Vec::new(),
     }
 }
 
@@ -1052,6 +1072,7 @@ fn spec_list_item(
         monitor_state: None,
         queue_position: None,
         exclusion_reason: None,
+        related_work_refs: Vec::new(),
     }
 }
 

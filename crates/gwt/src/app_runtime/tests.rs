@@ -10352,6 +10352,263 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_boar
     assert_eq!(agent.placement, WindowPlacement::Canvas);
 }
 
+fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
+    LaunchFeedbackContext {
+        client_id: "__issue_monitor__".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(issue_number),
+        issue_monitor_delivery_id: None,
+        issue_monitor_project_root: None,
+        issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
+    }
+}
+
+fn spawned_agent_placement(runtime: &AppRuntime, tab_id: &str) -> WindowPlacement {
+    runtime
+        .tab(tab_id)
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window")
+        .placement
+        .clone()
+}
+
+// SPEC-3671 FR-002 / T-007: an Issue Monitor auto-launch is mirrored inside the Issue
+// window instead of opening a canvas window.
+#[test]
+fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Issue],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let issue_window_id = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Issue)
+        .expect("issue window")
+        .id
+        .clone();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-3671")
+        .build();
+
+    runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            issue_monitor_feedback(3671),
+        )
+        .expect("issue monitor launch");
+
+    assert_eq!(
+        spawned_agent_placement(&runtime, "tab-1"),
+        WindowPlacement::IssuePreview {
+            issue_window_id,
+            issue_number: 3671,
+        }
+    );
+}
+
+// SPEC-3671 FR-002: without an Issue window there is nothing to mirror into, so the
+// launch keeps the canvas placement rather than becoming invisible.
+#[test]
+fn app_runtime_issue_monitor_launch_falls_back_to_canvas_without_issue_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Board],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-3671-fallback")
+        .build();
+
+    runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            issue_monitor_feedback(3671),
+        )
+        .expect("issue monitor launch without issue window");
+
+    assert_eq!(
+        spawned_agent_placement(&runtime, "tab-1"),
+        WindowPlacement::Canvas
+    );
+}
+
+// SPEC-3671 FR-003 / T-009: Start Work and Launch Agent keep opening canvas windows.
+#[test]
+fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Issue],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .spawn_agent_window(
+            "tab-1",
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .branch("work/manual-launch")
+                .build(),
+            canvas_bounds(),
+            None,
+        )
+        .expect("manual launch");
+
+    assert_eq!(
+        spawned_agent_placement(&runtime, "tab-1"),
+        WindowPlacement::Canvas
+    );
+
+    // A Launch Agent launch carries feedback but no Issue Monitor issue number.
+    runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .branch("work/manual-launch-feedback")
+                .build(),
+            canvas_bounds(),
+            None,
+            LaunchFeedbackContext {
+                client_id: "client-1".to_string(),
+                title: "Launch Agent".to_string(),
+                issue_monitor_issue_number: None,
+                issue_monitor_delivery_id: None,
+                issue_monitor_project_root: None,
+                issue_monitor_session_mode: None,
+                issue_monitor_autonomous_handoff: None,
+                issue_monitor_autonomous_submit_started: false,
+            },
+        )
+        .expect("manual launch with feedback");
+
+    for window in &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+    {
+        if window.preset == WindowPreset::Agent {
+            assert_eq!(
+                window.placement,
+                WindowPlacement::Canvas,
+                "manual launches must stay on the canvas"
+            );
+        }
+    }
+}
+
+// SPEC-3671 FR-006 / T-013: Issue Monitor delivery tracking keys off the window id, not
+// the placement, so an off-canvas preview stays fully tracked.
+#[test]
+fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Issue],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let delivery_id = "launch:issue-preview-tracking".to_string();
+    let mut feedback = issue_monitor_feedback(3671);
+    feedback.issue_monitor_delivery_id = Some(delivery_id.clone());
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-3671-tracking")
+        .build();
+
+    runtime
+        .spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback)
+        .expect("issue monitor launch");
+
+    let raw_id = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window")
+        .id
+        .clone();
+    let window_id = super::combined_window_id("tab-1", &raw_id);
+
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id: tracked, .. })
+            if tracked == &window_id
+    ));
+    assert_eq!(
+        runtime.issue_monitor_issue_number_for_window(&repo, &window_id),
+        Some(3671),
+        "an off-canvas preview must still resolve back to its Issue number"
+    );
+}
+
 #[test]
 fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast() {
     let temp = tempdir().expect("tempdir");

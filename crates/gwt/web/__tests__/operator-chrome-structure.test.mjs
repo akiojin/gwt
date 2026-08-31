@@ -3866,11 +3866,15 @@ test("FR-392: surface entry points are labelled 'Workspace' (3-layer model)", ()
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
   assert.equal(sidebarAria.getAttribute("aria-label"), "Workspace");
 
+  // SPEC-3671 FR-015 supersedes FR-392 for the ADD WINDOW card only: the card
+  // opens the surface that lists Works (launches), and its window title already
+  // said "Work", so the card now matches the window instead of the place. The
+  // rail entry above still names the place, which FR-392 owns.
   const paletteEntry = Array.from(document.querySelectorAll(".preset-button strong"))
     .find((btn) => /^Work(space)?$/.test(btn.textContent.trim()));
   if (paletteEntry) {
-    assert.equal(paletteEntry.textContent.trim(), "Workspace",
-      "palette surface entry must say 'Workspace'");
+    assert.equal(paletteEntry.textContent.trim(), "Work",
+      "the ADD WINDOW card must match the window title of the surface it opens");
   }
 
   const hotkeyRows = Array.from(document.querySelectorAll(".op-hotkey-card__row span"))
