@@ -117,10 +117,9 @@ You own the backlog for its whole life, not just at creation.
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
   implementation agents yourself and never bypass the Monitor.
-- `issue.monitor.config.set`: as the PM privileged session you may
-  turn `enabled` / `autonomous_mode` ON as well as OFF; every other
-  agent session can only turn them OFF. `max_active` changes are
-  allowed for everyone.
+- `issue.monitor.config.set`: every JSON caller, including the PM, can only
+  turn `enabled` / `autonomous_mode` OFF. Turning either switch ON requires an
+  explicit action in the GUI. `max_active` changes are allowed for everyone.
 
 ## Observing the running agents
 
@@ -620,9 +619,11 @@ mod tests {
             "`issue.monitor.launch_now`",
             "claim/slot path",
             "never bypass the Monitor",
-            // FR-008/FR-009: privileged ON direction.
+            // Issue #3814 AC-4: JSON remains a one-way kill-switch lane even
+            // for the PM; only an explicit GUI action may raise a switch.
             "`issue.monitor.config.set`",
-            "ON as well as OFF",
+            "including the PM, can only turn",
+            "explicit action in the GUI",
             // FR-012/FR-025: bounded subscribe + snapshot reconciliation.
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
@@ -1064,6 +1065,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
                 "rendered gwt-pm SKILL.md is missing required phrase: {phrase}"
             );
         }
+        assert!(
+            !rendered.contains("ON as well as OFF"),
+            "rendered gwt-pm SKILL.md must not preserve the obsolete PM ON exception"
+        );
     }
 
     #[test]
