@@ -28,6 +28,9 @@ async function importSurfaceModule() {
   ).replace(
     'from "/focus-trap.js"',
     'from "data:text/javascript,export function createFocusTrap(){return()=>{}}"',
+  ).replace(
+    'from "./launch-pending-controller.js"',
+    'from "data:text/javascript,export function createLaunchOperationId(){return%20%22work-row-test%22}"',
   );
   return import(
     `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
