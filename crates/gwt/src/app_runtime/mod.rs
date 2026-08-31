@@ -1065,6 +1065,9 @@ pub struct AppRuntime {
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
     pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    /// Issue #3702: one coalesced wake waiting for the PM composer to submit
+    /// or clear. Keyed by the live PM window id.
+    pub(crate) pending_pm_wakes: HashMap<String, pm::PmWakeDecision>,
     /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
     /// runs once the frontend reports canvas bounds (same deferral rule as
     /// startup auto-resume — agent panes never spawn before the canvas is
@@ -2257,6 +2260,7 @@ impl AppRuntime {
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
