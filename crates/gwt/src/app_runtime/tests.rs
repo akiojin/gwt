@@ -10308,6 +10308,7 @@ fn app_runtime_close_active_tab_broadcasts_fallback_project_pm_status() {
 #[test]
 fn app_runtime_close_last_tab_clears_pm_status_as_unavailable() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
