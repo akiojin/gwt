@@ -1031,6 +1031,9 @@ mod tests {
             "project_root",
             "enabled=false",
             "autonomous_mode=false",
+            "enabled=true",
+            "autonomous_mode=true",
+            "explicit GUI action",
         ] {
             assert!(
                 help.contains(expected),
