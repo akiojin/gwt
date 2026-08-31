@@ -369,6 +369,29 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
+## Open PR inventory
+
+Every resident cycle inventories open pull requests. Do not wait to
+be asked, and do not skip the inventory because the Issue Monitor
+queue looks quiet — agent windows disappear, PRs do not.
+
+- Read the inventory with JSON operation `pr.list`. Do not call
+  `gh pr list`.
+- Each row already carries a `lifecycle` class and a `default_action`.
+  Classify nothing yourself; act on those fields.
+- Classes and default actions:
+  - `MERGE-CANDIDATE`: mark Ready if draft, otherwise propose merge
+  - `CONFLICTED`: relaunch the owner to resolve the conflict
+  - `BEHIND`: update the PR branch
+  - `CI-RED`: relaunch the owner to fix CI
+  - `SUPERSEDED`: propose close in the digest
+  - `IN-PROGRESS`: leave it unless `stale` is true
+- A PR is stale when `stale` is true (no `updated_at` bump for 72h).
+  Stale PRs are an escalation: present them to the user in the digest
+  with the recommended action. They are never a silent "no change".
+- `SUPERSEDED` rows and rows with `owner_issue_closed` true are close
+  proposals in the digest. Never auto-close a PR.
+
 ## NeedsHuman
 
 - When `issue.monitor.status` lists an issue under `needs_human`,
@@ -664,6 +687,16 @@ mod tests {
             "Never blindly retry a mutation",
             "authoritative readback",
             "same operation ID",
+            // Issue #3781: open PR inventory is a standing resident-cycle duty.
+            "`pr.list`",
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+            "Never auto-close a PR",
+            "no `updated_at` bump for 72h",
             // T248: session notes live outside the disposable PM worktree.
             "`$GWT_PM_SCRATCH_DIR` is the only storage location for PM session notes and checklists",
             "Never write scratch files inside the PM worktree",
@@ -757,6 +790,30 @@ mod tests {
                 execution.contains(phrase),
                 "gwtd execution isolation contract is missing: {phrase}"
             );
+        }
+    }
+
+    /// Issue #3781 AC-1/AC-3: PR lifecycle is a standing PM duty, not a
+    /// discretionary `gh pr list` glance. The classes and the no-auto-close
+    /// rule have to live in the contract so a quiet queue cannot skip them.
+    #[test]
+    fn contract_inventories_open_prs_every_resident_cycle() {
+        let body = body();
+        assert!(body.contains("## Open PR inventory"));
+        assert!(body.contains("`pr.list`"));
+        assert!(body.contains("Do not call `gh pr list`"));
+        assert!(body.contains("Classify nothing yourself"));
+        assert!(body.contains("Never auto-close a PR"));
+        assert!(body.contains("no `updated_at` bump for 72h"));
+        for class in [
+            "MERGE-CANDIDATE",
+            "CONFLICTED",
+            "BEHIND",
+            "CI-RED",
+            "SUPERSEDED",
+            "IN-PROGRESS",
+        ] {
+            assert!(body.contains(class), "missing class {class}");
         }
     }
 

@@ -273,7 +273,10 @@ fn handle_at(
          subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
          mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
          `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
-         running agents' `last_activity_at`. {execution_clause} {clause} \
+         running agents' `last_activity_at`. Inventory open PRs with `pr.list` and act on each \
+         row's `lifecycle` and `default_action`; stale (no update for 72h), SUPERSEDED, and \
+         owner-Issue-closed rows are digest escalations — never auto-close them. \
+         {execution_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
          failures do not count as empty).{refresh_context}",
@@ -590,6 +593,14 @@ mod tests {
         assert!(
             reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE),
             "the forced continuation must carry the canonical gwtd execution-isolation clause verbatim; got: {reason}"
+        );
+        assert!(
+            reason.contains("`pr.list`"),
+            "Issue #3781: the continuation must inventory open PRs; got: {reason}"
+        );
+        assert!(
+            reason.contains("never auto-close"),
+            "Issue #3781: close proposals stay in the digest; got: {reason}"
         );
     }
 
