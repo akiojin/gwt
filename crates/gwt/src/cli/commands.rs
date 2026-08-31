@@ -190,6 +190,7 @@ pub enum IssueCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
     Current,
+    List,
     Create {
         base: String,
         head: Option<String>,
