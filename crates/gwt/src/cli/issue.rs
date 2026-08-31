@@ -1088,9 +1088,8 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
-    pm_privileged: bool,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1114,7 +1113,6 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
-    pm_privileged: bool,
 ) -> io::Result<()> {
     if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
         return Err(io::Error::new(
@@ -1122,12 +1120,12 @@ fn validate_monitor_config_set(
             "at least one Issue Monitor config field is required",
         ));
     }
-    // SPEC-3431 FR-008/FR-009: same rule as the parse layer — the registered
-    // PM may raise the switches; every other session must use the GUI.
-    if !pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
+    // Issue #3814: policy lives in the command handler so both JSON dispatch
+    // and direct callers receive the same effect-free GUI-only ON refusal.
+    if enabled == Some(true) || autonomous_mode == Some(true) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "enabling Issue Monitor or autonomous mode requires an explicit GUI action              (only the project's registered PM agent may raise it from the CLI;              run `pm.status` to see the current PM)",
+            "enabling Issue Monitor or autonomous mode requires an explicit GUI action",
         ));
     }
     if max_active == Some(0) {
@@ -1139,23 +1137,6 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
-/// SPEC-3431 FR-008/FR-009: the asymmetric boundary from Issue #3357 stays in
-/// force for every agent session — only the project's registered PM may raise
-/// `enabled` / `autonomous_mode`. The privileged subject is resolved from the
-/// ambient `GWT_SESSION_ID` (the caller cannot claim someone else's id through
-/// params) matched against the durable PM registration. Raising the switch
-/// changes nothing about merges: SPEC #3200's fail-closed merge gate still
-/// decides every merge on its own.
-fn caller_is_registered_pm(project_root: &std::path::Path) -> bool {
-    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
-        return false;
-    };
-    crate::pm_registry::session_is_registered_pm(
-        &crate::pm_registry::pm_prefs_path_for_repo_path(project_root),
-        session_id.trim(),
-    )
-}
-
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -1165,40 +1146,7 @@ fn run_monitor_config_set<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let pm_privileged = caller_is_registered_pm(&project_root);
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)
-        .map_err(io_as_api_error)?;
-
-    // SPEC-3431 FR-008: a PM raising a switch writes the prefs SOT directly
-    // and asks for an immediate rescan. The daemon control lane refuses ON in
-    // its own decoder (it cannot see who sent a frame), and prefs is the
-    // source the scan driver re-reads every pass — so this is the honest path
-    // rather than a second authority channel.
-    if pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
-        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, true)
-        })
-        .map_err(io_as_api_error)?;
-        let scan_now = crate::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            serde_json::json!({ "scan_now": {} }),
-            std::process::id(),
-        );
-        let _ = publish_monitor_config_set(&project_root, scan_now);
-        let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-        out.push_str(
-            &serde_json::json!({
-                "enabled": prefs.enabled,
-                "autonomous_mode": prefs.autonomous_mode,
-                "max_active": prefs.max_active_agents.max(1),
-                "applied_by": "pm",
-            })
-            .to_string(),
-        );
-        out.push('\n');
-        return Ok(0);
-    }
+    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1218,7 +1166,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, pm_privileged)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
         })
         .map_err(io_as_api_error)?;
     }
@@ -3278,6 +3226,90 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    /// Issue #3814 AC-2/AC-3: registered PM identity must not open a hidden
+    /// JSON path around the GUI-only ON boundary, and rejection is effect-free.
+    #[test]
+    fn issue_monitor_config_set_rejects_pm_on_direction_without_changing_status() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: false,
+                autonomous_mode: false,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        crate::pm_registry::try_register_pm(
+            &pm_prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        assert!(crate::pm_registry::session_is_registered_pm(
+            &pm_prefs_path,
+            "pm-session"
+        ));
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        for (enabled, autonomous_mode) in [(Some(true), None), (None, Some(true))] {
+            let mut out = String::new();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorConfigSet {
+                    project_root: Some(repo.clone()),
+                    enabled,
+                    autonomous_mode,
+                    max_active: None,
+                },
+                &mut out,
+            );
+            assert!(result.is_err(), "PM JSON ON request must be refused");
+            assert!(out.is_empty(), "a refusal must not report applied state");
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs bytes after refusal"),
+                before,
+                "a refused ON request must not change persisted state"
+            );
+        }
+
+        let mut status_out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus {
+                project_root: Some(repo),
+            },
+            &mut status_out,
+        )
+        .expect("status after refusal");
+        let status: serde_json::Value =
+            serde_json::from_str(status_out.trim()).expect("status JSON");
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["autonomous_mode"], false);
+        assert_eq!(status["max_active"], 3);
     }
 
     /// SPEC-3431 FR-033 / T-087b: the operation the PM actually calls.
