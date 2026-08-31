@@ -43,6 +43,26 @@ class SearchMultiContractTests(unittest.TestCase):
         self._coord_tmp.cleanup()
         runner._MODEL_CACHE = None
 
+    def _write_cached_issue(self, base: Path, number: int, title: str) -> None:
+        issue_dir = base / ".gwt" / "cache" / "issues" / REPO_HASH / str(number)
+        issue_dir.mkdir(parents=True)
+        (issue_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "number": number,
+                    "title": title,
+                    "labels": ["bug"],
+                    "state": "open",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                    "comment_ids": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (issue_dir / "body.md").write_text(
+            "alpha search regression details", encoding="utf-8"
+        )
+
     def _seed_file_scopes(self, base: Path, db_root: Path) -> Path:
         project = base / "project"
         (project / "src").mkdir(parents=True)
@@ -232,29 +252,47 @@ class SearchMultiContractTests(unittest.TestCase):
                 f"unreadable store must classify as corrupt, not silent-empty: {payload}",
             )
 
+    def test_search_multi_blocks_issue_results_when_source_count_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            self._write_cached_issue(base, 1, "First issue about alpha search")
+
+            with mock.patch.dict(os.environ, {"HOME": str(base)}, clear=False):
+                result = runner.action_index_issues_v2(
+                    repo_hash=REPO_HASH,
+                    project_root=str(base),
+                    db_root=db_root,
+                    respect_ttl=False,
+                )
+                self.assertTrue(result.get("ok"), result)
+                self._write_cached_issue(base, 2, "Second issue about alpha search")
+
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=None,
+                    project_root=str(base),
+                    query="alpha search",
+                    n_results=5,
+                    scopes=["issues"],
+                    db_root=db_root,
+                )
+
+            self.assertTrue(payload.get("ok"), payload)
+            self.assertEqual(
+                payload.get("scopes", {}).get("issues"),
+                {"state": "corrupt", "reason": "count_mismatch"},
+                payload,
+            )
+            self.assertNotIn("issues", payload.get("stale_scopes") or [], payload)
+            self.assertNotIn("issueResults", payload, payload)
+            self.assertFalse(payload.get("scope_results"), payload)
+
     def test_search_multi_marks_ttl_expired_issues_scope_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             db_root = base / "index"
-            cache_root = base / ".gwt" / "cache" / "issues" / REPO_HASH
-            issue_dir = cache_root / "1"
-            issue_dir.mkdir(parents=True)
-            (issue_dir / "meta.json").write_text(
-                json.dumps(
-                    {
-                        "number": 1,
-                        "title": "First issue about alpha search",
-                        "labels": ["bug"],
-                        "state": "open",
-                        "updated_at": "2026-07-01T00:00:00Z",
-                        "comment_ids": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (issue_dir / "body.md").write_text(
-                "alpha search regression details", encoding="utf-8"
-            )
+            self._write_cached_issue(base, 1, "First issue about alpha search")
 
             with mock.patch.dict(os.environ, {"HOME": str(base)}, clear=False):
                 result = runner.action_index_issues_v2(
