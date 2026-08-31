@@ -269,7 +269,11 @@ Common windows include:
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view.
+  open this same Work Item view. Issue Monitor launches do not open a window on
+  the canvas: the agent is mirrored read-only in the Issue window's right pane,
+  and `Windowize` promotes it to a normal window when you want to type into it.
+  Each row also carries its Work's lifecycle, attention reason, and PR state,
+  with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
 - `File Tree` — live read-only repository tree

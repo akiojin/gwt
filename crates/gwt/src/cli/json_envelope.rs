@@ -72,7 +72,10 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
-                _ => super::board::auto_file_operation_refusal(env, &operation, &output),
+                _ => {
+                    report_operation_refusal(env, &operation, &output);
+                    super::board::auto_file_operation_refusal(env, &operation, &output);
+                }
             }
             code
         }
@@ -95,6 +98,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             // depending on the agent noticing it is stuck. Answering the caller
             // comes first — the escalation must never delay or replace the
             // operation's own reply.
+            report_operation_refusal(env, &operation, &message);
             super::board::auto_file_operation_refusal(env, &operation, &message);
             1
         }
@@ -115,6 +119,22 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
 /// Absent when the operation never resolved a project store — including when it
 /// failed before doing so. Absence therefore means "no store was touched", not
 /// "the store is fine".
+fn report_operation_refusal<E: CliEnv>(env: &E, operation: &str, error: &str) {
+    let session_id = std::env::var(GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    crate::error_report::report_error(
+        gwt_core::error_ledger::ErrorKind::OperationRefusal,
+        format!("{operation}: {error}"),
+        gwt_core::error_ledger::ErrorTarget {
+            session_id,
+            project_root: Some(env.repo_path().display().to_string()),
+            ..gwt_core::error_ledger::ErrorTarget::default()
+        },
+    );
+}
+
 fn attach_project_store(payload: &mut Value) {
     let Some(store) = gwt_core::paths::operation_project_store() else {
         return;
@@ -327,24 +347,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "enabled|autonomous_mode|max_active",
                 ));
             }
-            // SPEC-3431 FR-008/FR-009: Issue #3357's asymmetric boundary keeps
-            // applying to every agent session — raising a switch stays a GUI
-            // action — except for the project's registered PM, which the SPEC
-            // grants full authority. Merges are unaffected either way: SPEC
-            // #3200's fail-closed merge gate still decides every merge.
-            let pm_privileged = params_caller_is_registered_pm(params);
-            if !pm_privileged {
-                if enabled == Some(true) {
-                    return Err(CliParseError::InvalidJson(
-                        "enabled=true requires an explicit GUI action".to_string(),
-                    ));
-                }
-                if autonomous_mode == Some(true) {
-                    return Err(CliParseError::InvalidJson(
-                        "autonomous_mode=true requires an explicit GUI action".to_string(),
-                    ));
-                }
-            }
+            // The handler owns the GUI-only ON policy so dispatch can return
+            // the normal structured `ok:false` operation envelope. This layer
+            // only rejects malformed config values.
             if max_active == Some(0) {
                 return Err(CliParseError::InvalidJson(
                     "max_active must be greater than zero".to_string(),
@@ -358,6 +363,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.list" => CliCommand::Pr(PrCommand::List),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -607,6 +613,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?,
         }),
         "search" => search(params)?,
+        "errors.list" => errors_list(params)?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
@@ -1126,6 +1133,17 @@ fn skill_state(
     }
 }
 
+fn errors_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["since"], "errors.list")?;
+    let since = optional_string(params, "since")?;
+    if let Some(raw) = since.as_deref() {
+        super::diagnostics::errors::parse_since(raw)?;
+    }
+    Ok(CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList {
+        since,
+    }))
+}
+
 fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     let scopes = optional_string_vec(params, "scopes")?
         .into_iter()
@@ -1373,34 +1391,6 @@ fn required_u64_vec(
     optional_u64_vec(params, key)
 }
 
-/// SPEC-3431 FR-009: is this caller the project's registered PM?
-///
-/// The identity comes from the ambient `GWT_SESSION_ID` only — params may
-/// name the project, never the subject — so no caller can claim PM authority
-/// it does not hold. The project is the explicit `project_root` when given,
-/// otherwise the current directory, matching how the handler resolves it.
-/// Anything unresolvable is not privileged (fail-closed).
-fn params_caller_is_registered_pm(params: &Map<String, Value>) -> bool {
-    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
-        return false;
-    };
-    let session_id = session_id.trim().to_string();
-    if session_id.is_empty() {
-        return false;
-    }
-    let project_root = match params.get("project_root").and_then(Value::as_str) {
-        Some(path) => std::path::PathBuf::from(path),
-        None => match std::env::current_dir() {
-            Ok(cwd) => cwd,
-            Err(_) => return false,
-        },
-    };
-    crate::pm_registry::session_is_registered_pm(
-        &crate::pm_registry::pm_prefs_path_for_repo_path(&project_root),
-        &session_id,
-    )
-}
-
 fn issue_monitor_priority_position(
     params: &Map<String, Value>,
 ) -> Result<super::IssueMonitorPriorityPosition, CliParseError> {
@@ -1499,9 +1489,9 @@ fn optional_json_array(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, HookCommand, IndexCommand,
-        IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
-        WorkflowCommand, WorkspaceCommand,
+        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
+        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
+        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
@@ -1543,6 +1533,7 @@ mod tests {
     #[test]
     fn operation_failures_answer_with_an_ok_false_envelope() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
         let mut env = TestEnv::new(temp.path().to_path_buf());
         env.stdin = envelope("issue.view", json!({ "number": 4242 }));
 
@@ -1565,6 +1556,94 @@ mod tests {
             stderr.contains("gwtd issue.view:"),
             "the human-readable stderr line must stay: {stderr}"
         );
+        let listed = gwt_core::error_ledger::list_since(None).expect("error ledger");
+        assert!(
+            listed.iter().any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::OperationRefusal
+                    && row.message.contains("issue.view")
+            }),
+            "operation refusal must land in the error ledger: {listed:?}"
+        );
+    }
+
+    /// Issue #3814 AC-2/AC-3: the JSON surface must return a structured
+    /// refusal for a registered PM and reject a mixed request atomically.
+    #[test]
+    fn issue_monitor_pm_on_refusal_answers_ok_false_and_preserves_prefs() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: false,
+                autonomous_mode: false,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        crate::pm_registry::try_register_pm(
+            &pm_prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: project_root.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        assert!(crate::pm_registry::session_is_registered_pm(
+            &pm_prefs_path,
+            "pm-session"
+        ));
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        for params in [
+            json!({
+                "project_root": project_root.to_string_lossy(),
+                "enabled": true,
+                "max_active": 7,
+            }),
+            json!({
+                "project_root": project_root.to_string_lossy(),
+                "autonomous_mode": true,
+                "max_active": 9,
+            }),
+        ] {
+            let mut env = TestEnv::new(project_root.clone());
+            env.stdin = envelope("issue.monitor.config.set", params);
+
+            let code = super::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 1);
+            let stdout = String::from_utf8(env.stdout).expect("stdout utf8");
+            let payload: Value = serde_json::from_str(stdout.trim()).expect("error envelope JSON");
+            assert_eq!(payload["ok"], json!(false));
+            assert_eq!(payload["operation"], json!("issue.monitor.config.set"));
+            assert_eq!(payload["exit_code"], json!(1));
+            assert!(payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("requires an explicit GUI action")));
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs after refusal"),
+                before,
+                "a mixed ON request must not partially apply allowed fields"
+            );
+        }
     }
 
     #[test]
@@ -2015,81 +2094,31 @@ mod tests {
         ));
     }
 
-    // SPEC-3431 T-030 (FR-008/FR-009): the #3357 asymmetric boundary keeps
-    // applying to every agent session; only the project's registered PM may
-    // raise the switches. The privileged subject comes from the ambient
-    // session id, never from params, so a caller cannot claim it.
+    // Issue #3814 AC-2: semantic policy belongs to the handler so dispatch can
+    // report a structured operation refusal instead of a parse-only stderr.
     #[test]
-    fn issue_monitor_config_set_on_direction_is_pm_only() {
-        let _guard = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project_root = temp.path().join("repo");
-        std::fs::create_dir_all(&project_root).expect("repo dir");
-        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
-
-        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
-        crate::pm_registry::try_register_pm(
-            &prefs_path,
-            crate::pm_registry::PmRegistration {
-                session_id: "pm-session".to_string(),
-                agent_id: "claude".to_string(),
-                worktree_path: project_root.to_string_lossy().into_owned(),
-                created_at: None,
-                consecutive_crashes: 0,
-                next_not_before: None,
-            },
-            |_| false,
-        )
-        .expect("register PM");
-
-        let params = json!({
-            "project_root": project_root.to_string_lossy(),
-            "autonomous_mode": true,
-        });
-
-        // positive: a non-PM session is still refused, with the GUI guidance.
-        let _other = gwt_core::test_support::ScopedEnvVar::set(
-            gwt_agent::GWT_SESSION_ID_ENV,
-            "other-session",
-        );
-        assert!(matches!(
-            err("issue.monitor.config.set", params.clone()),
-            CliParseError::InvalidJson(message) if message.contains("requires an explicit GUI action")
-        ));
-        drop(_other);
-
-        // ...and so is a session with no ambient identity at all.
-        let _unset = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
-        assert!(matches!(
-            err("issue.monitor.config.set", params.clone()),
-            CliParseError::InvalidJson(_)
-        ));
-        drop(_unset);
-
-        // false-positive negative: the registered PM is allowed through.
-        let _pm =
-            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+    fn issue_monitor_config_set_on_direction_reaches_handler_validation() {
         assert_eq!(
-            ok("issue.monitor.config.set", params),
+            ok(
+                "issue.monitor.config.set",
+                json!({"enabled": true, "max_active": 7})
+            ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
-                project_root: Some(project_root.clone()),
+                project_root: None,
+                enabled: Some(true),
+                autonomous_mode: None,
+                max_active: Some(7),
+            })
+        );
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
             })
         );
-
-        // OFF direction stays open to everyone, PM or not.
-        assert!(matches!(
-            ok(
-                "issue.monitor.config.set",
-                json!({"project_root": project_root.to_string_lossy(), "autonomous_mode": false})
-            ),
-            CliCommand::Issue(IssueCommand::MonitorConfigSet { .. })
-        ));
     }
 
     // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
@@ -2390,20 +2419,12 @@ mod tests {
 
     #[test]
     fn issue_monitor_queue_operations_reject_unsafe_or_incomplete_params() {
-        for params in [
-            json!({}),
-            json!({"enabled": true}),
-            json!({"max_active": 0}),
-        ] {
+        for params in [json!({}), json!({"max_active": 0})] {
             assert!(matches!(
                 err("issue.monitor.config.set", params),
                 CliParseError::InvalidJson(_) | CliParseError::MissingFlag(_)
             ));
         }
-        assert!(matches!(
-            err("issue.monitor.config.set", json!({"autonomous_mode": true})),
-            CliParseError::InvalidJson(_)
-        ));
         assert!(matches!(
             err(
                 "issue.monitor.priority.move",
@@ -2765,6 +2786,10 @@ mod tests {
             CliCommand::Pr(PrCommand::Current)
         ));
         assert!(matches!(
+            ok("pr.list", json!({})),
+            CliCommand::Pr(PrCommand::List)
+        ));
+        assert!(matches!(
             ok(
                 "pr.create",
                 json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": true})
@@ -2926,6 +2951,12 @@ mod tests {
                 ..
             })
         ));
+        match ok("daemon.subscribe", json!({"channels": ["errors"]})) {
+            CliCommand::Daemon(DaemonCommand::Subscribe { channels, .. }) => {
+                assert_eq!(channels, vec!["errors".to_string()]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
         // Zero would mean "return before reading anything", which is never
         // what a caller wants and silently degrades the loop to a busy poll.
         assert!(err(
@@ -3255,6 +3286,27 @@ mod tests {
             err("search", json!({"query": "q", "match_mode": "fuzzy"})),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn errors_list_parses_optional_since() {
+        assert!(matches!(
+            ok("errors.list", json!({})),
+            CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList { since: None })
+        ));
+        match ok("errors.list", json!({"since": "2026-08-30T00:00:00Z"})) {
+            CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList { since }) => {
+                assert_eq!(since.as_deref(), Some("2026-08-30T00:00:00Z"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match err("errors.list", json!({"since": "yesterday"})) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "since");
+                assert!(reason.contains("RFC3339"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

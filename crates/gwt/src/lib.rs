@@ -19,6 +19,7 @@ pub mod daemon_runtime;
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
+pub mod error_report;
 pub mod file_content;
 pub mod file_tree;
 pub mod gui_single_instance;
@@ -155,7 +156,7 @@ pub use knowledge_bridge::{
     search_knowledge_bridge, search_knowledge_bridge_outcome, update_knowledge_phase,
     KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
     KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
-    KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry,
+    KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,

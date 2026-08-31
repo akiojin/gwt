@@ -1885,7 +1885,11 @@ fn try_apply_typed_issue_monitor_failure(
             issue_number,
             window_id,
             message,
-            failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit { resets_at, .. }),
+            failure:
+                Some(crate::IssueMonitorFailure::ProviderUsageLimit {
+                    provider,
+                    resets_at,
+                }),
         } => {
             let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
             let Some(issue_number) = issue_number else {
@@ -1896,6 +1900,7 @@ fn try_apply_typed_issue_monitor_failure(
                 monitor.try_hold_provider_usage_limit(
                     issue_number,
                     &window_id,
+                    &provider,
                     message,
                     resets_at.as_deref(),
                     &now,
@@ -2059,7 +2064,10 @@ fn apply_routine_issue_monitor_control(
             // rather than falling through to the terminal failure path, so a
             // future routing change degrades to "handled" instead of "the
             // Issue is now terminal for someone else's billing cycle".
-            Some(crate::IssueMonitorFailure::ProviderUsageLimit { resets_at, .. }) => {
+            Some(crate::IssueMonitorFailure::ProviderUsageLimit {
+                provider,
+                resets_at,
+            }) => {
                 let issue_number =
                     issue_number.or_else(|| monitor.launched_window_issue(&window_id));
                 let Some(issue_number) = issue_number else {
@@ -2069,6 +2077,7 @@ fn apply_routine_issue_monitor_control(
                 monitor.try_hold_provider_usage_limit(
                     issue_number,
                     &window_id,
+                    &provider,
                     message,
                     resets_at.as_deref(),
                     &now,
@@ -3510,7 +3519,11 @@ fn scan_issue_monitor_once_blocking(
             format!("live issue list failed; cache proposal discarded: {error}"),
         ));
     }
-    let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
+    let monitor_owner = format!(
+        "{}:{}",
+        crate::process::current_username(),
+        std::process::id()
+    );
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
         &loaded,
@@ -6441,6 +6454,7 @@ exit 0
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: None,
                 reviewed_sha: None,
@@ -6543,6 +6557,7 @@ exit 0
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: Some("2026-07-28T00:00:00Z".to_string()),
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
@@ -7149,6 +7164,240 @@ exit 0
             Some(crate::MonitorInboxState::Queued)
         );
         assert_eq!(monitor.active_count(), 0, "the slot is released");
+    }
+
+    /// Issue #3785 / SPEC #3165 Scenario 113-114: a provider quota notice is
+    /// a launch-admission decision, not merely a retry floor for its source
+    /// Issue. The durable planner must therefore leave every matching-provider
+    /// candidate claim-neutral until reset and resume through the same planner
+    /// after reset.
+    #[test]
+    fn a_provider_usage_limit_control_gates_claim_planning_until_reset() {
+        let mut profile = sample_issue_monitor_profile();
+        profile.agent_id = "codex".to_string();
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launch_profile: Some(profile),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor.record_candidate(sample_issue_monitor_issue(43));
+        monitor.record_claimed(sample_issue_monitor_issue(42), "claim-a");
+        monitor
+            .next_launch_request("2026-08-16T00:00:00Z")
+            .expect("initial launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert_eq!(monitor.record_attempt(42), 1, "seed one prior attempt");
+
+        let resets_at = chrono::Utc::now() + chrono::Duration::days(6);
+        let before_reset = (resets_at - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let after_reset = (resets_at + chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let resets_at = resets_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-42",
+                    "message": format!("Codex usage limit reached — resumes after {resets_at}"),
+                    "failure": {
+                        "kind": "provider_usage_limit",
+                        "provider": "codex",
+                        "resets_at": resets_at,
+                    },
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("typed quota control");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+
+        let prefs = monitor.prefs();
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            prefs,
+        );
+        restored.set_gui_connected(true);
+        restored.record_candidate(sample_issue_monitor_issue(42));
+        restored.record_candidate(sample_issue_monitor_issue(43));
+
+        let before_reset_result: Result<usize, std::convert::Infallible> = restored
+            .try_prepare_claim_effects_with_probe("host/session", &before_reset, 1, |_| Ok(false));
+        assert_eq!(
+            before_reset_result.expect("infallible probe"),
+            0,
+            "the exhausted provider must gate every queued Issue before reset"
+        );
+        assert!(
+            restored.pending_effects().is_empty(),
+            "a provider hold must not burn a claim"
+        );
+        assert_eq!(restored.attempt_count(42), 1);
+        assert_eq!(restored.attempt_count(43), 0);
+        assert_ne!(
+            restored.autonomous_record(42).map(|record| record.phase),
+            Some(crate::AutonomousPhase::NeedsHuman)
+        );
+        assert_ne!(
+            restored.autonomous_record(43).map(|record| record.phase),
+            Some(crate::AutonomousPhase::NeedsHuman)
+        );
+
+        let after_reset_result: Result<usize, std::convert::Infallible> = restored
+            .try_prepare_claim_effects_with_probe("host/session", &after_reset, 1, |_| Ok(false));
+        assert_eq!(
+            after_reset_result.expect("infallible probe"),
+            1,
+            "the normal planner resumes automatically after reset"
+        );
+        assert_eq!(
+            restored
+                .pending_effects()
+                .iter()
+                .filter(|effect| matches!(
+                    effect.payload,
+                    crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn typed_provider_usage_limit_primary_path_preserves_the_reported_provider() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor
+            .next_launch_request("2026-08-16T00:00:00Z")
+            .expect("initial launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        let resets_at = chrono::Utc::now() + chrono::Duration::days(6);
+        let before_reset = (resets_at - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let resets_at = resets_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-42",
+                    "message": "Codex usage limit reached",
+                    "failure": {
+                        "kind": "provider_usage_limit",
+                        "provider": "codex",
+                        "resets_at": resets_at,
+                    },
+                }
+            }),
+            std::process::id() + 1,
+        );
+
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            decode_issue_monitor_control(payload).expect("typed quota control"),
+        ));
+        assert_eq!(
+            monitor.prefs().provider_quota_holds.get("codex"),
+            Some(&resets_at)
+        );
+        assert_eq!(monitor.status_view_at(&before_reset).quota_hold, None);
+        monitor.record_candidate(sample_issue_monitor_issue(43));
+        assert_eq!(
+            monitor
+                .try_prepare_claim_effects_with_probe("host/session", &before_reset, 1, |_| Ok::<
+                    bool,
+                    std::convert::Infallible,
+                >(
+                    false
+                ),)
+                .expect("infallible probe"),
+            1,
+            "the saved Claude profile must remain healthy when Codex reports quota exhaustion"
+        );
+    }
+
+    #[test]
+    fn typed_provider_usage_limit_routine_defense_preserves_the_reported_provider() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor
+            .next_launch_request("2026-08-16T00:00:00Z")
+            .expect("initial launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        let resets_at = "2099-08-22T04:00:00Z";
+
+        assert!(super::apply_routine_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::AgentFailed {
+                issue_number: Some(42),
+                window_id: "tab-1::agent-42".to_string(),
+                message: "Codex usage limit reached".to_string(),
+                failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit {
+                    provider: "codex".to_string(),
+                    resets_at: Some(resets_at.to_string()),
+                }),
+            },
+        ));
+        assert_eq!(
+            monitor.prefs().provider_quota_holds.get("codex"),
+            Some(&resets_at.to_string())
+        );
+        assert_eq!(
+            monitor.status_view_at("2026-08-22T03:00:00Z").quota_hold,
+            None
+        );
+        monitor.record_candidate(sample_issue_monitor_issue(43));
+        assert_eq!(
+            monitor
+                .try_prepare_claim_effects_with_probe(
+                    "host/session",
+                    "2026-08-22T03:00:00Z",
+                    1,
+                    |_| Ok::<bool, std::convert::Infallible>(false),
+                )
+                .expect("infallible probe"),
+            1
+        );
     }
 
     #[test]
@@ -8294,6 +8543,7 @@ exit 0
                     acceptance_snapshot: None,
                     retry_not_before: None,
                     retry_hold_reason: None,
+                    retry_hold_provider: None,
                     last_heartbeat: Some(original_heartbeat.to_string()),
                     pr_number: None,
                     reviewed_sha: None,
@@ -8690,7 +8940,7 @@ exit 0
             &fake_gh,
             r#"#!/bin/sh
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
+  printf '%s\n' '[{"number":42,"title":"Issue 42","body":"Body 42","labels":[{"name":"bug"},{"name":"hold"}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"2026-07-27T00:00:00Z"}]'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
@@ -8773,6 +9023,7 @@ exit 1
                     acceptance_snapshot: None,
                     retry_not_before: None,
                     retry_hold_reason: None,
+                    retry_hold_provider: None,
                     last_heartbeat: Some("2026-07-27T00:00:00Z".to_string()),
                     pr_number: Some(99),
                     reviewed_sha: Some("abc".to_string()),
@@ -10996,6 +11247,7 @@ exit 1
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
@@ -11056,6 +11308,7 @@ exit 1
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: Some("2026-07-28T00:00:00Z".to_string()),
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
@@ -11103,6 +11356,7 @@ exit 1
                     acceptance_snapshot: None,
                     retry_not_before: None,
                     retry_hold_reason: None,
+                    retry_hold_provider: None,
                     last_heartbeat: None,
                     pr_number: Some(70),
                     reviewed_sha: Some("sha-7".to_string()),
@@ -11116,6 +11370,7 @@ exit 1
                     acceptance_snapshot: None,
                     retry_not_before: None,
                     retry_hold_reason: None,
+                    retry_hold_provider: None,
                     last_heartbeat: Some("2026-07-28T00:00:00Z".to_string()),
                     pr_number: Some(80),
                     reviewed_sha: Some("sha-8".to_string()),
@@ -11179,6 +11434,7 @@ exit 1
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: Some(70),
                 reviewed_sha: Some("sha-7".to_string()),
@@ -11791,6 +12047,7 @@ exit 1
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("sha-a".to_string()),
@@ -11926,6 +12183,7 @@ exit 1
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
@@ -12056,6 +12314,7 @@ exit 1
                 acceptance_snapshot: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
+                retry_hold_provider: None,
                 last_heartbeat: None,
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
@@ -12371,6 +12630,7 @@ exit 1
             acceptance_snapshot: None,
             retry_not_before: None,
             retry_hold_reason: None,
+            retry_hold_provider: None,
             last_heartbeat: None,
             pr_number: None,
             reviewed_sha: None,
@@ -12591,6 +12851,7 @@ exit 1
                     acceptance_snapshot: None,
                     retry_not_before: None,
                     retry_hold_reason: None,
+                    retry_hold_provider: None,
                     last_heartbeat: None,
                     pr_number: None,
                     reviewed_sha: None,
@@ -13019,7 +13280,7 @@ exit 1
             &fake_gh,
             r#"#!/bin/sh
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
+  printf '%s\n' '[{"number":42,"title":"Issue 42","body":"Body 42","labels":[{"name":"bug"},{"name":"hold"}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"2026-07-27T00:00:00Z"}]'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
@@ -13598,6 +13859,7 @@ exit 1
                     acceptance_snapshot: None,
                     retry_not_before: None,
                     retry_hold_reason: None,
+                    retry_hold_provider: None,
                     last_heartbeat: Some(old_heartbeat.to_string()),
                     pr_number: None,
                     reviewed_sha: None,
@@ -13881,6 +14143,7 @@ exit 1
             acceptance_snapshot: None,
             retry_not_before: None,
             retry_hold_reason: None,
+            retry_hold_provider: None,
             last_heartbeat: Some("2026-07-21T00:00:00Z".to_string()),
             pr_number: None,
             reviewed_sha: None,

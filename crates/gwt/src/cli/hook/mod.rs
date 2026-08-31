@@ -293,7 +293,17 @@ pub fn run_daemon_hook<E: CliEnv>(
         }
     }
     fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let _ = writeln!(env.stderr(), "gwtd hook {name}: {err}");
+        let message = format!("{err}");
+        crate::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::HookFailure,
+            format!("{name}: {message}"),
+            gwt_core::error_ledger::ErrorTarget {
+                session_id: std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok(),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        let _ = writeln!(env.stderr(), "gwtd hook {name}: {message}");
         1
     }
 
@@ -510,6 +520,24 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    #[test]
+    fn invalid_hook_event_is_written_to_the_error_ledger() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let code =
+            run_daemon_hook(&mut env, "event", &["NotARealEvent".to_string()]).expect("run hook");
+        assert_eq!(code, 1);
+        let listed = gwt_core::error_ledger::list_since(None).expect("list");
+        assert!(
+            listed.iter().any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::HookFailure
+                    && row.message.contains("NotARealEvent")
+            }),
+            "hook failure must land in the error ledger: {listed:?}"
+        );
+    }
 
     #[test]
     fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {

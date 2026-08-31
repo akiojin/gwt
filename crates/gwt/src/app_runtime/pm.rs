@@ -29,7 +29,9 @@ use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 // Issue #3632: every prompt this module injects closes with the one canonical
 // reporting clause the Stop-gate continuation also uses; see
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
-use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE};
+use gwt::pm_registry::{
+    self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE, PM_GWTD_EXECUTION_CLAUSE,
+};
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
@@ -115,6 +117,13 @@ const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 pub(crate) struct PmWakeDecision {
     pub(crate) window_id: String,
     pub(crate) prompt: String,
+}
+
+/// Outcome of attempting to type a wake prompt into the PM pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PmWakeWrite {
+    Injected,
+    Deferred,
 }
 
 /// What one monitor inbox snapshot contributes to the wake decision: every
@@ -656,7 +665,10 @@ impl AppRuntime {
             prompt: format!(
                 "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
                  Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
-                 triage the new items. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 triage the new items. Inventory open PRs with `pr.list`; stale / SUPERSEDED / \
+                 owner-Issue-closed rows are digest escalations, never auto-close. \
+                 {PM_GWTD_EXECUTION_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 reasons.join(", "),
                 escalations = open_escalation_prompt_section(project_root),
             ),
@@ -731,7 +743,10 @@ impl AppRuntime {
             prompt: format!(
                 "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
                  fresh `issue.monitor.status` snapshot, check the running agents' \
-                 `last_activity_at` and any NeedsHuman rows. {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 `last_activity_at` and any NeedsHuman rows, and inventory open PRs with \
+                 `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows are digest \
+                 escalations, never auto-close). {PM_GWTD_EXECUTION_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 escalations = open_escalation_prompt_section(project_root),
             ),
         })
@@ -749,10 +764,16 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(()) => {
+            Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake re-armed the resident PM from the scheduled snapshot"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "periodic wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -793,10 +814,16 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(()) => {
+            Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "woke the resident PM for new Issue Monitor activity"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "Issue Monitor wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -1443,14 +1470,61 @@ impl AppRuntime {
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
-    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
-        match self.runtimes.get(&decision.window_id) {
-            None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => {
-                let pane = Arc::clone(&runtime.pane);
-                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+    ///
+    /// Issue #3702: if the PM TUI composer already has unsent keystrokes,
+    /// hold one coalesced prompt instead of splicing `[gwt]` into the line.
+    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
+        let pane = match self.runtimes.get(&decision.window_id) {
+            None => return Err(format!("no live runtime for pane {}", decision.window_id)),
+            Some(runtime) => Arc::clone(&runtime.pane),
+        };
+        let unsent = pane
+            .lock()
+            .map(|pane| pane.has_unsent_user_input())
+            .unwrap_or(false);
+        if unsent {
+            self.pending_pm_wakes
+                .insert(decision.window_id.clone(), decision.clone());
+            return Ok(PmWakeWrite::Deferred);
+        }
+        self.pending_pm_wakes.remove(&decision.window_id);
+        super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)?;
+        Ok(PmWakeWrite::Injected)
+    }
+
+    /// Issue #3702 AC-2: deliver a held wake once the composer is submitted
+    /// or cleared. Missing pending entries are a no-op so every pane submit
+    /// can call this cheaply.
+    pub(crate) fn flush_pending_pm_wake(&mut self, window_id: &str) {
+        let Some(decision) = self.pending_pm_wakes.get(window_id).cloned() else {
+            return;
+        };
+        if self.pane_has_unsent_user_input(window_id) {
+            return;
+        }
+        match self.write_pm_wake_prompt(&decision) {
+            Ok(PmWakeWrite::Injected) => {
+                tracing::info!(
+                    window_id,
+                    "delivered a PM wake held while the composer was busy"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_id,
+                    "held PM wake prompt injection failed"
+                );
             }
         }
+    }
+
+    pub(crate) fn pane_has_unsent_user_input(&self, window_id: &str) -> bool {
+        self.runtimes
+            .get(window_id)
+            .and_then(|runtime| runtime.pane.lock().ok())
+            .is_some_and(|pane| pane.has_unsent_user_input())
     }
 
     /// Authoritative liveness for a stored PM registration (FR-001): the
@@ -1605,24 +1679,28 @@ impl AppRuntime {
     /// arbitrary path. Fail-closed: any uncertainty keeps the worktree.
     fn cleanup_pm_worktree(project_root: &Path) {
         let worktree = pm_registry::pm_worktree_path_for_repo_path(project_root);
-        if !worktree.exists() {
-            return;
-        }
-        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
-        match manager.ephemeral_worktree_has_local_work(&worktree) {
-            Ok(false) => {
-                if let Err(error) = manager.remove_force_twice(&worktree) {
-                    tracing::warn!(%error, "failed to remove the clean PM worktree");
-                }
+        match pm_registry::cleanup_pm_worktree_for_repo_path(project_root, |worktree, entry| {
+            crate::runtime_support::intake_hook_config_is_disposable(worktree, entry)
+        }) {
+            Ok(pm_registry::PmWorktreeCleanupOutcome::Absent) => {}
+            Ok(pm_registry::PmWorktreeCleanupOutcome::Removed) => {
+                tracing::info!(
+                    worktree = %worktree.display(),
+                    "clean PM worktree removed"
+                );
             }
-            Ok(true) => {
+            Ok(pm_registry::PmWorktreeCleanupOutcome::RetainedLocalWork) => {
                 tracing::info!(
                     worktree = %worktree.display(),
                     "PM worktree has local work; keeping it for reuse"
                 );
             }
             Err(error) => {
-                tracing::warn!(%error, "PM worktree local-work check failed; keeping it");
+                tracing::warn!(
+                    %error,
+                    worktree = %worktree.display(),
+                    "PM worktree cleanup failed closed; keeping it"
+                );
             }
         }
     }
@@ -1760,35 +1838,21 @@ impl AppRuntime {
         }
         let mut config = builder.build();
         config.suppress_execution_control = true;
+        if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {
+            config.env_vars.insert(
+                "GWT_PM_SCRATCH_DIR".to_string(),
+                scratch.to_string_lossy().into_owned(),
+            );
+        }
         config
     }
 
     /// Dedicated detached worktree for the PM session (research R-10). Its
     /// lifecycle is bound to the PM registration; T-016 adds GC.
     fn ensure_pm_worktree(project_root: &Path) -> Result<PathBuf, String> {
-        let path = pm_registry::pm_worktree_path_for_repo_path(project_root);
-        if path.join(".git").exists() {
-            return Ok(path);
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
-        manager
-            .create_detached("HEAD", &path)
-            .map_err(|error| error.to_string())?;
-        Ok(path)
-    }
-
-    /// Issue #3497: the opened project root is not always a repository — the
-    /// bare layout (`parent/` holding `parent/<name>.git` plus worktrees) is
-    /// exactly what the launch paths already resolve through
-    /// `main_worktree_root`. Every PM `WorktreeManager` goes through the same
-    /// resolution, or `git worktree` dies with "not a git repository" and the
-    /// PM silently never comes up.
-    fn pm_git_root(project_root: &Path) -> PathBuf {
-        gwt_git::worktree::main_worktree_root(project_root)
-            .unwrap_or_else(|_| project_root.to_path_buf())
+        pm_registry::refresh_pm_worktree_for_repo_path(project_root)
+            .map(|outcome| outcome.worktree)
+            .map_err(|error| error.to_string())
     }
 }
 
