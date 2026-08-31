@@ -58165,6 +58165,10 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
     );
     assert!(
+        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+        "{label} must carry the canonical gwtd execution-isolation clause verbatim; got: {prompt}"
+    );
+    assert!(
         prompt.contains("`pr.list`"),
         "{label} must inventory open PRs each cycle (Issue #3781); got: {prompt}"
     );

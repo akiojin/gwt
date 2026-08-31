@@ -29,7 +29,9 @@ use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 // Issue #3632: every prompt this module injects closes with the one canonical
 // reporting clause the Stop-gate continuation also uses; see
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
-use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE};
+use gwt::pm_registry::{
+    self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE, PM_GWTD_EXECUTION_CLAUSE,
+};
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
@@ -658,6 +660,7 @@ impl AppRuntime {
                  Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
                  triage the new items. Inventory open PRs with `pr.list`; stale / SUPERSEDED / \
                  owner-Issue-closed rows are digest escalations, never auto-close. \
+                 {PM_GWTD_EXECUTION_CLAUSE} \
                  {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 reasons.join(", "),
                 escalations = open_escalation_prompt_section(project_root),
@@ -735,7 +738,8 @@ impl AppRuntime {
                  fresh `issue.monitor.status` snapshot, check the running agents' \
                  `last_activity_at` and any NeedsHuman rows, and inventory open PRs with \
                  `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows are digest \
-                 escalations, never auto-close). {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 escalations, never auto-close). {PM_GWTD_EXECUTION_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 escalations = open_escalation_prompt_section(project_root),
             ),
         })
