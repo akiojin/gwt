@@ -1167,6 +1167,10 @@ fn write_fake_gh_issue_list(temp_root: &Path) -> PathBuf {
                 &fake_gh,
                 "@echo off\r\n\
 if not \"%GWT_FAKE_GH_MARKER%\"==\"\" echo called>>\"%GWT_FAKE_GH_MARKER%\"\r\n\
+if /I \"%1 %2\"==\"api rate_limit\" (\r\n\
+  echo {\"resources\":{\"graphql\":{\"limit\":5000,\"remaining\":5000,\"reset\":4102444800}}}\r\n\
+  exit /b 0\r\n\
+)\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh refresh failed\r\n\
   exit /b 1\r\n\
@@ -1197,6 +1201,10 @@ exit /b 0\r\n",
 	if [ -n "$GWT_FAKE_GH_EXPECT_CWD" ] && [ "$(pwd)" != "$GWT_FAKE_GH_EXPECT_CWD" ]; then
 	  printf '%s\n' "wrong cwd: $(pwd)" >&2
 	  exit 1
+	fi
+	if [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+	  printf '%s\n' '{"resources":{"graphql":{"limit":5000,"remaining":5000,"reset":4102444800}}}'
+	  exit 0
 	fi
 	if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
 	  printf '%s\n' 'gh refresh failed' >&2

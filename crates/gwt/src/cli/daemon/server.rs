@@ -3530,7 +3530,7 @@ fn scan_issue_monitor_once_blocking(
         &scope.project_root,
         &now,
     );
-    crate::issue_monitor_worker::run_scan_stage(
+    if let Err(error) = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
@@ -3540,7 +3540,13 @@ fn scan_issue_monitor_once_blocking(
                 &repo,
             )
         },
-    )?;
+    ) {
+        tracing::warn!(error = %error, "issue monitor merge reconciliation failed");
+        monitor.record_scan_error(
+            &now,
+            format!("issue monitor merge reconciliation failed: {error}"),
+        );
+    }
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
@@ -4571,9 +4577,24 @@ if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
   done
   rm -f "$owner_marker" || exit 1
 fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_quota_low" ] && [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+  printf '%s\n' '{"resources":{"graphql":{"limit":5000,"remaining":100,"reset":4102444800}}}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+  printf '%s\n' '{"resources":{"graphql":{"limit":5000,"remaining":5000,"reset":4102444800}}}'
+  exit 0
+fi
 if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_quota_low" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ -n "$GWT_FAKE_GH_RECONCILIATION_MARKER" ]; then
+    : > "$GWT_FAKE_GH_RECONCILIATION_MARKER"
+  fi
+  printf '%s\n' '[]'
+  exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   if [ "$(git rev-parse --is-bare-repository 2>/dev/null)" != "true" ]; then
@@ -4581,6 +4602,10 @@ if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "lis
     exit 1
   fi
   printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED"}]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] || [ "$GWT_FAKE_GH_MODE" = "merge_quota_low" ]; then
+  printf '%s\n' '[{"number":43,"title":"Active issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"},{"number":44,"title":"Queued issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/44","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
@@ -7949,7 +7974,7 @@ exit 0
     }
 
     #[test]
-    fn daemon_scan_records_merge_reconciliation_error_and_preserves_active_slot() {
+    fn daemon_scan_records_merge_reconciliation_error_without_aborting_the_scan() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7974,9 +7999,12 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
-        let monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                launch_profile: Some(sample_issue_monitor_profile()),
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "window-43".to_string(),
@@ -7984,19 +8012,21 @@ exit 0
                 ..crate::IssueMonitorPrefs::default()
             },
         );
+        monitor.set_gui_connected(true);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &monitor.prefs(),
+        )
+        .expect("seed enabled issue monitor prefs");
 
-        let preserved = monitor.clone();
-        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
-            .expect_err("merge reconciliation failure stays typed");
-        assert_eq!(
-            failure.stage,
-            crate::issue_monitor_worker::IssueMonitorScanStage::MergeReconciliation
-        );
-        let error = failure.to_string();
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("merge reconciliation is diagnostic-only");
+        let error = monitor
+            .status_view()
+            .last_error
+            .expect("merge reconciliation diagnostic");
         assert!(error.contains("merge-reconciliation"), "{error}");
         assert!(error.contains("gh merged query failed"), "{error}");
-        let monitor =
-            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
         let status = monitor.status_view();
         assert_eq!(
             status.active_count, 1,
@@ -8008,6 +8038,91 @@ exit 0
             .iter()
             .any(|launched| launched.issue_number == 43));
         assert!(!monitor.prefs().merged_issues.contains(&43));
+        assert!(
+            monitor.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 44,
+                    ..
+                }
+            )),
+            "a failed merge probe must not suppress the next claim proposal: status={status:?}, pending={:?}",
+            monitor.pending_effects()
+        );
+    }
+
+    #[test]
+    fn daemon_scan_skips_low_quota_reconciliation_without_aborting_the_scan() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "merge_quota_low");
+        let reconciliation_marker = temp.path().join("reconciliation-ran");
+        let _marker =
+            ScopedEnvVar::set("GWT_FAKE_GH_RECONCILIATION_MARKER", &reconciliation_marker);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "window-43".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &monitor.prefs(),
+        )
+        .expect("seed enabled issue monitor prefs");
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("quota-low reconciliation is diagnostic-only");
+        let status = monitor.status_view();
+        let error = status.last_error.expect("quota-low diagnostic");
+        assert!(error.contains("resource=graphql"), "{error}");
+        assert!(error.contains("remaining=100"), "{error}");
+        assert!(error.contains("reset_at="), "{error}");
+        assert!(error.contains("retry_after_secs="), "{error}");
+        assert_eq!(status.active_count, 1, "quota skip preserves active work");
+        assert!(
+            !reconciliation_marker.exists(),
+            "low remaining quota must skip every GraphQL reconciliation query"
+        );
+        assert!(
+            monitor.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 44,
+                    ..
+                }
+            )),
+            "a quota skip must not suppress the next claim proposal"
+        );
     }
 
     #[test]

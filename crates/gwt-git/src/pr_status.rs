@@ -572,41 +572,82 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
-/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
-/// call. A transient failure returns an `Err` (the caller keeps work as
-/// launched) rather than an empty set, so closing the active slot only happens
-/// on a positive merge signal.
-pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
-    fetch_merged_pr_branches_with(repo_path, run_gh_command)
+/// Snapshot the GraphQL quota using GitHub's free `rate_limit` endpoint.
+pub fn fetch_graphql_quota_snapshot(
+    repo_path: &Path,
+) -> Result<gwt_core::github_quota::RateLimitBlock> {
+    fetch_graphql_quota_snapshot_with(repo_path, run_gh_command)
+}
+
+fn fetch_graphql_quota_snapshot_with<F>(
+    repo_path: &Path,
+    mut run_gh: F,
+) -> Result<gwt_core::github_quota::RateLimitBlock>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let output = run_gh(repo_path, gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS)?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh api rate_limit: {}",
+            output.stderr.trim()
+        )));
+    }
+    gwt_core::github_quota::parse_rate_limit_probe(
+        &output.stdout,
+        gwt_core::github_quota::GitHubQuota::GraphQl,
+    )
+    .ok_or_else(|| GwtError::Other("gh api rate_limit GraphQL JSON is invalid".to_string()))
+}
+
+/// Branches whose PR has merged, fetched by exact head ref. A transient
+/// failure returns an `Err` (the caller keeps work as launched) rather than an
+/// empty set, so closing the active slot only happens on a positive merge
+/// signal. Callers bound `branches`; this function never inventories all
+/// merged PRs in the repository.
+pub fn fetch_merged_pr_branches(
+    repo_path: &Path,
+    branches: &[String],
+) -> Result<std::collections::BTreeSet<String>> {
+    fetch_merged_pr_branches_with(repo_path, branches, run_gh_command)
 }
 
 fn fetch_merged_pr_branches_with<F>(
     repo_path: &Path,
+    branches: &[String],
     mut run_gh: F,
 ) -> Result<std::collections::BTreeSet<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--json",
-            "headRefName,state",
-            "--state",
-            "merged",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
-        return Err(GwtError::Git(format!(
-            "gh pr list merged: {}",
-            output.stderr.trim()
-        )));
+    let mut merged = std::collections::BTreeSet::new();
+    for branch in branches {
+        let output = run_gh(
+            repo_path,
+            &[
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--json",
+                "headRefName,state",
+                "--state",
+                "merged",
+                "--limit",
+                "1",
+            ],
+        )?;
+        if !output.success {
+            return Err(GwtError::Git(format!(
+                "gh pr list merged for head {branch}: {}",
+                output.stderr.trim()
+            )));
+        }
+        if parse_merged_pr_branches(&output.stdout)?.contains(branch) {
+            merged.insert(branch.clone());
+        }
     }
-    parse_merged_pr_branches(&output.stdout)
+    Ok(merged)
 }
 
 /// Parse `gh pr list --json headRefName,state` into the set of branches whose

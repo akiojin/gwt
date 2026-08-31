@@ -91,6 +91,23 @@ fn normalize_provider_quota_holds(holds: &BTreeMap<String, String>) -> BTreeMap<
     normalized
 }
 
+fn normalize_merge_reconciliation_progress(backlog: &[String], cursor: u64) -> (Vec<String>, u64) {
+    let mut normalized = Vec::with_capacity(backlog.len());
+    let mut seen = BTreeSet::new();
+    let mut normalized_cursor = 0_u64;
+    for (index, branch) in backlog.iter().enumerate() {
+        if branch.is_empty() || !seen.insert(branch.clone()) {
+            continue;
+        }
+        if (index as u64) < cursor {
+            normalized_cursor = normalized_cursor.saturating_add(1);
+        }
+        normalized.push(branch.clone());
+    }
+    normalized_cursor = normalized_cursor.min(normalized.len() as u64);
+    (normalized, normalized_cursor)
+}
+
 fn concrete_provider_quota_deadline(resets_at: Option<&str>, now: &str) -> String {
     let now = parse_rfc3339_utc(now).unwrap_or_else(chrono::Utc::now);
     let deadline = resets_at
@@ -808,6 +825,19 @@ pub struct IssueMonitorPrefs {
     /// their compact shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub autonomous_handoffs: Vec<AutonomousQuestionHandoff>,
+    /// Issue #3821: monotonic revision for bounded exact-branch merge
+    /// reconciliation. Monotonic rebases prevent a stale scanner from moving
+    /// durable progress backward.
+    #[serde(default)]
+    pub merge_reconciliation_generation: u64,
+    /// Stable candidate order for the current reconciliation cycle. This is
+    /// intentionally materialized even when empty so legacy prefs acquire an
+    /// explicit, inspectable compatibility default.
+    #[serde(default)]
+    pub merge_reconciliation_backlog: Vec<String>,
+    /// First unprocessed entry in `merge_reconciliation_backlog`.
+    #[serde(default)]
+    pub merge_reconciliation_cursor: u64,
     /// Issue #3633 (AC-5): when a driver last completed a scan for this
     /// project.
     ///
@@ -850,6 +880,9 @@ impl Default for IssueMonitorPrefs {
             pending_effects: Vec::new(),
             last_control_receipt: None,
             autonomous_handoffs: Vec::new(),
+            merge_reconciliation_generation: 0,
+            merge_reconciliation_backlog: Vec::new(),
+            merge_reconciliation_cursor: 0,
             last_scan_at: None,
         }
     }
@@ -1790,6 +1823,12 @@ pub struct IssueMonitorState {
     /// unrelated failures, but never these exact rows.
     #[serde(default, skip)]
     legacy_git_launch_failure_migration_tombstones: BTreeMap<u64, String>,
+    #[serde(default)]
+    merge_reconciliation_generation: u64,
+    #[serde(default)]
+    merge_reconciliation_backlog: Vec<String>,
+    #[serde(default)]
+    merge_reconciliation_cursor: u64,
     last_scan_at: Option<String>,
     last_error: Option<String>,
     launch_auth_required: bool,
@@ -3316,6 +3355,9 @@ impl IssueMonitorState {
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
+            merge_reconciliation_generation: 0,
+            merge_reconciliation_backlog: Vec::new(),
+            merge_reconciliation_cursor: 0,
             last_scan_at: None,
             last_error: None,
             launch_auth_required: false,
@@ -3359,6 +3401,13 @@ impl IssueMonitorState {
         let mut state = Self::new(config);
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
+        state.merge_reconciliation_generation = prefs.merge_reconciliation_generation;
+        let (backlog, cursor) = normalize_merge_reconciliation_progress(
+            &prefs.merge_reconciliation_backlog,
+            prefs.merge_reconciliation_cursor,
+        );
+        state.merge_reconciliation_backlog = backlog;
+        state.merge_reconciliation_cursor = cursor;
         state.priority_order = prefs.priority_order;
         state.last_scan_at = prefs.last_scan_at;
         state.launch_profile = prefs.launch_profile;
@@ -3572,6 +3621,9 @@ impl IssueMonitorState {
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
             autonomous_handoffs: self.autonomous_handoffs.clone(),
+            merge_reconciliation_generation: self.merge_reconciliation_generation,
+            merge_reconciliation_backlog: self.merge_reconciliation_backlog.clone(),
+            merge_reconciliation_cursor: self.merge_reconciliation_cursor,
             last_scan_at: self.last_scan_at.clone(),
         }
     }
@@ -5421,6 +5473,40 @@ impl IssueMonitorState {
         }
     }
 
+    fn rebase_merge_reconciliation_progress(&mut self, disk: &IssueMonitorPrefs) {
+        let (disk_backlog, disk_cursor) = normalize_merge_reconciliation_progress(
+            &disk.merge_reconciliation_backlog,
+            disk.merge_reconciliation_cursor,
+        );
+        let disk_is_newer =
+            disk.merge_reconciliation_generation > self.merge_reconciliation_generation;
+        let (mut backlog, cursor, secondary) = if disk_is_newer {
+            (
+                disk_backlog,
+                disk_cursor,
+                &self.merge_reconciliation_backlog,
+            )
+        } else {
+            (
+                self.merge_reconciliation_backlog.clone(),
+                self.merge_reconciliation_cursor,
+                &disk_backlog,
+            )
+        };
+        let mut seen = backlog.iter().cloned().collect::<BTreeSet<_>>();
+        backlog.extend(
+            secondary
+                .iter()
+                .filter(|branch| seen.insert((*branch).clone()))
+                .cloned(),
+        );
+        self.merge_reconciliation_generation = self
+            .merge_reconciliation_generation
+            .max(disk.merge_reconciliation_generation);
+        self.merge_reconciliation_cursor = cursor.min(backlog.len() as u64);
+        self.merge_reconciliation_backlog = backlog;
+    }
+
     /// Rebase a stale process-local state on the latest committed prefs before
     /// applying this transaction's explicit lifecycle mutation. Real launches,
     /// merged completions, and failures are reconciled before the caller's
@@ -5430,6 +5516,7 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        self.rebase_merge_reconciliation_progress(disk);
         let reopened_closure_fences = self.local_reopened_closure_fences(disk);
         let reopened_candidates = reopened_closure_fences
             .iter()
@@ -8104,6 +8191,150 @@ impl IssueMonitorState {
                 Some((*number, branch))
             })
             .collect()
+    }
+
+    fn merge_reconciliation_candidate_sets(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let active = self
+            .active_launched_branches()
+            .into_iter()
+            .map(|(_, branch)| branch)
+            .collect::<BTreeSet<_>>();
+        let untracked = self.inbox.iter().filter_map(|item| {
+            if item.state.is_terminal()
+                || item.issue.state != IssueMonitorIssueState::Open
+                || self.merged_issues.contains(&item.issue.number)
+                || self.active_launches.contains(&item.issue.number)
+            {
+                return None;
+            }
+            item.launch_plan
+                .as_ref()
+                .map(|plan| plan.branch_name.clone())
+        });
+        (active, untracked.collect())
+    }
+
+    /// Stable exact-head candidates for bounded merge reconciliation. Active
+    /// launches precede locally recoverable untracked launch plans, and both
+    /// partitions are deduplicated.
+    pub fn merge_reconciliation_branches(&self) -> Vec<String> {
+        let (active, untracked) = self.merge_reconciliation_candidate_sets();
+        let mut seen = BTreeSet::new();
+        active
+            .into_iter()
+            .chain(untracked)
+            .filter(|branch| seen.insert(branch.clone()))
+            .collect()
+    }
+
+    fn refresh_merge_reconciliation_backlog(&mut self) {
+        let (active, untracked) = self.merge_reconciliation_candidate_sets();
+        let old_cursor = self
+            .merge_reconciliation_cursor
+            .min(self.merge_reconciliation_backlog.len() as u64) as usize;
+        let mut processed = Vec::new();
+        let mut active_queue = Vec::new();
+        let mut deferred_untracked = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for (index, branch) in self.merge_reconciliation_backlog.iter().enumerate() {
+            if (!active.contains(branch) && !untracked.contains(branch))
+                || !seen.insert(branch.clone())
+            {
+                continue;
+            }
+            if active.contains(branch) {
+                active_queue.push(branch.clone());
+            } else if index < old_cursor {
+                processed.push(branch.clone());
+            } else {
+                deferred_untracked.push(branch.clone());
+            }
+        }
+        let processed_len = processed.len() as u64;
+        active_queue.extend(
+            active
+                .into_iter()
+                .filter(|branch| seen.insert(branch.clone())),
+        );
+        deferred_untracked.extend(
+            untracked
+                .into_iter()
+                .filter(|branch| seen.insert(branch.clone())),
+        );
+        processed.extend(active_queue);
+        processed.extend(deferred_untracked);
+        self.merge_reconciliation_backlog = processed;
+        self.merge_reconciliation_cursor = processed_len;
+    }
+
+    /// Return the next durable exact-head batch. A partial final batch is
+    /// intentional: only its successful completion wraps the cursor to zero.
+    pub fn merge_reconciliation_branch_batch(&mut self, limit: usize) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        self.refresh_merge_reconciliation_backlog();
+        self.merge_reconciliation_backlog
+            .iter()
+            .skip(self.merge_reconciliation_cursor as usize)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Advance exactly the batch that was returned, and only after every
+    /// exact-head lookup in it succeeded.
+    pub fn complete_merge_reconciliation_batch(&mut self, branches: &[String]) -> bool {
+        if branches.is_empty() {
+            return false;
+        }
+        let Some(next) = self.merge_reconciliation_generation.checked_add(1) else {
+            return false;
+        };
+        let start = self.merge_reconciliation_cursor as usize;
+        let end = start.saturating_add(branches.len());
+        if self.merge_reconciliation_backlog.get(start..end) != Some(branches) {
+            return false;
+        }
+        let active = self.merge_reconciliation_candidate_sets().0;
+        let mut processed = self.merge_reconciliation_backlog[..start].to_vec();
+        let mut active_queue = self.merge_reconciliation_backlog[start..]
+            .iter()
+            .filter(|branch| active.contains(*branch))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut deferred_untracked = self.merge_reconciliation_backlog[start..]
+            .iter()
+            .filter(|branch| !active.contains(*branch))
+            .cloned()
+            .collect::<Vec<_>>();
+        let queried_active = branches
+            .iter()
+            .filter(|branch| active.contains(*branch))
+            .count();
+        if !active_queue.is_empty() {
+            let active_count = active_queue.len();
+            active_queue.rotate_left(queried_active % active_count);
+        }
+        let queried_untracked = branches
+            .iter()
+            .filter(|branch| !active.contains(*branch))
+            .cloned()
+            .collect::<Vec<_>>();
+        if deferred_untracked.get(..queried_untracked.len()) != Some(queried_untracked.as_slice()) {
+            return false;
+        }
+        processed.extend(deferred_untracked.drain(..queried_untracked.len()));
+        if deferred_untracked.is_empty() {
+            deferred_untracked = std::mem::take(&mut processed);
+        }
+        self.merge_reconciliation_cursor = processed.len() as u64;
+        processed.extend(active_queue);
+        processed.extend(deferred_untracked);
+        self.merge_reconciliation_backlog = processed;
+        self.merge_reconciliation_generation = next;
+        true
     }
 
     /// Reconcile active work branches that merged. Every match frees its slot;
@@ -14214,6 +14445,145 @@ mod tests {
         let merged: BTreeSet<String> = ["work/some-other-branch".to_string()].into_iter().collect();
         assert!(monitor.reconcile_merged_branches(&merged).is_empty());
         assert_eq!(monitor.active_count(), 1, "unmerged work stays launched");
+    }
+
+    #[test]
+    fn merge_reconciliation_generation_defaults_and_rebases_monotonically() {
+        fn prefs_with_progress(
+            generation: u64,
+            backlog: &[&str],
+            cursor: u64,
+        ) -> IssueMonitorPrefs {
+            let mut value = serde_json::to_value(IssueMonitorPrefs::default()).expect("prefs JSON");
+            value["merge_reconciliation_generation"] = serde_json::json!(generation);
+            value["merge_reconciliation_backlog"] = serde_json::json!(backlog);
+            value["merge_reconciliation_cursor"] = serde_json::json!(cursor);
+            serde_json::from_value(value).expect("prefs with progress")
+        }
+
+        let legacy = IssueMonitorPrefs::default();
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("legacy prefs JSON")
+                ["merge_reconciliation_generation"],
+            serde_json::json!(0),
+            "legacy preferences must materialize generation zero"
+        );
+
+        let legacy_json = serde_json::to_value(&legacy).expect("legacy prefs JSON");
+        assert_eq!(
+            legacy_json["merge_reconciliation_backlog"],
+            serde_json::json!([]),
+            "legacy preferences must materialize an empty backlog"
+        );
+
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            prefs_with_progress(5, &["work/issue-21", "work/issue-1"], 1),
+        );
+        monitor.rebase_daemon_driver_prefs(&prefs_with_progress(
+            7,
+            &["work/issue-41", "work/issue-21"],
+            1,
+        ));
+        monitor.rebase_daemon_driver_prefs(&prefs_with_progress(
+            6,
+            &["work/issue-1", "work/issue-41"],
+            2,
+        ));
+        let rebased = serde_json::to_value(monitor.prefs()).expect("rebased prefs JSON");
+        assert_eq!(
+            rebased["merge_reconciliation_generation"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            rebased["merge_reconciliation_backlog"],
+            serde_json::json!(["work/issue-41", "work/issue-21", "work/issue-1"]),
+            "newer backlog order wins and stale-only branches append without rollback"
+        );
+        assert_eq!(
+            rebased["merge_reconciliation_cursor"],
+            serde_json::json!(1),
+            "newer cursor wins and an older rebase cannot move it"
+        );
+    }
+
+    #[test]
+    fn merge_reconciliation_batch_prioritizes_active_work() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "window-43".to_string(),
+                }],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let candidates = (1..=45).map(issue).collect::<Vec<_>>();
+        scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-08-31T00:00:00Z");
+
+        let batch = monitor.merge_reconciliation_branch_batch(20);
+
+        assert_eq!(batch.first().map(String::as_str), Some("work/issue-43"));
+    }
+
+    #[test]
+    fn processed_untracked_branch_is_promoted_when_it_becomes_active() {
+        let candidates = (1..=45).map(issue).collect::<Vec<_>>();
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-08-31T00:00:00Z");
+        let first_batch = monitor.merge_reconciliation_branch_batch(20);
+        assert!(monitor.complete_merge_reconciliation_batch(&first_batch));
+        assert!(first_batch.iter().any(|branch| branch == "work/issue-1"));
+
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues = vec![IssueMonitorLaunchedIssue {
+            issue_number: 1,
+            window_id: "window-1".to_string(),
+        }];
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-08-31T00:05:00Z");
+
+        let next_batch = monitor.merge_reconciliation_branch_batch(20);
+
+        assert_eq!(
+            next_batch.first().map(String::as_str),
+            Some("work/issue-1"),
+            "a newly active branch must not wait behind the untracked cycle remainder"
+        );
+    }
+
+    #[test]
+    fn active_reconciliation_rotates_when_active_count_exceeds_batch_cap() {
+        let launched_issues = (1..=25)
+            .map(|issue_number| IssueMonitorLaunchedIssue {
+                issue_number,
+                window_id: format!("window-{issue_number}"),
+            })
+            .collect();
+        let candidates = (1..=25).map(issue).collect::<Vec<_>>();
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                max_active_agents: 25,
+                launched_issues,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-08-31T00:00:00Z");
+        let expected_order = monitor.merge_reconciliation_branches();
+
+        let first_batch = monitor.merge_reconciliation_branch_batch(20);
+        assert!(monitor.complete_merge_reconciliation_batch(&first_batch));
+        let second_batch = monitor.merge_reconciliation_branch_batch(20);
+
+        assert_eq!(first_batch, expected_order[..20]);
+        assert_eq!(second_batch.first(), expected_order.get(20));
+        let covered = first_batch
+            .iter()
+            .chain(&second_batch)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(covered.len(), 25, "all active branches must make progress");
     }
 
     /// Issue #3645 AC-3/AC-4: emptying `launched_issues` — the repair the

@@ -10,6 +10,7 @@ use crate::{
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+pub(crate) const ISSUE_MONITOR_MERGE_RECONCILIATION_BRANCH_CAP: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -647,7 +648,8 @@ pub fn linked_pr_completion_is_fresh_for_issue(
 /// Issue-wide completion vs requeue to the domain policy. Returns query
 /// failures so the scan owner can surface them after its final state rebase.
 ///
-/// Two entrances, one query. The tracked one matches `active_launched_branches`
+/// Two entrances, one bounded rotating exact-head batch. The tracked one matches
+/// `active_launched_branches`
 /// and is the ordinary path. The untracked one (Issue #3645 AC-3/AC-4) exists
 /// because emptying `launched_issues` — the repair the 2026-08-17 outage
 /// required — makes every launch that was in flight invisible to the first: the
@@ -663,10 +665,35 @@ pub fn reconcile_issue_monitor_merges(
     owner: &str,
     repo: &str,
 ) -> gwt_core::Result<Vec<u64>> {
-    if monitor.active_launched_branches().is_empty() && !monitor.has_open_launch_plan_candidates() {
+    let branches =
+        monitor.merge_reconciliation_branch_batch(ISSUE_MONITOR_MERGE_RECONCILIATION_BRANCH_CAP);
+    if branches.is_empty() {
         return Ok(Vec::new());
     }
-    let merged_branches = gwt_git::pr_status::fetch_merged_pr_branches(repo_path)?;
+
+    let quota = gwt_git::pr_status::fetch_graphql_quota_snapshot(repo_path)?;
+    let reserve = (quota.limit / 10).max(ISSUE_MONITOR_MERGE_RECONCILIATION_BRANCH_CAP as u64);
+    let required = reserve.saturating_add(branches.len() as u64);
+    if quota.remaining <= required {
+        let now = chrono::Utc::now();
+        return Err(gwt_core::GwtError::Other(format!(
+            "github_quota_low: resource={} limit={} remaining={} reset_at={} retry_after_secs={}",
+            quota.resource,
+            quota.limit,
+            quota.remaining,
+            quota
+                .reset_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            quota.retry_after_secs(now)
+        )));
+    }
+
+    let merged_branches = gwt_git::pr_status::fetch_merged_pr_branches(repo_path, &branches)?;
+    if !monitor.complete_merge_reconciliation_batch(&branches) {
+        return Err(gwt_core::GwtError::Other(
+            "merge reconciliation progress conflict or generation overflow".to_string(),
+        ));
+    }
     let mut merged = monitor.reconcile_merged_branches(&merged_branches);
     if !merged.is_empty() {
         tracing::info!(
@@ -2099,6 +2126,282 @@ mod tests {
 
         assert_eq!(launch_numbers, vec![42, 43, 44]);
         assert_eq!(monitor.active_count(), 3);
+    }
+
+    #[cfg(unix)]
+    fn write_merge_reconciliation_fake_gh(
+        bin_dir: &std::path::Path,
+        call_log: &std::path::Path,
+    ) -> std::path::PathBuf {
+        std::fs::create_dir_all(bin_dir).expect("create fake gh bin");
+        let fake_gh = bin_dir.join("gh");
+        std::fs::write(
+            &fake_gh,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "{}"
+if [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+  remaining="${{GWT_MERGE_QUOTA_REMAINING:-5000}}"
+  printf '{{"resources":{{"graphql":{{"limit":5000,"remaining":%s,"reset":4102444800}}}}}}\n' "$remaining"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ -n "$GWT_FAIL_MERGE_HEAD" ]; then
+    case "$*" in
+      *"--head $GWT_FAIL_MERGE_HEAD"*)
+        printf '%s\n' 'targeted merge lookup failed' >&2
+        exit 1
+        ;;
+    esac
+  fi
+  printf '%s\n' '[]'
+  exit 0
+fi
+printf '%s\n' '{{}}'
+exit 0
+"#,
+                call_log.display()
+            ),
+        )
+        .expect("write fake gh");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake gh");
+        fake_gh
+    }
+
+    #[cfg(unix)]
+    fn merge_reconciliation_test_monitor(candidate_count: u64) -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let candidates = (1..=candidate_count).map(issue).collect::<Vec<_>>();
+        crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-08-31T00:00:00Z");
+        monitor
+    }
+
+    #[cfg(unix)]
+    fn merge_head_from_call(call: &str) -> Option<&str> {
+        let args = call.split_whitespace().collect::<Vec<_>>();
+        let index = args.iter().position(|arg| *arg == "--head")?;
+        args.get(index + 1).copied()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_reconciliation_targets_bounded_rotating_branch_batches() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", repo.to_str().expect("repo path")])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let call_log = temp.path().join("gh-calls.log");
+        let fake_gh = write_merge_reconciliation_fake_gh(&temp.path().join("bin"), &call_log);
+        let mut paths = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+
+        let mut monitor = merge_reconciliation_test_monitor(45);
+        for _ in 0..3 {
+            reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+                .expect("bounded reconciliation");
+        }
+
+        let calls = std::fs::read_to_string(&call_log).expect("read gh calls");
+        let pr_calls = calls
+            .lines()
+            .filter(|call| call.starts_with("pr list "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pr_calls.len(),
+            45,
+            "three batches must cover 20 + 20 + 5 exact branches: {pr_calls:?}"
+        );
+        assert!(
+            pr_calls.iter().all(|call| {
+                call.contains("--state merged")
+                    && call.contains("--limit 1")
+                    && merge_head_from_call(call).is_some()
+                    && !call.contains("--limit 999")
+            }),
+            "repository-wide merged inventory is forbidden: {pr_calls:?}"
+        );
+        let unique_heads = pr_calls
+            .iter()
+            .filter_map(|call| merge_head_from_call(call))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique_heads.len(),
+            45,
+            "every deferred branch is carried forward"
+        );
+        let scans_per_hour = 3_600 / IssueMonitorConfig::default().poll_interval_secs;
+        assert!(
+            scans_per_hour * (ISSUE_MONITOR_MERGE_RECONCILIATION_BRANCH_CAP as u64) < 2_500,
+            "default one-hour reconciliation must stay below half the GraphQL budget"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_reconciliation_preserves_deferred_branches_across_churn_and_restart() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", repo.to_str().expect("repo path")])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let call_log = temp.path().join("gh-calls.log");
+        let fake_gh = write_merge_reconciliation_fake_gh(&temp.path().join("bin"), &call_log);
+        let mut paths = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+
+        let original_branches = (1..=45)
+            .map(|number| format!("work/issue-{number}"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut monitor = merge_reconciliation_test_monitor(45);
+        reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+            .expect("first reconciliation");
+
+        let prefs = monitor.prefs();
+        monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let expanded = (1..=65).map(issue).collect::<Vec<_>>();
+        crate::scan_issue_monitor_candidates(&mut monitor, &expanded, "2026-08-31T00:05:00Z");
+        reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+            .expect("second reconciliation after restart and intake");
+        reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+            .expect("third reconciliation after churn");
+
+        let calls = std::fs::read_to_string(&call_log).expect("read gh calls");
+        let heads = calls
+            .lines()
+            .filter(|call| call.starts_with("pr list "))
+            .filter_map(merge_head_from_call)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &heads[20..40],
+            &original_branches[20..40],
+            "new intake must append behind the deferred durable prefix"
+        );
+        assert!(
+            original_branches
+                .iter()
+                .all(|branch| heads[..60].contains(&branch.as_str())),
+            "all original deferred branches must run within the next two successful scans: {heads:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_merge_reconciliation_retries_the_same_batch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", repo.to_str().expect("repo path")])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let call_log = temp.path().join("gh-calls.log");
+        let fake_gh = write_merge_reconciliation_fake_gh(&temp.path().join("bin"), &call_log);
+        let mut paths = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let _fail =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_FAIL_MERGE_HEAD", "work/issue-1");
+
+        let mut monitor = merge_reconciliation_test_monitor(45);
+        for _ in 0..2 {
+            reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+                .expect_err("targeted lookup failure");
+        }
+
+        let calls = std::fs::read_to_string(&call_log).expect("read gh calls");
+        let attempted_heads = calls
+            .lines()
+            .filter(|call| call.starts_with("pr list "))
+            .filter_map(merge_head_from_call)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempted_heads,
+            vec!["work/issue-1", "work/issue-1"],
+            "a failed batch must not consume its durable generation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn low_quota_retries_the_same_batch_after_quota_recovers() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", repo.to_str().expect("repo path")])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let call_log = temp.path().join("gh-calls.log");
+        let fake_gh = write_merge_reconciliation_fake_gh(&temp.path().join("bin"), &call_log);
+        let mut paths = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let mut monitor = merge_reconciliation_test_monitor(45);
+
+        {
+            let _low =
+                gwt_core::test_support::ScopedEnvVar::set("GWT_MERGE_QUOTA_REMAINING", "100");
+            reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+                .expect_err("low quota skips reconciliation");
+        }
+        reconcile_issue_monitor_merges(&mut monitor, &repo, "example", "repo")
+            .expect("healthy quota resumes reconciliation");
+
+        let calls = std::fs::read_to_string(&call_log).expect("read gh calls");
+        let heads = calls
+            .lines()
+            .filter(|call| call.starts_with("pr list "))
+            .filter_map(merge_head_from_call)
+            .collect::<Vec<_>>();
+        assert_eq!(heads.len(), 20, "low quota must consume no exact lookup");
+        assert_eq!(heads[0], "work/issue-1", "recovery retries the same prefix");
     }
 
     #[test]
