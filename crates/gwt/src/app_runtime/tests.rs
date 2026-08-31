@@ -9718,6 +9718,8 @@ fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: None,
         issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
     }
 }
 
@@ -9884,6 +9886,8 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
                 issue_monitor_delivery_id: None,
                 issue_monitor_project_root: None,
                 issue_monitor_session_mode: None,
+                issue_monitor_autonomous_handoff: None,
+                issue_monitor_autonomous_submit_started: false,
             },
         )
         .expect("manual launch with feedback");
