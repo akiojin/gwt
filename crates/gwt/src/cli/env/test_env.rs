@@ -58,6 +58,8 @@ pub struct TestEnv {
     pub pr_review_threads: HashMap<u64, Vec<PrReviewThread>>,
     pub pr_checks: HashMap<u64, PrChecksSummary>,
     pub pr_current_call_count: usize,
+    pub pr_list: Vec<gwt_git::PrInventoryItem>,
+    pub pr_list_call_count: usize,
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
@@ -108,6 +110,8 @@ impl TestEnv {
             pr_review_threads: HashMap::new(),
             pr_checks: HashMap::new(),
             pr_current_call_count: 0,
+            pr_list: Vec::new(),
+            pr_list_call_count: 0,
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
@@ -184,6 +188,10 @@ impl TestEnv {
 
     pub fn seed_pr(&mut self, number: u64, pr: PrStatus) {
         self.prs.insert(number, pr);
+    }
+
+    pub fn seed_pr_inventory(&mut self, items: Vec<gwt_git::PrInventoryItem>) {
+        self.pr_list = items;
     }
 
     pub fn seed_created_pr(&mut self, pr: PrStatus) {
@@ -360,6 +368,10 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+        self.pr_list_call_count += 1;
+        Ok(self.pr_list.clone())
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);

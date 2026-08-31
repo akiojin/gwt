@@ -428,6 +428,12 @@ fn red_104_parse_pr_view() {
 }
 
 #[test]
+fn parse_pr_list() {
+    let cmd = parse_pr_args(&[s("list")]).unwrap();
+    assert_eq!(cmd, CliCommand::Pr(PrCommand::List));
+}
+
+#[test]
 fn red_104a_parse_pr_create() {
     let cmd = parse_pr_args(&[
         s("create"),
