@@ -1838,6 +1838,22 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
     WindowProcessStatus::Running
 }
 
+/// SPEC-3671 FR-002: the Issue window that mirrors Issue Monitor launches in this tab.
+/// A canvas Issue window is preferred over one that is itself contained, and creation
+/// order breaks ties so repeated launches land in the same pane.
+fn issue_preview_host_window_id(workspace: &gwt::WindowCanvasState) -> Option<String> {
+    let windows = &workspace.persisted().windows;
+    windows
+        .iter()
+        .find(|window| window.preset.hosts_issue_preview() && window.placement.is_canvas())
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|window| window.preset.hosts_issue_preview())
+        })
+        .map(|window| window.id.clone())
+}
+
 #[derive(Debug, Clone)]
 enum AgentWindowPlacement {
     Centered(WindowGeometry),
@@ -4002,9 +4018,10 @@ impl AppRuntime {
         // Resume or chooses a fresh fallback, a same-branch window must not
         // replace the requested materialization. Durable deliveries also need
         // their own window so the exact delivery tuple can be ACKed.
-        let issue_monitor_launch = launch_feedback_context
+        let issue_monitor_issue_number = launch_feedback_context
             .as_ref()
-            .is_some_and(|context| context.issue_monitor_issue_number.is_some());
+            .and_then(|context| context.issue_monitor_issue_number);
+        let issue_monitor_launch = issue_monitor_issue_number.is_some();
         if continuation.is_some() {
             if let Some(window_id) =
                 self.pending_continue_work
@@ -4121,6 +4138,18 @@ impl AppRuntime {
                 target.lane_id,
                 None,
             );
+        } else if let Some(issue_number) = issue_monitor_issue_number {
+            // SPEC-3671 FR-002: an Issue Monitor launch is mirrored inside the Issue
+            // window instead of opening a canvas window. FR-003 keeps every manual
+            // launch (Start Work / Launch Agent) on the canvas, and a tab with no
+            // Issue window keeps the canvas fallback so the agent is never invisible.
+            if let Some(issue_window_id) = issue_preview_host_window_id(&tab.workspace) {
+                let _ = tab.workspace.place_agent_window_in_issue_preview(
+                    &window.id,
+                    &issue_window_id,
+                    issue_number,
+                );
+            }
         }
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);

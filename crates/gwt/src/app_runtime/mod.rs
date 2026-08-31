@@ -7265,19 +7265,34 @@ impl AppRuntime {
                             })
                             .unwrap_or(gwt::WindowWorktreeForm::Unknown);
                     }
-                    if let gwt::WindowPlacement::AgentKanban {
-                        board_id,
-                        lane_id,
-                        order,
-                        collapsed,
-                    } = window.placement
-                    {
-                        window.placement = gwt::WindowPlacement::AgentKanban {
-                            board_id: combined_window_id(&tab.id, &board_id),
+                    // Placements reference sibling windows by raw id on disk; the
+                    // frontend only ever sees combined ids, so every window
+                    // reference inside a placement is combined here too.
+                    match window.placement {
+                        gwt::WindowPlacement::AgentKanban {
+                            board_id,
                             lane_id,
                             order,
                             collapsed,
-                        };
+                        } => {
+                            window.placement = gwt::WindowPlacement::AgentKanban {
+                                board_id: combined_window_id(&tab.id, &board_id),
+                                lane_id,
+                                order,
+                                collapsed,
+                            };
+                        }
+                        // SPEC-3671 FR-007.
+                        gwt::WindowPlacement::IssuePreview {
+                            issue_window_id,
+                            issue_number,
+                        } => {
+                            window.placement = gwt::WindowPlacement::IssuePreview {
+                                issue_window_id: combined_window_id(&tab.id, &issue_window_id),
+                                issue_number,
+                            };
+                        }
+                        gwt::WindowPlacement::Canvas => {}
                     }
                     if let Some(status) = self.window_status(&window.id) {
                         window.status = status;

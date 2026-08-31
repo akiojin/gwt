@@ -1727,9 +1727,19 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
             "expected presetRoleLabel to cover {label}",
         );
     }
+    // SPEC-3671 FR-014 / 受け入れシナリオ 9: `issue` / `issue_monitor` / `spec`
+    // used to collapse into a single "Issue" badge, so an open window could not
+    // say which face it was. Each face now carries its own label.
     assert!(
-        js.contains(r#"issue: "Issue""#) && js.contains(r#"spec: "Issue""#),
-        "expected legacy issue/spec presets to share the Issue role label",
+        js.contains(r#"issue: "Issue""#)
+            && js.contains(r#"issue_monitor: "Issue Monitor""#)
+            && js.contains(r#"spec: "SPEC""#),
+        "expected the three Issue-family presets to carry distinguishable role labels",
+    );
+    // SPEC-3671 FR-015: the wire preset is `work`; the surface lists Works.
+    assert!(
+        js.contains(r#"work: "Work""#),
+        "expected the Work surface to be labelled by its wire preset key",
     );
     assert!(
         js.contains("function shouldShowRuntimeStatus(windowData)")
