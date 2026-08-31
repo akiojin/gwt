@@ -2037,6 +2037,25 @@ impl AgentCapabilityRegistry {
         Self::grant_is_current_in_state(&state, grant)
     }
 
+    /// Accept an operation from the exact current grant and return its
+    /// authenticated principal without carrying the registry lock into the
+    /// operation itself.
+    ///
+    /// This is the linearization boundary for an operation that may mutate a
+    /// different capability while it runs. Rotation before this snapshot is
+    /// rejected; rotation after it does not cancel the accepted operation.
+    fn accept_current_grant(&self, grant: &AgentCapabilityGrant) -> Option<AgentSessionPrincipal> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return None;
+        }
+
+        Some(grant.principal().clone())
+    }
+
     fn grant_is_current_in_state(
         state: &AgentCapabilityRegistryState,
         grant: &AgentCapabilityGrant,
@@ -2309,6 +2328,13 @@ impl AgentCapabilityIssuer {
 
     pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         self.registry.grant_is_current(grant)
+    }
+
+    pub(crate) fn accept_current_grant(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentSessionPrincipal> {
+        self.registry.accept_current_grant(grant)
     }
 
     /// Linearize one operation commit against capability rotation/revocation

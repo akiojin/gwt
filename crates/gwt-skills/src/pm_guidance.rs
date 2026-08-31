@@ -34,8 +34,8 @@ You are the resident Project Manager (PM) agent for this project
 (SPEC-3431). You are the user's single conversational window: the user
 states goals and requests in natural language; you carry out everything
 else through gwtd JSON operations and your own in-session sub-agents,
-and you report outcomes back in conversation. No intermediate
-confirmation questions for work the user already asked for.
+and you report outcomes back in conversation. No intermediate confirmation
+questions except for the intake questions explicitly allowed below.
 
 ## Role
 
@@ -48,6 +48,27 @@ confirmation questions for work the user already asked for.
   never modify the production working tree. Implementation is always
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
+
+## Request intake via sub-agents
+
+- For every new work request that may require Issue registration or update,
+  delegate a bounded intake packet to one or more in-session sub-agents. The
+  packet must inspect the existing implementation and duplicate Issues,
+  draft a spec with verifiable acceptance criteria, and enumerate the
+  decision branches. Sub-agents return evidence and options; you retain the
+  final scope and registration decision.
+- Require a recommended default and rationale for every decision branch.
+  Apply those defaults yourself to every branch that is neither irreversible
+  nor a core specification choice, and continue through registration without
+  asking the user.
+- Ask the user only when a branch is irreversible or determines a core
+  specification choice. Present all remaining questions in a single batch;
+  each question includes your recommendation and rationale plus a copy-paste
+  answer example.
+- For every branch registered using a PM default, add a Notes entry to the
+  Issue body in the form `PM default ruling (override available): ...`.
+  Record the branch, chosen default, and rationale, and tell the user that a
+  one-line correction can override the ruling later.
 
 ## Issues: registering, updating, curating
 
@@ -570,10 +591,27 @@ mod tests {
             // FR-004: sole window + full autonomy without mid-confirmations.
             "single conversational window",
             "No intermediate confirmation questions",
+            "except for the intake questions explicitly allowed below",
             // FR-004: registration template.
             "acceptance",
             "`- [ ]` checkboxes",
             "`auto-merge` label applied",
+            // Issue #3796: request intake is delegated, routine branches are
+            // decided with explicit defaults, and only consequential questions
+            // reach the user with a reversible override trail.
+            "## Request intake via sub-agents",
+            "new work request that may require Issue registration or update",
+            "delegate a bounded intake packet",
+            "existing implementation and duplicate Issues",
+            "verifiable acceptance criteria",
+            "recommended default and rationale",
+            "every branch that is neither irreversible nor a core specification choice",
+            "irreversible or determines a core specification choice",
+            "single batch",
+            "copy-paste answer example",
+            "For every branch registered using a PM default",
+            "PM default ruling (override available)",
+            "one-line correction",
             // FR-005: semantic priority through #3357 operations.
             "`issue.monitor.status`",
             "`issue.monitor.priority.set`",
@@ -745,6 +783,40 @@ mod tests {
         assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
         assert!(body.contains("before registering anything new"));
         assert!(body.contains("Keep the backlog honest"));
+    }
+
+    #[test]
+    fn contract_delegates_request_intake_and_minimizes_user_questions() {
+        assert!(body().contains(
+            "No intermediate confirmation questions except for the intake questions explicitly allowed below"
+        ));
+        let request_intake = SKILL_BODY_EN
+            .split_once("## Request intake via sub-agents")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("Request intake via sub-agents must be a bounded section");
+        let request_intake = unwrapped(request_intake);
+
+        for phrase in [
+            "new work request that may require Issue registration or update",
+            "delegate a bounded intake packet",
+            "existing implementation and duplicate Issues",
+            "verifiable acceptance criteria",
+            "decision branches",
+            "recommended default and rationale",
+            "every branch that is neither irreversible nor a core specification choice",
+            "irreversible or determines a core specification choice",
+            "single batch",
+            "copy-paste answer example",
+            "For every branch registered using a PM default",
+            "PM default ruling (override available)",
+            "one-line correction",
+        ] {
+            assert!(
+                request_intake.contains(phrase),
+                "request-intake contract is missing: {phrase}"
+            );
+        }
     }
 
     /// FR-012: the resident loop must actually look at the running agents each
