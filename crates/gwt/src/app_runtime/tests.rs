@@ -3588,6 +3588,7 @@ fn sample_runtime_with_events(
         pending_pm_closes: HashMap::new(),
         pm_sessions: HashMap::new(),
         pm_wake_seen: HashMap::new(),
+        pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
@@ -58392,6 +58393,243 @@ fn delta_and_periodic_wakes_do_not_double_fire_in_one_window() {
             .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
             .is_none(),
         "the delta wake's stamp must suppress the periodic wake"
+    );
+}
+
+fn seed_quiet_standing_supervision(repo: &Path) {
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..gwt::IssueMonitorConfig::default()
+        },
+        gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-10T00:00:00Z",
+    );
+    monitor.complete_active_launch(42, "tab-1::other-window");
+    gwt::save_issue_monitor_prefs(&monitor_prefs_path, &monitor.prefs()).expect("save prefs");
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop");
+}
+
+fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) {
+    insert_test_pane_runtime(runtime, window_id);
+}
+
+fn assert_pm_pane_is_not_in_protected_inject(runtime: &AppRuntime, window_id: &str) {
+    let pty = runtime
+        .runtimes
+        .get(window_id)
+        .expect("live PM pane")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    let reservation = pty
+        .reserve_input_transaction()
+        .expect("a composing PM pane must not already have a protected wake inject in flight");
+    drop(reservation);
+}
+
+/// Issue #3702 AC-1/AC-3: typing into the PM composer must not let a
+/// scheduled supervision tick splice `[gwt] ...` into the unsent line.
+#[test]
+fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let compose = runtime.terminal_input_events(&pm_window_id, "ちゃんとbunx/npxで実行されてい");
+    assert!(compose.is_empty());
+    assert!(
+        runtime
+            .runtimes
+            .get(&pm_window_id)
+            .expect("live PM pane")
+            .pane
+            .lock()
+            .expect("pane lock")
+            .has_unsent_user_input(),
+        "the typed prefix must remain unsent"
+    );
+
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+    assert!(
+        runtime
+            .runtimes
+            .get(&pm_window_id)
+            .expect("live PM pane")
+            .pane
+            .lock()
+            .expect("pane lock")
+            .has_unsent_user_input(),
+        "holding the tick must not consume the user's unsent composer"
+    );
+}
+
+/// Issue #3702 AC-1: the Issue Monitor activity wake uses the same inject
+/// path and must also wait while the user is mid-prompt.
+#[test]
+fn issue_monitor_activity_wake_does_not_inject_while_pm_pane_has_unsent_input() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let baseline = [pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued)];
+    assert!(runtime.pm_wake_events(&repo, &baseline).is_empty());
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "PMはあなた自身が全てを");
+    let escalated = [
+        pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued),
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    let _ = runtime.pm_wake_events(&repo, &escalated);
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+}
+
+/// Issue #3702 AC-4: an idle composer still receives the tick immediately.
+#[test]
+fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    let pty = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("live PM pane")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    match pty.reserve_input_transaction() {
+        Ok(_) => panic!("idle delivery must start the protected inject"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("another protected PTY input transaction is active"),
+            "{error}"
+        ),
+    }
+}
+
+/// Issue #3702 AC-2: a held tick is delivered once (coalesced) after submit.
+#[test]
+fn held_supervision_tick_is_delivered_after_the_composer_submits() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "実行されてい");
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+    assert!(
+        runtime
+            .pending_pm_wakes
+            .get(&pm_window_id)
+            .is_some_and(|decision| decision.prompt.contains("Scheduled supervision tick")),
+        "the held prompt must be the scheduled tick"
+    );
+
+    // A second tick while still composing stays one pending entry.
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("re-quiet the loop");
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:05:00Z");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1, "ticks must coalesce");
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
+    assert!(
+        runtime.pending_pm_wakes.is_empty(),
+        "submit must deliver and clear the held tick"
+    );
+    let pty = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("live PM pane")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    match pty.reserve_input_transaction() {
+        Ok(_) => panic!("the held tick must inject after submit"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("another protected PTY input transaction is active"),
+            "{error}"
+        ),
+    }
+}
+
+/// Issue #3702 AC-2: clearing the composer (Ctrl+C) also releases the tick.
+#[test]
+fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "途中の入力");
+    let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+
+    let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    assert!(
+        runtime.pending_pm_wakes.is_empty(),
+        "Ctrl+C must deliver the held tick"
     );
 }
 

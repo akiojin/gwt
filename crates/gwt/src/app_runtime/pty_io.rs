@@ -615,6 +615,9 @@ impl AppRuntime {
                 if gwt::window_state::is_approval_resolution_input(data) {
                     self.begin_runtime_approval_resolution(id);
                 }
+                if !self.pane_has_unsent_user_input(id) {
+                    self.flush_pending_pm_wake(id);
+                }
                 Vec::new()
             }
             Err(error) => self.handle_runtime_status_event(
@@ -1512,6 +1515,7 @@ impl AppRuntime {
                 Some((identity, runtime.incarnation))
             });
         self.remove_window_state_tracking(window_id);
+        self.pending_pm_wakes.remove(window_id);
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
             output_thread: None,

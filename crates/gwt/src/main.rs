@@ -1264,6 +1264,11 @@ enum UserEvent {
     RuntimeApprovalResolutionCancelled {
         id: String,
     },
+    /// Issue #3702: the fast-path just submitted or cleared a composer that
+    /// had unsent keystrokes. Deliver one coalesced PM wake if one was held.
+    FlushPendingPmWake {
+        id: String,
+    },
     RuntimeApprovalSettle {
         id: String,
         token: u64,
@@ -3149,6 +3154,7 @@ mod tests {
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -8841,6 +8847,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
                 app.cancel_runtime_approval_resolution(&id);
+            }
+            Event::UserEvent(UserEvent::FlushPendingPmWake { id }) => {
+                app.flush_pending_pm_wake(&id);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
                 clients.dispatch(app.handle_runtime_approval_settle(&id, token));
