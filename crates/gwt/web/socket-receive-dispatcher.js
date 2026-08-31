@@ -39,6 +39,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
   new Set([
     "workspace_state",
     "active_work_projection",
+    "active_work_projection_patch",
     "window_list",
     "provider_usage",
     "runtime_health",

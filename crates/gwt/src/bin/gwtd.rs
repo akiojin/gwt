@@ -90,6 +90,7 @@ fn print_help() {
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
+    println!("  errors      List host-wide persistent error ledger rows");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -116,6 +117,7 @@ fn family_help(family: &str) -> Option<String> {
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
+        "errors" => Some(format_errors_help()),
         _ => None,
     }
 }
@@ -143,6 +145,29 @@ fn format_workspace_help() -> String {
     .join("\n")
 }
 
+fn format_errors_help() -> String {
+    [
+        "errors.* — Host-wide persistent error ledger via JSON envelope.",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"errors.list\",\"params\":{\"since\":\"2026-08-30T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  errors.list                             List errors recorded at or after `since`",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 timestamp; omitted lists all",
+        "",
+        "Notes:",
+        "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
+        "  - Live rows are also published on the daemon `errors` channel.",
+        "",
+    ]
+    .join("\n")
+}
+
 fn format_daemon_help() -> String {
     [
         "daemon.* — Long-running runtime daemon operations via JSON envelope.",
@@ -159,12 +184,16 @@ fn format_daemon_help() -> String {
         "",
         "Key params:",
         "  channels                                Required for daemon.subscribe",
+        "  project_root                            Optional for daemon.subscribe; selects the",
+        "                                          project authority instead of caller cwd",
         "  timeout_seconds                         Optional for daemon.subscribe; ends the",
         "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
+        "  - An explicit project_root must resolve to an existing directory; invalid roots",
+        "    fail closed and never fall back to cwd. Omitting it preserves cwd resolution.",
         "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
         "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
         "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
@@ -204,7 +233,8 @@ fn format_issue_help() -> String {
         "  number, position                      Move one priority (head or numeric index)",
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
         "  number, reason                        issue.monitor.requeue releases a dead",
-        "                                        agent_failed / launch_failed hold",
+        "                                        agent_failed / launch_failed hold, or a",
+        "                                        daemon-reported blocked_by_claim hold",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -225,7 +255,7 @@ fn format_pr_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  pr.current | pr.view | pr.checks | pr.reviews | pr.review_threads",
+        "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
         "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
         "  pr.review_threads.reply_and_resolve",
         "",
@@ -893,6 +923,31 @@ mod tests {
     #[test]
     fn family_help_resolves_search() {
         assert!(family_help("search").is_some());
+    }
+
+    #[test]
+    fn family_help_resolves_errors_and_documents_list() {
+        let help = family_help("errors").expect("errors help");
+        assert!(help.contains("errors.list"));
+        assert!(help.contains("since"));
+        assert!(help.contains("errors"));
+    }
+
+    #[test]
+    fn format_daemon_help_documents_project_root_authority_contract() {
+        let help = format_daemon_help();
+        for expected in [
+            "project_root",
+            "project authority instead of caller cwd",
+            "existing directory",
+            "fail closed",
+            "Omitting it preserves cwd resolution",
+        ] {
+            assert!(
+                help.contains(expected),
+                "daemon help must document {expected}. help:\n{help}"
+            );
+        }
     }
 
     #[test]

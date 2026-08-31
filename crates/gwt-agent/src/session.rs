@@ -1327,6 +1327,60 @@ where
     })
 }
 
+/// Mutate one Session only when its complete durable snapshot still matches
+/// the caller's preflight value.
+///
+/// The callback runs while the per-Session lock is held. Callers may use this
+/// to coordinate an owner-ledger commit with the Session publication, but
+/// must acquire the owner lease before calling this helper. The Session write
+/// happens only after the callback succeeds; a stale replacement reports
+/// [`SessionSnapshotUpdateOutcome::SnapshotChanged`] without invoking the
+/// callback or changing durable bytes.
+#[must_use]
+#[derive(Debug)]
+pub enum SessionSnapshotUpdateOutcome<T> {
+    SnapshotChanged,
+    SnapshotUnreadable(io::Error),
+    Updated(T),
+    MutationFailed(io::Error),
+}
+
+pub fn update_session_if_unchanged_with<T, F>(
+    sessions_dir: &Path,
+    expected: &Session,
+    mutate: F,
+) -> io::Result<SessionSnapshotUpdateOutcome<T>>
+where
+    F: FnOnce(&mut Session) -> io::Result<T>,
+{
+    validate_session_id_path_component(&expected.id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let expected_content = serialize_session_toml(expected)?;
+    with_session_path_lease(sessions_dir, &expected.id, |state| {
+        let path = session_file_path(sessions_dir, &expected.id);
+        let mut session = match state {
+            SessionPathState::Present(session) => *session,
+            SessionPathState::Missing => return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged),
+            SessionPathState::Error(error) => {
+                return Ok(SessionSnapshotUpdateOutcome::SnapshotUnreadable(error))
+            }
+        };
+        if serialize_session_toml(&session)? != expected_content {
+            return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged);
+        }
+        let before = serialize_session_toml(&session)?;
+        let value = match mutate(&mut session) {
+            Ok(value) => value,
+            Err(error) => return Ok(SessionSnapshotUpdateOutcome::MutationFailed(error)),
+        };
+        let after = serialize_session_toml(&session)?;
+        if after != before {
+            write_session_toml_atomic(&path, &after)?;
+        }
+        Ok(SessionSnapshotUpdateOutcome::Updated(value))
+    })
+}
+
 /// Remove one uncommitted Session only when its durable execution binding
 /// still matches the exact Prepared candidate selected by the caller.
 ///
@@ -2165,6 +2219,47 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
     )?;
     runtime.save(&runtime_path)?;
     Ok(true)
+}
+
+/// Clear or restore startup window recreation while the caller already holds
+/// the exact producing Session lease. A replaced or unreadable same-id Session
+/// is retained byte-for-byte and returns `false`.
+pub fn persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    restore: bool,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    let Some(mut session) = exact_durable_session_under_lease(sessions_dir, expected)? else {
+        return Ok(false);
+    };
+    if session.restore_window_on_startup == restore {
+        return Ok(true);
+    }
+    session.restore_window_on_startup = restore;
+    session.updated_at = Utc::now();
+    let content = serialize_session_toml(&session)?;
+    write_session_toml_atomic(
+        &session_file_path(sessions_dir, &expected.session_id),
+        &content,
+    )?;
+    Ok(true)
+}
+
+/// Process-local convenience wrapper for callers that do not already hold the
+/// Session lease.
+pub fn persist_session_restore_window_on_startup_if_execution_identity_matches(
+    sessions_dir: &Path,
+    expected: &SessionExecutionIdentity,
+    restore: bool,
+) -> io::Result<bool> {
+    with_session_path_lease(sessions_dir, &expected.session_id, |_| {
+        persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
+            sessions_dir,
+            expected,
+            restore,
+        )
+    })
 }
 
 /// Persist terminal status for an exact runtime namespace while the caller
@@ -3086,6 +3181,90 @@ display_name = "Codex"
             .expect("inspect a genuinely missing Session under its lease");
 
         assert!(observed);
+    }
+
+    #[test]
+    fn exact_snapshot_update_is_atomic_fail_closed_and_preserves_noop_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::new(dir.path(), "work/exact-update", AgentId::Codex);
+        session.id = "exact-snapshot-update".to_string();
+        session.save(dir.path()).expect("save Session");
+        let path = dir.path().join(format!("{}.toml", session.id));
+        let original = fs::read_to_string(&path).expect("read Session");
+        fs::write(&path, format!("# retained comment\n{original}"))
+            .expect("add non-semantic formatting");
+        let expected = Session::load(&path).expect("load exact expected Session");
+        let no_op_bytes = fs::read(&path).expect("read no-op baseline");
+
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |_| Ok(()))
+                .expect("run exact no-op"),
+            SessionSnapshotUpdateOutcome::Updated(())
+        ));
+        assert_eq!(
+            fs::read(&path).expect("read no-op result"),
+            no_op_bytes,
+            "a semantic no-op must retain the original TOML bytes"
+        );
+
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |current| {
+                current.display_name = "Adopting Session".to_string();
+                Ok(())
+            })
+            .expect("persist exact mutation"),
+            SessionSnapshotUpdateOutcome::Updated(())
+        ));
+        let mutated = Session::load(&path).expect("load mutated Session");
+        assert_eq!(mutated.display_name, "Adopting Session");
+
+        let callback_ran = std::cell::Cell::new(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &expected, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify stale snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotChanged
+        ));
+        assert!(!callback_ran.get());
+
+        let before_error = fs::read(&path).expect("read callback-error baseline");
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |current| {
+                current.display_name = "must not persist".to_string();
+                Err::<(), _>(io::Error::other("simulated mutation failure"))
+            })
+            .expect("surface callback error separately"),
+            SessionSnapshotUpdateOutcome::MutationFailed(error)
+                if error.to_string() == "simulated mutation failure"
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before_error);
+
+        fs::write(&path, b"broken = [").expect("corrupt Session");
+        callback_ran.set(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify unreadable snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotUnreadable(_)
+        ));
+        assert!(!callback_ran.get());
+        assert_eq!(fs::read(&path).unwrap(), b"broken = [");
+
+        fs::remove_file(&path).expect("remove Session");
+        callback_ran.set(false);
+        assert!(matches!(
+            update_session_if_unchanged_with(dir.path(), &mutated, |_| {
+                callback_ran.set(true);
+                Ok(())
+            })
+            .expect("classify missing snapshot"),
+            SessionSnapshotUpdateOutcome::SnapshotChanged
+        ));
+        assert!(!callback_ran.get());
     }
 
     #[test]
@@ -5265,6 +5444,52 @@ display_name = "Claude Code"
         assert_eq!(
             fs::read(runtime_path).expect("read sidecar after missing CAS"),
             sentinel_bytes
+        );
+    }
+
+    #[test]
+    fn exact_restore_persistence_updates_only_the_matching_execution_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        session
+            .set_execution_binding(Some(test_session_execution_binding(&session)))
+            .expect("bind Session");
+        session.restore_window_on_startup = true;
+        session.save(dir.path()).expect("save Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        assert!(
+            persist_session_restore_window_on_startup_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                false,
+            )
+            .expect("clear exact restore state")
+        );
+        let durable = Session::load(&dir.path().join(format!("{}.toml", session.id)))
+            .expect("load updated Session");
+        assert!(!durable.restore_window_on_startup);
+
+        let mut replacement = session.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.restore_window_on_startup = true;
+        replacement.save(dir.path()).expect("save replacement");
+        let replacement_path = dir.path().join(format!("{}.toml", session.id));
+        let replacement_bytes = fs::read(&replacement_path).expect("read replacement bytes");
+
+        assert!(
+            !persist_session_restore_window_on_startup_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                false,
+            )
+            .expect("reject replacement")
+        );
+        assert_eq!(
+            fs::read(replacement_path).expect("retain replacement bytes"),
+            replacement_bytes
         );
     }
 
