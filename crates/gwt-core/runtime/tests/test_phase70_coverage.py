@@ -249,9 +249,10 @@ class SearchClassificationBranchTests(unittest.TestCase):
             "healthy": True,
             "ttl_remaining_seconds": 120,
         }
-        stale_drift = {
+        source_drift = {
             "exists": True,
             "healthy": False,
+            "repair_required": True,
             "reason": "source_cache_changed",
         }
         broken_meta = {
@@ -261,7 +262,7 @@ class SearchClassificationBranchTests(unittest.TestCase):
         }
         for health, expected in [
             (healthy_fresh, "fresh"),
-            (stale_drift, "stale"),
+            (source_drift, "corrupt"),
             (broken_meta, "corrupt"),
         ]:
             with mock.patch.object(runner, "_issue_status_v2", return_value=health):
