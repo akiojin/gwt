@@ -42,6 +42,18 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
      changed, end the cycle with no user-facing output.";
 
+/// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
+/// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
+/// guidance owns the detailed timeout, retry, readback, and lifecycle rules;
+/// this clause only prevents injected prompts from silently restoring direct
+/// long-running execution.
+pub const PM_GWTD_EXECUTION_CLAUSE: &str =
+    "Keep the PM turn responsive: run only short read-only gwtd operations directly with the \
+     contract's 10-second outer deadline. Delegate `daemon.subscribe`, batch mutations, repeated \
+     `pane.read`, and every long-running or hang-risk operation to exactly one background task or \
+     in-session sub-agent; collect the result only from its task-completion notification, and \
+     never duplicate an operation while it is pending.";
+
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmRegistration {

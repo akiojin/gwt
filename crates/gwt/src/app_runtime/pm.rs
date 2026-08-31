@@ -29,7 +29,9 @@ use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 // Issue #3632: every prompt this module injects closes with the one canonical
 // reporting clause the Stop-gate continuation also uses; see
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
-use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE};
+use gwt::pm_registry::{
+    self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE, PM_GWTD_EXECUTION_CLAUSE,
+};
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
@@ -115,6 +117,13 @@ const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 pub(crate) struct PmWakeDecision {
     pub(crate) window_id: String,
     pub(crate) prompt: String,
+}
+
+/// Outcome of attempting to type a wake prompt into the PM pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PmWakeWrite {
+    Injected,
+    Deferred,
 }
 
 /// What one monitor inbox snapshot contributes to the wake decision: every
@@ -708,6 +717,7 @@ impl AppRuntime {
                  Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot and \
                  triage the new items. Inventory open PRs with `pr.list`; stale / SUPERSEDED / \
                  owner-Issue-closed rows are digest escalations, never auto-close. \
+                 {PM_GWTD_EXECUTION_CLAUSE} \
                  {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 reasons.join(", "),
                 escalations = open_escalation_prompt_section(project_root),
@@ -785,7 +795,8 @@ impl AppRuntime {
                  fresh `issue.monitor.status` snapshot, check the running agents' \
                  `last_activity_at` and any NeedsHuman rows, and inventory open PRs with \
                  `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows are digest \
-                 escalations, never auto-close). {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 escalations, never auto-close). {PM_GWTD_EXECUTION_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
                 escalations = open_escalation_prompt_section(project_root),
             ),
         })
@@ -803,10 +814,16 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(()) => {
+            Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake re-armed the resident PM from the scheduled snapshot"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "periodic wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -847,10 +864,16 @@ impl AppRuntime {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(()) => {
+            Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "woke the resident PM for new Issue Monitor activity"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "Issue Monitor wake deferred until the PM composer is empty"
                 );
             }
             Err(error) => {
@@ -1497,14 +1520,61 @@ impl AppRuntime {
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
-    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
-        match self.runtimes.get(&decision.window_id) {
-            None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => {
-                let pane = Arc::clone(&runtime.pane);
-                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+    ///
+    /// Issue #3702: if the PM TUI composer already has unsent keystrokes,
+    /// hold one coalesced prompt instead of splicing `[gwt]` into the line.
+    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
+        let pane = match self.runtimes.get(&decision.window_id) {
+            None => return Err(format!("no live runtime for pane {}", decision.window_id)),
+            Some(runtime) => Arc::clone(&runtime.pane),
+        };
+        let unsent = pane
+            .lock()
+            .map(|pane| pane.has_unsent_user_input())
+            .unwrap_or(false);
+        if unsent {
+            self.pending_pm_wakes
+                .insert(decision.window_id.clone(), decision.clone());
+            return Ok(PmWakeWrite::Deferred);
+        }
+        self.pending_pm_wakes.remove(&decision.window_id);
+        super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)?;
+        Ok(PmWakeWrite::Injected)
+    }
+
+    /// Issue #3702 AC-2: deliver a held wake once the composer is submitted
+    /// or cleared. Missing pending entries are a no-op so every pane submit
+    /// can call this cheaply.
+    pub(crate) fn flush_pending_pm_wake(&mut self, window_id: &str) {
+        let Some(decision) = self.pending_pm_wakes.get(window_id).cloned() else {
+            return;
+        };
+        if self.pane_has_unsent_user_input(window_id) {
+            return;
+        }
+        match self.write_pm_wake_prompt(&decision) {
+            Ok(PmWakeWrite::Injected) => {
+                tracing::info!(
+                    window_id,
+                    "delivered a PM wake held while the composer was busy"
+                );
+            }
+            Ok(PmWakeWrite::Deferred) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_id,
+                    "held PM wake prompt injection failed"
+                );
             }
         }
+    }
+
+    pub(crate) fn pane_has_unsent_user_input(&self, window_id: &str) -> bool {
+        self.runtimes
+            .get(window_id)
+            .and_then(|runtime| runtime.pane.lock().ok())
+            .is_some_and(|pane| pane.has_unsent_user_input())
     }
 
     /// Authoritative liveness for a stored PM registration (FR-001): the
