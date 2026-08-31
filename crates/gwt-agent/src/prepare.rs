@@ -4122,7 +4122,7 @@ mod tests {
         fs::create_dir_all(link.parent().expect("junction parent"))
             .expect("create junction parent");
         fs::create_dir_all(target).expect("create junction target");
-        let output = std::process::Command::new("cmd.exe")
+        let output = gwt_core::process::hidden_command("cmd.exe")
             .arg("/D")
             .arg("/C")
             .arg("mklink")

@@ -57,9 +57,9 @@ test.describe("Project Manager Settings", () => {
 
       try {
         await injectPmStatus(page, { available: false });
-        await expect(interval).toHaveValue("");
+        await expect(interval).toHaveValue("60");
         await expect(interval).toBeDisabled();
-        await expect(sharedMount).toHaveValue("");
+        await expect(sharedMount).toHaveValue("60");
         await expect(sharedMount).toBeDisabled();
 
         const refreshCursor = await messageCursor(page);

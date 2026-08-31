@@ -27,7 +27,10 @@ use gwt::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::continuation::{provider_conversation_availability, ProviderConversationAvailability};
+use super::continuation::{
+    provider_conversation_availability, provider_conversation_availability_with_grok_home,
+    session_matches_project_state, ProviderConversationAvailability,
+};
 use crate::{ShellLaunchConfig, UserEvent};
 
 /// `Pr => None` because Launch Agent is not exposed for PR bridges
@@ -400,6 +403,23 @@ impl AppRuntime {
         linked_issue_kind: LinkedIssueKind,
         previous_profiles: gwt::LaunchWizardPreviousProfiles,
     ) -> LaunchWizardSession {
+        // #3426: the unified Issue surface preset collapses SPEC entries to
+        // LinkedIssueKind::Issue, so re-canonicalize the kind from the cached
+        // label evidence before it seeds the Work owner label. Absent evidence
+        // keeps the caller-declared kind. This stays scoped to the owner label:
+        // `linked_issue_kind` also drives `show_linked_issue` and the manual
+        // branch suffix, and flipping those from a cache label would hide the
+        // wizard's Linked issue section and seed `spec-N` instead of the
+        // unified `issue-N` branch convention.
+        let canonical_owner_kind =
+            match gwt::cli::execution_state::detect_owner_kind_evidence(project_root, issue_number)
+            {
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Spec) => LinkedIssueKind::Spec,
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Issue) => {
+                    LinkedIssueKind::Issue
+                }
+                None => linked_issue_kind,
+            };
         let base_branch_name = normalize_branch_name(base_branch_name);
         let target_branch_name =
             knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
@@ -413,7 +433,7 @@ impl AppRuntime {
         // SPEC #3431 FR-070: this must be the spelling the durable execution
         // binding produces, not a display label. `workspace.ensure` compares
         // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
-        let owner_label = match linked_issue_kind {
+        let owner_label = match canonical_owner_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
             LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };
@@ -2067,8 +2087,19 @@ impl AppRuntime {
                     }
                 }
                 if !was_materialized {
-                    recovery_events
-                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                    let exact_live_holder = self.active_agent_sessions.contains_key(&window_id)
+                        && self.runtimes.contains_key(&window_id)
+                        && self.window_status(&window_id).is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        });
+                    if !exact_live_holder {
+                        recovery_events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
                 } else {
                     let Some((window_id, materialized, workspace_durable)) = self
                         .existing_issue_monitor_delivery_window(
@@ -2142,12 +2173,73 @@ impl AppRuntime {
                 recovery_events
             }
             Err(error) => {
-                recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
-                    Some(project_root),
-                    issue_number,
-                    &error,
-                    delivery_id.as_deref(),
-                ));
+                let answered_handoff_pending = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .ok()
+                .is_some_and(|prefs| {
+                    prefs.autonomous_handoffs.iter().any(|handoff| {
+                        handoff.issue_number == issue_number
+                            && handoff.answer.is_some()
+                            && handoff.delivered_at.is_none()
+                    })
+                });
+                if answered_handoff_pending {
+                    if let Some(delivery_id) = delivery_id.as_deref() {
+                        self.issue_monitor_launch_deliveries.remove(delivery_id);
+                    }
+                    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let settlement = gwt::prepare_autonomous_handoff_delivery_from_prefs(
+                        &prefs_path,
+                        issue_number,
+                        &now,
+                    )
+                    .and_then(|prepared| match prepared {
+                        Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(prepared)) => {
+                            gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                                &prefs_path,
+                                &prepared.handoff_id,
+                                &prepared.session_id,
+                                prepared.attempt,
+                                &error,
+                                &now,
+                            )
+                            .map(Some)
+                        }
+                        _ => Ok(None),
+                    });
+                    let disposition = match settlement {
+                        Ok(Some(gwt::AutonomousHandoffDeliveryFailureOutcome::Retry {
+                            retry_not_before,
+                            ..
+                        })) => format!(" exact-session retry after {retry_not_before}"),
+                        Ok(Some(gwt::AutonomousHandoffDeliveryFailureOutcome::Escalated {
+                            ..
+                        })) => " parked for human review after bounded retries".to_string(),
+                        Ok(Some(gwt::AutonomousHandoffDeliveryFailureOutcome::Rejected))
+                        | Ok(None) => " kept in its existing durable delivery state".to_string(),
+                        Err(settlement_error) => {
+                            format!(" could not persist its delivery failure: {settlement_error}")
+                        }
+                    };
+                    recovery_events.push(OutboundEvent::broadcast(
+                        BackendEvent::IssueMonitorToast {
+                            level: "error".to_string(),
+                            message: format!(
+                                "Issue Monitor could not continue the exact answered session;{disposition}: {error}"
+                            ),
+                            issue_number: Some(issue_number),
+                        },
+                    ));
+                } else {
+                    recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
+                        Some(project_root),
+                        issue_number,
+                        &error,
+                        delivery_id.as_deref(),
+                    ));
+                }
                 recovery_events
             }
         }
@@ -2303,8 +2395,22 @@ impl AppRuntime {
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
-        if previous_profiles.preferred_profile().is_none() {
+        let Some(profile_agent_id) = previous_profiles
+            .preferred_profile()
+            .map(|profile| profile.agent_id.clone())
+        else {
             return Ok(None);
+        };
+        // Issue #3676 AC-2: refuse before any terminal is spawned when the
+        // profile provider's CLI is definitively unauthenticated. The error
+        // funnels through the normal launch-failed path, so the active slot
+        // is released instead of burning on a provider login screen.
+        if (self.issue_monitor_provider_auth_probe)(&profile_agent_id)
+            == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+        {
+            return Err(gwt::issue_monitor::provider_unauthenticated_message(
+                &profile_agent_id,
+            ));
         }
         // SPEC #3200 FR-015: for the independent review, force a different model
         // than the implementer's (when configured) so the verdict is not a
@@ -2317,6 +2423,13 @@ impl AppRuntime {
             review_model.as_deref(),
         );
         let launch_profiles = previous_profiles.clone();
+        let answered_handoff_pending = review_prompt.is_none()
+            && gwt::preserve_answered_handoff_resume_strategy_from_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+                issue_number,
+            )
+            .ok()
+            .unwrap_or(false);
 
         // FR-022: an Issue whose agent window was previously closed without a
         // merge keeps a resumable session. Re-engage by resuming that session
@@ -2326,7 +2439,8 @@ impl AppRuntime {
         // skips resume and always launches a new agent.
         let target_branch = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let resume_holder_window_id = if review_prompt.is_none()
-            && launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+            && (launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+                || answered_handoff_pending)
         {
             let (events, holder_window_id) = self.silent_issue_monitor_resume_events(
                 &tab_id,
@@ -2334,6 +2448,7 @@ impl AppRuntime {
                 &target_branch,
                 issue_number,
                 delivery_id.clone(),
+                &profile_agent_id,
             )?;
             if let Some(events) = events {
                 return Ok(Some(events));
@@ -2427,6 +2542,8 @@ impl AppRuntime {
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.clone()),
             issue_monitor_session_mode,
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -2473,20 +2590,247 @@ impl AppRuntime {
         target_branch: &str,
         issue_number: u64,
         delivery_id: Option<String>,
+        profile_agent_id: &str,
     ) -> Result<(Option<Vec<OutboundEvent>>, Option<String>), String> {
-        let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
-        else {
-            return Ok((None, None));
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let autonomous_handoff =
+            gwt::pending_autonomous_handoff_resumption_from_prefs(&prefs_path, issue_number)
+                .map_err(|error| {
+                    format!("failed to read the autonomous handoff answer: {error}")
+                })?;
+        let session = if let Some(handoff) = autonomous_handoff.as_ref() {
+            let session = self
+                .issue_monitor_session_by_id(&handoff.session_id)
+                .ok_or_else(|| {
+                    format!(
+                        "answered autonomous handoff {} references unavailable gwt Session {}",
+                        handoff.handoff_id, handoff.session_id
+                    )
+                })?;
+            if session.linked_issue_number != Some(issue_number)
+                || normalize_branch_name(&session.branch) != normalize_branch_name(target_branch)
+                || !session_matches_project_state(&session, project_root)
+            {
+                return Err(format!(
+                    "answered autonomous handoff {} does not match Issue #{issue_number}'s exact Session",
+                    handoff.handoff_id
+                ));
+            }
+            session
+        } else {
+            let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
+            else {
+                return Ok((None, None));
+            };
+            session
         };
-        if !session_exact_resume_materializable(project_root, &session) {
+        // Issue #3676 AC-1: a stored session only qualifies for resume when
+        // its provider matches the Monitor's current launch profile. A
+        // mismatched provider must fall through to a fresh launch on the
+        // profile provider instead of re-binding the slot to the old CLI.
+        if !session
+            .agent_id
+            .command()
+            .eq_ignore_ascii_case(profile_agent_id.trim())
+        {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff provider does not match the Monitor profile"
+                        .to_string(),
+                );
+            }
             return Ok((None, None));
         }
-        if provider_conversation_availability(&session) != ProviderConversationAvailability::Present
-        {
+        if !session_exact_resume_materializable(project_root, &session) {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff Session can no longer be materialized".to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
+        let provider_availability = if session.agent_id == gwt_agent::AgentId::GrokBuild {
+            let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+                &self.profile_config_path()?,
+                session.runtime_target,
+            )?
+            .into_parts();
+            let grok_home =
+                gwt_core::usage::grok::grok_home_from_env(&effective_env, &session.worktree_path);
+            provider_conversation_availability_with_grok_home(&session, grok_home.as_deref())
+        } else {
+            provider_conversation_availability(&session)
+        };
+        if provider_availability != ProviderConversationAvailability::Present {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff native conversation is unavailable or foreign"
+                        .to_string(),
+                );
+            }
             return Ok((None, None));
         }
         if let Some(holder_window_id) = self.issue_monitor_native_conversation_holder(&session) {
-            return Ok((None, Some(holder_window_id)));
+            let Some(handoff) = autonomous_handoff.as_ref() else {
+                return Ok((None, Some(holder_window_id)));
+            };
+            if !self.active_agent_sessions.contains_key(&holder_window_id) {
+                // A materializing window reserves the native writer identity
+                // but is not yet a conversation that can accept an answer.
+                return Ok((Some(Vec::new()), None));
+            }
+            let Some(pane) = self
+                .runtimes
+                .get(&holder_window_id)
+                .map(|runtime| runtime.pane.clone())
+            else {
+                // The exact conversation is known to be owned or currently
+                // materializing, but there is no writable live pane yet. Keep
+                // the durable delivery pending instead of launching a second
+                // writer or consuming the answer.
+                return Ok((Some(Vec::new()), None));
+            };
+            let local_delivery_key = delivery_id
+                .clone()
+                .unwrap_or_else(|| format!("handoff:{}", handoff.handoff_id));
+            if matches!(
+                self.issue_monitor_launch_deliveries.get(&local_delivery_key),
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+                    if window_id == &holder_window_id
+            ) {
+                return Ok((Some(Vec::new()), None));
+            }
+            if let Some(delivery_id) = delivery_id.as_deref() {
+                match self.claim_issue_monitor_launch_delivery(
+                    project_root,
+                    issue_number,
+                    delivery_id,
+                    &holder_window_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok((Some(Vec::new()), None)),
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to bind the autonomous answer delivery to live window \
+                             {holder_window_id}: {error}"
+                        ));
+                    }
+                }
+            }
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let prepared = match gwt::prepare_autonomous_handoff_delivery_from_prefs(
+                &prefs_path,
+                issue_number,
+                &now,
+            )
+            .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?
+            {
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(prepared)) => prepared,
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Backoff {
+                    retry_not_before,
+                    ..
+                }) => {
+                    return Err(format!(
+                        "answered autonomous handoff delivery is in backoff until {retry_not_before}"
+                    ));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::InFlight { .. }) => {
+                    return Ok((Some(Vec::new()), None));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ambiguous { reason, .. }) => {
+                    return Err(reason);
+                }
+                None => return Ok((Some(Vec::new()), None)),
+            };
+            let record_pre_submit_failure =
+                |message: &str| match gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                    &prefs_path,
+                    &prepared.handoff_id,
+                    &prepared.session_id,
+                    prepared.attempt,
+                    message,
+                    &now,
+                ) {
+                    Ok(_) => message.to_string(),
+                    Err(error) => {
+                        format!("{message}; failed to record bounded retry: {error}")
+                    }
+                };
+            let target = match super::autonomous_handoff_delivery_target_for_session(
+                &session,
+                issue_number,
+                &holder_window_id,
+                delivery_id.as_deref(),
+                &self.issue_monitor_materializer_id,
+            ) {
+                Ok(target) => target,
+                Err(error) => return Err(record_pre_submit_failure(&error)),
+            };
+            let bound = match gwt::bind_autonomous_handoff_delivery_target_from_prefs(
+                &prefs_path,
+                &prepared.handoff_id,
+                &prepared.session_id,
+                prepared.attempt,
+                &target,
+            ) {
+                Ok(bound) => bound,
+                Err(error) => {
+                    let error = format!("failed to bind the autonomous answer target: {error}");
+                    return Err(record_pre_submit_failure(&error));
+                }
+            };
+            if !bound {
+                let error = "autonomous answer target no longer matches its durable attempt";
+                return Err(record_pre_submit_failure(error));
+            }
+            self.issue_monitor_launch_deliveries.insert(
+                local_delivery_key.clone(),
+                super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id: holder_window_id.clone(),
+                    started_at: std::time::Instant::now(),
+                },
+            );
+            let proxy = self.proxy.clone();
+            let project_root = project_root.to_path_buf();
+            let worker_holder_window_id = holder_window_id.clone();
+            let worker_delivery_id = delivery_id.clone();
+            let worker_local_delivery_key = local_delivery_key.clone();
+            let handoff_id = prepared.handoff_id.clone();
+            let handoff_session_id = prepared.session_id.clone();
+            let attempt = prepared.attempt;
+            let prompt = format!("{}\r", prepared.prompt);
+            if let Err(error) = self.blocking_tasks.try_spawn(move || {
+                let result = super::pty_io::write_pane_input_and_submit_blocking(&pane, &prompt);
+                proxy.send(UserEvent::IssueMonitorAnswerDeliveryComplete(
+                    super::IssueMonitorAnswerDelivery {
+                        project_root,
+                        issue_number,
+                        holder_window_id: worker_holder_window_id,
+                        delivery_id: worker_delivery_id,
+                        local_delivery_key: worker_local_delivery_key,
+                        handoff_id,
+                        session_id: handoff_session_id,
+                        attempt,
+                        result,
+                    },
+                ));
+            }) {
+                self.issue_monitor_launch_deliveries
+                    .remove(&local_delivery_key);
+                let _ = gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                    &prefs_path,
+                    &prepared.handoff_id,
+                    &prepared.session_id,
+                    prepared.attempt,
+                    &error,
+                    &now,
+                );
+                return Err(format!(
+                    "failed to schedule the autonomous answer delivery to live window \
+                     {holder_window_id}: {error}"
+                ));
+            }
+            return Ok((Some(Vec::new()), None));
         }
         let mut config = super::launch_config_from_persisted_session(&session);
         if !session.worktree_path.as_path().exists() {
@@ -2495,17 +2839,56 @@ impl AppRuntime {
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok((None, None));
         }
-        // Issue #3478 (AC-5): a parked question that a human answered resumes
-        // this exact session with the answer as its first prompt, so the work
-        // continues with the decision context it was parked on. Taken once —
-        // a later resume of the same session must not replay a stale answer.
-        if let Some(prompt) = gwt::take_autonomous_resume_prompt_from_prefs(
+        let autonomous_mode = gwt::load_issue_monitor_prefs(
             &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
-            issue_number,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        ) {
-            config.args.push(prompt);
+        )
+        .map(|prefs| prefs.autonomous_mode)
+        .unwrap_or(false);
+        if autonomous_mode {
+            config.env_vars.insert(
+                gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV.to_string(),
+                "1".to_string(),
+            );
+            config.env_vars.insert(
+                gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV.to_string(),
+                issue_number.to_string(),
+            );
         }
+        // Write-ahead before the exact Resume is scheduled. The protected
+        // prompt is consumed only by this launch; UserPromptSubmit supplies
+        // the semantic receipt that marks it delivered.
+        let autonomous_delivery_attempt = if autonomous_handoff.is_some() {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            match gwt::prepare_autonomous_handoff_delivery_from_prefs(
+                &prefs_path,
+                issue_number,
+                &now,
+            )
+            .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?
+            {
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(prepared)) => {
+                    config.args.push(prepared.prompt.clone());
+                    Some(prepared)
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Backoff {
+                    retry_not_before,
+                    ..
+                }) => {
+                    return Err(format!(
+                        "answered autonomous handoff delivery is in backoff until {retry_not_before}"
+                    ));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::InFlight { .. }) => {
+                    return Ok((Some(Vec::new()), None));
+                }
+                Some(gwt::AutonomousHandoffDeliveryPreparation::Ambiguous { reason, .. }) => {
+                    return Err(reason);
+                }
+                None => return Ok((Some(Vec::new()), None)),
+            }
+        } else {
+            None
+        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
             project_root,
             Some(session.branch.as_str()),
@@ -2530,14 +2913,33 @@ impl AppRuntime {
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.to_path_buf()),
             issue_monitor_session_mode: Some(config.session_mode),
+            issue_monitor_autonomous_handoff: autonomous_delivery_attempt.clone(),
+            issue_monitor_autonomous_submit_started: false,
         };
-        let mut events = self.spawn_agent_window_with_feedback_at_geometry(
+        let launch = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
             config,
             geometry,
             workspace_resume_context,
             feedback,
-        )?;
+        );
+        let mut events = match launch {
+            Ok(events) => events,
+            Err(error) => {
+                if let Some(prepared) = autonomous_delivery_attempt {
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let _ = gwt::record_autonomous_handoff_delivery_failure_from_prefs(
+                        &prefs_path,
+                        &prepared.handoff_id,
+                        &prepared.session_id,
+                        prepared.attempt,
+                        &error,
+                        &now,
+                    );
+                }
+                return Err(error);
+            }
+        };
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "info".to_string(),
             message: "Issue Monitor resumed existing session".to_string(),
@@ -2989,15 +3391,21 @@ impl AppRuntime {
         let runtime_proof = match runtime_disposition {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof)
             | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(proof) => {
-                Some(proof)
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live => {
                 local_runtime_incarnation.map(|runtime_incarnation| {
-                    gwt_agent::ManualLaunchRuntimeProof {
-                        host_pid: std::process::id(),
-                        runtime_incarnation,
-                    }
+                    gwt_agent::ManualLaunchRuntimeEvidence::Proof(
+                        gwt_agent::ManualLaunchRuntimeProof {
+                            host_pid: std::process::id(),
+                            runtime_incarnation,
+                        },
+                    )
                 })
+            }
+            // Issue #3457: absence is exact evidence, not a missing proof.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => {
+                Some(gwt_agent::ManualLaunchRuntimeEvidence::Absent)
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
@@ -3031,6 +3439,14 @@ impl AppRuntime {
                 ))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Defunct(_) => Ok(
+                super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
+            ),
+            // Issue #3457: the holder published no sidecar in any namespace,
+            // so no Host is running it and no proof can ever appear. Unlike a
+            // Terminal holder there is no exit record to cross-check against
+            // the durable status, so a `.toml` a crashed Host left behind as
+            // Running must still be recoverable here.
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::Absent => Ok(
                 super::ManualLaunchGenerationDisposition::Prepare(intent.preparation()),
             ),
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {
@@ -3578,6 +3994,8 @@ impl AppRuntime {
                             issue_monitor_delivery_id: None,
                             issue_monitor_project_root: issue_monitor_project_root.clone(),
                             issue_monitor_session_mode: Some(config.session_mode),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
                         });
                     if let Some(target) = session.agent_kanban_target.clone() {
                         runtime.spawn_agent_window_in_agent_kanban(
@@ -4400,6 +4818,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_checked_out_develop_in_container_workspace() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -4412,6 +4831,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_checked_out_main_without_develop() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &[], Some("main"));
 
@@ -4424,6 +4844,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_existing_normal_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");
 
@@ -4436,6 +4857,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_existing_bare_head_without_default_worktree() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
 
@@ -4448,6 +4870,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_empty_bare_repository() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_empty_bare_workspace(&workspace);
 
@@ -4460,6 +4883,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_unborn_current_branch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repository");
         run_git(&repo, &["init", "-q", "-b", "future"]);
@@ -4473,6 +4897,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_uses_develop_worktree_from_detached_head() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         run_git(&repo, &["branch", "develop"]);
@@ -4490,6 +4915,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_falls_back_from_unusable_root_git_metadata() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &[], None);
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -4503,6 +4929,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_prefers_develop_when_project_root_is_bare() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
@@ -4515,6 +4942,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_rejects_local_ref_that_is_not_a_commit() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         init_bare_workspace(&workspace, "master", &["main"], Some("main"));
         let blob = git_stdout(&workspace.join("seed"), &["rev-parse", "master:README.md"]);
@@ -4533,6 +4961,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_git_error_when_fallback_is_unavailable() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
@@ -4548,6 +4977,7 @@ mod launch_agent_branch_resolution_tests {
     #[test]
     fn launch_agent_branch_resolution_preserves_malformed_local_ref_error() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "main");
         fs::write(repo.join(".git/refs/heads/main"), "not-an-object-id\n")

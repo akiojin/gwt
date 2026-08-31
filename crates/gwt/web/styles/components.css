@@ -5550,6 +5550,8 @@ button.workspace-board-ref:focus-visible {
 
 .op-status-strip__cell--usage {
   display: inline-flex;
+  flex: 0 0 23ch;
+  inline-size: 23ch;
   align-items: center;
   gap: 6px;
   border: 0;
@@ -5558,27 +5560,43 @@ button.workspace-board-ref:focus-visible {
   font: inherit;
   color: inherit;
   padding: 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 /* Stable per-provider summary chips in the status strip (no rotation). */
 .op-usage-sum {
   display: inline-flex;
+  flex: 0 0 7ch;
+  inline-size: 7ch;
   align-items: baseline;
   gap: 3px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
-.op-usage-sum[data-provider="codex"] {
-  color: var(--agent-color-codex, #6fb1ff);
+.op-usage-sum[data-severity="normal"] {
+  color: var(--color-status-strip-fg);
 }
 
-.op-usage-sum[data-provider="claude_code"] {
-  color: var(--agent-color-claude, #e0a06a);
+.op-usage-sum[data-severity="warning"] {
+  color: var(--color-state-needs-input);
+}
+
+.op-usage-sum[data-severity="danger"] {
+  color: var(--color-state-blocked);
 }
 
 .op-usage-sum[data-limit="true"] {
-  color: var(--color-state-blocked, #ff6b6b);
+  color: var(--color-state-blocked);
+}
+
+.op-usage-more {
+  flex: 0 0 3ch;
+  inline-size: 3ch;
+  color: var(--color-status-strip-fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .op-status-strip__cell--usage:hover .op-usage-sum,
@@ -5678,6 +5696,13 @@ button.workspace-board-ref:focus-visible {
   border-radius: 999px;
   background: var(--color-surface, rgba(127, 127, 127, 0.16));
   color: var(--color-text-muted, #9aa0ad);
+}
+
+.op-usage-card__limit {
+  margin-left: auto;
+  color: var(--color-state-blocked);
+  font-size: var(--type-xs);
+  font-weight: 700;
 }
 
 .op-usage-card__account {
@@ -5940,15 +5965,15 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-bar__fill {
   height: 100%;
-  background: var(--color-accent, #6fb1ff);
+  background: var(--color-state-active);
 }
 
-.op-usage-bar__fill[data-level="mid"] {
-  background: #e0b341;
+.op-usage-bar__fill[data-severity="warning"] {
+  background: var(--color-state-needs-input);
 }
 
-.op-usage-bar__fill[data-level="high"] {
-  background: var(--color-state-blocked, #ff6b6b);
+.op-usage-bar__fill[data-severity="danger"] {
+  background: var(--color-state-blocked);
 }
 
 .op-usage-window__pct {

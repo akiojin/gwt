@@ -14,7 +14,7 @@
 //!   the PM parks silently (a user prompt resets the budget). Waking a parked
 //!   PM on daemon events is the follow-up wake path.
 
-use std::path::Path;
+use std::{io, path::Path};
 
 use super::HookOutput;
 use crate::pm_registry::{self, PmLoopState};
@@ -69,13 +69,41 @@ pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
     }
 }
 
-/// UserPromptSubmit entry: real user contact re-arms the loop budget and
-/// stamps the conversation clock the T-093 wake path defers to.
-pub fn handle_user_prompt_submit(worktree: &Path) {
+fn refresh_at_safe_boundary(worktree: &Path) -> io::Result<Option<String>> {
+    match pm_registry::refresh_pm_worktree_at_safe_boundary(worktree) {
+        Ok(Some(outcome)) if !outcome.is_fresh() => Ok(Some(format!(
+            "Resident PM worktree refresh is degraded: state={:?}, stage={:?}, reason={}",
+            outcome.freshness.state,
+            outcome.freshness.failure_stage,
+            outcome
+                .freshness
+                .failure_reason
+                .as_deref()
+                .unwrap_or("unknown")
+        ))),
+        Ok(_) => Ok(None),
+        Err(error) => {
+            tracing::warn!(%error, "resident PM worktree refresh failed at a safe boundary");
+            Err(error)
+        }
+    }
+}
+
+/// UserPromptSubmit entry: refresh before the new model turn can start, then
+/// re-arm the loop budget and stamp the conversation clock the T-093 wake path
+/// defers to. Degraded context is returned to the event dispatcher so the PM
+/// reports it immediately instead of silently claiming freshness.
+pub fn handle_user_prompt_submit(worktree: &Path) -> io::Result<Option<String>> {
+    let refresh_context = if super::is_resident_pm_worktree(worktree) {
+        refresh_at_safe_boundary(worktree)?
+    } else {
+        None
+    };
     handle_user_prompt_submit_at(
         worktree,
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     );
+    Ok(refresh_context)
 }
 
 fn handle_user_prompt_submit_at(worktree: &Path, now: &str) {
@@ -94,15 +122,30 @@ fn handle_user_prompt_submit_at(worktree: &Path, now: &str) {
     );
 }
 
-pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
+/// `current_session` is the caller's Session id, resolved once by the hook
+/// dispatcher. It is injected rather than read here so this gate stays a pure
+/// function of its inputs — the process-global environment is shared by every
+/// test in the binary, and reading it from inside made two tests race each
+/// other's `GWT_SESSION_ID` under CI parallelism.
+pub fn handle_with_input(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+) -> HookOutput {
     handle_at(
         worktree,
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         super::envelope::stop_hook_active_from(input),
+        current_session,
     )
 }
 
-fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
+fn handle_at(
+    worktree: &Path,
+    now: &str,
+    stop_hook_active: bool,
+    current_session: Option<&str>,
+) -> HookOutput {
     if !super::is_resident_pm_worktree(worktree) {
         return HookOutput::Silent;
     }
@@ -159,7 +202,32 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
         end_own_chain(&mut state);
         return HookOutput::Silent;
     }
-    let interval_secs = pm_registry::load_pm_prefs(&project_state.join("pm.json"))
+    // Issue #3607: the resident loop belongs to the *registered* PM. This gate
+    // keys on the worktree's path shape alone, so a PM that `pm.stop` retired —
+    // or that another PM superseded — otherwise kept forcing itself into the
+    // next cycle and kept rewriting Issue Monitor state a second PM was also
+    // writing. Deregistration is the durable, GUI-free way to end that, so it
+    // has to be observable here.
+    //
+    // A caller with no ambient identity is left alone: the loop cannot be
+    // attributed to anyone, and retiring a healthy PM over a missing
+    // environment variable would be worse than the duplicate this prevents.
+    let pm_prefs_path = project_state.join("pm.json");
+    if let Some(caller_session) = current_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !pm_registry::session_is_registered_pm(&pm_prefs_path, caller_session) {
+            tracing::info!(
+                session_id = caller_session,
+                worktree = %worktree.display(),
+                "resident PM loop released: this Session is no longer the registered PM"
+            );
+            end_own_chain(&mut state);
+            return HookOutput::Silent;
+        }
+    }
+    let interval_secs = pm_registry::load_pm_prefs(&pm_prefs_path)
         .map(|prefs| prefs.settings.loop_interval_secs_clamped())
         .unwrap_or(pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS);
     if !has_unconsumed_observations && state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
@@ -177,6 +245,17 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
             }
         }
     }
+    // The current model turn has completed and this gate has decided to start
+    // the next resident cycle. This is the only Stop-side mutation boundary;
+    // quiet-time wake selection never fetches or repoints the worktree.
+    let refresh_context = match refresh_at_safe_boundary(worktree) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(%error, "resident PM continuation parked after refresh failure");
+            end_own_chain(&mut state);
+            return HookOutput::Silent;
+        }
+    };
     // FR-110: only truly empty cycles spend the park budget; held cycles keep
     // the count as-is so the brake resumes once the observations are consumed.
     if !has_unconsumed_observations {
@@ -185,16 +264,20 @@ fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
     state.last_continued_at = Some(now.to_string());
     state.pending_own_block = true;
     let _ = pm_registry::save_pm_loop_state(&state_path, &state);
+    let refresh_context = refresh_context
+        .map(|context| format!(" Worktree status: {context}."))
+        .unwrap_or_default();
     HookOutput::stop_block(format!(
         "Resident PM loop: run one cycle before stopping. Try JSON operation `daemon.subscribe` \
          on the `issue_monitor` channel with `params.timeout_seconds:{interval_secs}`; if the \
          subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
          mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
-         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, check the \
-         running agents' `last_activity_at`, and report milestones to the user as a digest. \
+         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
+         running agents' `last_activity_at`. {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
-         failures do not count as empty)."
+         failures do not count as empty).{refresh_context}",
+        clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
     ))
 }
 
@@ -203,38 +286,265 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
-    fn pm_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    /// The Session the fixture's PM is registered as. It is passed directly
+    /// to `handle_at`; no process-global session environment is needed.
+    const FIXTURE_PM_SESSION: &str = "pm-session-fixture";
+
+    fn set_fixture_gwt_home(home: &tempfile::TempDir) -> ScopedGwtHome {
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        ScopedGwtHome::set(&canonical_home)
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let output = gwt_core::process::run_git_logged(args, Some(repo)).expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn snapshot_worktree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut snapshot = std::collections::BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read worktree snapshot directory") {
+                let entry = entry.expect("worktree snapshot entry");
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("snapshot path under worktree")
+                    .to_path_buf();
+                let file_type = entry.file_type().expect("worktree snapshot file type");
+                if file_type.is_dir() {
+                    snapshot.insert(relative, vec![b'd']);
+                    pending.push(path);
+                } else if file_type.is_file() {
+                    let mut value = vec![b'f'];
+                    value.extend(std::fs::read(&path).expect("read worktree snapshot file"));
+                    snapshot.insert(relative, value);
+                } else {
+                    snapshot.insert(relative, vec![b'o']);
+                }
+            }
+        }
+        snapshot
+    }
+
+    fn pm_refresh_fixture() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+    ) {
+        let env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
+        let origin = home.path().join("origin.git");
         let repo = home.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        let worktree = {
-            let _guard = ScopedGwtHome::set(home.path());
-            let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
-            std::fs::create_dir_all(&worktree).expect("pm worktree");
-            let prefs = crate::IssueMonitorPrefs {
+        std::fs::create_dir_all(&repo).expect("repo parent");
+        run_git(
+            home.path(),
+            &["init", "--bare", origin.to_str().expect("origin")],
+        );
+        run_git(
+            home.path(),
+            &[
+                "clone",
+                origin.to_str().expect("origin"),
+                repo.to_str().expect("repo"),
+            ],
+        );
+        run_git(&repo, &["config", "user.email", "pm-refresh@example.com"]);
+        run_git(&repo, &["config", "user.name", "PM Refresh Test"]);
+        run_git(&repo, &["checkout", "-b", "develop"]);
+        std::fs::write(repo.join("tracked.txt"), b"A\n").expect("write A");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "A"]);
+        run_git(&repo, &["push", "-u", "origin", "develop"]);
+
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(worktree.parent().expect("PM parent")).expect("PM parent");
+        gwt_git::WorktreeManager::new(repo.clone())
+            .create_detached("origin/develop", &worktree)
+            .expect("create PM worktree");
+        std::fs::write(repo.join("tracked.txt"), b"B\n").expect("write B");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "B"]);
+        let target = run_git(&repo, &["rev-parse", "HEAD"]);
+        run_git(&repo, &["push", "origin", "develop"]);
+
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("project dir")
+            .join("project-state");
+        std::fs::create_dir_all(&project_state).expect("project state");
+        crate::save_issue_monitor_prefs(
+            &project_state.join("issue-monitor.json"),
+            &crate::IssueMonitorPrefs {
                 enabled: true,
                 ..crate::IssueMonitorPrefs::default()
-            };
-            let prefs_path = worktree
-                .parent()
-                .and_then(Path::parent)
-                .expect("gwt project dir")
-                .join("project-state/issue-monitor.json");
-            std::fs::create_dir_all(prefs_path.parent().expect("parent")).expect("state dir");
-            crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-            worktree
+            },
+        )
+        .expect("monitor prefs");
+        (env_lock, home, repo, worktree, target)
+    }
+
+    fn pm_fixture() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let origin = home.path().join("origin.git");
+        let repo = home.path().join("repo");
+        run_git(
+            home.path(),
+            &["init", "--bare", origin.to_str().expect("origin")],
+        );
+        run_git(
+            home.path(),
+            &[
+                "clone",
+                origin.to_str().expect("origin"),
+                repo.to_str().expect("repo"),
+            ],
+        );
+        run_git(&repo, &["config", "user.email", "pm-loop@example.com"]);
+        run_git(&repo, &["config", "user.name", "PM Loop Test"]);
+        run_git(&repo, &["checkout", "-b", "develop"]);
+        std::fs::write(repo.join("tracked.txt"), b"A\n").expect("write initial state");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "initial state"]);
+        run_git(&repo, &["push", "-u", "origin", "develop"]);
+        let _guard = set_fixture_gwt_home(&home);
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(worktree.parent().expect("PM parent")).expect("PM parent");
+        gwt_git::WorktreeManager::new(repo.clone())
+            .create_detached("origin/develop", &worktree)
+            .expect("create PM worktree");
+        crate::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+            .expect("seed PM identity and managed assets");
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("gwt project dir")
+            .join("project-state");
+        crate::pm_registry::save_pm_prefs(
+            &project_state.join("pm.json"),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: FIXTURE_PM_SESSION.to_string(),
+                    agent_id: "claude".to_string(),
+                    worktree_path: worktree.display().to_string(),
+                    created_at: Some("2026-08-08T00:00:00Z".to_string()),
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                settings: crate::pm_registry::PmSettings::default(),
+                worktree_freshness: None,
+            },
+        )
+        .expect("seed PM registration");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            ..crate::IssueMonitorPrefs::default()
         };
-        (home, repo, worktree)
+        let prefs_path = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("gwt project dir")
+            .join("project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        (env_lock, home, repo, worktree)
+    }
+
+    /// Issue #3607 AC-5: `pm.stop` clears the registration, and that has to
+    /// actually quiet the PM. The Stop gate keys only on the worktree's path
+    /// shape, so without this a retired orphan kept forcing itself into the
+    /// next cycle — and kept rewriting the Issue Monitor state a second PM was
+    /// also writing.
+    #[test]
+    fn a_deregistered_session_stops_driving_the_resident_loop() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("gwt project dir")
+            .join("project-state");
+        crate::pm_registry::deregister_pm(&project_state.join("pm.json"), FIXTURE_PM_SESSION)
+            .expect("deregister");
+
+        let output = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+
+        assert!(
+            matches!(output, HookOutput::Silent),
+            "a retired PM must stop looping, got {output:?}"
+        );
+    }
+
+    /// A session that another PM superseded must not keep driving cycles
+    /// either — that is the two-PM state itself.
+    #[test]
+    fn a_superseded_session_stops_driving_the_resident_loop() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        let output = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some("some-other-session"),
+        );
+
+        assert!(
+            matches!(output, HookOutput::Silent),
+            "only the registered PM drives the loop, got {output:?}"
+        );
+    }
+
+    /// Without a caller identity the gate cannot attribute the loop to anyone,
+    /// so it must keep the pre-#3607 behaviour rather than silently retiring a
+    /// healthy PM.
+    #[test]
+    fn a_caller_without_a_session_identity_keeps_looping() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:00:00Z", false, None),
+            HookOutput::StopBlock { .. }
+        ));
     }
 
     /// FR-012: a stopping PM is turned around into the next cycle while the
     /// Monitor is enabled — this is what converts one-shot into resident.
     #[test]
     fn pm_stop_continues_the_resident_loop() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
 
-        let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
+        let output = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected the loop to continue, got {output:?}");
@@ -243,12 +553,357 @@ mod tests {
         assert!(reason.contains("issue.monitor.status"));
     }
 
+    /// Issue #3632 AC-1/AC-6: the forced continuation is the highest-frequency
+    /// injection there is — it lands on every Stop of the resident loop — so it
+    /// carries the same reporting clause as the two wake prompts rather than its
+    /// own wording. Three differently-phrased report instructions were how
+    /// "report every cycle" survived a milestone-only skill body in the first
+    /// place.
+    #[test]
+    fn the_forced_continuation_reports_only_when_the_cycle_changed_something() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        let output = handle_at(
+            &worktree,
+            "2026-08-17T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected the loop to continue, got {output:?}");
+        };
+        assert!(
+            reason.contains(pm_registry::PM_CYCLE_REPORTING_CLAUSE),
+            "the forced continuation must carry the shared clause; got: {reason}"
+        );
+        assert!(
+            !reason.contains("report milestones to the user as a digest"),
+            "the continuation must not carry its own report wording; got: {reason}"
+        );
+        assert!(
+            reason.contains("issue.monitor.status"),
+            "FR-3: the cycle itself is still driven in full; got: {reason}"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_refreshes_pm_before_the_new_turn() {
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, _fixture_home, _repo, worktree, target) = pm_refresh_fixture();
+        assert!(
+            super::super::is_resident_pm_worktree(&worktree),
+            "worktree={} projects={}",
+            worktree.display(),
+            gwt_core::paths::gwt_projects_dir().display()
+        );
+        assert_ne!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+
+        handle_user_prompt_submit(&worktree).expect("pre-turn refresh");
+
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+        assert!(
+            worktree.join(".codex/skills/gwt-pm/SKILL.md").exists(),
+            "pre-turn refresh must materialize Codex PM guidance before the model runs"
+        );
+        assert!(
+            worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+            "pre-turn refresh must materialize Claude PM guidance before the model runs"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_reports_typed_stale_context_when_fetch_fails() {
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        std::fs::rename(
+            fixture_home.path().join("origin.git"),
+            fixture_home.path().join("offline-origin.git"),
+        )
+        .expect("make origin unavailable without changing project identity");
+        let old_head = run_git(&worktree, &["rev-parse", "HEAD"]);
+        let codex_guidance = worktree.join(".codex/skills/gwt-pm/SKILL.md");
+        let claude_guidance = worktree.join(".claude/skills/gwt-pm/SKILL.md");
+        let _ = std::fs::remove_file(&codex_guidance);
+        let _ = std::fs::remove_file(&claude_guidance);
+
+        let context = handle_user_prompt_submit(&worktree)
+            .expect("degraded refresh succeeds with current managed assets")
+            .expect("degraded refresh context");
+
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), old_head);
+        assert!(context.contains("state=Stale"), "{context}");
+        assert!(context.contains("stage=Some(Fetch)"), "{context}");
+        assert!(
+            codex_guidance.exists() && claude_guidance.exists(),
+            "a degraded Git refresh may continue only after both managed guidance mirrors are current"
+        );
+    }
+
+    #[test]
+    fn managed_asset_failure_blocks_pre_turn_and_parks_stop_continuation() {
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let codex_root = worktree.join(".codex");
+        std::fs::create_dir_all(&codex_root).expect("create Codex root");
+        std::fs::write(codex_root.join("skills"), b"blocking non-directory node\n")
+            .expect("create deterministic managed-asset collision");
+        let legacy_memory = worktree.join("tasks/memory.md");
+        std::fs::create_dir_all(legacy_memory.parent().expect("legacy memory parent"))
+            .expect("create legacy memory parent");
+        std::fs::write(
+            &legacy_memory,
+            b"legacy memory stays until assets succeed\n",
+        )
+        .expect("write legacy memory");
+        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
+        let prior_tree = snapshot_worktree(&worktree);
+
+        handle_user_prompt_submit(&worktree)
+            .expect_err("a pre-turn phase must fail closed when assets are incomplete");
+
+        assert_eq!(
+            run_git(&worktree, &["rev-parse", "HEAD"]),
+            prior_head,
+            "managed-asset failure after re-point must restore the usable prior checkout"
+        );
+        assert_eq!(
+            snapshot_worktree(&worktree),
+            prior_tree,
+            "managed-asset failure must restore every worktree node, not leave partial materialization"
+        );
+
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .expect("project dir")
+            .join("project-state");
+        let freshness = crate::pm_registry::load_pm_prefs(&project_state.join("pm.json"))
+            .expect("load PM prefs")
+            .worktree_freshness
+            .expect("managed asset failure freshness");
+        assert_eq!(
+            freshness.failure_stage,
+            Some(crate::pm_registry::PmWorktreeRefreshFailureStage::ManagedAssets)
+        );
+        assert_eq!(
+            handle_at(&worktree, "2026-08-29T00:00:00Z", false, None),
+            HookOutput::Silent,
+            "completed Stop must park instead of starting a turn with partial assets"
+        );
+        let loop_state =
+            crate::pm_registry::load_pm_loop_state(&project_state.join("pm-loop.json"))
+                .unwrap_or_default();
+        assert_eq!(loop_state.consecutive_continuations, 0);
+        assert!(!loop_state.pending_own_block);
+    }
+
+    #[test]
+    fn late_managed_asset_failure_restores_the_full_prior_checkout() {
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, _fixture_home, repo, worktree, _target) = pm_refresh_fixture();
+        handle_user_prompt_submit(&worktree)
+            .expect("initial refresh materializes generated hook configs");
+        for generated in [".claude/settings.local.json", ".codex/hooks.json"] {
+            assert!(
+                worktree.join(generated).is_file(),
+                "fixture requires prior generated config {generated}"
+            );
+        }
+        std::fs::write(repo.join("tracked.txt"), b"C\n").expect("write C");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "C"]);
+        run_git(&repo, &["push", "origin", "develop"]);
+        let exclude_raw = run_git(&worktree, &["rev-parse", "--git-path", "info/exclude"]);
+        let exclude = {
+            let path = std::path::PathBuf::from(exclude_raw);
+            if path.is_absolute() {
+                path
+            } else {
+                worktree.join(path)
+            }
+        };
+        std::fs::write(&exclude, b"# gwt-managed-begin\n")
+            .expect("seed malformed managed exclude block");
+        let legacy_memory = worktree.join("tasks/memory.md");
+        std::fs::create_dir_all(legacy_memory.parent().expect("legacy memory parent"))
+            .expect("create legacy memory parent");
+        std::fs::write(&legacy_memory, b"legacy memory remains on late failure\n")
+            .expect("write legacy memory");
+        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
+        let prior_tree = snapshot_worktree(&worktree);
+        let prior_exclude = std::fs::read(&exclude).expect("snapshot malformed exclude");
+
+        handle_user_prompt_submit(&worktree)
+            .expect_err("late Git-exclude failure must fail the pre-turn refresh");
+
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert_eq!(snapshot_worktree(&worktree), prior_tree);
+        assert_eq!(
+            std::fs::read(&exclude).expect("read restored exclude"),
+            prior_exclude,
+            "late failure must restore Git metadata outside the worktree too"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_asset_refresh_rejects_indirect_roots_without_touching_external_content() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let external = home.path().join("external-claude");
+        std::fs::create_dir_all(&external).expect("external Claude root");
+        std::fs::write(external.join("sentinel.txt"), b"external content\n")
+            .expect("external sentinel");
+        symlink(&external, worktree.join(".claude")).expect("indirect managed root");
+        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
+
+        handle_user_prompt_submit(&worktree)
+            .expect_err("indirect managed roots must fail before materialization");
+
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert!(std::fs::symlink_metadata(worktree.join(".claude"))
+            .expect("managed-root symlink metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(external.join("sentinel.txt")).expect("external sentinel remains"),
+            b"external content\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(&external)
+                .expect("external root remains")
+                .count(),
+            1,
+            "no generated assets may escape through the symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_asset_refresh_rejects_indirect_nested_skill_roots_without_touching_external_content()
+    {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let external = home.path().join("external-skills");
+        let external_skill = external.join("gwt-stale");
+        std::fs::create_dir_all(&external_skill).expect("external skills root");
+        std::fs::write(external.join("sentinel.txt"), b"external content\n")
+            .expect("external sentinel");
+        std::fs::write(external_skill.join("SKILL.md"), b"external stale skill\n")
+            .expect("external stale skill");
+        std::fs::create_dir_all(worktree.join(".claude")).expect("Claude root");
+        symlink(&external, worktree.join(".claude/skills")).expect("indirect nested managed root");
+        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
+        let prior_external = snapshot_worktree(&external);
+
+        handle_user_prompt_submit(&worktree)
+            .expect_err("indirect nested skill roots must fail before materialization");
+
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert_eq!(snapshot_worktree(&external), prior_external);
+        assert!(
+            std::fs::symlink_metadata(worktree.join(".claude/skills"))
+                .expect("nested managed-root symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "the rejected nested symlink must remain byte-for-byte owned by the prior checkout"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_asset_refresh_removes_broken_managed_hermes_credential_links() {
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let hermes_source = home.path().join("hermes-source");
+        std::fs::create_dir_all(&hermes_source).expect("Hermes source home");
+        let source_env = hermes_source.join(".env");
+        std::fs::write(&source_env, b"HERMES_API_KEY=secret\n").expect("Hermes credential");
+        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let _hermes_guard = ScopedEnvVar::set("HERMES_HOME", &hermes_source);
+
+        handle_user_prompt_submit(&worktree).expect("initial managed asset refresh");
+        let managed_env = worktree.join(".gwt/hermes/.env");
+        assert!(
+            std::fs::symlink_metadata(&managed_env)
+                .expect("managed Hermes credential metadata")
+                .file_type()
+                .is_symlink(),
+            "the initial refresh must bridge the real credential by symlink"
+        );
+        std::fs::remove_file(&source_env).expect("remove real Hermes credential");
+        assert!(
+            std::fs::symlink_metadata(&managed_env)
+                .expect("broken managed Hermes credential metadata")
+                .file_type()
+                .is_symlink(),
+            "deleting the source must leave the prior managed link broken"
+        );
+
+        handle_user_prompt_submit(&worktree)
+            .expect("a broken managed credential link must be self-healed on refresh");
+
+        assert!(
+            std::fs::symlink_metadata(&managed_env).is_err(),
+            "refresh must remove the stale managed link when the source credential is absent"
+        );
+        assert_eq!(
+            std::fs::read_dir(&hermes_source)
+                .expect("Hermes source remains readable")
+                .count(),
+            0,
+            "refresh must not materialize or mutate anything in the external source home"
+        );
+    }
+
+    #[test]
+    fn resident_stop_refreshes_pm_before_forcing_the_next_cycle() {
+        let home = tempfile::tempdir().expect("gwt home");
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
+        let _home_guard = ScopedGwtHome::set(&canonical_home);
+        let (_env_lock, _fixture_home, _repo, worktree, target) = pm_refresh_fixture();
+        assert!(
+            super::super::is_resident_pm_worktree(&worktree),
+            "worktree={} projects={}",
+            worktree.display(),
+            gwt_core::paths::gwt_projects_dir().display()
+        );
+        assert_ne!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+
+        let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false, None);
+
+        assert!(matches!(output, HookOutput::StopBlock { .. }));
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+    }
+
     #[test]
     fn exact_target_user_prompt_submit_verifies_the_delivery_receipt() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
-        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _gwt_home = set_fixture_gwt_home(&home);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "target-session");
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
         let body = "report exact status";
@@ -283,10 +938,13 @@ mod tests {
 
     #[test]
     fn wrong_session_or_body_hash_cannot_verify_a_delivery_receipt() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("home");
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
-        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _gwt_home = set_fixture_gwt_home(&home);
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a4";
         let body = "report exact status";
         let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
@@ -330,42 +988,62 @@ mod tests {
     /// contact; user contact re-arms.
     #[test]
     fn pm_loop_floor_cap_and_user_reset_bound_the_continuations() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
 
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
         // Inside the floor: silent, and the budget is not consumed.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:30Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:30Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent
         );
         // Exhaust the budget past the floor each time.
         let mut minute = 2;
         loop {
             let now = format!("2026-08-08T00:{minute:02}:00Z");
-            match handle_at(&worktree, &now, false) {
+            match handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)) {
                 HookOutput::StopBlock { .. } => minute += 2,
                 _ => break,
             }
             assert!(minute < 60, "the cap must bound the loop");
         }
         // A user prompt re-arms.
-        handle_user_prompt_submit(&worktree);
+        handle_user_prompt_submit(&worktree).expect("pre-turn refresh");
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T02:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T02:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
     }
 
     #[test]
     fn next_stop_cycle_reloads_the_updated_loop_interval() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
 
-        let first = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
+        let first = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
         let HookOutput::StopBlock { reason } = first else {
             panic!("expected initial cycle, got {first:?}");
         };
@@ -381,7 +1059,12 @@ mod tests {
         })
         .expect("update loop interval");
 
-        let next = handle_at(&worktree, "2026-08-08T00:00:10Z", true);
+        let next = handle_at(
+            &worktree,
+            "2026-08-08T00:00:10Z",
+            true,
+            Some(FIXTURE_PM_SESSION),
+        );
         let HookOutput::StopBlock { reason } = next else {
             panic!("updated interval must apply to the next Stop cycle, got {next:?}");
         };
@@ -391,8 +1074,8 @@ mod tests {
     /// Monitor off = parked project; and no other worktree is ever driven.
     #[test]
     fn disabled_monitor_and_non_pm_worktrees_stay_silent() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
         let prefs_path = worktree
             .parent()
             .and_then(Path::parent)
@@ -402,13 +1085,23 @@ mod tests {
         prefs.enabled = false;
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save");
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent
         );
 
         let ordinary = tempfile::tempdir().expect("ordinary");
         assert_eq!(
-            handle_at(ordinary.path(), "2026-08-08T00:00:00Z", false),
+            handle_at(
+                ordinary.path(),
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent
         );
     }
@@ -418,12 +1111,17 @@ mod tests {
     /// keeps flowing across `stop_hook_active` stops.
     #[test]
     fn foreign_forced_continuations_are_not_ridden_and_own_chain_flows() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
 
         // A foreign chain: some other gate forced the previous continuation.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent,
             "the loop must not stack onto another gate's forced continuation"
         );
@@ -431,29 +1129,54 @@ mod tests {
         // Its own chain: block once, then keep flowing across the
         // stop_hook_active stops of that same chain.
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:10:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:10:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:12:00Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:12:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
 
         // A within-floor stop ends the loop's own chain (marker cleared), so
         // a later stop_hook_active stop is foreign again.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:12:30Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:12:30Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent,
             "the floor ends the own chain"
         );
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:20:00Z", true),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:20:00Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::Silent,
             "after the own chain ended, stop_hook_active stops are foreign"
         );
         // ...while a fresh chain start (no stop_hook_active) still drives.
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:21:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:21:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
     }
@@ -462,11 +1185,16 @@ mod tests {
     /// path defers to it) and re-arms the budget.
     #[test]
     fn user_prompt_submit_stamps_the_conversation_clock() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
 
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:00Z",
+                false,
+                Some(FIXTURE_PM_SESSION)
+            ),
             HookOutput::StopBlock { .. }
         ));
         handle_user_prompt_submit_at(&worktree, "2026-08-08T00:00:30Z");
@@ -489,8 +1217,8 @@ mod tests {
     /// not retire the PM.
     #[test]
     fn park_counting_holds_while_unconsumed_observations_remain() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
         let state_path =
             pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).expect("pm loop state path");
         let prefs_path = state_path
@@ -513,6 +1241,7 @@ mod tests {
                 body: None,
                 url: None,
                 readiness: crate::IssueMonitorReadiness::NotApplicable,
+                updated_at: None,
             }],
             "2026-08-10T00:00:00Z",
         );
@@ -525,7 +1254,7 @@ mod tests {
             let now = format!("2026-08-10T01:{minute:02}:00Z");
             assert!(
                 matches!(
-                    handle_at(&worktree, &now, false),
+                    handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
                     HookOutput::StopBlock { .. }
                 ),
                 "a supervising PM must not park while a launch is live (cycle at {now})"
@@ -543,15 +1272,15 @@ mod tests {
     /// the empty-cycle brake is unchanged.
     #[test]
     fn park_counting_still_caps_truly_empty_cycles() {
-        let (home, _repo, worktree) = pm_fixture();
-        let _guard = ScopedGwtHome::set(home.path());
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
 
         let mut minute = 0;
         let mut blocks = 0;
         for _ in 0..20 {
             let now = format!("2026-08-10T02:{minute:02}:00Z");
             if matches!(
-                handle_at(&worktree, &now, false),
+                handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
                 HookOutput::StopBlock { .. }
             ) {
                 blocks += 1;

@@ -12,11 +12,22 @@ const AUTO_START_HELP =
 const LOOP_INTERVAL_HELP =
   "Default: 60 seconds. Minimum: 10 seconds. Changes apply to the next cycle without restarting the Project Manager.";
 const PROFILE_HELP =
-  "Agent and model changes apply after restart. Restarting starts a new conversation; history is not carried over.";
+  "Agent, model, and effort changes apply after restart. Restarting starts a new conversation; history is not carried over.";
 const RESTART_CONFIRM =
   "Restart the Project Manager?\n\n"
   + "The current PM session ends and a new conversation starts on the "
   + "configured agent. History is not carried over.";
+const EFFORT_OPTIONS_BY_AGENT = {
+  claude: ["", "low", "medium", "high", "xhigh", "max", "ultracode"],
+  codex: ["", "low", "medium", "high", "xhigh", "max", "ultra"],
+  grok: ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+};
+
+function effortLabel(value) {
+  if (value === "") return "Auto";
+  if (value === "xhigh") return "Extra high";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
@@ -44,8 +55,11 @@ function emptyStatus() {
     autoStart: true,
     configuredAgentId: "",
     configuredModel: "",
+    configuredReasoning: "",
     loopIntervalSecs: String(DEFAULT_LOOP_INTERVAL_SECS),
     runningAgentId: "",
+    runningModel: "",
+    runningReasoning: "",
     isRunning: false,
     agentOptions: [],
   };
@@ -58,10 +72,13 @@ function normalizeStatus(status) {
     autoStart: status?.auto_start !== false,
     configuredAgentId: String(status?.configured_agent_id ?? ""),
     configuredModel: String(status?.configured_model ?? ""),
+    configuredReasoning: String(status?.configured_reasoning ?? ""),
     loopIntervalSecs: normalizedLoopInterval(
       status?.loop_interval_secs_decimal ?? status?.loop_interval_secs,
     ),
     runningAgentId: String(status?.running_agent_id ?? ""),
+    runningModel: String(status?.running_model ?? ""),
+    runningReasoning: String(status?.running_reasoning ?? ""),
     isRunning: Boolean(status?.is_running),
     agentOptions: options
       .filter((option) => option && option.id)
@@ -105,17 +122,26 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
 
   function renderView(view) {
     const runningName = agentLabel(state, state.runningAgentId);
+    const runningProfile = [runningName];
+    if (state.runningModel) runningProfile.push(`Model: ${state.runningModel}`);
+    if (state.runningReasoning) {
+      runningProfile.push(`Effort: ${state.runningReasoning}`);
+    }
     view.runningLine.textContent = !state.available
       ? "Project Manager unavailable for this project."
       : state.isRunning && runningName
-        ? `Running as: ${runningName}`
+        ? `Running as: ${runningProfile.join(" · ")}`
         : "Not running";
 
     view.pendingChip.hidden = !(
       state.isRunning
       && state.runningAgentId !== ""
       && state.configuredAgentId !== ""
-      && state.configuredAgentId !== state.runningAgentId
+      && (
+        state.configuredAgentId !== state.runningAgentId
+        || state.configuredModel !== state.runningModel
+        || state.configuredReasoning !== state.runningReasoning
+      )
     );
 
     clear(view.agentSelect);
@@ -128,11 +154,29 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     }
 
     view.modelInput.value = state.configuredModel;
+    clear(view.effortSelect);
+    const effortValues = [
+      ...(EFFORT_OPTIONS_BY_AGENT[state.configuredAgentId] || [""]),
+    ];
+    if (
+      state.configuredReasoning
+      && !effortValues.includes(state.configuredReasoning)
+    ) {
+      effortValues.push(state.configuredReasoning);
+    }
+    for (const value of effortValues) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = effortLabel(value);
+      if (value === state.configuredReasoning) option.selected = true;
+      view.effortSelect.appendChild(option);
+    }
     view.intervalInput.value = String(state.loopIntervalSecs);
     view.autoStartInput.checked = state.autoStart;
     for (const control of [
       view.agentSelect,
       view.modelInput,
+      view.effortSelect,
       view.intervalInput,
       view.autoStartInput,
       view.restart,
@@ -154,11 +198,12 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     const agentId = view.agentSelect.value || state.configuredAgentId;
     if (!agentId) return;
     const model = view.modelInput.value.trim();
+    const reasoning = view.effortSelect.value.trim();
     dispatch({
       kind: "set_pm_launch_profile",
       agent_id: agentId,
       model: model === "" ? null : model,
-      reasoning: null,
+      reasoning: reasoning === "" ? null : reasoning,
     });
   }
 
@@ -231,6 +276,13 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     modelInput.dataset.role = "pm-model-input";
     modelField.appendChild(modelInput);
     section.appendChild(modelField);
+
+    const effortField = el("label", "settings-field");
+    effortField.appendChild(el("span", "settings-label", "Effort"));
+    const effortSelect = el("select", "settings-select");
+    effortSelect.dataset.role = "pm-effort-select";
+    effortField.appendChild(effortSelect);
+    section.appendChild(effortField);
     section.appendChild(el("p", "settings-help", PROFILE_HELP));
 
     const intervalField = el("label", "settings-field");
@@ -273,6 +325,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     const view = {
       agentSelect,
       autoStartInput,
+      effortSelect,
       intervalError,
       intervalInput,
       modelInput,
@@ -283,6 +336,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
 
     agentSelect.addEventListener("change", () => sendProfile(view));
     modelInput.addEventListener("change", () => sendProfile(view));
+    effortSelect.addEventListener("change", () => sendProfile(view));
     intervalInput.addEventListener("change", () => sendLoopInterval(view));
     autoStartInput.addEventListener("change", () => {
       if (!state.available) return;

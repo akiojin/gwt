@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -121,14 +121,14 @@ use super::workspace::{
 use super::{
     continue_work_readiness_decision, launch_config_from_persisted_session,
     non_empty_workspace_text, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
-    ContinueWorkReadinessWatch, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
-    PendingFreshExecutionLaunch, ReadinessDeadlineDecision, WindowGeometry, WindowProcessStatus,
-    WorkspaceResumeContext,
+    ContinueWorkReadinessWatch, LaunchPaneDisposition, OutboundEvent, PendingContinueWork,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ReadinessDeadlineDecision,
+    WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
 };
 use regex::Regex;
 
 #[derive(Debug)]
-struct ContinueWorkFailure {
+pub(super) struct ContinueWorkFailure {
     outcome: gwt::ContinueWorkOutcomeKind,
     message: String,
     code: &'static str,
@@ -669,6 +669,16 @@ fn provider_conversation_cwd(path: &Path) -> std::io::Result<Option<PathBuf>> {
 pub(super) fn provider_conversation_availability(
     session: &gwt_agent::Session,
 ) -> ProviderConversationAvailability {
+    provider_conversation_availability_with_grok_home(
+        session,
+        gwt_core::usage::grok::grok_home().as_deref(),
+    )
+}
+
+pub(super) fn provider_conversation_availability_with_grok_home(
+    session: &gwt_agent::Session,
+    grok_home: Option<&Path>,
+) -> ProviderConversationAvailability {
     let Some(conversation_id) = session.exact_resume_session_id() else {
         return ProviderConversationAvailability::Missing;
     };
@@ -688,6 +698,27 @@ pub(super) fn provider_conversation_availability(
             };
             gwt_core::usage::codex::rollout_for_session(&home, conversation_id)
         }
+        gwt_agent::AgentId::GrokBuild => {
+            let Some(home) = grok_home else {
+                return ProviderConversationAvailability::Unknown;
+            };
+            return match gwt_core::usage::grok::resumable_session_summary(
+                home,
+                conversation_id,
+                &session.worktree_path,
+            ) {
+                Ok(gwt_core::usage::grok::GrokSessionStoreAvailability::Present(_)) => {
+                    ProviderConversationAvailability::Present
+                }
+                Ok(gwt_core::usage::grok::GrokSessionStoreAvailability::Missing) => {
+                    ProviderConversationAvailability::Missing
+                }
+                Ok(gwt_core::usage::grok::GrokSessionStoreAvailability::Foreign) => {
+                    ProviderConversationAvailability::Foreign
+                }
+                Err(_) => ProviderConversationAvailability::Unknown,
+            };
+        }
         _ => return ProviderConversationAvailability::Unknown,
     };
     let Some(path) = path else {
@@ -703,13 +734,27 @@ pub(super) fn provider_conversation_availability(
     }
 }
 
+#[cfg(test)]
 pub(super) fn configure_provider_continuation(
     config: &mut gwt_agent::LaunchConfig,
     source_session: &gwt_agent::Session,
 ) -> gwt::ContinueWorkOutcomeKind {
+    configure_provider_continuation_with_grok_home(config, source_session, None)
+}
+
+pub(super) fn configure_provider_continuation_with_grok_home(
+    config: &mut gwt_agent::LaunchConfig,
+    source_session: &gwt_agent::Session,
+    grok_home: Option<&Path>,
+) -> gwt::ContinueWorkOutcomeKind {
+    let availability = if source_session.agent_id == gwt_agent::AgentId::GrokBuild {
+        provider_conversation_availability_with_grok_home(source_session, grok_home)
+    } else {
+        provider_conversation_availability(source_session)
+    };
     let exact_resume_is_safe = source_session.exact_resume_session_id().is_some()
         && !matches!(
-            provider_conversation_availability(source_session),
+            availability,
             ProviderConversationAvailability::Missing | ProviderConversationAvailability::Foreign
         );
     if exact_resume_is_safe {
@@ -718,6 +763,26 @@ pub(super) fn configure_provider_continuation(
     config.session_mode = gwt_agent::SessionMode::Normal;
     config.resume_session_id = None;
     gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+}
+
+impl AppRuntime {
+    /// Resolve Grok's session store from the same active Profile environment
+    /// and child cwd that the eventual provider process receives.
+    pub(super) fn active_profile_grok_home_for_continuation(
+        &self,
+        source_session: &gwt_agent::Session,
+        launch_cwd: &Path,
+    ) -> Option<PathBuf> {
+        let profile_config_path = self.profile_config_path().ok()?;
+        let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+            &profile_config_path,
+            source_session.runtime_target,
+        )
+        .ok()?
+        .with_project_root(launch_cwd)
+        .into_parts();
+        gwt_core::usage::grok::grok_home_from_env(&effective_env, launch_cwd)
+    }
 }
 
 fn path_matches(left: &Path, right: &Path) -> bool {
@@ -730,7 +795,10 @@ fn path_matches(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn session_matches_project_state(session: &gwt_agent::Session, project_root: &Path) -> bool {
+pub(super) fn session_matches_project_state(
+    session: &gwt_agent::Session,
+    project_root: &Path,
+) -> bool {
     if let Some(root) = session
         .project_state_root
         .as_deref()
@@ -792,12 +860,12 @@ fn canonical_continue_work_branch(worktree_path: &Path) -> Result<String, Contin
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProjectionOwnerRef {
+pub(super) struct ProjectionOwnerRef {
     declared_kind: Option<gwt::cli::execution_state::ExecutionOwnerKind>,
     number: u64,
 }
 
-fn strict_projection_owner(raw_owner: &str) -> Option<ProjectionOwnerRef> {
+pub(super) fn strict_projection_owner(raw_owner: &str) -> Option<ProjectionOwnerRef> {
     let owner = raw_owner.trim();
     if owner.is_empty() {
         return None;
@@ -864,17 +932,18 @@ fn projection_only_continue_owner(
     })
 }
 
-fn canonical_continue_work_owner(
+pub(super) fn canonical_continue_work_owner(
     project_root: &Path,
     worktree_path: &Path,
     projected: ProjectionOwnerRef,
 ) -> Result<gwt::cli::execution_state::ExecutionOwnerKey, ContinueWorkFailure> {
+    // #3426: a same-number kind-only disagreement self-heals toward the
+    // trusted authority (generation ledger, ECR hint, or cache label
+    // evidence); the corrected owner is committed back to the Work
+    // projection by the continuation transaction. Number mismatches stay
+    // fail-closed.
     let validate = |owner: gwt::cli::execution_state::ExecutionOwnerKey| {
-        if owner.number != projected.number
-            || projected
-                .declared_kind
-                .is_some_and(|kind| kind != owner.kind)
-        {
+        if owner.number != projected.number {
             Err(ContinueWorkFailure::failed(
                 "execution_owner_ambiguous",
                 "The Work owner does not match its current execution authority.",
@@ -889,13 +958,21 @@ fn canonical_continue_work_owner(
         Ok(None) => {
             match gwt::cli::execution_state::recovery_projection_owner_hint(worktree_path) {
                 Ok(Some(owner)) => validate(owner),
-                Ok(None) => validate(gwt::cli::execution_state::ExecutionOwnerKey {
-                    kind: gwt::cli::execution_state::detect_owner_kind(
+                Ok(None) => {
+                    // No trusted execution authority exists yet. Prefer cache
+                    // label evidence; absent evidence, retain the declared
+                    // kind rather than silently downgrading to Issue.
+                    let kind = gwt::cli::execution_state::detect_owner_kind_evidence(
                         project_root,
                         projected.number,
-                    ),
-                    number: projected.number,
-                }),
+                    )
+                    .or(projected.declared_kind)
+                    .unwrap_or(gwt::cli::execution_state::ExecutionOwnerKind::Issue);
+                    validate(gwt::cli::execution_state::ExecutionOwnerKey {
+                        kind,
+                        number: projected.number,
+                    })
+                }
                 Err(_) => Err(ContinueWorkFailure::conflict(
                     "The Work execution authority could not be read safely.",
                 )),
@@ -1080,6 +1157,15 @@ fn work_agent_ref_authenticates_session(
     agent.session_id == session.id && work_agent_ref_authenticates_agent(agent, &session.agent_id)
 }
 
+/// `require_exact_owner_kind` must be `false` for a pre-transition read and
+/// `true` for a post-commit readback (#3426). `canonical_continue_work_owner`
+/// deliberately heals a same-number kind-only disagreement toward the trusted
+/// authority, but the correction is only written *inside* the activation
+/// transaction. Demanding the exact kind of the pre-transition snapshot would
+/// therefore re-reject precisely the set the heal exists to admit, and the
+/// corrected owner could never land. The readbacks still see the healed label
+/// and keep enforcing the strict check.
+#[allow(clippy::too_many_arguments)]
 fn projection_continue_authority_matches(
     item: &gwt_core::workspace_projection::WorkItem,
     project_root: &Path,
@@ -1088,14 +1174,16 @@ fn projection_continue_authority_matches(
     branch: &str,
     agent_id: &gwt_agent::AgentId,
     agent_session_id: Option<&str>,
+    require_exact_owner_kind: bool,
 ) -> bool {
     let Ok(projected_owner) = projection_only_continue_owner(item) else {
         return false;
     };
     if projected_owner.number != owner.number
-        || projected_owner
-            .declared_kind
-            .is_some_and(|kind| kind != owner.kind)
+        || (require_exact_owner_kind
+            && projected_owner
+                .declared_kind
+                .is_some_and(|kind| kind != owner.kind))
     {
         return false;
     }
@@ -2329,6 +2417,7 @@ fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool 
                     &pending.work_branch,
                     &pending.work_agent_id,
                     Some(&pending.binding.session_id),
+                    true,
                 )
         })
 }
@@ -2362,6 +2451,7 @@ fn transact_pending_continue_work_with_activation(
                 &pending.work_branch,
                 &pending.work_agent_id,
                 pending.work_agent_session_id.as_deref(),
+                false,
             ) {
                 return Err(gwt_core::error::GwtError::Other(
                     "Continue work authority changed before activation".to_string(),
@@ -2374,6 +2464,7 @@ fn transact_pending_continue_work_with_activation(
                     work_id: Some(pending.work_id.clone()),
                     base_branch: None,
                     linked_issue_number: Some(pending.owner.number),
+                    canonical_owner: Some(pending.owner),
                     resume_context: Some(&pending.resume_context),
                     kind: WorkspaceLaunchProjectionKind::Resume {
                         created_by_start_work: active_session.branch_name.starts_with("work/"),
@@ -2404,17 +2495,6 @@ fn fresh_execution_commit_readback_matches(
         .ok()
         .flatten()
         == Some(session.execution_binding.identity.clone())
-}
-
-fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
 }
 
 fn resolve_activated_fresh_execution_commit(
@@ -3529,6 +3609,9 @@ impl AppRuntime {
             return None;
         }
         self.pending_continue_work.remove(window_id);
+        // Issue #3482: see `completed_fresh_execution_launch_events` — a late
+        // SessionStart must retire the readiness handoff diagnostic.
+        self.window_details.remove(window_id);
         let outcome = CachedContinueWorkOutcome {
             work_id: pending.work_id.clone(),
             outcome: pending.outcome,
@@ -3762,87 +3845,261 @@ impl AppRuntime {
         &self,
         session_id: &str,
     ) -> ActiveOwnerLiveness {
-        let durable_path = self.sessions_dir.join(format!("{session_id}.toml"));
-        let durable = match gwt_agent::inspect_session_path(&durable_path) {
-            gwt_agent::SessionPathState::Present(session) => Some(session),
-            gwt_agent::SessionPathState::Missing => None,
-            gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
-        };
-        let runtime_root = self.sessions_dir.join("runtime");
-        let entries = match std::fs::read_dir(&runtime_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if durable.is_none() {
-                    return ActiveOwnerLiveness::Stale("durable Session is missing");
-                }
-                return if durable.as_ref().is_some_and(|session| {
-                    matches!(
-                        session.status,
-                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                    )
-                }) {
-                    ActiveOwnerLiveness::Stale("durable Session is stopped")
-                } else {
-                    ActiveOwnerLiveness::Unknown
-                };
+        classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
+    }
+
+    pub(super) fn classify_nonlocal_active_owner_liveness_batch<'a>(
+        &self,
+        session_ids: impl IntoIterator<Item = &'a str>,
+    ) -> HashMap<String, ActiveOwnerLiveness> {
+        classify_nonlocal_active_owner_liveness_batch_at(&self.sessions_dir, session_ids)
+    }
+}
+
+#[derive(Debug)]
+struct NonlocalActiveOwnerLivenessState {
+    durable_status: Option<gwt_agent::AgentStatus>,
+    durable_unknown: bool,
+    saw_dead_runtime: bool,
+    saw_stopped_runtime: bool,
+    saw_unknown_runtime: bool,
+}
+
+impl NonlocalActiveOwnerLivenessState {
+    fn finish(self) -> ActiveOwnerLiveness {
+        if self.durable_unknown || self.saw_unknown_runtime {
+            return ActiveOwnerLiveness::Unknown;
+        }
+        if self.saw_stopped_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
+        }
+        if self.saw_dead_runtime {
+            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
+        }
+        match self.durable_status {
+            None => ActiveOwnerLiveness::Stale("durable Session is missing"),
+            Some(gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted) => {
+                ActiveOwnerLiveness::Stale("durable Session is stopped")
             }
-            Err(_) => return ActiveOwnerLiveness::Unknown,
+            Some(_) => ActiveOwnerLiveness::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NonlocalRuntimeIndexScanMetrics {
+    pub runtime_root_enumerations: usize,
+    pub runtime_namespace_enumerations: usize,
+    pub host_process_probes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NONLOCAL_RUNTIME_INDEX_SCAN_METRICS:
+        std::cell::Cell<NonlocalRuntimeIndexScanMetrics> =
+        const { std::cell::Cell::new(NonlocalRuntimeIndexScanMetrics {
+            runtime_root_enumerations: 0,
+            runtime_namespace_enumerations: 0,
+            host_process_probes: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn record_nonlocal_runtime_root_enumeration() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        current.runtime_root_enumerations += 1;
+        metrics.set(current);
+    });
+}
+
+#[cfg(not(test))]
+fn record_nonlocal_runtime_root_enumeration() {}
+
+#[cfg(test)]
+fn record_nonlocal_runtime_namespace_enumeration() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        current.runtime_namespace_enumerations += 1;
+        metrics.set(current);
+    });
+}
+
+#[cfg(not(test))]
+fn record_nonlocal_runtime_namespace_enumeration() {}
+
+#[cfg(test)]
+fn record_nonlocal_host_process_probe() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        current.host_process_probes += 1;
+        metrics.set(current);
+    });
+}
+
+#[cfg(not(test))]
+fn record_nonlocal_host_process_probe() {}
+
+#[cfg(test)]
+pub(super) fn reset_nonlocal_runtime_index_scan_metrics() {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(|metrics| {
+        metrics.set(NonlocalRuntimeIndexScanMetrics::default());
+    });
+}
+
+#[cfg(test)]
+pub(super) fn nonlocal_runtime_index_scan_metrics() -> NonlocalRuntimeIndexScanMetrics {
+    NONLOCAL_RUNTIME_INDEX_SCAN_METRICS.with(std::cell::Cell::get)
+}
+
+pub(super) fn classify_nonlocal_active_owner_liveness_batch_at<'a>(
+    sessions_dir: &Path,
+    session_ids: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, ActiveOwnerLiveness> {
+    let mut states = session_ids
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|session_id| {
+            let durable_path = sessions_dir.join(format!("{session_id}.toml"));
+            let (durable_status, durable_unknown) =
+                match gwt_agent::inspect_session_path(&durable_path) {
+                    gwt_agent::SessionPathState::Present(session) => (Some(session.status), false),
+                    gwt_agent::SessionPathState::Missing => (None, false),
+                    gwt_agent::SessionPathState::Error(_) => (None, true),
+                };
+            (
+                session_id,
+                NonlocalActiveOwnerLivenessState {
+                    durable_status,
+                    durable_unknown,
+                    saw_dead_runtime: false,
+                    saw_stopped_runtime: false,
+                    saw_unknown_runtime: false,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if states.is_empty() {
+        return HashMap::new();
+    }
+
+    let sidecar_owners = states
+        .keys()
+        .map(|session_id| (format!("{session_id}.json"), session_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let runtime_root = sessions_dir.join("runtime");
+    record_nonlocal_runtime_root_enumeration();
+    let namespaces = match std::fs::read_dir(&runtime_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return states
+                .into_iter()
+                .map(|(session_id, state)| (session_id, state.finish()))
+                .collect();
+        }
+        Err(_) => {
+            for state in states.values_mut() {
+                state.saw_unknown_runtime = true;
+            }
+            return states
+                .into_iter()
+                .map(|(session_id, state)| (session_id, state.finish()))
+                .collect();
+        }
+    };
+
+    let mut global_runtime_error = false;
+    for namespace in namespaces {
+        let namespace = match namespace {
+            Ok(namespace) => namespace,
+            Err(_) => {
+                global_runtime_error = true;
+                break;
+            }
         };
-        let mut saw_dead_runtime = false;
-        let mut saw_stopped_runtime = false;
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return ActiveOwnerLiveness::Unknown;
+        let Some(host_pid) = namespace
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        record_nonlocal_runtime_namespace_enumeration();
+        let sidecars = match std::fs::read_dir(namespace.path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                global_runtime_error = true;
+                break;
+            }
+        };
+        let mut host_is_alive = None;
+        for sidecar in sidecars {
+            let sidecar = match sidecar {
+                Ok(sidecar) => sidecar,
+                Err(_) => {
+                    global_runtime_error = true;
+                    break;
+                }
             };
-            let Some(pid) = entry
+            let Some(session_id) = sidecar
                 .file_name()
                 .to_str()
-                .and_then(|value| value.parse::<u32>().ok())
+                .and_then(|filename| sidecar_owners.get(filename))
             else {
                 continue;
             };
-            let sidecar = entry.path().join(format!("{session_id}.json"));
-            match sidecar.try_exists() {
-                Ok(false) => continue,
-                Ok(true) => {}
-                Err(_) => return ActiveOwnerLiveness::Unknown,
+            let Some(state) = states.get_mut(session_id) else {
+                continue;
+            };
+            let host_is_alive = *host_is_alive.get_or_insert_with(|| {
+                record_nonlocal_host_process_probe();
+                gwt::process::is_host_process_alive(host_pid)
+            });
+            if !host_is_alive {
+                state.saw_dead_runtime = true;
+                continue;
             }
-            if gwt::process::is_host_process_alive(pid) {
-                match gwt_agent::SessionRuntimeState::load(&sidecar) {
-                    Ok(state)
-                        if matches!(
-                            state.status,
-                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                        ) =>
-                    {
-                        saw_stopped_runtime = true;
-                        continue;
-                    }
-                    Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
+            match gwt_agent::SessionRuntimeState::load(&sidecar.path()) {
+                Ok(runtime)
+                    if matches!(
+                        runtime.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    ) =>
+                {
+                    state.saw_stopped_runtime = true;
                 }
+                Ok(_) | Err(_) => state.saw_unknown_runtime = true,
             }
-            saw_dead_runtime = true;
         }
-        if saw_stopped_runtime {
-            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
+        if global_runtime_error {
+            break;
         }
-        if saw_dead_runtime {
-            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
-        }
-        if durable.is_none() {
-            return ActiveOwnerLiveness::Stale("durable Session is missing");
-        }
-        if durable.as_ref().is_some_and(|session| {
-            matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            )
-        }) {
-            return ActiveOwnerLiveness::Stale("durable Session is stopped");
-        }
-        ActiveOwnerLiveness::Unknown
     }
+    if global_runtime_error {
+        for state in states.values_mut() {
+            state.saw_unknown_runtime = true;
+        }
+    }
+    states
+        .into_iter()
+        .map(|(session_id, state)| (session_id, state.finish()))
+        .collect()
+}
 
+pub(super) fn classify_nonlocal_active_owner_liveness_at(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> ActiveOwnerLiveness {
+    classify_nonlocal_active_owner_liveness_batch_at(sessions_dir, [session_id])
+        .remove(session_id)
+        .unwrap_or(ActiveOwnerLiveness::Unknown)
+}
+
+impl AppRuntime {
     pub(crate) fn stop_pending_continue_work_session_without_projection(
         &mut self,
         window_id: &str,
@@ -4968,6 +5225,7 @@ impl AppRuntime {
                                 &exact_candidate.branch,
                                 &exact_candidate.agent_id,
                                 Some(&candidate_session_id),
+                                true,
                             )
                     });
                     if !projection_matches || !work_matches {
@@ -5150,7 +5408,7 @@ impl AppRuntime {
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if !canonical_public_id(&operation_id, 256) || !canonical_public_id(&work_id, 512) {
-            return self.continue_work_failure_events(
+            return self.continue_work_uncached_failure_events(
                 client_id,
                 operation_id,
                 work_id,
@@ -5512,7 +5770,19 @@ impl AppRuntime {
                 let mut config = launch_config_from_persisted_session(source_session);
                 config.working_dir = Some(target.worktree_path.clone());
                 config.branch = Some(source_session.branch.clone());
-                let outcome = configure_provider_continuation(&mut config, source_session);
+                let grok_home = (source_session.agent_id == gwt_agent::AgentId::GrokBuild)
+                    .then(|| {
+                        self.active_profile_grok_home_for_continuation(
+                            source_session,
+                            &target.worktree_path,
+                        )
+                    })
+                    .flatten();
+                let outcome = configure_provider_continuation_with_grok_home(
+                    &mut config,
+                    source_session,
+                    grok_home.as_deref(),
+                );
                 (config, outcome)
             }
             ContinueWorkLaunchSeed::WorkProjection {
@@ -5809,6 +6079,23 @@ impl AppRuntime {
         window_id: &str,
         detail: &str,
     ) -> Vec<OutboundEvent> {
+        self.continue_work_launch_failed_events_with_pane(
+            window_id,
+            detail,
+            LaunchPaneDisposition::Teardown,
+        )
+    }
+
+    /// Issue #3482: same rollback, but the caller decides whether the pane in
+    /// the window goes down with the launch. A deadline that fires for a window
+    /// another Session owns must still release its own durable candidate — and
+    /// must not terminate that Session's pane on the way out.
+    pub(crate) fn continue_work_launch_failed_events_with_pane(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        pane: LaunchPaneDisposition,
+    ) -> Vec<OutboundEvent> {
         let Some(pending) = self.pending_continue_work.get(window_id).cloned() else {
             return Vec::new();
         };
@@ -5880,8 +6167,13 @@ impl AppRuntime {
                 );
             }
         }
-        self.stop_window_runtime_without_session_projection(window_id);
-        let mut events = self.close_window_events(window_id);
+        let mut events = match pane {
+            LaunchPaneDisposition::Teardown => {
+                self.stop_window_runtime_without_session_projection(window_id);
+                self.close_window_events(window_id)
+            }
+            LaunchPaneDisposition::Retain => Vec::new(),
+        };
         self.pending_continue_work.remove(window_id);
         let message = format!("Continue work launch failed before activation: {detail}");
         self.continue_work_outcomes.insert(
@@ -5935,6 +6227,10 @@ impl AppRuntime {
         self.pending_fresh_execution_launches.remove(window_id);
         let _ = self.persist();
         self.launch_error_terminal_details.remove(window_id);
+        // Issue #3482: a launch that reported SessionStart late still carries
+        // the readiness handoff diagnostic. Retire it here so a reconnecting
+        // client is not told a started agent is still unready.
+        self.window_details.remove(window_id);
         let mut events = vec![self.workspace_state_broadcast()];
         if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(projection);
@@ -6033,6 +6329,22 @@ impl AppRuntime {
         window_id: &str,
         detail: &str,
     ) -> Vec<OutboundEvent> {
+        self.fresh_execution_launch_failed_events_with_pane(
+            window_id,
+            detail,
+            LaunchPaneDisposition::Teardown,
+        )
+    }
+
+    /// Issue #3482: see
+    /// [`Self::continue_work_launch_failed_events_with_pane`] — a rollback that
+    /// does not own the window rolls back durable state only.
+    pub(crate) fn fresh_execution_launch_failed_events_with_pane(
+        &mut self,
+        window_id: &str,
+        detail: &str,
+        pane: LaunchPaneDisposition,
+    ) -> Vec<OutboundEvent> {
         let Some(pending) = self
             .pending_fresh_execution_launches
             .get(window_id)
@@ -6082,15 +6394,23 @@ impl AppRuntime {
         };
         match cleanup {
             Ok(true) => {
-                self.stop_window_runtime_without_session_projection(window_id);
                 self.launch_wizard_cache
                     .forget_session(&pending.binding.session_id);
-                let mut events = Self::status_events(
-                    window_id.to_string(),
-                    WindowProcessStatus::Error,
-                    Some(detail.to_string()),
-                );
-                events.extend(self.close_window_events(window_id));
+                let events = match pane {
+                    LaunchPaneDisposition::Teardown => {
+                        self.stop_window_runtime_without_session_projection(window_id);
+                        let mut events = Self::status_events(
+                            window_id.to_string(),
+                            WindowProcessStatus::Error,
+                            Some(detail.to_string()),
+                        );
+                        events.extend(self.close_window_events(window_id));
+                        events
+                    }
+                    // Painting or closing a window this launch does not own
+                    // would report someone else's pane as failed.
+                    LaunchPaneDisposition::Retain => Vec::new(),
+                };
                 self.pending_fresh_execution_launches.remove(window_id);
                 let _ =
                     clear_durable_launch_recovery(&self.sessions_dir, &pending.binding.session_id);
@@ -6121,31 +6441,42 @@ impl AppRuntime {
     }
 
     /// Issue #3475: a fired readiness deadline is a checkpoint, not an expiry.
-    /// It aborts the prepared successor only once the pane stops showing that
-    /// the agent is still coming up, and always within a bounded number of
-    /// extensions. The `operation_id` correlation is unchanged, so a timer that
-    /// fires after its launch already succeeded (or was superseded) is still a
-    /// no-op.
+    /// It extends while the pane shows that the agent is still coming up, and
+    /// always within a bounded number of extensions. The `operation_id`
+    /// correlation is unchanged, so a timer that fires after its launch already
+    /// succeeded (or was superseded) is still a no-op.
+    ///
+    /// Issue #3482: spending that budget is not a licence to destroy a live
+    /// Session. The deadline re-proves session identity and process liveness
+    /// before it decides anything, and only a dead pane — or a window another
+    /// Session owns now — is rolled back. A pane that is still this launch's own
+    /// live pane is handed to the user with its process and prepared candidate
+    /// intact, and the deadline stays armed purely to reap it later.
     pub(crate) fn handle_continue_work_ready_timeout(
         &mut self,
         window_id: &str,
         watch: &ContinueWorkReadinessWatch,
     ) -> Vec<OutboundEvent> {
         let operation_id = watch.operation_id.as_str();
-        let is_pending_continue_work = self
+        let pending_continue_work_session = self
             .pending_continue_work
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id);
-        let is_pending_fresh_execution = self
+            .filter(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.binding.session_id.clone());
+        let pending_fresh_execution_session = self
             .pending_fresh_execution_launches
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id);
-        if !is_pending_continue_work && !is_pending_fresh_execution {
+            .filter(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.binding.session_id.clone());
+        let is_pending_continue_work = pending_continue_work_session.is_some();
+        let Some(expected_session_id) =
+            pending_continue_work_session.or(pending_fresh_execution_session)
+        else {
             return Vec::new();
-        }
-        let pane_alive = self.readiness_pane_is_alive(window_id);
+        };
+        let evidence = self.readiness_pane_evidence(window_id, &expected_session_id);
         let output_bytes = self.observed_window_output_bytes(window_id);
-        match continue_work_readiness_decision(watch, pane_alive, output_bytes) {
+        match continue_work_readiness_decision(watch, evidence, output_bytes) {
             ReadinessDeadlineDecision::Extend(next) => {
                 tracing::info!(
                     window_id = %window_id,
@@ -6157,22 +6488,63 @@ impl AppRuntime {
                 self.rearm_continue_work_readiness_deadline(window_id, next);
                 Vec::new()
             }
-            ReadinessDeadlineDecision::Abort { detail } => {
+            ReadinessDeadlineDecision::HandOff {
+                watch: next,
+                detail,
+            } => {
+                self.rearm_continue_work_readiness_deadline(window_id, next);
+                let Some(detail) = detail else {
+                    return Vec::new();
+                };
+                tracing::warn!(
+                    window_id = %window_id,
+                    operation_id = %operation_id,
+                    "handed an unready but live launch pane to the user"
+                );
+                self.readiness_handoff_events(window_id, detail)
+            }
+            ReadinessDeadlineDecision::Abort { detail, pane } => {
                 if is_pending_continue_work {
-                    self.continue_work_launch_failed_events(window_id, &detail)
+                    self.continue_work_launch_failed_events_with_pane(window_id, &detail, pane)
                 } else {
                     let feedback = self
                         .pending_fresh_execution_launches
                         .get(window_id)
                         .and_then(|pending| pending.launch_feedback_context.clone());
-                    self.launch_error_events_with_continue_work(
-                        window_id.to_string(),
-                        detail,
-                        feedback,
-                    )
+                    match pane {
+                        LaunchPaneDisposition::Teardown => self
+                            .launch_error_events_with_continue_work(
+                                window_id.to_string(),
+                                detail,
+                                feedback,
+                            ),
+                        // A foreign window must not travel the generic launch
+                        // error path: that one paints and tears down whatever
+                        // window it is given.
+                        LaunchPaneDisposition::Retain => self
+                            .fresh_execution_launch_failed_events_with_pane(
+                                window_id, &detail, pane,
+                            ),
+                    }
                 }
             }
         }
+    }
+
+    /// Issue #3482: publish the handoff so the pane says why it is still
+    /// waiting. The window keeps its runtime state — only the detail changes,
+    /// and it is stored so a client that reconnects later still sees it.
+    fn readiness_handoff_events(&mut self, window_id: &str, detail: String) -> Vec<OutboundEvent> {
+        self.window_details
+            .insert(window_id.to_string(), detail.clone());
+        let status = self
+            .window_status(window_id)
+            .unwrap_or(WindowProcessStatus::Running);
+        vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+            id: window_id.to_string(),
+            status,
+            detail: Some(detail),
+        })]
     }
 
     pub(crate) fn finalize_fresh_execution_launch_session_start(
@@ -6278,12 +6650,6 @@ impl AppRuntime {
                         &pending.operation_id,
                         |projection, _work_items, _| {
                             let now = chrono::Utc::now();
-                            let owner_context = WorkspaceResumeContext {
-                                title: None,
-                                owner: Some(workspace_owner_label(pending.owner)),
-                                summary: None,
-                                next_action: None,
-                            };
                             let event = apply_workspace_launch_transition(
                                 projection,
                                 &active_session,
@@ -6295,10 +6661,8 @@ impl AppRuntime {
                                     ),
                                     base_branch: pending.base_branch.as_deref(),
                                     linked_issue_number: pending.linked_issue_number,
-                                    resume_context: pending
-                                        .resume_context
-                                        .as_ref()
-                                        .or(Some(&owner_context)),
+                                    canonical_owner: Some(pending.owner),
+                                    resume_context: pending.resume_context.as_ref(),
                                     kind: if pending.base_branch.is_some() {
                                         WorkspaceLaunchProjectionKind::StartWork
                                     } else {
@@ -6630,6 +6994,9 @@ impl AppRuntime {
         }
 
         self.pending_continue_work.remove(window_id);
+        // Issue #3482: see `completed_fresh_execution_launch_events` — a late
+        // SessionStart must retire the readiness handoff diagnostic.
+        self.window_details.remove(window_id);
         self.continue_work_outcomes.insert(
             pending.operation_id.clone(),
             CachedContinueWorkOutcome {

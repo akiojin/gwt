@@ -7000,6 +7000,18 @@ impl PublicMutationContext {
         Self::for_repo_until(repo_root, deadline.expires_at())
     }
 
+    /// Run the real privacy-context collector without coupling success-path
+    /// tests to the production latency budget. Full-suite load can delay the
+    /// collector's git subprocesses beyond three seconds; timeout behavior is
+    /// covered separately with an explicitly expired deadline.
+    #[cfg(test)]
+    pub(super) fn for_repo_with_test_budget(repo_root: &Path) -> Self {
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        Self::for_repo_until(repo_root, expires_at)
+    }
+
     fn for_repo_until(repo_root: &Path, expires_at: Instant) -> Self {
         let _operation_deadline =
             gwt_core::operation_deadline::ScopedOperationDeadline::enter(expires_at);

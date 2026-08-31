@@ -36,6 +36,67 @@ fn set_worktree_launch_path(
     env_vars.insert("GWT_PROJECT_ROOT".to_string(), path.display().to_string());
 }
 
+fn launch_worktree_materialization_lock_path(main_repo_path: &Path, branch_name: &str) -> PathBuf {
+    let repo_hash = gwt_core::repo_hash::compute_path_hash(main_repo_path);
+    let branch_digest = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(branch_name.as_bytes())
+    );
+    gwt_core::paths::gwt_home()
+        .join("locks/launch-worktree-materialization")
+        .join(format!("{repo_hash}-{}.lock", &branch_digest[..16]))
+}
+
+fn with_launch_worktree_materialization_lock<T>(
+    main_repo_path: &Path,
+    branch_name: &str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock_path = launch_worktree_materialization_lock_path(main_repo_path, branch_name);
+    let lock_dir = lock_path.parent().ok_or_else(|| {
+        format!(
+            "launch materialization lock has no parent: {}",
+            lock_path.display()
+        )
+    })?;
+    std::fs::create_dir_all(lock_dir).map_err(|error| {
+        format!(
+            "failed to create launch materialization lock directory {}: {error}",
+            lock_dir.display()
+        )
+    })?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "failed to open launch materialization lock {} for branch {branch_name}: {error}",
+                lock_path.display()
+            )
+        })?;
+    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(|error| {
+        format!(
+            "failed to acquire launch materialization lock {} for branch {branch_name}: {error}",
+            lock_path.display()
+        )
+    })?;
+    let result = operation();
+    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
+        format!(
+            "failed to release launch materialization lock {} for branch {branch_name}: {error}",
+            lock_path.display()
+        )
+    });
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
@@ -64,19 +125,51 @@ pub fn resolve_launch_worktree_request(
             return Err(error.to_string());
         }
     };
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    with_launch_worktree_materialization_lock(&main_repo_path, &branch_name, || {
+        resolve_launch_worktree_request_locked(
+            &main_repo_path,
+            &branch_name,
+            base_branch,
+            working_dir,
+            env_vars,
+        )
+    })
+}
+
+fn resolve_launch_worktree_request_locked(
+    main_repo_path: &Path,
+    branch_name: &str,
+    base_branch: &mut Option<String>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    let manager = gwt_git::WorktreeManager::new(main_repo_path);
+    let start_work_branch = is_start_work_branch_name(branch_name);
+    let fresh_start_work_launch = start_work_branch && base_branch.is_some();
     let mut worktrees = manager.list().map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-        set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
+    let mut usable_worktree = usable_worktree_path_for_branch(&worktrees, branch_name);
+    if let Some(existing_worktree) = usable_worktree
+        .as_ref()
+        .filter(|_| !fresh_start_work_launch)
+    {
+        set_worktree_launch_path(working_dir, env_vars, existing_worktree);
         return Ok(());
     }
-    if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
+    let observed_worktree_path = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
+        .map(|worktree| worktree.path.clone());
+    if worktrees_have_stale_branch_entry(&worktrees, branch_name) {
         manager
             .prune()
             .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
         worktrees = manager.list().map_err(|err| err.to_string())?;
-        if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-            set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
+        usable_worktree = usable_worktree_path_for_branch(&worktrees, branch_name);
+        if let Some(existing_worktree) = usable_worktree
+            .as_ref()
+            .filter(|_| !fresh_start_work_launch)
+        {
+            set_worktree_launch_path(working_dir, env_vars, existing_worktree);
             return Ok(());
         }
     }
@@ -85,23 +178,24 @@ pub fn resolve_launch_worktree_request(
         .clone()
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let mut remote_base_ref = origin_remote_ref(&effective_base_branch);
-    let remote_branch_ref = origin_remote_ref(&branch_name);
-    let has_local_branch = local_branch_exists(&main_repo_path, &branch_name)?;
+    let remote_branch_ref = origin_remote_ref(branch_name);
+    let has_local_branch = local_branch_exists(main_repo_path, branch_name)?;
 
-    if !has_local_branch {
-        if is_start_work_branch_name(&branch_name) {
-            manager
-                .prepare_start_work_remote_develop()
-                .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
-            effective_base_branch = "origin/develop".to_string();
-            remote_base_ref = origin_remote_ref(&effective_base_branch);
-            *base_branch = Some(effective_base_branch.clone());
-        } else {
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to fetch origin: {err}"))?;
-        }
+    if start_work_branch && (fresh_start_work_launch || !has_local_branch) {
+        manager
+            .prepare_start_work_remote_develop()
+            .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
+        effective_base_branch = "origin/develop".to_string();
+        remote_base_ref = origin_remote_ref(&effective_base_branch);
+        *base_branch = Some(effective_base_branch.clone());
+    } else if !has_local_branch {
+        manager
+            .fetch_origin()
+            .map_err(|err| format!("failed to fetch origin: {err}"))?;
+    }
 
+    let mut has_remote_branch = false;
+    if !has_local_branch || fresh_start_work_launch {
         if !manager
             .remote_branch_exists(&remote_base_ref)
             .map_err(|err| {
@@ -110,7 +204,7 @@ pub fn resolve_launch_worktree_request(
         {
             if let Some(fallback_base_branch) =
                 gwt::start_work::refallback_start_work_base_branch_with(
-                    &branch_name,
+                    branch_name,
                     &effective_base_branch,
                     |candidate| {
                         let candidate_ref = origin_remote_ref(candidate);
@@ -130,36 +224,75 @@ pub fn resolve_launch_worktree_request(
             }
         }
 
-        if !manager
+        has_remote_branch = manager
             .remote_branch_exists(&remote_branch_ref)
-            .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
-        {
-            manager
-                .create_remote_branch_from_base(&remote_base_ref, &branch_name)
-                .map_err(|err| {
-                    format!(
-                        "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                    )
-                })?;
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
-        }
+            .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?;
     }
 
     let preferred_worktree_path =
-        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
+        gwt_git::worktree::sibling_worktree_path(main_repo_path, branch_name);
+    if fresh_start_work_launch {
+        let mut recovery_refs = Vec::with_capacity(2);
+        if has_local_branch {
+            recovery_refs.push(branch_name);
+        }
+        if has_remote_branch {
+            recovery_refs.push(remote_branch_ref.as_str());
+        }
+        for recovery_ref in recovery_refs {
+            let divergence = gwt_git::git_divergence(
+                main_repo_path,
+                recovery_ref,
+                &remote_base_ref,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to verify whether existing launch branch {branch_name} has unique commits against {remote_base_ref}: {error}"
+                )
+            })?;
+            if divergence.ahead > 0 {
+                let residual_path = usable_worktree
+                    .as_deref()
+                    .or(observed_worktree_path.as_deref())
+                    .unwrap_or(&preferred_worktree_path);
+                return Err(format!(
+                    "needs_human: unique commits present on existing launch ref `{recovery_ref}` for branch `{branch_name}` ({} commit(s) ahead of `{remote_base_ref}`); refusing automatic fresh-launch recovery to preserve work. Residual worktree location: `{}`. Recommended action: continue the existing work, or archive/delete the branch and worktree, then retry fresh launch.",
+                    divergence.ahead,
+                    residual_path.display()
+                ));
+            }
+        }
+    }
+
+    if let Some(existing_worktree) = usable_worktree {
+        set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
+        return Ok(());
+    }
+
+    if !has_local_branch && !has_remote_branch {
+        manager
+            .create_remote_branch_from_base(&remote_base_ref, branch_name)
+            .map_err(|err| {
+                format!(
+                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
+                )
+            })?;
+        manager
+            .fetch_origin()
+            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
+    }
+
     let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
         .ok_or_else(|| {
             format!("failed to resolve available worktree path for branch {branch_name}")
         })?;
     if has_local_branch {
         manager
-            .create(&branch_name, &worktree_path)
+            .create(branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
     } else {
         manager
-            .create_from_remote(&remote_branch_ref, &branch_name, &worktree_path)
+            .create_from_remote(&remote_branch_ref, branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
     }
 
@@ -988,6 +1121,7 @@ mod tests {
     #[test]
     fn checked_host_runner_falls_back_from_broken_direct_to_healthy_bunx() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         let original_args = config.args.clone();
         let mut probes = Vec::new();
@@ -1026,6 +1160,7 @@ mod tests {
     #[test]
     fn checked_host_runner_falls_back_from_broken_bunx_to_healthy_npx() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         let original_args = config.args.clone();
         let mut probes = Vec::new();
@@ -1067,6 +1202,7 @@ mod tests {
     #[test]
     fn checked_host_runner_rejects_broken_direct_bunx_and_npx_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let mut config = sample_direct_codex_launch_config(temp.path());
         config
             .env_vars
@@ -1155,9 +1291,306 @@ mod tests {
             .success()
     }
 
+    fn init_launch_test_repo(root: &Path) -> PathBuf {
+        let origin = root.join("origin.git");
+        let repo = root.join("repo");
+        run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
+        run_git(
+            root,
+            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "gwt"]);
+        run_git(&repo, &["checkout", "-qb", "develop"]);
+        fs::write(repo.join("README.md"), "develop\n").expect("write readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "seed develop"]);
+        run_git(&repo, &["push", "-u", "origin", "develop"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "-a"]);
+        repo
+    }
+
+    #[test]
+    fn launch_worktree_materialization_waits_for_same_branch_lock() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-serial";
+        run_git(&repo, &["branch", branch, "origin/develop"]);
+        let existing_worktree = temp.path().join("existing-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                existing_worktree.to_str().unwrap(),
+                branch,
+            ],
+        );
+
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
+        let repo_hash = gwt_core::repo_hash::compute_path_hash(&main_repo);
+        let branch_digest = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(branch.as_bytes())
+        );
+        let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
+        fs::create_dir_all(&lock_dir).expect("lock dir");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16])))
+            .expect("lock file");
+        gwt_core::operation_deadline::lock_exclusive(&lock).expect("hold materialization lock");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repo_for_thread = repo.clone();
+        let branch_for_thread = branch.to_string();
+        let gwt_home_for_thread = temp.path().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(&gwt_home_for_thread);
+            let mut base_branch = Some("origin/develop".to_string());
+            let mut working_dir = None;
+            let mut env_vars = HashMap::new();
+            let result = resolve_launch_worktree_request(
+                &repo_for_thread,
+                Some(&branch_for_thread),
+                &mut base_branch,
+                &mut working_dir,
+                &mut env_vars,
+            );
+            tx.send((result, working_dir)).expect("send result");
+        });
+
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("resolver ignored the same-branch materialization lock: {other:?}"),
+        }
+        fs2::FileExt::unlock(&lock).expect("release materialization lock");
+        let (result, working_dir) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("resolver completes after lock release");
+        result.expect("existing worktree is reusable");
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|path| { crate::same_worktree_path(path, &existing_worktree) }));
+        handle.join().expect("resolver thread");
+    }
+
+    #[test]
+    fn fresh_launch_preserves_issue_branch_with_unique_commits() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-unique";
+        let scratch = temp.path().join("scratch");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                scratch.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(scratch.join("unique.txt"), "preserve me\n").expect("write unique file");
+        run_git(&scratch, &["add", "unique.txt"]);
+        run_git(&scratch, &["commit", "-m", "unique work"]);
+        run_git(&scratch, &["push", "-u", "origin", branch]);
+        let remote_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("remote unique head");
+        assert!(remote_head.status.success());
+        let remote_head = String::from_utf8_lossy(&remote_head.stdout)
+            .trim()
+            .to_string();
+        run_git(&repo, &["worktree", "remove", scratch.to_str().unwrap()]);
+        run_git(&repo, &["branch", "-f", branch, "origin/develop"]);
+        let local_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("local commitless head");
+        assert!(local_head.status.success());
+        let local_head = String::from_utf8_lossy(&local_head.stdout)
+            .trim()
+            .to_string();
+        assert_ne!(local_head, remote_head, "fixture requires divergent refs");
+
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
+        let residual_path = gwt_git::worktree::sibling_worktree_path(&main_repo, branch);
+        fs::create_dir_all(&residual_path).expect("residual directory");
+        fs::write(residual_path.join("sentinel.txt"), "keep\n").expect("residual sentinel");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let error = resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect_err("unique commits must block automatic fresh-launch recovery");
+
+        assert!(error.contains("needs_human"), "{error}");
+        assert!(error.contains("unique commits present"), "{error}");
+        assert!(error.contains(branch), "{error}");
+        assert!(error.contains("origin/work/issue-unique"), "{error}");
+        assert!(error.contains("origin/develop"), "{error}");
+        assert!(
+            error.contains(&residual_path.display().to_string()),
+            "{error}"
+        );
+        assert!(error.contains("archive/delete"), "{error}");
+        assert!(working_dir.is_none());
+        assert_eq!(
+            fs::read_to_string(residual_path.join("sentinel.txt")).expect("preserved sentinel"),
+            "keep\n"
+        );
+        let preserved_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("preserved branch head");
+        assert!(preserved_head.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&preserved_head.stdout).trim(),
+            local_head
+        );
+        let preserved_remote_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "origin/work/issue-unique"])
+            .current_dir(&repo)
+            .output()
+            .expect("preserved remote branch head");
+        assert!(preserved_remote_head.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&preserved_remote_head.stdout).trim(),
+            remote_head
+        );
+
+        run_git(&repo, &["branch", "-D", branch]);
+        let mut continuation_base_branch = None;
+        let mut continuation_working_dir = None;
+        let mut continuation_env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut continuation_base_branch,
+            &mut continuation_working_dir,
+            &mut continuation_env_vars,
+        )
+        .expect("manual continuation must materialize the preserved remote branch");
+        let continuation_working_dir =
+            continuation_working_dir.expect("manual continuation worktree");
+        let continued_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&continuation_working_dir)
+            .output()
+            .expect("continued branch head");
+        assert!(continued_head.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&continued_head.stdout).trim(),
+            remote_head
+        );
+    }
+
+    #[test]
+    fn fresh_launch_preserves_usable_issue_worktree_with_unique_commits() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-usable-unique";
+        let worktree = temp.path().join("existing-worktree");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+        fs::write(worktree.join("unique.txt"), "preserve me\n").expect("write unique file");
+        run_git(&worktree, &["add", "unique.txt"]);
+        run_git(&worktree, &["commit", "-m", "unique work"]);
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let error = resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect_err("fresh launch must not bypass unique-commit protection");
+
+        assert!(error.contains("needs_human"), "{error}");
+        assert!(error.contains("unique commits present"), "{error}");
+        assert!(error.contains(&worktree.display().to_string()), "{error}");
+        assert!(working_dir.is_none());
+        assert_eq!(
+            fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
+            "preserve me\n"
+        );
+    }
+
+    #[test]
+    fn fresh_launch_materializes_commitless_issue_branch_beside_residual_directory() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let branch = "work/issue-reusable";
+        run_git(&repo, &["branch", branch, "origin/develop"]);
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
+        let residual_path = gwt_git::worktree::sibling_worktree_path(&main_repo, branch);
+        fs::create_dir_all(&residual_path).expect("residual directory");
+        fs::write(residual_path.join("sentinel.txt"), "keep\n").expect("residual sentinel");
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("commitless residual branch is reusable");
+
+        let working_dir = working_dir.expect("materialized worktree");
+        assert_ne!(working_dir, residual_path);
+        assert!(working_dir.exists());
+        assert_eq!(
+            fs::read_to_string(residual_path.join("sentinel.txt")).expect("preserved sentinel"),
+            "keep\n"
+        );
+        let current = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&working_dir)
+            .output()
+            .expect("materialized branch");
+        assert!(current.status.success());
+        assert_eq!(String::from_utf8_lossy(&current.stdout).trim(), branch);
+    }
+
     #[test]
     fn start_work_launch_materialization_prepares_origin_develop_at_launch_time() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let origin = temp.path().join("origin.git");
         let repo = temp.path().join("repo");
         run_git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
@@ -1417,6 +1850,7 @@ mod tests {
     #[test]
     fn command_prompt_agent_wrapper_normalizes_bun_claude_stub_before_shell_expression() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bun_bin_dir = temp.path().join(".bun").join("bin");
         fs::create_dir_all(&bun_bin_dir).expect("bun bin");
         let global_shim = bun_bin_dir.join("claude.exe");
@@ -1503,6 +1937,7 @@ mod tests {
     #[test]
     fn command_prompt_agent_wrapper_preserves_inner_cmd_expression_env() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bin = temp.path().join("Program Files").join("npm bin");
         fs::create_dir_all(&bin).expect("cmd shim directory");
         let shim = bin.join("npx.cmd");
@@ -1544,6 +1979,7 @@ mod tests {
         // an actionable error rather than embed the non-PE stub into the shell
         // expression (which would raise the Windows 16-bit dialog from cmd).
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let package_root = temp
             .path()
             .join("node_modules")
@@ -1584,6 +2020,7 @@ mod tests {
     #[test]
     fn windows_npx_cache_corruption_detection_requires_verified_old_binary_signature() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx_base = temp
             .path()
             .join("Local Cache With Spaces")
@@ -1621,6 +2058,7 @@ mod tests {
     #[test]
     fn windows_npx_cache_corruption_detection_rejects_paths_outside_local_npx_root() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let outside_root = temp.path().join("other-cache").join("_npx").join("abc");
         let bin_dir = outside_root
@@ -1646,6 +2084,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_repairs_corrupt_npx_cache_once_before_switching() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
@@ -1716,6 +2155,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_fails_before_spawn_when_npx_repair_fails() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let npx_root = npx_base.join("97540b0888a2deac");
@@ -1763,6 +2203,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_does_not_repair_unrelated_npx_failure() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let mut config = sample_exact_windows_npx_launch_config();
@@ -1796,6 +2237,7 @@ mod tests {
     #[test]
     fn checked_host_package_runner_fallback_rejects_npx_timeout_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let npx = temp.path().join("node").join("npx.cmd");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let mut config = sample_exact_windows_npx_launch_config();
@@ -1852,6 +2294,7 @@ mod tests {
     #[test]
     fn host_launch_keeps_bunx_when_runner_version_probe_succeeds() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let bunx = temp.path().join("bunx");
         write_executable(&bunx);
         let mut config = sample_versioned_launch_config();
@@ -1870,6 +2313,7 @@ mod tests {
     #[test]
     fn host_launch_switches_to_npx_when_bunx_absent_but_npx_present() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         write_executable(&temp.path().join("npx"));
         let mut config = sample_versioned_launch_config();
         config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
@@ -1926,6 +2370,7 @@ mod tests {
     #[test]
     fn install_launch_gwt_bin_env_host_uses_checkout_sibling_before_foreign_path_install() {
         let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
         let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
         let current_exe = temp.path().join("checkout").join(executable_name);
