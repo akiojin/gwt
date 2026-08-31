@@ -572,49 +572,112 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
-/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
-/// call. A transient failure returns an `Err` (the caller keeps work as
-/// launched) rather than an empty set, so closing the active slot only happens
-/// on a positive merge signal.
-pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
-    fetch_merged_pr_branches_with(repo_path, run_gh_command)
+/// Hard ceiling for all merge-reconciliation GraphQL queries in one Monitor
+/// scan. Every candidate query carries its closing-Issue and merge-time
+/// evidence, so reconciliation needs no per-Issue follow-up GraphQL request.
+pub const MAX_MERGE_RECONCILIATION_GRAPHQL_QUERIES_PER_SCAN: usize = 20;
+pub const MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN: usize =
+    MAX_MERGE_RECONCILIATION_GRAPHQL_QUERIES_PER_SCAN;
+
+/// Reconciliation stops spending GraphQL before the shared window is close to
+/// exhaustion. The free `rate_limit` endpoint supplies the reset-aware status
+/// diagnostic used by the scan owner.
+const MERGE_RECONCILIATION_GRAPHQL_QUOTA_FLOOR: u64 = 100;
+pub const MERGE_RECONCILIATION_QUOTA_LOW_CODE: &str = "github_quota_low";
+
+/// Merge evidence returned for one candidate head branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedPrBranchEvidence {
+    pub merged_at: Option<String>,
+    pub body: Option<String>,
+    pub closing_issue_numbers: std::collections::BTreeSet<u64>,
 }
 
-fn fetch_merged_pr_branches_with<F>(
+/// Merged PR evidence for caller-nominated head refs. The fixed-cap `--limit
+/// 1` query includes the data needed for Issue-generation freshness, keeping
+/// repository-wide history and follow-up GraphQL probes outside this API.
+pub fn fetch_merged_pr_evidence(
     repo_path: &Path,
+    candidate_branches: &std::collections::BTreeSet<String>,
+) -> Result<std::collections::BTreeMap<String, MergedPrBranchEvidence>> {
+    fetch_merged_pr_evidence_with(repo_path, candidate_branches, run_gh_command)
+}
+
+fn fetch_merged_pr_evidence_with<F>(
+    repo_path: &Path,
+    candidate_branches: &std::collections::BTreeSet<String>,
     mut run_gh: F,
-) -> Result<std::collections::BTreeSet<String>>
+) -> Result<std::collections::BTreeMap<String, MergedPrBranchEvidence>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
-    let output = run_gh(
-        repo_path,
-        &[
-            "pr",
-            "list",
-            "--json",
-            "headRefName,state",
-            "--state",
-            "merged",
-            "--limit",
-            "999",
-        ],
-    )?;
-    if !output.success {
+    let probe = run_gh(repo_path, gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS)?;
+    if !probe.success {
         return Err(GwtError::Git(format!(
-            "gh pr list merged: {}",
-            output.stderr.trim()
+            "gh api rate_limit for merge reconciliation: {}",
+            probe.stderr.trim()
         )));
     }
-    parse_merged_pr_branches(&output.stdout)
+    let quota = gwt_core::github_quota::parse_rate_limit_probe(
+        &probe.stdout,
+        gwt_core::github_quota::GitHubQuota::GraphQl,
+    )
+    .ok_or_else(|| {
+        GwtError::Git("gh api rate_limit returned no GraphQL quota snapshot".to_string())
+    })?;
+    if quota.remaining < MERGE_RECONCILIATION_GRAPHQL_QUOTA_FLOOR {
+        let now = Utc::now();
+        return Err(GwtError::Git(format!(
+            "{MERGE_RECONCILIATION_QUOTA_LOW_CODE}: resource={} limit={} remaining={} threshold={} reset_at={} retry_after_secs={}",
+            quota.resource,
+            quota.limit,
+            quota.remaining,
+            MERGE_RECONCILIATION_GRAPHQL_QUOTA_FLOOR,
+            quota.reset_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            quota.retry_after_secs(now)
+        )));
+    }
+
+    let mut merged = std::collections::BTreeMap::new();
+    for branch in candidate_branches
+        .iter()
+        .take(MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN)
+    {
+        let output = run_gh(
+            repo_path,
+            &[
+                "pr",
+                "list",
+                "--json",
+                "headRefName,state,mergedAt,body,closingIssuesReferences",
+                "--state",
+                "merged",
+                "--head",
+                branch,
+                "--limit",
+                "1",
+            ],
+        )?;
+        if !output.success {
+            return Err(GwtError::Git(format!(
+                "gh pr list merged head {branch}: {}",
+                output.stderr.trim()
+            )));
+        }
+        merged.extend(parse_merged_pr_evidence(&output.stdout)?);
+    }
+    Ok(merged)
 }
 
-/// Parse `gh pr list --json headRefName,state` into the set of branches whose
-/// PR state is `MERGED`.
-pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet<String>> {
+/// Parse candidate-bound merged PR evidence. Missing freshness fields remain
+/// an explicit empty/`None` signal so untracked completion fails closed while
+/// tracked slot reconciliation can still use the merged branch.
+pub fn parse_merged_pr_evidence(
+    json: &str,
+) -> Result<std::collections::BTreeMap<String, MergedPrBranchEvidence>> {
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
-    let mut branches = std::collections::BTreeSet::new();
+    let mut evidence = std::collections::BTreeMap::new();
     for value in &arr {
         let merged = value
             .get("state")
@@ -623,16 +686,47 @@ pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet
         if !merged {
             continue;
         }
-        if let Some(branch) = value
+        let Some(branch) = value
             .get("headRefName")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|name| !name.is_empty())
-        {
-            branches.insert(branch.to_string());
-        }
+        else {
+            continue;
+        };
+        let merged_at = value
+            .get("mergedAt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let body = value
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let closing_issue_numbers = value
+            .get("closingIssuesReferences")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|issue| issue.get("number").and_then(serde_json::Value::as_u64))
+            .collect();
+        evidence.insert(
+            branch.to_string(),
+            MergedPrBranchEvidence {
+                merged_at,
+                body,
+                closing_issue_numbers,
+            },
+        );
     }
-    Ok(branches)
+    Ok(evidence)
+}
+
+/// Parse `gh pr list --json headRefName,state` into the set of branches whose
+/// PR state is `MERGED`.
+pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet<String>> {
+    Ok(parse_merged_pr_evidence(json)?.into_keys().collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1565,6 +1659,155 @@ mod tests {
         );
         // Empty titles are skipped.
         assert!(!map.contains_key("work/c"));
+    }
+
+    /// Issue #3818 / SPEC #3200 T-221: reconciliation must spend GraphQL only
+    /// on branches that can change Monitor state. Enumerating the repository's
+    /// entire monotonically growing merged-PR history is never an acceptable
+    /// substitute for a candidate-bound query.
+    #[test]
+    fn merged_pr_reconciliation_queries_only_candidate_heads() {
+        let repo = Path::new("/tmp/repo");
+        let candidates = std::collections::BTreeSet::from([
+            "work/issue-41".to_string(),
+            "work/issue-42".to_string(),
+        ]);
+        let mut calls = Vec::new();
+
+        let evidence = fetch_merged_pr_evidence_with(repo, &candidates, |_path, args| {
+            calls.push(args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>());
+            if args == ["api", "rate_limit"] {
+                return Ok(GhCliOutput {
+                    success: true,
+                    stdout: r#"{"resources":{"graphql":{"limit":5000,"remaining":5000,"reset":1893456000}}}"#
+                        .to_string(),
+                    stderr: String::new(),
+                });
+            }
+            let head_index = args
+                .iter()
+                .position(|arg| *arg == "--head")
+                .expect("candidate query must use --head");
+            let branch = args[head_index + 1];
+            let issue_number = branch
+                .rsplit('-')
+                .next()
+                .expect("issue suffix")
+                .parse::<u64>()
+                .expect("numeric issue suffix");
+            Ok(GhCliOutput {
+                success: true,
+                stdout: format!(
+                    r#"[{{"headRefName":"{branch}","state":"MERGED","mergedAt":"2026-08-31T00:00:00Z","body":"Closes #{issue_number}","closingIssuesReferences":[]}}]"#
+                ),
+                stderr: String::new(),
+            })
+        })
+        .expect("candidate-bound merged query");
+
+        assert_eq!(
+            evidence
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            candidates
+        );
+        assert_eq!(
+            evidence["work/issue-42"].body.as_deref(),
+            Some("Closes #42")
+        );
+        assert_eq!(
+            evidence["work/issue-42"].merged_at.as_deref(),
+            Some("2026-08-31T00:00:00Z")
+        );
+        assert_eq!(calls[0], ["api", "rate_limit"]);
+        assert_eq!(
+            calls.len(),
+            3,
+            "one free probe plus one query per candidate"
+        );
+        for args in &calls[1..] {
+            assert!(args.windows(2).any(|pair| pair == ["--limit", "1"]));
+            assert!(args.iter().any(|arg| arg == "--head"));
+            assert!(args
+                .iter()
+                .any(|arg| { arg == "headRefName,state,mergedAt,body,closingIssuesReferences" }));
+            assert!(!args.iter().any(|arg| arg == "999"));
+        }
+    }
+
+    /// A low GraphQL snapshot is a degraded skip, not permission to consume
+    /// the last shared points. The diagnostic is intentionally complete enough
+    /// for the Monitor status surface without another GitHub call.
+    #[test]
+    fn merged_pr_reconciliation_skips_all_candidate_queries_below_quota_floor() {
+        let repo = Path::new("/tmp/repo");
+        let candidates = std::collections::BTreeSet::from(["work/issue-42".to_string()]);
+        let mut calls = Vec::new();
+
+        let error = fetch_merged_pr_evidence_with(repo, &candidates, |_path, args| {
+            calls.push(
+                args.iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>(),
+            );
+            Ok(GhCliOutput {
+                success: true,
+                stdout:
+                    r#"{"resources":{"graphql":{"limit":5000,"remaining":99,"reset":1893456000}}}"#
+                        .to_string(),
+                stderr: String::new(),
+            })
+        })
+        .expect_err("low quota must skip reconciliation");
+
+        assert_eq!(calls, vec![vec!["api", "rate_limit"]]);
+        let message = error.to_string();
+        assert!(message.contains("github_quota_low"), "{message}");
+        assert!(message.contains("resource=graphql"), "{message}");
+        assert!(message.contains("remaining=99"), "{message}");
+        assert!(message.contains("reset_at="), "{message}");
+        assert!(message.contains("retry_after_secs="), "{message}");
+    }
+
+    /// Default cadence is one scan per five minutes. Even at the fixed batch
+    /// ceiling, one hour must stay below half of GitHub's 5000-point GraphQL
+    /// window. This catches both an accidental cap removal and a return to 999.
+    #[test]
+    fn merged_pr_reconciliation_hourly_candidate_budget_stays_below_half() {
+        let scans_per_hour = 3600 / 300;
+        let maximum_graphql_queries =
+            scans_per_hour * MAX_MERGE_RECONCILIATION_GRAPHQL_QUERIES_PER_SCAN;
+
+        assert_eq!(
+            MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN,
+            MAX_MERGE_RECONCILIATION_GRAPHQL_QUERIES_PER_SCAN,
+            "each branch query must carry all Issue freshness evidence without a second GraphQL probe"
+        );
+        assert!(maximum_graphql_queries < 2_500);
+        assert!(MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN < 999);
+    }
+
+    #[test]
+    fn parse_merged_pr_evidence_keeps_closing_issue_freshness_fields() {
+        let evidence = parse_merged_pr_evidence(
+            r#"[
+                {"headRefName":"work/a","state":"MERGED","mergedAt":"2026-08-31T00:00:00Z","body":"Closes #42","closingIssuesReferences":[{"number":43}]},
+                {"headRefName":"work/b","state":"OPEN","mergedAt":null,"closingIssuesReferences":[{"number":44}]}
+            ]"#,
+        )
+        .expect("merged evidence");
+
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence["work/a"].body.as_deref(), Some("Closes #42"));
+        assert_eq!(
+            evidence["work/a"].closing_issue_numbers,
+            std::collections::BTreeSet::from([43])
+        );
+        assert_eq!(
+            evidence["work/a"].merged_at.as_deref(),
+            Some("2026-08-31T00:00:00Z")
+        );
     }
 
     #[test]

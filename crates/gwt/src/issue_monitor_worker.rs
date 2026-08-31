@@ -90,6 +90,20 @@ impl IssueMonitorScanFailure {
             detail: detail.into(),
         }
     }
+
+    /// Issue #3818: only GraphQL budget pressure is a degraded
+    /// merge-reconciliation skip. Every other stage/failure remains fail-closed
+    /// so authority, deadline, and transport errors cannot be hidden.
+    pub fn is_merge_reconciliation_quota_degradation(&self) -> bool {
+        self.stage == IssueMonitorScanStage::MergeReconciliation
+            && self.detail.contains("resource=graphql")
+            && (self
+                .detail
+                .contains(gwt_git::pr_status::MERGE_RECONCILIATION_QUOTA_LOW_CODE)
+                || self
+                    .detail
+                    .contains(gwt_core::github_quota::RATE_LIMITED_ERROR_CODE))
+    }
 }
 
 impl fmt::Display for IssueMonitorScanFailure {
@@ -643,30 +657,68 @@ pub fn linked_pr_completion_is_fresh_for_issue(
     })
 }
 
+fn merged_pr_evidence_is_fresh_for_issue(
+    issue: &IssueMonitorIssue,
+    evidence: &gwt_git::pr_status::MergedPrBranchEvidence,
+) -> bool {
+    let Some(issue_updated_at) = issue
+        .updated_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return false;
+    };
+    let closes_issue = evidence.closing_issue_numbers.contains(&issue.number)
+        || evidence
+            .body
+            .as_deref()
+            .is_some_and(|body| crate::cli::issue::body_closes_issue(body, issue.number));
+    if !closes_issue {
+        return false;
+    }
+    let is_spec = issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    if is_spec {
+        return issue.readiness == IssueMonitorReadiness::ReadyWithCompletedTasks;
+    }
+    evidence
+        .merged_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|merged_at| merged_at >= issue_updated_at)
+}
+
 /// Reconcile work branches that have merged, freeing the slot and delegating
 /// Issue-wide completion vs requeue to the domain policy. Returns query
 /// failures so the scan owner can surface them after its final state rebase.
 ///
-/// Two entrances, one query. The tracked one matches `active_launched_branches`
-/// and is the ordinary path. The untracked one (Issue #3645 AC-3/AC-4) exists
+/// Two entrances, one fixed-cap candidate batch. The tracked one matches
+/// `active_launched_branches` and is the ordinary path. The untracked one
+/// (Issue #3645 AC-3/AC-4) exists
 /// because emptying `launched_issues` — the repair the 2026-08-17 outage
 /// required — makes every launch that was in flight invisible to the first: the
 /// work merges, nothing records it, and the Issue stays a relaunch candidate
-/// forever. Candidates there are nominated locally from the merged-branch list
-/// and confirmed by [`try_issue_completed_by_merged_pr`], whose
-/// `merged_at >= issue_updated_at` rule is what stops a branch merged for an
-/// earlier generation from parking work that was reopened after it. Bounding
-/// the probe to branch matches keeps it off the whole queue.
+/// forever. Each candidate-bound branch query also returns `mergedAt` and
+/// closing-Issue references, preserving the same generation-freshness rule
+/// without a second GraphQL request.
 pub fn reconcile_issue_monitor_merges(
     monitor: &mut IssueMonitorState,
     repo_path: &Path,
-    owner: &str,
-    repo: &str,
+    _owner: &str,
+    _repo: &str,
 ) -> gwt_core::Result<Vec<u64>> {
-    if monitor.active_launched_branches().is_empty() && !monitor.has_open_launch_plan_candidates() {
+    let batch = monitor.merge_reconciliation_branch_batch(
+        gwt_git::pr_status::MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN,
+    );
+    if batch.branches.is_empty() {
         return Ok(Vec::new());
     }
-    let merged_branches = gwt_git::pr_status::fetch_merged_pr_branches(repo_path)?;
+    let candidates = batch.branches.iter().cloned().collect();
+    let evidence = gwt_git::pr_status::fetch_merged_pr_evidence(repo_path, &candidates)?;
+    let merged_branches = evidence.keys().cloned().collect();
+    monitor.record_merge_reconciliation_batch(&batch);
     let mut merged = monitor.reconcile_merged_branches(&merged_branches);
     if !merged.is_empty() {
         tracing::info!(
@@ -677,26 +729,19 @@ pub fn reconcile_issue_monitor_merges(
 
     for issue in monitor.untracked_merged_branch_candidates(&merged_branches) {
         let issue_number = issue.number;
-        // A probe failure keeps the issue launchable, matching the claim-path
-        // policy: an unreachable GitHub must never mint a terminal completion.
-        match try_issue_completed_by_merged_pr(owner, repo, &issue) {
-            Ok(true) => {
-                if monitor.record_untracked_completion(issue_number) {
-                    tracing::info!(
-                        issue = issue_number,
-                        "issue monitor recovered a completion its launch tracking had lost"
-                    );
-                    merged.push(issue_number);
-                }
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(
-                    issue = issue_number,
-                    error = %error,
-                    "issue monitor untracked completion probe failed; issue stays launchable"
-                );
-            }
+        let branch_evidence = monitor
+            .inbox_item(issue_number)
+            .and_then(|item| item.launch_plan.as_ref())
+            .and_then(|plan| evidence.get(&plan.branch_name));
+        if branch_evidence
+            .is_some_and(|evidence| merged_pr_evidence_is_fresh_for_issue(&issue, evidence))
+            && monitor.record_untracked_completion(issue_number)
+        {
+            tracing::info!(
+                issue = issue_number,
+                "issue monitor recovered a completion its launch tracking had lost"
+            );
+            merged.push(issue_number);
         }
     }
     Ok(merged)
@@ -1256,6 +1301,87 @@ mod tests {
             readiness: IssueMonitorReadiness::NotApplicable,
             updated_at: Some("2026-08-15T00:00:00Z".to_string()),
         }
+    }
+
+    #[test]
+    fn only_merge_reconciliation_quota_failures_are_degraded() {
+        for detail in [
+            "github_quota_low: resource=graphql remaining=99 reset_at=2030-01-01T00:00:00Z retry_after_secs=60",
+            "github_rate_limited: resource=graphql remaining=0 reset_at=2030-01-01T00:00:00Z retry_after_secs=60",
+        ] {
+            assert!(IssueMonitorScanFailure::new(
+                IssueMonitorScanStage::MergeReconciliation,
+                detail,
+            )
+            .is_merge_reconciliation_quota_degradation());
+        }
+
+        assert!(!IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::MergeReconciliation,
+            "gh merged query failed",
+        )
+        .is_merge_reconciliation_quota_degradation());
+        assert!(!IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::MergeReconciliation,
+            "github_rate_limited: resource=core remaining=0",
+        )
+        .is_merge_reconciliation_quota_degradation());
+        assert!(!IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::MergeReconciliation,
+            "github_rate_limited: secondary limit without a GraphQL resource",
+        )
+        .is_merge_reconciliation_quota_degradation());
+        assert!(!IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::CandidateLoad,
+            "github_rate_limited: resource=graphql",
+        )
+        .is_merge_reconciliation_quota_degradation());
+    }
+
+    #[test]
+    fn merged_branch_evidence_preserves_issue_generation_freshness_without_second_probe() {
+        let issue = issue(42);
+        let evidence = gwt_git::pr_status::MergedPrBranchEvidence {
+            merged_at: Some("2026-08-31T00:00:00Z".to_string()),
+            body: None,
+            closing_issue_numbers: std::collections::BTreeSet::from([42]),
+        };
+
+        assert!(merged_pr_evidence_is_fresh_for_issue(&issue, &evidence));
+
+        let develop_target = gwt_git::pr_status::MergedPrBranchEvidence {
+            body: Some("Fixes monitor state.\n\nCloses #42".to_string()),
+            closing_issue_numbers: std::collections::BTreeSet::new(),
+            ..evidence.clone()
+        };
+        assert!(
+            merged_pr_evidence_is_fresh_for_issue(&issue, &develop_target),
+            "develop-target PRs preserve the existing body closing-intent fallback"
+        );
+
+        let stale = gwt_git::pr_status::MergedPrBranchEvidence {
+            merged_at: Some("2026-08-14T23:59:59Z".to_string()),
+            ..evidence.clone()
+        };
+        assert!(!merged_pr_evidence_is_fresh_for_issue(&issue, &stale));
+
+        let wrong_issue = gwt_git::pr_status::MergedPrBranchEvidence {
+            body: None,
+            closing_issue_numbers: std::collections::BTreeSet::from([41]),
+            ..evidence.clone()
+        };
+        assert!(!merged_pr_evidence_is_fresh_for_issue(&issue, &wrong_issue));
+
+        let missing_revision_spec = IssueMonitorIssue {
+            labels: vec!["gwt-spec".to_string()],
+            readiness: IssueMonitorReadiness::ReadyWithCompletedTasks,
+            updated_at: None,
+            ..issue
+        };
+        assert!(!merged_pr_evidence_is_fresh_for_issue(
+            &missing_revision_spec,
+            &develop_target,
+        ));
     }
 
     fn github_issue(number: u64) -> IssueSnapshot {

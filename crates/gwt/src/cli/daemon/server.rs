@@ -3530,7 +3530,7 @@ fn scan_issue_monitor_once_blocking(
         &scope.project_root,
         &now,
     );
-    crate::issue_monitor_worker::run_scan_stage(
+    if let Err(failure) = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
@@ -3540,7 +3540,16 @@ fn scan_issue_monitor_once_blocking(
                 &repo,
             )
         },
-    )?;
+    ) {
+        if !failure.is_merge_reconciliation_quota_degradation() {
+            return Err(failure);
+        }
+        tracing::warn!(
+            error = %failure,
+            "issue monitor skipped merge reconciliation at the GraphQL quota floor"
+        );
+        monitor.record_scan_error(&now, failure.to_string());
+    }
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
@@ -4571,6 +4580,14 @@ if [ "$GWT_FAKE_GH_MODE" = "block" ]; then
   done
   rm -f "$owner_marker" || exit 1
 fi
+if [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+  if [ "$GWT_FAKE_GH_MODE" = "quota_low" ]; then
+    printf '%s\n' '{"resources":{"graphql":{"limit":5000,"remaining":99,"reset":1893456000}}}'
+  else
+    printf '%s\n' '{"resources":{"graphql":{"limit":5000,"remaining":5000,"reset":1893456000}}}'
+  fi
+  exit 0
+fi
 if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
@@ -4608,6 +4625,10 @@ if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
   exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "completion_recovery" ]; then
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "quota_low" ]; then
   printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
@@ -8008,6 +8029,71 @@ exit 0
             .iter()
             .any(|launched| launched.issue_number == 43));
         assert!(!monitor.prefs().merged_issues.contains(&43));
+    }
+
+    /// Issue #3818 / SPEC #3200 T-223: a low GraphQL snapshot degrades only
+    /// merge reconciliation. The same scan still reaches the launch proposal
+    /// path, while preserving a complete reset-aware diagnostic for operators.
+    #[test]
+    fn daemon_scan_continues_to_launch_planning_when_merge_quota_is_low() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "quota_low");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 1,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &monitor.prefs(),
+        )
+        .expect("seed issue monitor prefs");
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("quota-low reconciliation must not abort the scan");
+
+        let status = monitor.status_view();
+        let error = status.last_error.expect("quota diagnostic");
+        assert!(error.contains("merge-reconciliation"), "{error}");
+        assert!(error.contains("github_quota_low"), "{error}");
+        assert!(error.contains("resource=graphql"), "{error}");
+        assert!(error.contains("remaining=99"), "{error}");
+        assert!(error.contains("reset_at="), "{error}");
+        assert!(error.contains("retry_after_secs="), "{error}");
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            crate::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number,
+                ..
+            } if *issue_number == 43
+        )));
     }
 
     #[test]

@@ -717,6 +717,13 @@ pub struct IssueMonitorPrefs {
     /// source-compatible while new readers can reject delayed window closes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub launched_claims: BTreeMap<u64, String>,
+    /// Issue #3818: successful candidate-bounded reconciliation advances
+    /// these cursors so over-cap active and untracked sets are carried across
+    /// scans without reintroducing repository-wide merged history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_reconciliation_active_cursor: Option<MergeReconciliationCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_reconciliation_untracked_cursor: Option<MergeReconciliationCursor>,
     /// Issue #3222: claims whose agent window is not bound yet (`Launching`).
     /// Persisted so an in-flight claim survives the per-handler prefs
     /// roundtrip — otherwise a rescan re-claims the same issue (same-owner
@@ -832,6 +839,8 @@ impl Default for IssueMonitorPrefs {
             provider_quota_holds: BTreeMap::new(),
             launched_issues: Vec::new(),
             launched_claims: BTreeMap::new(),
+            merge_reconciliation_active_cursor: None,
+            merge_reconciliation_untracked_cursor: None,
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
             queued_launch_session_strategies: BTreeMap::new(),
@@ -1779,6 +1788,28 @@ pub struct AutonomousIssueSummary {
     pub pending_question: Option<AutonomousPendingQuestion>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MergeReconciliationCursor {
+    generation: u64,
+    next_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MergeReconciliationCursorUpdate {
+    Keep,
+    Set(MergeReconciliationCursor),
+}
+
+/// One fixed-cap set of branch heads selected for merge reconciliation.
+/// Cursor updates are private and are committed only after every head query
+/// succeeds, so a skipped/failed scan retries the same candidates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeReconciliationBranchBatch {
+    pub branches: Vec<String>,
+    active_cursor: MergeReconciliationCursorUpdate,
+    untracked_cursor: MergeReconciliationCursorUpdate,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
     pub config: IssueMonitorConfig,
@@ -1807,6 +1838,10 @@ pub struct IssueMonitorState {
     /// issue → work branch for currently launched Issues, used to look up the
     /// PR when checking whether the work has merged.
     launched_branches: BTreeMap<u64, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge_reconciliation_active_cursor: Option<MergeReconciliationCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge_reconciliation_untracked_cursor: Option<MergeReconciliationCursor>,
     /// Compatibility projection of completed records (state `Merged`).
     merged_issues: BTreeSet<u64>,
     issue_completion_migration_version: u32,
@@ -3326,6 +3361,8 @@ impl IssueMonitorState {
             launched_windows: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
+            merge_reconciliation_active_cursor: None,
+            merge_reconciliation_untracked_cursor: None,
             merged_issues: BTreeSet::new(),
             issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
             completion_records: BTreeMap::new(),
@@ -3365,6 +3402,8 @@ impl IssueMonitorState {
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
+        state.merge_reconciliation_active_cursor = prefs.merge_reconciliation_active_cursor;
+        state.merge_reconciliation_untracked_cursor = prefs.merge_reconciliation_untracked_cursor;
         // Issue #3627: restore used to re-inject every persisted launch into
         // `active_launches` without consulting `config.max_active`, so a disk
         // snapshot holding more launches than the cap (11 slots against a cap
@@ -3538,6 +3577,10 @@ impl IssueMonitorState {
                 })
                 .collect(),
             launched_claims: self.launched_claims.clone(),
+            merge_reconciliation_active_cursor: self.merge_reconciliation_active_cursor.clone(),
+            merge_reconciliation_untracked_cursor: self
+                .merge_reconciliation_untracked_cursor
+                .clone(),
             launching_issues: self
                 .active_launches
                 .iter()
@@ -4400,11 +4443,11 @@ impl IssueMonitorState {
                         .get(&held)
                         .and_then(|reset_at| parse_rfc3339_utc(reset_at))
                         .is_some_and(|reset_at| reset_at > now)
-                    && !self
+                    && self
                         .provider_quota_holds
                         .get(&saved)
                         .and_then(|reset_at| parse_rfc3339_utc(reset_at))
-                        .is_some_and(|reset_at| reset_at > now)
+                        .is_none_or(|reset_at| reset_at <= now)
             });
         if switched_to_healthy_provider {
             // The operator explicitly selected a healthy provider. The
@@ -5359,6 +5402,17 @@ impl IssueMonitorState {
         }
     }
 
+    fn merge_reconciliation_cursors_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        if disk.merge_reconciliation_active_cursor > self.merge_reconciliation_active_cursor {
+            self.merge_reconciliation_active_cursor =
+                disk.merge_reconciliation_active_cursor.clone();
+        }
+        if disk.merge_reconciliation_untracked_cursor > self.merge_reconciliation_untracked_cursor {
+            self.merge_reconciliation_untracked_cursor =
+                disk.merge_reconciliation_untracked_cursor.clone();
+        }
+    }
+
     /// Rebase a GUI observer on the latest committed prefs. The GUI does not
     /// drive autonomous lifecycle transitions, so disk owns the complete
     /// autonomous record map, including an updated value for an existing key.
@@ -5520,6 +5574,10 @@ impl IssueMonitorState {
         // an older reset in a stale disk snapshot may never erase newer local
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
+        // Cursor generations are monotonic scan progress. Joining by generation
+        // prevents a stale daemon/GUI writer from rolling another process back,
+        // while preserving a newer result produced by this scan before rebase.
+        self.merge_reconciliation_cursors_from_prefs(disk);
         self.refresh_disk_owned_prefs(disk);
         // The refresh replaces durable delivery/effect projections. Reapply
         // the fence so a contradictory disk snapshot cannot restore an
@@ -8088,6 +8146,123 @@ impl IssueMonitorState {
         );
         self.closure_reopen_tombstones.remove(&issue_number);
         self.clear_closed_issue_current_state(issue_number);
+    }
+
+    fn select_merge_reconciliation_candidates(
+        candidates: &[String],
+        cursor: Option<&MergeReconciliationCursor>,
+        limit: usize,
+    ) -> (Vec<String>, MergeReconciliationCursorUpdate) {
+        if limit == 0 {
+            return (Vec::new(), MergeReconciliationCursorUpdate::Keep);
+        }
+        let next_generation = cursor
+            .map(|cursor| cursor.generation.saturating_add(1))
+            .unwrap_or(1);
+        if candidates.is_empty() {
+            return (
+                Vec::new(),
+                MergeReconciliationCursorUpdate::Set(MergeReconciliationCursor {
+                    generation: next_generation,
+                    next_branch: None,
+                }),
+            );
+        }
+        if candidates.len() <= limit {
+            return (
+                candidates.to_vec(),
+                MergeReconciliationCursorUpdate::Set(MergeReconciliationCursor {
+                    generation: next_generation,
+                    next_branch: None,
+                }),
+            );
+        }
+
+        let start = cursor
+            .and_then(|cursor| cursor.next_branch.as_deref())
+            .and_then(|next_branch| candidates.iter().position(|branch| branch == next_branch))
+            .unwrap_or(0);
+        let selected = (0..limit)
+            .map(|offset| candidates[(start + offset) % candidates.len()].clone())
+            .collect::<Vec<_>>();
+        let next_branch = Some(candidates[(start + limit) % candidates.len()].clone());
+        (
+            selected,
+            MergeReconciliationCursorUpdate::Set(MergeReconciliationCursor {
+                generation: next_generation,
+                next_branch,
+            }),
+        )
+    }
+
+    /// Select the next fixed-cap reconciliation slice. Active branches are
+    /// ordered first. When active work alone exceeds the cap, one final slot
+    /// remains reserved for untracked recovery so neither durable cursor can
+    /// be starved indefinitely.
+    pub fn merge_reconciliation_branch_batch(
+        &self,
+        limit: usize,
+    ) -> MergeReconciliationBranchBatch {
+        let active = self
+            .active_launched_branches()
+            .into_iter()
+            .map(|(_, branch)| branch)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let active_set = active.iter().cloned().collect::<BTreeSet<_>>();
+        let untracked = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                !item.state.is_terminal()
+                    && item.issue.state == IssueMonitorIssueState::Open
+                    && !self.merged_issues.contains(&item.issue.number)
+                    && !self.active_launches.contains(&item.issue.number)
+            })
+            .filter_map(|item| {
+                item.launch_plan
+                    .as_ref()
+                    .map(|plan| plan.branch_name.clone())
+            })
+            .filter(|branch| !active_set.contains(branch))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let reserved_untracked =
+            usize::from(limit > 1 && !untracked.is_empty() && active.len() >= limit);
+        let active_limit = limit.saturating_sub(reserved_untracked);
+        let (mut branches, active_cursor) = Self::select_merge_reconciliation_candidates(
+            &active,
+            self.merge_reconciliation_active_cursor.as_ref(),
+            active_limit,
+        );
+        let remaining = limit.saturating_sub(branches.len());
+        let (untracked_branches, untracked_cursor) = Self::select_merge_reconciliation_candidates(
+            &untracked,
+            self.merge_reconciliation_untracked_cursor.as_ref(),
+            remaining,
+        );
+        branches.extend(untracked_branches);
+
+        MergeReconciliationBranchBatch {
+            branches,
+            active_cursor,
+            untracked_cursor,
+        }
+    }
+
+    /// Commit cursor progress only after the caller completed every branch
+    /// query in this batch. Low quota and transport failures deliberately do
+    /// not call this method, preserving the exact retry slice.
+    pub fn record_merge_reconciliation_batch(&mut self, batch: &MergeReconciliationBranchBatch) {
+        if let MergeReconciliationCursorUpdate::Set(cursor) = &batch.active_cursor {
+            self.merge_reconciliation_active_cursor = Some(cursor.clone());
+        }
+        if let MergeReconciliationCursorUpdate::Set(cursor) = &batch.untracked_cursor {
+            self.merge_reconciliation_untracked_cursor = Some(cursor.clone());
+        }
     }
 
     /// issue → work branch for every currently active (launched) Issue. Uses
@@ -14214,6 +14389,153 @@ mod tests {
         let merged: BTreeSet<String> = ["work/some-other-branch".to_string()].into_iter().collect();
         assert!(monitor.reconcile_merged_branches(&merged).is_empty());
         assert_eq!(monitor.active_count(), 1, "unmerged work stays launched");
+    }
+
+    /// Issue #3818 / SPEC #3200 T-222: a scan spends its fixed allowance on
+    /// active work first, then carries both an over-cap active set and the
+    /// untracked recovery set across persisted prefs without starvation.
+    #[test]
+    fn merge_reconciliation_batch_prioritizes_active_and_persists_cursors() {
+        let active_count = gwt_git::pr_status::MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN + 2;
+        let all_count = active_count + 3;
+        let candidates = (1..=all_count as u64).map(issue).collect::<Vec<_>>();
+        let prefs = IssueMonitorPrefs {
+            max_active_agents: active_count,
+            launched_issues: (1..=active_count as u64)
+                .map(|issue_number| IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: format!("window-{issue_number}"),
+                })
+                .collect(),
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-08-31T00:00:00Z");
+
+        let first = monitor.merge_reconciliation_branch_batch(
+            gwt_git::pr_status::MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN,
+        );
+        assert_eq!(
+            first.branches.len(),
+            gwt_git::pr_status::MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN
+        );
+        let active_branches = monitor
+            .active_launched_branches()
+            .into_iter()
+            .map(|(_, branch)| branch)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            first.branches[..first.branches.len() - 1]
+                .iter()
+                .all(|branch| active_branches.contains(branch)),
+            "active work is always ordered before recovery work"
+        );
+        assert!(
+            !active_branches.contains(first.branches.last().expect("reserved recovery slot")),
+            "an over-cap active set must not starve untracked recovery forever"
+        );
+        monitor.record_merge_reconciliation_batch(&first);
+
+        let persisted = monitor.prefs();
+        assert!(persisted.merge_reconciliation_active_cursor.is_some());
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), persisted.clone());
+        scan_issue_monitor_candidates(&mut restored, &candidates, "2026-08-31T00:05:00Z");
+        let second = restored.merge_reconciliation_branch_batch(
+            gwt_git::pr_status::MAX_MERGE_RECONCILIATION_BRANCHES_PER_SCAN,
+        );
+
+        assert!(
+            second.branches[..second.branches.len() - 1]
+                .iter()
+                .all(|branch| active_branches.contains(branch)),
+            "the carried active tail stays ahead of untracked recovery"
+        );
+        assert!(
+            !active_branches.contains(second.branches.last().expect("recovery branch")),
+            "the reserved recovery slot advances across scans"
+        );
+        restored.record_merge_reconciliation_batch(&second);
+        assert_ne!(
+            restored.prefs().merge_reconciliation_active_cursor,
+            persisted.merge_reconciliation_active_cursor,
+            "the active cursor advances only after a successful batch"
+        );
+    }
+
+    #[test]
+    fn merge_reconciliation_cursor_points_to_the_unqueried_successor() {
+        let first_candidates = vec![
+            "work/a".to_string(),
+            "work/b".to_string(),
+            "work/c".to_string(),
+            "work/d".to_string(),
+        ];
+        let (first, update) =
+            IssueMonitorState::select_merge_reconciliation_candidates(&first_candidates, None, 2);
+        assert_eq!(first, vec!["work/a", "work/b"]);
+        let MergeReconciliationCursorUpdate::Set(cursor) = update else {
+            panic!("over-cap selection must advance a cursor");
+        };
+        assert_eq!(cursor.next_branch.as_deref(), Some("work/c"));
+
+        // Both queried branches may disappear after they reconcile. The next
+        // scan must still resume from the first unqueried successor, not reset
+        // to the lexicographic prefix.
+        let remaining = vec![
+            "work/a".to_string(),
+            "work/c".to_string(),
+            "work/d".to_string(),
+        ];
+        let (second, _) =
+            IssueMonitorState::select_merge_reconciliation_candidates(&remaining, Some(&cursor), 2);
+        assert_eq!(second, vec!["work/c", "work/d"]);
+    }
+
+    #[test]
+    fn merge_reconciliation_cursor_rebase_keeps_the_newer_generation() {
+        let cursor = |generation, next_branch: &str| MergeReconciliationCursor {
+            generation,
+            next_branch: Some(next_branch.to_string()),
+        };
+        let local = IssueMonitorPrefs {
+            merge_reconciliation_active_cursor: Some(cursor(1, "work/b")),
+            ..IssueMonitorPrefs::default()
+        };
+        let disk = IssueMonitorPrefs {
+            merge_reconciliation_active_cursor: Some(cursor(2, "work/c")),
+            ..IssueMonitorPrefs::default()
+        };
+        let mut stale = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), local);
+        stale.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            stale.prefs().merge_reconciliation_active_cursor,
+            disk.merge_reconciliation_active_cursor,
+            "a stale process may not roll durable cursor progress back"
+        );
+
+        let newer_local = IssueMonitorPrefs {
+            merge_reconciliation_active_cursor: Some(cursor(3, "work/d")),
+            ..IssueMonitorPrefs::default()
+        };
+        let mut advanced =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), newer_local.clone());
+        advanced.rebase_gui_observer_prefs(&disk);
+        assert_eq!(
+            advanced.prefs().merge_reconciliation_active_cursor,
+            newer_local.merge_reconciliation_active_cursor,
+            "an older disk snapshot may not erase this scan's progress"
+        );
+    }
+
+    #[test]
+    fn legacy_issue_monitor_prefs_default_merge_reconciliation_cursors() {
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(r#"{"enabled":true,"max_active_agents":1,"priority_order":[]}"#)
+                .expect("legacy prefs remain readable");
+
+        assert_eq!(prefs.merge_reconciliation_active_cursor, None);
+        assert_eq!(prefs.merge_reconciliation_untracked_cursor, None);
     }
 
     /// Issue #3645 AC-3/AC-4: emptying `launched_issues` — the repair the
