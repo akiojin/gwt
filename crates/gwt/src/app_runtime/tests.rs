@@ -58164,6 +58164,18 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         prompt.contains("issue.monitor.status"),
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
     );
+    assert!(
+        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+        "{label} must carry the canonical gwtd execution-isolation clause verbatim; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("`pr.list`"),
+        "{label} must inventory open PRs each cycle (Issue #3781); got: {prompt}"
+    );
+    assert!(
+        prompt.contains("never auto-close"),
+        "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
+    );
 }
 
 /// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.

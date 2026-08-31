@@ -503,6 +503,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.list"
             | "issue.monitor.status"
             | "pr.current"
+            | "pr.list"
             | "pr.view"
             | "pr.checks"
             | "pr.reviews"
