@@ -8,6 +8,7 @@
 // updateCameraFrame DOM output and the cell-click → frameWindow contract.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 
@@ -51,6 +52,15 @@ function makeMinimap(container, windows, overrides = {}) {
   return { minimap, calls };
 }
 
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
 test("createFleetMinimap returns a no-op surface when there is no container", () => {
   const minimap = createFleetMinimap({ container: null });
   assert.equal(typeof minimap.renderCells, "function");
@@ -61,6 +71,69 @@ test("createFleetMinimap returns a no-op surface when there is no container", ()
   minimap.renderCells();
   minimap.update();
   minimap.setZoom(1.25);
+});
+
+test("visibility toggle collapses the radar, persists the preference, and keeps cell state live", () => {
+  const { container } = setupDom();
+  const storage = memoryStorage();
+  const windows = [
+    windowAt("w-agent", 0, 0, 100, 80, {
+      agent_color: "violet",
+      telemetry: "running",
+    }),
+  ];
+  const { minimap } = makeMinimap(container, windows, { storage });
+
+  minimap.renderCells();
+
+  const toggle = container.querySelector(".fleet-minimap__visibility-toggle");
+  assert.ok(toggle, "the minimap exposes its visibility toggle");
+  assert.equal(container.dataset.collapsed, "false");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(toggle.getAttribute("aria-label"), "Hide minimap");
+
+  toggle.dispatchEvent(new container.ownerDocument.defaultView.Event("click"));
+
+  assert.equal(container.dataset.collapsed, "true");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle.getAttribute("aria-label"), "Show minimap");
+  assert.equal(storage.getItem("gwt:ui:fleet-minimap-collapsed"), "1");
+  windows[0].telemetry = "waiting";
+  minimap.renderCells();
+  assert.equal(
+    container.querySelector('[data-window-id="w-agent"]').dataset.telemetry,
+    "waiting",
+    "collapsed presentation keeps receiving telemetry updates",
+  );
+
+  toggle.dispatchEvent(new container.ownerDocument.defaultView.Event("click"));
+
+  assert.equal(container.dataset.collapsed, "false");
+  assert.equal(storage.getItem("gwt:ui:fleet-minimap-collapsed"), null);
+});
+
+test("stored collapsed preference is restored when the minimap is created", () => {
+  const { container } = setupDom();
+  const storage = memoryStorage({ "gwt:ui:fleet-minimap-collapsed": "1" });
+  makeMinimap(container, [windowAt("w-1", 0, 0)], { storage });
+
+  const toggle = container.querySelector(".fleet-minimap__visibility-toggle");
+  assert.equal(container.dataset.collapsed, "true");
+  assert.equal(toggle?.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle?.getAttribute("aria-label"), "Show minimap");
+});
+
+test("collapsed minimap CSS leaves only the token-styled visibility toggle", () => {
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\.fleet-minimap\[data-collapsed="true"\]/);
+  assert.match(
+    css,
+    /\.fleet-minimap\[data-collapsed="true"\]\s*>\s*:not\(\.fleet-minimap__visibility-toggle\)/,
+  );
+  const toggleRule = /\.fleet-minimap__visibility-toggle\s*\{[^}]+\}/.exec(css)?.[0] ?? "";
+  assert.match(toggleRule, /var\(--color-border\)/);
+  assert.match(toggleRule, /var\(--color-surface-elevated\)/);
+  assert.doesNotMatch(toggleRule, /#[0-9a-f]{3,8}\b|rgba?\(/i);
 });
 
 test("renderCells creates one cell per window keyed by window id", () => {
