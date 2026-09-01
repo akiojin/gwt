@@ -3883,7 +3883,10 @@ mod tests {
         );
         assert_eq!(config.args, ["--model", "x"]);
         assert!(
-            !config.args.iter().any(|arg| PathBuf::from(arg) == bun),
+            !config
+                .args
+                .iter()
+                .any(|arg| Path::new(arg) == bun.as_path()),
             "native entrypoint must not be passed to the Bun runtime"
         );
         assert_eq!(config.working_dir, Some(PathBuf::from("/tmp/project")));
