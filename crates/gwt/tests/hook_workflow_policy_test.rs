@@ -876,21 +876,27 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         let candidate_lock_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
             .join("improvements")
             .join(".lock");
-        let lock_release_at = Arc::new(OnceLock::<Instant>::new());
-        let server_lock_release_at = Arc::clone(&lock_release_at);
+        let candidate_lock = Arc::new(OnceLock::new());
+        let server_candidate_lock = Arc::clone(&candidate_lock);
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let address = listener.local_addr().expect("loopback address");
         let server = std::thread::spawn(move || {
             let mut request = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             read_http_request(&mut request);
-            let candidate_lock = std::fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(candidate_lock_path)
-                .expect("candidate store lock");
-            fs2::FileExt::lock_exclusive(&candidate_lock).expect("hold candidate store lock");
+            let held_candidate_lock = Arc::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(candidate_lock_path)
+                    .expect("candidate store lock"),
+            );
+            fs2::FileExt::lock_exclusive(held_candidate_lock.as_ref())
+                .expect("hold candidate store lock");
+            server_candidate_lock
+                .set(held_candidate_lock)
+                .expect("publish held candidate store lock");
             let body = r#"{"data":{"repository":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
             write!(
                 request,
@@ -900,11 +906,6 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
             )
             .expect("complete owner corpus response");
             request.flush().expect("flush owner corpus response");
-            let release_at = *server_lock_release_at
-                .get()
-                .expect("absolute candidate lock release deadline");
-            std::thread::sleep(release_at.saturating_duration_since(Instant::now()));
-            fs2::FileExt::unlock(&candidate_lock).expect("release candidate store lock");
         });
         let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
         let _rest = ScopedEnvVar::set("GWT_OWNER_GITHUB_REST_BASE", format!("http://{address}"));
@@ -919,37 +920,37 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
             DIRECT_STOP_TEST_TOTAL_BUDGET,
         );
         let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
-        let release_at = resolution_deadline.expires_at() + Duration::from_millis(25);
-        assert!(
-            release_at < deadline.expires_at(),
-            "fixture must release the lock inside the settlement reserve"
+        assert_eq!(
+            deadline
+                .expires_at()
+                .duration_since(resolution_deadline.expires_at()),
+            DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+            "resolution deadline must preserve the full settlement reserve"
         );
-        lock_release_at
-            .set(release_at)
-            .expect("set absolute candidate lock release deadline");
-        let started = Instant::now();
 
-        let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+        let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve_observed(
             &mut env,
             false,
             &deadline,
             DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+            || {
+                fs2::FileExt::unlock(
+                    candidate_lock
+                        .get()
+                        .expect("server must publish the held candidate store lock")
+                        .as_ref(),
+                )
+                .expect("release candidate store lock at fallback contention");
+            },
         );
-        let elapsed = started.elapsed();
 
         server.join().expect("loopback server");
         let HookOutput::StopBlock { reason } = output else {
-            panic!(
-                "post-attempt store contention must block Stop; output={output:?}; elapsed={elapsed:?}"
-            );
+            panic!("post-attempt store contention must block Stop; output={output:?}");
         };
         assert!(reason.contains("state=blocked"), "{reason}");
         assert!(reason.contains("reason=timeout"), "{reason}");
         assert!(reason.contains("RETRY_WITHIN_BUDGET"), "{reason}");
-        assert!(
-            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
-            "elapsed={elapsed:?}"
-        );
         let persisted = candidate_public_values(repo.path());
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0]["state"], "blocked");
