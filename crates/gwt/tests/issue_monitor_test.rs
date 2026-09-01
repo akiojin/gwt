@@ -366,7 +366,7 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
     assert_eq!(first.branch_name, "work/issue-42");
     assert_eq!(
         issue_monitor_launch_prompt(first.linked_issue_kind, first.issue_number),
-        "$gwt-execute #42"
+        "$gwt-execute #42\n\nBefore changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #42 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
     );
     assert_eq!(monitor.queue_len(), 1);
     assert!(monitor

@@ -589,8 +589,12 @@ fn run_monitor_launch_now<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        let hold_cleared = monitor.clear_retry_hold(number);
-        if hold_cleared {
+        let retry_hold_cleared = monitor.clear_retry_hold(number);
+        let completion_hold_cleared = monitor.clear_completion_hold(number);
+        let hold_cleared = retry_hold_cleared || completion_hold_cleared;
+        if completion_hold_cleared {
+            *prefs = monitor.prefs();
+        } else if retry_hold_cleared {
             prefs.autonomous_records = monitor.prefs().autonomous_records;
         }
         Ok(hold_cleared)
@@ -808,18 +812,24 @@ fn run_monitor_requeue<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
-        let outcome = monitor.requeue_failed_issue(number, reason, &now);
-        if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
-            *prefs = monitor.prefs();
-        }
-        Ok(outcome)
-    })
-    .map_err(io_as_api_error)?;
+    let (prefs, (outcome, completion_hold_cleared)) =
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let outcome = monitor.requeue_failed_issue(number, reason, &now);
+            let completion_hold_cleared =
+                matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld)
+                    && monitor.clear_completion_hold(number);
+            if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. })
+                || completion_hold_cleared
+            {
+                *prefs = monitor.prefs();
+            }
+            Ok((outcome, completion_hold_cleared))
+        })
+        .map_err(io_as_api_error)?;
 
     let (stale_window_id, attempts_before, attempts_after) = match outcome {
         crate::IssueMonitorRequeueOutcome::Requeued {
@@ -844,6 +854,26 @@ fn run_monitor_requeue<E: CliEnv>(
             return Ok(1);
         }
         crate::IssueMonitorRequeueOutcome::NotHeld => {
+            if completion_hold_cleared {
+                let delivery =
+                    issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+                out.push_str(
+                    &serde_json::json!({
+                        "number": number,
+                        "status": "requeued",
+                        "reason": reason,
+                        "released_hold": "completion",
+                        "released_at": now,
+                        "scan_requested": delivery.scan_requested,
+                        "scan_delivery": delivery.scan_delivery,
+                        "scan_error": delivery.scan_error,
+                        "pane_teardown": "none",
+                    })
+                    .to_string(),
+                );
+                out.push('\n');
+                return Ok(0);
+            }
             // Issue #3683 (AC-3): a `BlockedByClaim` hold lives only in the
             // driving process's inbox, never in the prefs this process reads,
             // so the failure gate above cannot see it. Ask the live daemon's
@@ -1088,9 +1118,8 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
-    pm_privileged: bool,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1114,7 +1143,6 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
-    pm_privileged: bool,
 ) -> io::Result<()> {
     if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
         return Err(io::Error::new(
@@ -1122,12 +1150,12 @@ fn validate_monitor_config_set(
             "at least one Issue Monitor config field is required",
         ));
     }
-    // SPEC-3431 FR-008/FR-009: same rule as the parse layer — the registered
-    // PM may raise the switches; every other session must use the GUI.
-    if !pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
+    // Issue #3814: policy lives in the command handler so both JSON dispatch
+    // and direct callers receive the same effect-free GUI-only ON refusal.
+    if enabled == Some(true) || autonomous_mode == Some(true) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "enabling Issue Monitor or autonomous mode requires an explicit GUI action              (only the project's registered PM agent may raise it from the CLI;              run `pm.status` to see the current PM)",
+            "enabling Issue Monitor or autonomous mode requires an explicit GUI action",
         ));
     }
     if max_active == Some(0) {
@@ -1139,23 +1167,6 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
-/// SPEC-3431 FR-008/FR-009: the asymmetric boundary from Issue #3357 stays in
-/// force for every agent session — only the project's registered PM may raise
-/// `enabled` / `autonomous_mode`. The privileged subject is resolved from the
-/// ambient `GWT_SESSION_ID` (the caller cannot claim someone else's id through
-/// params) matched against the durable PM registration. Raising the switch
-/// changes nothing about merges: SPEC #3200's fail-closed merge gate still
-/// decides every merge on its own.
-fn caller_is_registered_pm(project_root: &std::path::Path) -> bool {
-    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
-        return false;
-    };
-    crate::pm_registry::session_is_registered_pm(
-        &crate::pm_registry::pm_prefs_path_for_repo_path(project_root),
-        session_id.trim(),
-    )
-}
-
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -1165,40 +1176,7 @@ fn run_monitor_config_set<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let pm_privileged = caller_is_registered_pm(&project_root);
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)
-        .map_err(io_as_api_error)?;
-
-    // SPEC-3431 FR-008: a PM raising a switch writes the prefs SOT directly
-    // and asks for an immediate rescan. The daemon control lane refuses ON in
-    // its own decoder (it cannot see who sent a frame), and prefs is the
-    // source the scan driver re-reads every pass — so this is the honest path
-    // rather than a second authority channel.
-    if pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
-        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, true)
-        })
-        .map_err(io_as_api_error)?;
-        let scan_now = crate::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            serde_json::json!({ "scan_now": {} }),
-            std::process::id(),
-        );
-        let _ = publish_monitor_config_set(&project_root, scan_now);
-        let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-        out.push_str(
-            &serde_json::json!({
-                "enabled": prefs.enabled,
-                "autonomous_mode": prefs.autonomous_mode,
-                "max_active": prefs.max_active_agents.max(1),
-                "applied_by": "pm",
-            })
-            .to_string(),
-        );
-        out.push('\n');
-        return Ok(0);
-    }
+    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1218,7 +1196,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, pm_privileged)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
         })
         .map_err(io_as_api_error)?;
     }
@@ -2451,6 +2429,58 @@ mod tests {
         assert_eq!(record.retry_hold_provider, None);
     }
 
+    #[test]
+    fn launch_now_clears_a_stale_completion_hold_and_requires_a_fresh_session() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version:
+                    crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+                completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                    issue_number: 42,
+                    generation: 1,
+                    state: crate::issue_monitor::IssueCompletionState::Completed,
+                    issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                    evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let _ = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(result["hold_cleared"], true);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.merged_issues.is_empty());
+        assert_eq!(
+            persisted.completion_records[0].state,
+            crate::issue_monitor::IssueCompletionState::Reopened
+        );
+        assert_eq!(
+            persisted.queued_launch_session_strategies.get(&42),
+            Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+    }
+
     /// Issue #3655 AC-4: an open unblock request has to be visible in the one
     /// field the PM reads to find work that needs a human.
     #[test]
@@ -3280,6 +3310,90 @@ mod tests {
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
     }
 
+    /// Issue #3814 AC-2/AC-3: registered PM identity must not open a hidden
+    /// JSON path around the GUI-only ON boundary, and rejection is effect-free.
+    #[test]
+    fn issue_monitor_config_set_rejects_pm_on_direction_without_changing_status() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: false,
+                autonomous_mode: false,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        crate::pm_registry::try_register_pm(
+            &pm_prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        assert!(crate::pm_registry::session_is_registered_pm(
+            &pm_prefs_path,
+            "pm-session"
+        ));
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        for (enabled, autonomous_mode) in [(Some(true), None), (None, Some(true))] {
+            let mut out = String::new();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorConfigSet {
+                    project_root: Some(repo.clone()),
+                    enabled,
+                    autonomous_mode,
+                    max_active: None,
+                },
+                &mut out,
+            );
+            assert!(result.is_err(), "PM JSON ON request must be refused");
+            assert!(out.is_empty(), "a refusal must not report applied state");
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs bytes after refusal"),
+                before,
+                "a refused ON request must not change persisted state"
+            );
+        }
+
+        let mut status_out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus {
+                project_root: Some(repo),
+            },
+            &mut status_out,
+        )
+        .expect("status after refusal");
+        let status: serde_json::Value =
+            serde_json::from_str(status_out.trim()).expect("status JSON");
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["autonomous_mode"], false);
+        assert_eq!(status["max_active"], 3);
+    }
+
     /// SPEC-3431 FR-033 / T-087b: the operation the PM actually calls.
     ///
     /// Drives the whole path a `gwtd` invocation takes — load prefs, evaluate
@@ -3585,6 +3699,59 @@ mod tests {
         .expect("requeue runs");
         assert_eq!(code, 1);
         assert!(out.contains("not_held"), "{out}");
+    }
+
+    #[test]
+    fn monitor_requeue_releases_a_stale_completion_hold_instead_of_refusing_not_held() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version:
+                    crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+                completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                    issue_number: 42,
+                    generation: 7,
+                    state: crate::issue_monitor::IssueCompletionState::Completed,
+                    issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                    evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+
+        assert_eq!(code, 0);
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("requeue response is JSON");
+        assert_eq!(response["status"], "requeued");
+        assert_eq!(response["released_hold"], "completion");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.merged_issues.is_empty());
+        assert_eq!(persisted.completion_records[0].generation, 8);
+        assert_eq!(
+            persisted.completion_records[0].state,
+            crate::issue_monitor::IssueCompletionState::Reopened
+        );
     }
 
     // -------------------------------------------------------------------
