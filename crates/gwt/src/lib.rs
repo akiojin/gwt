@@ -38,6 +38,8 @@ pub mod managed_assets;
 pub mod migration;
 pub mod native_app;
 pub(crate) mod path_filter;
+#[doc(hidden)]
+pub mod perf;
 pub mod persistence;
 pub mod pm_registry;
 pub mod preset;
