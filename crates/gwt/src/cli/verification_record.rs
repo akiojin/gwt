@@ -43,6 +43,9 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+/// Live GitHub opt-in must never cross the `verify.run` child boundary.
+const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationCommandResult {
     pub command: String,
@@ -1953,6 +1956,7 @@ fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), Stri
     let output = match gwt_core::process::hidden_command(&args[0])
         .args(&args[1..])
         .current_dir(worktree)
+        .env_remove(LIVE_GITHUB_OPT_IN_ENV)
         .output()
     {
         Ok(output) => output,
@@ -2079,6 +2083,11 @@ where
     let started_at = Utc::now();
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
+    if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
+        transcript.push_str(
+            "warning: GWT_ALLOW_REAL_GH is set; verify.run ignores it for child processes to preserve test isolation\n",
+        );
+    }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let (exit_code, tail) = execute_command(worktree, command)?;
@@ -3250,6 +3259,54 @@ pub(crate) mod tests {
         assert_eq!(
             split_command_line("grep ';' config.toml").unwrap(),
             vec!["grep", ";", "config.toml"]
+        );
+    }
+
+    #[test]
+    fn verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once() {
+        const CHILD_PROBE: &str = "GWT_VERIFY_LIVE_GH_CHILD_PROBE";
+        const TEST_NAME: &str = "cli::verification_record::tests::verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once";
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if std::env::var_os(CHILD_PROBE).is_some() {
+            assert!(
+                std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
+                "verify.run must not expose its live GitHub opt-in to a test child"
+            );
+            let error = gwt_core::process_console::spawn_logged_blocking(
+                &gwt_core::process_console::ProcessConsoleHub::new(),
+                gwt_core::process_console::ProcessKind::Gh,
+                "gh",
+                &["--version"],
+                gwt_core::process_console::SpawnOptions::new("verify.run child guard probe"),
+            )
+            .expect_err("the child test guard must fail closed before spawning real gh");
+            assert!(error
+                .to_string()
+                .contains(gwt_core::process_console::REAL_GH_BLOCKED_ERROR_CODE));
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let current_exe = std::env::current_exe().unwrap();
+        let command = format!(
+            r#""{}" --exact {TEST_NAME} --nocapture"#,
+            current_exe.display()
+        );
+        let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
+        let _sandbox =
+            ["GWT_TEST_GH_SANDBOX", "GWT_TEST_GH", "GWT_FAKE_GH_MODE"].map(ScopedEnvVar::unset);
+        let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+
+        let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(transcript.matches("GWT_ALLOW_REAL_GH").count(), 1);
+        assert_eq!(
+            std::env::var_os("GWT_ALLOW_REAL_GH").as_deref(),
+            Some("1".as_ref())
         );
     }
 
