@@ -50,6 +50,7 @@ pub struct TestEnv {
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
     pub prs: HashMap<u64, PrStatus>,
+    pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
     pub pr_comments: Vec<(u64, String)>,
     pub pr_create_call_log: Vec<PrCreateCall>,
@@ -102,6 +103,7 @@ impl TestEnv {
             linked_pr_call_log: Vec::new(),
             current_pr: None,
             prs: HashMap::new(),
+            pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
             pr_comments: Vec::new(),
             pr_create_call_log: Vec::new(),
@@ -368,6 +370,20 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.pr_quarantine_contexts
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no PR quarantine context: {number}"),
+                )
+            })
     }
     fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
         self.pr_list_call_count += 1;

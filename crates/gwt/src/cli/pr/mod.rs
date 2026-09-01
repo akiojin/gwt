@@ -16,17 +16,32 @@ mod gh;
 pub(super) use gh::{
     comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh, edit_or_create_repo_guard,
     edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh, fetch_pr_checks_via_gh,
-    fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
-    mark_pr_ready_via_gh, parse_available_fields, parse_pr_checks_items_json,
-    parse_pr_checks_items_response, parse_pr_number_from_url,
-    reply_and_resolve_pr_review_threads_via_gh, review_thread_has_comment_body,
-    should_reply_to_review_thread, should_resolve_review_thread,
+    fetch_pr_quarantine_context_via_gh, fetch_pr_review_thread_state_via_gh,
+    fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh, mark_pr_ready_via_gh,
+    parse_available_fields, parse_pr_checks_items_json, parse_pr_checks_items_response,
+    parse_pr_number_from_url, reply_and_resolve_pr_review_threads_via_gh,
+    review_thread_has_comment_body, should_reply_to_review_thread, should_resolve_review_thread,
 };
 
 use gwt_git::PrStatus;
 use gwt_github::SpecOpsError;
 
 use crate::cli::{CliEnv, CliParseError, PrChecksSummary, PrCommand, PrReview, PrReviewThread};
+
+/// Durable top-level PR comment used by the typed quarantine gate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrQuarantineComment {
+    pub id: u64,
+    pub body: String,
+}
+
+/// Strict current PR body/comment snapshot used by conditional verification.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrQuarantineContext {
+    pub number: u64,
+    pub body: String,
+    pub comments: Vec<PrQuarantineComment>,
+}
 
 pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
     let mut it = args.iter().peekable();
@@ -95,7 +110,102 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
     }
 }
 
+#[derive(Clone)]
+struct VerificationMutationGuard {
+    session_id: String,
+    owner_number: Option<u64>,
+    record_id: String,
+    run_hash: String,
+    plan_hash: String,
+    completion: Option<crate::cli::execution_state::ExecutionCompletionEvidence>,
+}
+
 fn dispatch_pr_mutation<T>(
+    expected: Option<&gwt_agent::SessionExecutionBinding>,
+    verification_guard: Option<(&std::path::Path, &VerificationMutationGuard)>,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    if let Some((worktree, guard)) = verification_guard {
+        return crate::cli::trusted_store::with_write_lease(worktree, || {
+            let current = crate::cli::verification_record::load(worktree)?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "PR mutation refused: typed quarantine verification record disappeared before external dispatch",
+                )
+            })?;
+            if current.content_hash.is_empty()
+                || current.record_id != guard.record_id
+                || current.content_hash != guard.run_hash
+                || current.verification_plan_hash != guard.plan_hash
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "PR mutation refused: typed quarantine verification evidence changed before external dispatch; revalidate the current record and PR marker",
+                ));
+            }
+            let plan = crate::cli::verification_record::load_plan(worktree)?;
+            let status = if let Some(completion) = &guard.completion {
+                let owner_number = guard.owner_number.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "PR mutation refused: completed verification guard has no owner Issue",
+                    )
+                })?;
+                crate::cli::verification_record::validate_completion_evidence_snapshot(
+                    worktree,
+                    &guard.session_id,
+                    owner_number,
+                    completion,
+                )
+                .map(|_| {
+                    if completion.used_typed_quarantine {
+                        crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+                    } else {
+                        crate::cli::verification_record::EvidenceStatus::Fresh
+                    }
+                })
+            } else {
+                Ok(crate::cli::verification_record::evaluate_evidence_snapshot(
+                    worktree,
+                    &guard.session_id,
+                    guard.owner_number,
+                    plan.as_ref(),
+                    &current,
+                ))
+            }
+            .map_err(|refusal| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "PR mutation refused: typed quarantine verification evidence changed before external dispatch: {refusal}"
+                    ),
+                )
+            })?;
+            let expected_status = if guard
+                .completion
+                .as_ref()
+                .is_some_and(|completion| !completion.used_typed_quarantine)
+            {
+                crate::cli::verification_record::EvidenceStatus::Fresh
+            } else {
+                crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+            };
+            if status != expected_status {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "PR mutation refused: typed quarantine verification evidence changed before external dispatch: {}",
+                        status.describe()
+                    ),
+                ));
+            }
+            dispatch_pr_mutation_with_binding(expected, operation)
+        });
+    }
+    dispatch_pr_mutation_with_binding(expected, operation)
+}
+
+fn dispatch_pr_mutation_with_binding<T>(
     expected: Option<&gwt_agent::SessionExecutionBinding>,
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
@@ -154,9 +264,12 @@ pub(super) fn run<E: CliEnv>(
             | PrCommand::Ready { .. }
     );
     let mut mutation_binding = None;
+    let mut mutation_worktree = None;
+    let mut verification_guard = None;
     let mut ready_adjudications = Vec::new();
     if is_pr_mutation {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        mutation_worktree = Some(worktree.clone());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
             .ok()
             .map(|value| value.trim().to_string())
@@ -177,6 +290,97 @@ pub(super) fn run<E: CliEnv>(
                 | PrCommand::CreateBody { draft: false, .. }
                 | PrCommand::Ready { .. }
         );
+        if is_ready_handoff {
+            let target_pr = match &cmd {
+                PrCommand::Ready { number } => Some(*number),
+                _ => None,
+            };
+            let completed_evidence = crate::cli::execution_state::load(&worktree)
+                .map_err(super::io_as_api_error)?
+                .filter(|record| {
+                    record.status == crate::cli::execution_state::ExecutionControlStatus::Completed
+                })
+                .and_then(|record| {
+                    record
+                        .completion_evidence
+                        .map(|evidence| (record.owner_number, evidence))
+                });
+            if let Some((owner_number, completion)) = completed_evidence {
+                if completion.used_typed_quarantine && target_pr.is_none() {
+                    out.push_str("PR handoff refused: typed quarantine requires Draft-first creation so the exact PR body or durable top-level comment can be recorded and read back.\n");
+                    return Ok(2);
+                }
+                let session_id = session_id.as_deref().unwrap_or_default();
+                if let Err(refusal) = crate::cli::verification_record::validate_completion_evidence(
+                    env,
+                    &worktree,
+                    session_id,
+                    owner_number,
+                    &completion,
+                    target_pr,
+                ) {
+                    out.push_str(&format!(
+                        "PR handoff refused: completion verification evidence is not current: {refusal}\n"
+                    ));
+                    return Ok(2);
+                }
+                verification_guard = Some(VerificationMutationGuard {
+                    session_id: session_id.to_string(),
+                    owner_number: Some(owner_number),
+                    record_id: completion.verification_record_id.clone(),
+                    run_hash: completion.verification_run_hash.clone(),
+                    plan_hash: completion.verification_plan_hash.clone(),
+                    completion: Some(completion),
+                });
+            } else {
+                match crate::cli::verification_record::load(&worktree) {
+                    Ok(Some(verification)) if !verification.quarantined_failures.is_empty() => {
+                        if target_pr.is_none() {
+                            out.push_str("PR handoff refused: typed quarantine requires Draft-first creation so the exact PR body or durable top-level comment can be recorded and read back.\n");
+                            return Ok(2);
+                        }
+                        let evidence = crate::cli::verification_record::evaluate_evidence(
+                            &worktree,
+                            session_id.as_deref().unwrap_or_default(),
+                            None,
+                        );
+                        if evidence
+                            != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+                        {
+                            out.push_str(&format!("PR handoff refused: {}\n", evidence.describe()));
+                            return Ok(2);
+                        }
+                        if let Err(refusal) =
+                            crate::cli::verification_record::validate_current_quarantine_references(
+                                env,
+                                &verification,
+                                target_pr,
+                            )
+                        {
+                            out.push_str(&format!(
+                            "PR handoff refused: typed quarantine evidence is not current: {refusal}\n"
+                        ));
+                            return Ok(2);
+                        }
+                        verification_guard = Some(VerificationMutationGuard {
+                            session_id: session_id.unwrap_or_default().to_string(),
+                            owner_number: verification.owner_number,
+                            record_id: verification.record_id.clone(),
+                            run_hash: verification.content_hash.clone(),
+                            plan_hash: verification.verification_plan_hash.clone(),
+                            completion: None,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        out.push_str(&format!(
+                            "PR handoff refused: verification evidence is unreadable: {error}\n"
+                        ));
+                        return Ok(2);
+                    }
+                }
+            }
+        }
         if matches!(cmd, PrCommand::Ready { .. }) {
             match crate::cli::execution_state::pr_ready_adjudications(env.repo_path()) {
                 Ok(references) => ready_adjudications = references,
@@ -241,9 +445,16 @@ pub(super) fn run<E: CliEnv>(
             draft,
         } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
-                env.create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
-            })
+            let pr = dispatch_pr_mutation(
+                mutation_binding.as_ref(),
+                verification_guard.as_ref().map(|guard| {
+                    (
+                        mutation_worktree.as_deref().expect("mutation worktree"),
+                        guard,
+                    )
+                }),
+                || env.create_pr(&base, head.as_deref(), &title, &body, &labels, draft),
+            )
             .map_err(super::io_as_api_error)?;
             sync_workspace_pr_metadata(env, &pr, head.as_deref());
             out.push_str("created pull request\n");
@@ -258,9 +469,16 @@ pub(super) fn run<E: CliEnv>(
             labels,
             draft,
         } => {
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
-                env.create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
-            })
+            let pr = dispatch_pr_mutation(
+                mutation_binding.as_ref(),
+                verification_guard.as_ref().map(|guard| {
+                    (
+                        mutation_worktree.as_deref().expect("mutation worktree"),
+                        guard,
+                    )
+                }),
+                || env.create_pr(&base, head.as_deref(), &title, &body, &labels, draft),
+            )
             .map_err(super::io_as_api_error)?;
             sync_workspace_pr_metadata(env, &pr, head.as_deref());
             out.push_str("created pull request\n");
@@ -277,9 +495,16 @@ pub(super) fn run<E: CliEnv>(
                 .as_deref()
                 .map(|path| env.read_file(path).map_err(super::io_as_api_error))
                 .transpose()?;
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
-                env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
-            })
+            let pr = dispatch_pr_mutation(
+                mutation_binding.as_ref(),
+                verification_guard.as_ref().map(|guard| {
+                    (
+                        mutation_worktree.as_deref().expect("mutation worktree"),
+                        guard,
+                    )
+                }),
+                || env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels),
+            )
             .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
             render_pr(out, &pr);
@@ -291,9 +516,16 @@ pub(super) fn run<E: CliEnv>(
             body,
             add_labels,
         } => {
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
-                env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
-            })
+            let pr = dispatch_pr_mutation(
+                mutation_binding.as_ref(),
+                verification_guard.as_ref().map(|guard| {
+                    (
+                        mutation_worktree.as_deref().expect("mutation worktree"),
+                        guard,
+                    )
+                }),
+                || env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels),
+            )
             .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
             render_pr(out, &pr);
@@ -311,12 +543,21 @@ pub(super) fn run<E: CliEnv>(
             // not change pr.state (OPEN→OPEN), so there is no metadata to refresh.
             let adjudication_note = (!ready_adjudications.is_empty())
                 .then(|| verification_adjudication_note(&ready_adjudications));
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
-                if let Some(note) = adjudication_note.as_deref() {
-                    env.comment_on_pr(number, note)?;
-                }
-                env.mark_pr_ready(number)
-            })
+            let pr = dispatch_pr_mutation(
+                mutation_binding.as_ref(),
+                verification_guard.as_ref().map(|guard| {
+                    (
+                        mutation_worktree.as_deref().expect("mutation worktree"),
+                        guard,
+                    )
+                }),
+                || {
+                    if let Some(note) = adjudication_note.as_deref() {
+                        env.comment_on_pr(number, note)?;
+                    }
+                    env.mark_pr_ready(number)
+                },
+            )
             .map_err(super::io_as_api_error)?;
             out.push_str(&format!("marked pull request #{number} ready for review\n"));
             render_pr(out, &pr);
@@ -1021,6 +1262,7 @@ mod tests {
                 derived: false,
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
@@ -1139,6 +1381,174 @@ mod tests {
         assert_eq!(env.pr_create_call_log.len(), 1);
         assert_eq!(env.pr_edit_call_log.len(), 1);
         assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
+    #[test]
+    fn completed_ready_requires_the_exact_verification_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("completed receipt repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-receipt");
+        persist_pr_generation_session(worktree.path(), "session-receipt", identity.clone());
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-receipt",
+        );
+        crate::cli::verification_record::save_plan(
+            worktree.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "session-receipt".to_string(),
+                owner_number: Some(42),
+                execution_binding: Some(identity),
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save receipt plan");
+        let (verification, _) = crate::cli::verification_record::run_verification(
+            worktree.path(),
+            "session-receipt",
+            &["git --version".to_string()],
+        )
+        .expect("run receipt verification");
+        let completion = crate::cli::execution_state::ExecutionCompletionEvidence {
+            verification_record_id: verification.record_id.clone(),
+            verification_run_hash: verification.content_hash.clone(),
+            verification_plan_hash: verification.verification_plan_hash.clone(),
+            used_typed_quarantine: false,
+        };
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                worktree.path(),
+                "session-receipt",
+                crate::cli::execution_state::ExecutionSettlement::CompletedWithEvidence {
+                    evidence: completion,
+                },
+            )
+            .expect("settle with completion receipt"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            0,
+            "{out}"
+        );
+
+        let mut replacement = crate::cli::verification_record::load(worktree.path())
+            .unwrap()
+            .unwrap();
+        replacement.record_id = "vrr-replacement".to_string();
+        crate::cli::verification_record::save(worktree.path(), &replacement).unwrap();
+        out.clear();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        assert!(out.contains("completion verification evidence"), "{out}");
+        assert_eq!(
+            env.pr_ready_call_log,
+            vec![7],
+            "replacement record must not reach GitHub"
+        );
+    }
+
+    #[test]
+    fn ready_dispatch_rejects_verification_record_substitution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("verification guard repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-guard");
+        crate::cli::verification_record::save_plan(
+            worktree.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "session-guard".to_string(),
+                owner_number: Some(42),
+                execution_binding: Some(identity),
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (original, _) = crate::cli::verification_record::run_verification(
+            worktree.path(),
+            "session-guard",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        let completion = crate::cli::execution_state::ExecutionCompletionEvidence {
+            verification_record_id: original.record_id.clone(),
+            verification_run_hash: original.content_hash.clone(),
+            verification_plan_hash: original.verification_plan_hash.clone(),
+            used_typed_quarantine: false,
+        };
+        let guard = VerificationMutationGuard {
+            session_id: "session-guard".to_string(),
+            owner_number: Some(42),
+            record_id: original.record_id.clone(),
+            run_hash: original.content_hash.clone(),
+            plan_hash: original.verification_plan_hash.clone(),
+            completion: Some(completion),
+        };
+        let dispatched = std::cell::Cell::new(false);
+        dispatch_pr_mutation(None, Some((worktree.path(), &guard)), || {
+            dispatched.set(true);
+            Ok(())
+        })
+        .expect("unchanged verification snapshot must allow dispatch");
+        assert!(dispatched.replace(false));
+
+        let mut replacement = original.clone();
+        replacement.record_id = "vrr-substituted".to_string();
+        crate::cli::verification_record::save(worktree.path(), &replacement).unwrap();
+
+        let error = dispatch_pr_mutation(None, Some((worktree.path(), &guard)), || {
+            dispatched.set(true);
+            Ok(())
+        })
+        .expect_err("substituted verification must block dispatch");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!dispatched.get(), "external mutation must not run");
+
+        crate::cli::verification_record::save(worktree.path(), &original).unwrap();
+        let mut replacement_plan = crate::cli::verification_record::load_plan(worktree.path())
+            .unwrap()
+            .unwrap();
+        replacement_plan.created_at += chrono::Duration::seconds(1);
+        crate::cli::verification_record::save_plan(worktree.path(), &replacement_plan).unwrap();
+        let error = dispatch_pr_mutation(None, Some((worktree.path(), &guard)), || {
+            dispatched.set(true);
+            Ok(())
+        })
+        .expect_err("substituted verification plan must block dispatch");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!dispatched.get(), "plan replacement must not reach GitHub");
     }
 
     #[test]
@@ -1530,6 +1940,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },
@@ -1634,6 +2045,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },
