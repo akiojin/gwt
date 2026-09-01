@@ -1085,7 +1085,7 @@ pub(super) fn is_explicit_model_selection(model: &str) -> bool {
 }
 
 pub(super) fn agent_has_npm_package(agent_id: &str) -> bool {
-    agent_id_from_key(agent_id).package_name().is_some()
+    agent_id_from_key(agent_id).npm_package().is_some()
 }
 
 pub(super) fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {

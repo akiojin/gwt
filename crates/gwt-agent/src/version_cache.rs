@@ -211,7 +211,7 @@ impl VersionCache {
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = Result<String, VersionCacheError>>,
     {
-        let Some(package) = agent_id.package_name() else {
+        let Some(package) = agent_id.npm_package() else {
             return Ok(None);
         };
         let url = npm_registry_url(package);
