@@ -920,6 +920,8 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
             DIRECT_STOP_TEST_TOTAL_BUDGET,
         );
         let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
+        // This checks only the reserve arithmetic. The persisted candidate
+        // assertions below are the end-to-end settlement-reserve oracle.
         assert_eq!(
             deadline
                 .expires_at()
