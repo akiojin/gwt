@@ -1183,7 +1183,7 @@ fn validate_pane_endpoint_home_scope(url: &str) -> Result<(), String> {
     let runtime_sessions =
         pane_runtime_sessions_dir(&canonical_runtime_path).ok_or_else(malformed_runtime_error)?;
     let expected_sessions = gwt_core::paths::gwt_sessions_dir();
-    if !same_pane_scope_path(&runtime_sessions, &expected_sessions) {
+    if !same_pane_scope_path(runtime_sessions, &expected_sessions) {
         return Err(format!(
             "pane endpoint belongs to a different GWT home (launch sessions: {}; current sessions: {}); relaunch the Session from the current gwt instance",
             runtime_sessions.display(),
