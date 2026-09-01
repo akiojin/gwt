@@ -1041,6 +1041,7 @@ mod tests {
         let intake = tempfile::tempdir().expect("repo");
         for operation in [
             "issue.create",
+            "issue.edit",
             "issue.comment",
             "issue.spec.create",
             "issue.spec.edit",

@@ -94,6 +94,15 @@ pub enum IssueCommand {
         body: String,
         labels: Vec<String>,
     },
+    /// Issue #3865: update a plain Issue in place. Every field is optional and
+    /// only the supplied ones are sent; `body` is a whole-body replacement and
+    /// is refused for `gwt-spec` Issues, whose body is section-managed.
+    Edit {
+        number: u64,
+        title: Option<String>,
+        body: Option<String>,
+        labels: Option<Vec<String>>,
+    },
     Comment {
         number: u64,
         file: String,

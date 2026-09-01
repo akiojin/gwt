@@ -37,6 +37,10 @@ pub struct FakeIssueClient {
     /// When set, the next `create_comment` stores a corrupted body so tests
     /// can prove that post-write readback fails closed.
     corrupt_next_create_comment: Arc<std::sync::atomic::AtomicBool>,
+    /// Failure injection for the Issue field patches (`patch_body`,
+    /// `patch_title`, `set_labels`): the next such call fails with the stored
+    /// error and writes nothing (Issue #3865 AC-5).
+    fail_next_issue_patch: Arc<Mutex<Option<ApiError>>>,
 }
 
 struct FakeState {
@@ -127,6 +131,28 @@ impl FakeIssueClient {
             clock: Arc::new(AtomicU64::new(1)),
             fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_next_issue_patch: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Failure injection: the next `patch_body` / `patch_title` /
+    /// `set_labels` call fails with `error` before touching any Issue.
+    pub fn fail_next_issue_patch(&self, error: ApiError) {
+        *self
+            .fail_next_issue_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+    }
+
+    fn take_issue_patch_fault(&self) -> Result<(), ApiError> {
+        match self
+            .fail_next_issue_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
@@ -488,6 +514,7 @@ impl IssueClient for FakeIssueClient {
     }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
         if new_body.len() > 65_536 {
             return Err(ApiError::BodyTooLarge);
         }
@@ -506,6 +533,7 @@ impl IssueClient for FakeIssueClient {
     }
 
     fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
         let mut state = self
             .inner
             .lock()
@@ -640,6 +668,7 @@ impl IssueClient for FakeIssueClient {
         number: IssueNumber,
         labels: &[String],
     ) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
         let mut state = self
             .inner
             .lock()

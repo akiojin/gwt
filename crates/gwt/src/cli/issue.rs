@@ -115,6 +115,12 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
+        IssueCommand::Edit {
+            number,
+            title,
+            body,
+            labels,
+        } => run_issue_edit(env, number, title, body, labels, out)?,
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
@@ -1376,6 +1382,85 @@ pub(super) fn issue_state_label(state: IssueState) -> &'static str {
     }
 }
 
+/// Issue #3865: update a plain Issue's title / body / labels in place.
+///
+/// Only the supplied fields are sent. A body update on a `gwt-spec` Issue is
+/// refused before any write because that body is section-managed by
+/// `issue.spec.edit`; title and labels are not section-managed and stay
+/// editable. API failures pass through untouched so the caller can tell a
+/// missing Issue, a permission failure, and a network failure apart.
+fn run_issue_edit<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    title: Option<String>,
+    body: Option<String>,
+    labels: Option<Vec<String>>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    if title.is_none() && body.is_none() && labels.is_none() {
+        return Ok(write_issue_edit_refusal(
+            out,
+            number,
+            "nothing to update: pass at least one of params.title, params.body, params.labels",
+        ));
+    }
+    let issue = IssueNumber(number);
+    let current = load_or_refresh_issue(env, issue, true)?.snapshot;
+    if body.is_some()
+        && current
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    {
+        return Ok(write_issue_edit_refusal(
+            out,
+            number,
+            &format!(
+                "issue #{number} carries the gwt-spec label and its body is section-managed;                  use issue.spec.edit per section instead of issue.edit (title and labels                  remain editable here)"
+            ),
+        ));
+    }
+
+    let mut updated = Vec::new();
+    if let Some(title) = title {
+        env.client().patch_title(issue, &title)?;
+        updated.push("title");
+    }
+    if let Some(body) = body {
+        env.client().patch_body(issue, &body)?;
+        updated.push("body");
+    }
+    if let Some(labels) = labels {
+        env.client().set_labels(issue, &labels)?;
+        updated.push("labels");
+    }
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.edit",
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    let _ = refresh_issue_cache(env, issue)?;
+    out.push_str(&format!(
+        "updated issue #{number} ({})\n",
+        updated.join(", ")
+    ));
+    Ok(0)
+}
+
+fn write_issue_edit_refusal(out: &mut String, number: u64, reason: &str) -> i32 {
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "refused",
+            "reason": reason,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    1
+}
+
 pub(super) fn render_issue(out: &mut String, snapshot: &IssueSnapshot) {
     out.push_str(&format!(
         "#{} [{}] {}\n",
@@ -2116,6 +2201,188 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(out.contains("#42 [OPEN] Issue family direct run"));
+    }
+
+    fn seeded_edit_env(labels: &[&str]) -> (TempDir, crate::cli::TestEnv) {
+        let tmp = TempDir::new().expect("tempdir");
+        let env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.client.seed(IssueSnapshot {
+            number: IssueNumber(7),
+            title: "Original title".to_string(),
+            body: "Original body".to_string(),
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: vec![],
+        });
+        (tmp, env)
+    }
+
+    fn fetched(env: &crate::cli::TestEnv, number: u64) -> IssueSnapshot {
+        match env
+            .client
+            .fetch(IssueNumber(number), None)
+            .expect("fresh fetch")
+        {
+            gwt_github::client::FetchResult::Updated(snapshot) => snapshot,
+            gwt_github::client::FetchResult::NotModified => panic!("fresh fetch should update"),
+        }
+    }
+
+    fn edit_body(number: u64, body: &str) -> IssueCommand {
+        IssueCommand::Edit {
+            number,
+            title: None,
+            body: Some(body.to_string()),
+            labels: None,
+        }
+    }
+
+    /// Issue #3865 AC-2: title / body / labels are each optional and only the
+    /// supplied fields change; the local cache reflects the write.
+    #[test]
+    fn issue_edit_updates_only_the_supplied_fields() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: Some("Renamed title".to_string()),
+                body: None,
+                labels: None,
+            },
+            &mut out,
+        )
+        .expect("title-only edit");
+        assert_eq!(code, 0, "{out}");
+        let snapshot = fetched(&env, 7);
+        assert_eq!(snapshot.title, "Renamed title");
+        assert_eq!(snapshot.body, "Original body");
+        assert_eq!(snapshot.labels, vec!["bug"]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: Some("Corrected body".to_string()),
+                labels: Some(vec!["bug".to_string(), "auto-merge".to_string()]),
+            },
+            &mut out,
+        )
+        .expect("body+labels edit");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("updated issue #7"), "{out}");
+        let snapshot = fetched(&env, 7);
+        assert_eq!(snapshot.title, "Renamed title");
+        assert_eq!(snapshot.body, "Corrected body");
+        assert_eq!(snapshot.labels, vec!["bug", "auto-merge"]);
+
+        let cached = Cache::new(env.cache_root())
+            .load_entry(IssueNumber(7))
+            .expect("cache entry after edit");
+        assert_eq!(cached.snapshot.body, "Corrected body");
+        assert_eq!(cached.snapshot.title, "Renamed title");
+    }
+
+    /// Issue #3865 AC-3: a `gwt-spec` body is section-managed, so the plain
+    /// editor refuses it, writes nothing, and points at `issue.spec.edit`.
+    #[test]
+    fn issue_edit_refuses_body_updates_on_gwt_spec_issues() {
+        let (_tmp, mut env) = seeded_edit_env(&["GWT-Spec", "phase/draft"]);
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, "rewritten"), &mut out).expect("refusal is a result");
+        assert_eq!(code, 1, "{out}");
+        let refusal: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refusal["status"], "refused");
+        let reason = refusal["reason"].as_str().expect("reason");
+        assert!(reason.contains("gwt-spec"), "{reason}");
+        assert!(reason.contains("issue.spec.edit"), "{reason}");
+        assert_eq!(fetched(&env, 7).body, "Original body");
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("patch_body")),
+            "refusal must not reach the API"
+        );
+
+        // Title and labels are not section-managed: they stay editable.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: Some("Renamed spec".to_string()),
+                body: None,
+                labels: None,
+            },
+            &mut out,
+        )
+        .expect("title edit on spec");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).title, "Renamed spec");
+    }
+
+    /// Issue #3865 AC-5: a missing Issue, a permission failure, and a network
+    /// failure each surface their own cause, and none of them writes anything.
+    #[test]
+    fn issue_edit_reports_distinguishable_failures() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+
+        let missing = run(&mut env, edit_body(999, "x"), &mut out).expect_err("missing issue");
+        assert!(missing.to_string().contains("#999 not found"), "{missing}");
+
+        env.client
+            .fail_next_issue_patch(ApiError::PermissionDenied {
+                message: "Resource not accessible by integration".to_string(),
+            });
+        let denied = run(&mut env, edit_body(7, "x"), &mut out).expect_err("permission");
+        assert!(
+            denied.to_string().starts_with("permission denied:"),
+            "{denied}"
+        );
+
+        env.client
+            .fail_next_issue_patch(ApiError::Network("connection reset".to_string()));
+        let network = run(&mut env, edit_body(7, "x"), &mut out).expect_err("network");
+        assert!(
+            network.to_string().starts_with("network error:"),
+            "{network}"
+        );
+
+        assert_eq!(fetched(&env, 7).body, "Original body");
+    }
+
+    #[test]
+    fn issue_edit_refuses_an_empty_update() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: None,
+            },
+            &mut out,
+        )
+        .expect("refusal is a result");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("refused"), "{out}");
+        assert!(out.contains("params.title"), "{out}");
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")),
+            "nothing may reach the API"
+        );
     }
 
     #[test]

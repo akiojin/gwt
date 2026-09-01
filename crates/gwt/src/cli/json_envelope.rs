@@ -270,6 +270,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             body: required_string(params, "body")?,
             labels: optional_string_vec(params, "labels")?,
         }),
+        "issue.edit" => CliCommand::Issue(IssueCommand::Edit {
+            number: required_u64(params, "number")?,
+            title: optional_string(params, "title")?,
+            body: optional_string(params, "body")?,
+            // Absent means "leave labels alone"; an explicit empty array
+            // clears them.
+            labels: params
+                .contains_key("labels")
+                .then(|| optional_string_vec(params, "labels"))
+                .transpose()?,
+        }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,

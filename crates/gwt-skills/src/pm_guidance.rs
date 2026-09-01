@@ -85,16 +85,42 @@ You own the backlog for its whole life, not just at creation.
   by default (remove it only when the user asks for manual merges).
 - Use `issue.create` for plain Issues; use `issue.spec.create` +
   `issue.spec.edit` for design-required Issues, then fill `plan` and
-  `tasks` sections to readiness before queueing them.
+  `tasks` sections to readiness before queueing them. Decide between
+  the two with the rule in "Plain Issue or design-required" below.
 - Update Issues as understanding changes: correct a scope that drifted,
   add acceptance criteria the conversation revealed, record a decision
-  and why it was made. `issue.spec.edit` replaces a whole section, so
-  read the section first and write it back in full — appending blindly
-  loses content.
+  and why it was made. Implementation agents work from the body's
+  acceptance criteria, so a correction belongs in the body itself, not
+  only in a comment.
+- Update a plain Issue with `issue.edit`: `params.number` plus any of
+  `params.title`, `params.body`, `params.labels` — only the fields you
+  pass are updated. `params.body` replaces the whole body, so read it
+  with `issue.view` first and write it back in full. `issue.edit`
+  refuses a body update on a `gwt-spec` Issue and points you at
+  `issue.spec.edit`; title and labels stay editable either way.
+- `issue.spec.edit` replaces a whole section, so read the section first
+  and write it back in full — appending blindly loses content.
 - Keep the backlog honest. Fold duplicates into the surviving Issue and
   close the loser with a pointer, close what the work made obsolete,
   and flag anything you cannot decide instead of leaving it to rot.
   Curation is your standing job, not something you wait to be asked for.
+
+## Plain Issue or design-required
+
+Register a `gwt-spec` Issue (`issue.spec.create`) when the work:
+
+- spans more than one crate or layer,
+- changes an existing public interface or type,
+- has an implementation order with dependencies that need a `tasks`
+  breakdown, or
+- includes a user ruling that acceptance criteria alone cannot express.
+
+Any one of these makes it design-required (`gwt-spec`); otherwise
+register a plain Issue. A single-crate bug fix, a wording fix, one added
+operation with clear acceptance criteria, or a docs task stays plain.
+When a plain Issue grows into one of the bullets above, re-register it
+as a `gwt-spec` Issue and close the plain one with a pointer — a plain
+body cannot hold `plan` / `tasks` sections.
 
 ## Priority and launches
 
@@ -812,6 +838,32 @@ mod tests {
         assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
         assert!(body.contains("before registering anything new"));
         assert!(body.contains("Keep the backlog honest"));
+    }
+
+    /// Issue #3865 AC-6 / AC-7: plain Issues have a body-update path, and the
+    /// plain-vs-design-required decision is a written rule, not PM discretion.
+    #[test]
+    fn contract_names_issue_edit_and_the_design_required_criteria() {
+        let body = body();
+        for phrase in [
+            "`issue.edit`",
+            "`params.number`",
+            "`params.title`",
+            "`params.body`",
+            "`params.labels`",
+            "only the fields you pass are updated",
+            "replaces the whole body",
+            "refuses a body update on a `gwt-spec` Issue",
+            "## Plain Issue or design-required",
+            "spans more than one crate or layer",
+            "changes an existing public interface or type",
+            "an implementation order with dependencies that need a `tasks` breakdown",
+            "includes a user ruling that acceptance criteria alone cannot express",
+            "Any one of these makes it design-required (`gwt-spec`)",
+            "otherwise register a plain Issue",
+        ] {
+            assert!(body.contains(phrase), "missing phrase: {phrase}");
+        }
     }
 
     #[test]
