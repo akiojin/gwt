@@ -61,6 +61,7 @@ pub struct TestEnv {
     pub pr_current_call_count: usize,
     pub pr_list: Vec<gwt_git::PrInventoryItem>,
     pub pr_list_call_count: usize,
+    pub pr_list_options: Option<gwt_git::PrInventoryOptions>,
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
@@ -114,6 +115,7 @@ impl TestEnv {
             pr_current_call_count: 0,
             pr_list: Vec::new(),
             pr_list_call_count: 0,
+            pr_list_options: None,
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
@@ -385,8 +387,12 @@ impl CliEnv for TestEnv {
                 )
             })
     }
-    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
         self.pr_list_call_count += 1;
+        self.pr_list_options = Some(*options);
         Ok(self.pr_list.clone())
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {

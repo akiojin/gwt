@@ -190,7 +190,12 @@ pub enum IssueCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
     Current,
-    List,
+    /// `pr.list` with the optional PM thresholds from Issue #3868 (AC-5 /
+    /// AC-6); `None` keeps the crate defaults.
+    List {
+        stale_after_hours: Option<i64>,
+        escalate_after_cycles: Option<u32>,
+    },
     Create {
         base: String,
         head: Option<String>,

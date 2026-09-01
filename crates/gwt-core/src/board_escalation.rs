@@ -364,7 +364,7 @@ impl OperationRefusalKind {
                 "この session には権限がありません。正しい authority を持つ session を割り当てるか、authority の不整合を解消してください。"
             }
             Self::Permission => {
-                "この操作はこの surface では拒否されます。PM 側での代行、または設定・ツール側の修正が必要です。"
+                "この操作はこの surface で拒否されました。まず拒否メッセージが示す順序・前提の不足を担当が解消して再試行し、それでも通らなければ PM 側での代行、または設定・ツール側の修正が必要です。"
             }
         }
     }
@@ -469,7 +469,8 @@ pub fn render_operation_refusal_body(
     format!(
         "事象: JSON operation `{operation}` が拒否されました。\n\
          ```\n{error}\n```\n\
-         原因: {kind} 由来の拒否です。agent 側の入力の作り直しでは解消しません。\n\
+         原因: 未判定。拒否メッセージ本文を読んで判断してください（機械分類の候補: {kind}）。\
+         担当 agent 側の順序・前提・入力の修正で解消できる場合があります。\n\
          依頼: {request}\n\
          再開条件: 上記が解消され、`{operation}` 相当の操作が通る状態になること。\n\
          \n\
@@ -1026,6 +1027,19 @@ mod tests {
             "the verbatim error is what tells the PM which lever to pull: {body}"
         );
         assert!(body.contains("fresh launch"), "{body}");
+        // Issue #3868 AC-24: the classifier is a heuristic, so the body must
+        // not assert the cause — that assertion made agents give up on
+        // refusals they could resolve themselves.
+        assert!(body.contains("原因: 未判定"), "{body}");
+        assert!(body.contains("拒否メッセージ本文を読んで"), "{body}");
+        assert!(!body.contains("由来の拒否です"), "{body}");
+        assert!(!body.contains("入力の作り直しでは解消しません"), "{body}");
+        let permission = render_operation_refusal_body(
+            "pr.ready",
+            "PR handoff refused: verification record is stale",
+            OperationRefusalKind::Permission,
+        );
+        assert!(permission.contains("担当が解消して再試行"), "{permission}");
     }
 
     #[test]

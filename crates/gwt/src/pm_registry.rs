@@ -40,7 +40,8 @@ use sha2::{Digest, Sha256};
 /// conversation (FR-4).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
-     changed, end the cycle with no user-facing output.";
+     changed and no open PR is CI-RED, CONFLICTED, or escalation_due, end the cycle with no \
+     user-facing output.";
 
 /// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
 /// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
