@@ -4409,11 +4409,11 @@ impl IssueMonitorState {
                         .get(&held)
                         .and_then(|reset_at| parse_rfc3339_utc(reset_at))
                         .is_some_and(|reset_at| reset_at > now)
-                    && !self
+                    && self
                         .provider_quota_holds
                         .get(&saved)
                         .and_then(|reset_at| parse_rfc3339_utc(reset_at))
-                        .is_some_and(|reset_at| reset_at > now)
+                        .is_none_or(|reset_at| reset_at <= now)
             });
         if switched_to_healthy_provider {
             // The operator explicitly selected a healthy provider. The
