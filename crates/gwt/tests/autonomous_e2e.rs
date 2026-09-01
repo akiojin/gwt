@@ -34,6 +34,13 @@ fn auto_issue(number: u64) -> IssueMonitorIssue {
     }
 }
 
+fn completed_auto_spec(number: u64) -> IssueMonitorIssue {
+    let mut issue = auto_issue(number);
+    issue.labels.push("gwt-spec".to_string());
+    issue.readiness = gwt::IssueMonitorReadiness::ReadyWithCompletedTasks;
+    issue
+}
+
 fn verified() -> BranchProtectionStatus {
     BranchProtectionStatus::Verified {
         required_checks: vec!["build".to_string()],
@@ -84,7 +91,7 @@ fn drive_to_reviewed(
 }
 
 #[test]
-fn full_pass_reaches_deliver_and_completes_only_on_sha_match() {
+fn full_pass_reaches_deliver_and_requeues_an_open_issue_only_on_sha_match() {
     let mut monitor = autonomous_monitor();
     let issue = auto_issue(42);
     drive_to_reviewed(&mut monitor, &issue, true);
@@ -110,7 +117,12 @@ fn full_pass_reaches_deliver_and_completes_only_on_sha_match() {
     monitor.record_merged(42);
     assert_eq!(
         monitor.inbox_item(42).map(|i| i.state),
-        Some(MonitorInboxState::Merged),
+        Some(MonitorInboxState::Queued),
+    );
+    assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    assert_eq!(
+        monitor.prefs().queued_launch_session_strategies.get(&42),
+        Some(&gwt::IssueMonitorLaunchSessionStrategy::FreshRequired),
     );
     assert!(
         monitor.autonomous_record(42).is_none(),
@@ -258,7 +270,7 @@ fn fr_family_decision_boundaries_are_observable() {
     // assertion block per FR family; if a future refactor makes a boundary
     // silent, this audit goes RED.
     let mut monitor = autonomous_monitor();
-    let issue = auto_issue(42);
+    let issue = completed_auto_spec(42);
 
     // FR-001/FR-003 (two-stage opt-in): the eligibility DECISION is a returned
     // value, and a non-candidate leaves no autonomous state behind.
