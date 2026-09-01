@@ -1084,6 +1084,87 @@ pub(super) fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
 }
 
+/// SPEC-3864 FR-005..FR-007: what the wizard offers when an agent cannot
+/// launch as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSetupKind {
+    /// The executable is missing and no runtime `latest` route exists.
+    Install,
+    /// The executable is launchable but first-time configuration is missing.
+    Configure,
+}
+
+impl AgentSetupKind {
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Configure => "configure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSetupAffordance {
+    pub kind: AgentSetupKind,
+    pub title: String,
+    pub detail: String,
+    /// Button label when gwt can run the setup in a shell pane; `None` when
+    /// the user has to act outside gwt.
+    pub action_label: Option<String>,
+}
+
+/// Derive the setup affordance for one built-in purely from its descriptor
+/// plus the detection / configuration state (SPEC-3864 FR-006): adding an
+/// agent means filling in `distribution` / `setup_args`, never a new branch.
+pub fn agent_setup_affordance(
+    descriptor: &gwt_agent::BuiltinAgentDescriptor,
+    available: bool,
+    needs_configuration: bool,
+) -> Option<AgentSetupAffordance> {
+    let name = descriptor.display_name;
+    if !available && !descriptor.distribution.supports_runtime_latest() {
+        let title = format!("{name} is not installed");
+        return Some(match descriptor.distribution.install_shell_command() {
+            Some(command) => AgentSetupAffordance {
+                kind: AgentSetupKind::Install,
+                title,
+                detail: format!(
+                    "Install it with: {command} — gwt can run this in a shell pane. \
+                     Restart gwt after installing so `{}` is detected on PATH.",
+                    descriptor.command
+                ),
+                action_label: Some(format!("Install {name}")),
+            },
+            None => AgentSetupAffordance {
+                kind: AgentSetupKind::Install,
+                title,
+                detail: format!(
+                    "No distribution route is known. Install `{}` manually, put it on PATH, \
+                     and restart gwt.",
+                    descriptor.command
+                ),
+                action_label: None,
+            },
+        });
+    }
+    if needs_configuration && !descriptor.setup_args.is_empty() {
+        let setup_command = std::iter::once(descriptor.command)
+            .chain(descriptor.setup_args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(AgentSetupAffordance {
+            kind: AgentSetupKind::Configure,
+            title: format!("{name} is not set up yet"),
+            detail: format!(
+                "Run `{setup_command}` to finish first-time setup. You can still launch — \
+                 {name} will prompt for setup."
+            ),
+            action_label: Some(format!("Run {name} setup")),
+        });
+    }
+    None
+}
+
 pub(super) fn agent_has_npm_package(agent_id: &str) -> bool {
     agent_id_from_key(agent_id).npm_package().is_some()
 }
@@ -1313,6 +1394,11 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions).expect("chmod stub");
+        // PATH is replaced wholesale so no real agent leaks in, but tests that
+        // spawn `git` without the env lock still run concurrently; keep git
+        // reachable through the scoped PATH.
+        let git = which::which("git").expect("git on the test runner");
+        std::os::unix::fs::symlink(&git, dir.path().join("git")).expect("link git");
         let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", dir.path());
         let _no_custom = gwt_core::test_support::ScopedEnvVar::set(
             gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
@@ -1362,6 +1448,117 @@ mod tests {
             .expect("Antigravity option");
         assert!(!agy.available);
         assert_eq!(agent_description(agy), "Not installed");
+    }
+
+    /// SPEC-3864 FR-005 (AC-5): every pre-install built-in (no runtime
+    /// `latest` route) surfaces an install affordance when it is missing, and
+    /// npm-routed or detected agents surface none.
+    #[test]
+    fn agent_setup_affordance_covers_preinstall_builtins_when_missing() {
+        for command in ["agy", "hermes", "gh"] {
+            let descriptor = gwt_agent::builtin_agent_descriptor_for_command(command)
+                .expect("built-in descriptor");
+            let affordance = agent_setup_affordance(descriptor, false, false)
+                .unwrap_or_else(|| panic!("{command} must offer an install affordance"));
+            assert_eq!(affordance.kind, AgentSetupKind::Install, "{command}");
+            assert!(
+                affordance.title.contains(descriptor.display_name),
+                "{command}: {}",
+                affordance.title
+            );
+            let install_command = descriptor
+                .distribution
+                .install_shell_command()
+                .expect("install command");
+            assert!(
+                affordance.detail.contains(&install_command),
+                "{command}: {}",
+                affordance.detail
+            );
+            assert!(affordance.action_label.is_some(), "{command}");
+        }
+        for command in ["openclaw", "opencode", "claude"] {
+            let descriptor = gwt_agent::builtin_agent_descriptor_for_command(command)
+                .expect("built-in descriptor");
+            assert_eq!(
+                agent_setup_affordance(descriptor, false, false),
+                None,
+                "{command} can run latest at launch and needs no install affordance"
+            );
+            assert_eq!(
+                agent_setup_affordance(descriptor, true, false),
+                None,
+                "{command}"
+            );
+        }
+    }
+
+    /// SPEC-3864 FR-006 / FR-007 (AC-6): the affordance is derived from the
+    /// descriptor alone. A synthetic agent that exists nowhere else in gwt
+    /// gets both the install and the configure affordance without any
+    /// agent-specific branch.
+    #[test]
+    fn agent_setup_affordance_is_descriptor_driven_for_synthetic_agent() {
+        let descriptor = gwt_agent::BuiltinAgentDescriptor {
+            id: gwt_agent::AgentId::Custom("zeta-cli".to_string()),
+            command: "zeta",
+            display_name: "Zeta CLI",
+            distribution: gwt_agent::DistributionRoute::Homebrew {
+                formula: "zeta/tap/zeta",
+            },
+            setup_args: &["login"],
+            color: gwt_agent::AgentColor::Gray,
+            aliases: &["zeta"],
+            cache_key: "zeta",
+            version_flag: "--version",
+            version_prefix_args: &[],
+        };
+
+        let install = agent_setup_affordance(&descriptor, false, false).expect("install");
+        assert_eq!(install.kind, AgentSetupKind::Install);
+        assert!(install.title.contains("Zeta CLI"), "{}", install.title);
+        assert!(
+            install.detail.contains("brew install zeta/tap/zeta"),
+            "{}",
+            install.detail
+        );
+        assert_eq!(install.action_label.as_deref(), Some("Install Zeta CLI"));
+
+        let configure = agent_setup_affordance(&descriptor, true, true).expect("configure");
+        assert_eq!(configure.kind, AgentSetupKind::Configure);
+        assert!(
+            configure.detail.contains("zeta login"),
+            "{}",
+            configure.detail
+        );
+        assert_eq!(
+            configure.action_label.as_deref(),
+            Some("Run Zeta CLI setup")
+        );
+
+        assert_eq!(agent_setup_affordance(&descriptor, true, false), None);
+    }
+
+    /// SPEC-3864 FR-005: an agent with no known route still tells the user it
+    /// is missing, but offers no runnable action.
+    #[test]
+    fn agent_setup_affordance_without_route_has_no_action() {
+        let descriptor = gwt_agent::BuiltinAgentDescriptor {
+            id: gwt_agent::AgentId::Custom("omega".to_string()),
+            command: "omega",
+            display_name: "Omega",
+            distribution: gwt_agent::DistributionRoute::None,
+            setup_args: &[],
+            color: gwt_agent::AgentColor::Gray,
+            aliases: &[],
+            cache_key: "omega",
+            version_flag: "--version",
+            version_prefix_args: &[],
+        };
+        let affordance = agent_setup_affordance(&descriptor, false, false).expect("install");
+        assert_eq!(affordance.kind, AgentSetupKind::Install);
+        assert_eq!(affordance.action_label, None);
+        assert!(affordance.detail.contains("omega"), "{}", affordance.detail);
     }
 
     #[test]
@@ -1564,7 +1761,7 @@ mod tests {
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
         assert!(agent_has_npm_package("opencode"));
-        assert!(!agent_has_npm_package("openclaw"));
+        assert!(agent_has_npm_package("openclaw"));
         assert!(!agent_has_npm_package("hermes"));
         assert!(!agent_has_npm_package("custom"));
         assert_eq!(agent_id_from_key("gh"), gwt_agent::AgentId::Copilot);

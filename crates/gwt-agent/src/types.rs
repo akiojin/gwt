@@ -202,6 +202,10 @@ pub struct BuiltinAgentDescriptor {
     pub display_name: &'static str,
     /// SPEC-3864 FR-001: how the executable is obtained when not on PATH.
     pub distribution: DistributionRoute,
+    /// SPEC-3864 FR-006 / FR-007: subcommand the wizard's setup affordance
+    /// appends to the agent command for first-time configuration (e.g.
+    /// `auth login`). Empty when the agent has no interactive setup.
+    pub setup_args: &'static [&'static str],
     pub color: AgentColor,
     pub aliases: &'static [&'static str],
     pub cache_key: &'static str,
@@ -217,6 +221,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Npm {
             package: "@anthropic-ai/claude-code",
         },
+        setup_args: &[],
         color: AgentColor::Yellow,
         aliases: &["claude", "claudecode", "claude-code", "claude code"],
         cache_key: "claude-code",
@@ -230,6 +235,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Npm {
             package: "@openai/codex",
         },
+        setup_args: &[],
         color: AgentColor::Cyan,
         aliases: &["codex"],
         cache_key: "codex",
@@ -243,6 +249,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Npm {
             package: "@xai-official/grok",
         },
+        setup_args: &[],
         color: AgentColor::Gray,
         aliases: &["grok", "grok build", "grok-build"],
         cache_key: "grok-build",
@@ -260,6 +267,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Installer {
             shell_command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
         },
+        setup_args: &[],
         color: AgentColor::Green,
         aliases: &["agy", "antigravity", "antigravity cli", "antigravity-cli"],
         cache_key: "antigravity",
@@ -273,6 +281,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Npm {
             package: "@google/gemini-cli",
         },
+        setup_args: &[],
         color: AgentColor::Magenta,
         aliases: &["gemini", "gemini cli", "gemini-cli", "gemini cli legacy"],
         cache_key: "gemini",
@@ -289,6 +298,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Npm {
             package: "opencode-ai",
         },
+        setup_args: &["auth", "login"],
         color: AgentColor::Green,
         aliases: &["opencode", "open-code"],
         cache_key: "opencode",
@@ -304,6 +314,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Npm {
             package: "openclaw",
         },
+        setup_args: &[],
         color: AgentColor::Blue,
         aliases: &["openclaw", "open-claw"],
         cache_key: "openclaw",
@@ -319,6 +330,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::Installer {
             shell_command: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
         },
+        setup_args: &["setup"],
         color: AgentColor::Magenta,
         aliases: &["hermes", "hermes agent", "hermes-agent"],
         cache_key: "hermes",
@@ -333,6 +345,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         distribution: DistributionRoute::GhExtension {
             repository: "github/gh-copilot",
         },
+        setup_args: &[],
         color: AgentColor::Blue,
         aliases: &["gh", "copilot", "github copilot", "github-copilot"],
         cache_key: "copilot",
