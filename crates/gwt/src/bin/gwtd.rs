@@ -497,9 +497,12 @@ fn format_verify_help() -> String {
         "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
         "  JSON",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"verify.adjudicate\",\"params\":{\"record_id\":\"vrr-...\",\"command\":\"cargo test -p gwt --all-features\",\"board_entry_id\":\"...\"}}",
+        "  JSON",
         "",
         "Operations:",
-        "  verify.plan | verify.run",
+        "  verify.plan | verify.run | verify.adjudicate",
         "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
         "  verify.lease.status",
         "",
@@ -507,8 +510,15 @@ fn format_verify_help() -> String {
         "  Register the derived matrix with verify.plan first; a run must cover it.",
         "  gwtd executes each command itself (one plain command per entry, no",
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
-        "  evidence. execution.complete and Ready PR handoffs require a fresh,",
-        "  all-passing record.",
+        "  evidence. execution.complete and non-adjudicated Ready PR handoffs",
+        "  require a fresh, all-passing record. verify.adjudicate attaches one",
+        "  exact Board decision to one exact failing command for pr.ready only;",
+        "  raw completion and obligation evidence remains failing.",
+        "  The referenced kind=decision Board body must contain these exact",
+        "  non-empty lines:",
+        "    Verification record: <id>",
+        "    Failing command: <command>",
+        "    Reason: <reason>",
         "",
         "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
         "  take the lease before cargo test --all-features / cargo llvm-cov /",
@@ -971,6 +981,25 @@ mod tests {
         assert!(!help.contains("integrity repair"), "{help}");
         assert!(!help.contains("cannot be repaired in the same"), "{help}");
         assert!(!help.contains("fresh linked-owner launch"), "{help}");
+    }
+
+    #[test]
+    fn format_verify_help_documents_pr_ready_adjudication_contract() {
+        let help = format_verify_help();
+        for expected in [
+            "verify.adjudicate",
+            "pr.ready only",
+            "kind=decision",
+            "Verification record: <id>",
+            "Failing command:",
+            "Reason: <reason>",
+            "raw completion and obligation evidence remains failing",
+        ] {
+            assert!(
+                help.contains(expected),
+                "verify help must document adjudication contract {expected}. help:\n{help}",
+            );
+        }
     }
 
     #[test]
