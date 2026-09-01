@@ -1994,6 +1994,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
     }
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let generation_recovery_error;
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
     let mut local_repo_identity = None;
@@ -2006,6 +2007,13 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + scan_budget,
         );
+        generation_recovery_error =
+            gwt::issue_monitor_worker::recover_inactive_execution_generations_for_scan(
+                &mut monitor,
+                project_root,
+                now,
+            )
+            .err();
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root) {
             Ok((owner, repo)) => {
@@ -2121,6 +2129,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 }
             }
             record_issue_monitor_scan_failures(latest, now, merge_reconciliation_error, Vec::new());
+            if let Some(error) = generation_recovery_error {
+                latest.record_scan_error(now, error);
+            }
         },
     );
     if let Err(error) = commit {
@@ -4989,6 +5000,13 @@ impl AppRuntime {
         let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + std::time::Duration::from_secs(60),
         );
+        let generation_recovery_error =
+            gwt::issue_monitor_worker::recover_inactive_execution_generations_for_scan(
+                &mut monitor,
+                &project_root,
+                &now,
+            )
+            .err();
         let mut loaded_for_commit = None;
         let mut merge_reconciliation_error = None;
         #[cfg(not(unix))]
@@ -5098,6 +5116,9 @@ impl AppRuntime {
                 merge_reconciliation_error,
                 Vec::new(),
             );
+            if let Some(error) = generation_recovery_error {
+                monitor.record_scan_error(&now, error);
+            }
         });
         #[cfg(not(unix))]
         let mut launch_events = local_repo_identity

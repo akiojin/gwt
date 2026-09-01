@@ -32798,11 +32798,11 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
 }
 
-/// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
-/// generation reaper. The selected exact holder remains Active while another
-/// stale owner in the same repository is audited Blocked in the same batch.
+/// Issue #3833: restore selection completes before the generation reaper, but
+/// only an unknown holder is protected. Exact inactive holders are audited
+/// Blocked in the same batch whether or not they were selected for restore.
 #[test]
-fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
+fn issue_3833_startup_reaper_reaps_selected_exact_inactive_holder() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -32965,8 +32965,8 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
     });
     let summary = summary.expect("startup reaper summary");
 
-    assert_eq!(summary.reaped, 2);
-    assert_eq!(summary.protected, 2);
+    assert_eq!(summary.reaped, 3);
+    assert_eq!(summary.protected, 1);
     assert_eq!(summary.failures, 1);
     assert!(logs.iter().any(|event| {
         event.level == Level::INFO
@@ -32975,16 +32975,16 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
             && event.fields.contains_key("duration_ms")
     }));
     assert!(logs.iter().any(|event| {
-        event.level == Level::WARN
+            event.level == Level::WARN
             && event.fields.get("message").map(String::as_str)
-                == Some("startup Active generation owner inspection failed closed")
+                == Some("inactive Active generation owner inspection failed closed")
     }));
     assert_eq!(
         gwt::cli::execution_state::load(&protected_worktree)
             .unwrap()
             .unwrap()
             .status,
-        gwt::cli::execution_state::ExecutionControlStatus::Active
+        gwt::cli::execution_state::ExecutionControlStatus::Blocked
     );
     assert_eq!(
         gwt::cli::execution_state::load(&stale_worktree)
@@ -33042,7 +33042,43 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         .split_once("pub(super) fn startup_auto_resume_ready_events")
         .expect("startup generation reaper boundary")
         .0;
-    assert!(reaper.contains("classify_nonlocal_active_owner_liveness"));
+    assert!(
+        !reaper.contains("classify_nonlocal_active_owner_liveness"),
+        "durable holder state must not be prefiltered by runtime evidence"
+    );
+}
+
+#[test]
+fn issue_3833_recovery_runs_once_per_real_gui_and_daemon_scan() {
+    const CALL: &str = "recover_inactive_execution_generations_for_scan";
+    let gui = include_str!("mod.rs");
+    let scheduled = gui
+        .split_once("fn run_scheduled_issue_monitor_scan_with_budgets")
+        .expect("scheduled scan")
+        .1
+        .split_once("fn issue_monitor_prefs_need_local_claim_cleanup")
+        .expect("scheduled scan boundary")
+        .0;
+    assert_eq!(scheduled.matches(CALL).count(), 1);
+
+    let local = gui
+        .split_once("fn local_issue_monitor_events_with_policy_for_project")
+        .expect("local scan")
+        .1
+        .split_once("fn drive_local_issue_monitor_claim_effects")
+        .expect("local scan boundary")
+        .0;
+    assert_eq!(local.matches(CALL).count(), 1);
+
+    let daemon = include_str!("../cli/daemon/server.rs");
+    let daemon_scan = daemon
+        .split_once("fn scan_issue_monitor_once_blocking")
+        .expect("daemon scan")
+        .1
+        .split_once("fn publish_issue_monitor_payloads")
+        .expect("daemon scan boundary")
+        .0;
+    assert_eq!(daemon_scan.matches(CALL).count(), 1);
 }
 
 #[test]

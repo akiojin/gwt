@@ -8707,6 +8707,63 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorRequeueOutcome {
+        self.requeue_failed_issue_with_notice(
+            issue_number,
+            reason,
+            now,
+            format!("Issue #{issue_number} requeued by operator: {reason}"),
+        )
+    }
+
+    /// Release only generation-collision holds backed by durable reaper
+    /// receipts. Other failures and every live launch remain untouched.
+    pub fn release_recovered_generation_failures(
+        &mut self,
+        recovered_issue_numbers: &[u64],
+        now: &str,
+    ) -> Vec<u64> {
+        let candidates = recovered_issue_numbers
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut released = Vec::new();
+        for issue_number in candidates {
+            let collision_held = self
+                .failed_issues
+                .get(&issue_number)
+                .is_some_and(|message| {
+                    message.starts_with(
+                        crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
+                    )
+                });
+            if !collision_held {
+                continue;
+            }
+            let reason = "inactive execution generation recovered during Issue Monitor scan";
+            if matches!(
+                self.requeue_failed_issue_with_notice(
+                    issue_number,
+                    reason,
+                    now,
+                    format!(
+                        "Issue #{issue_number} requeued after inactive execution generation recovery"
+                    ),
+                ),
+                IssueMonitorRequeueOutcome::Requeued { .. }
+            ) {
+                released.push(issue_number);
+            }
+        }
+        released
+    }
+
+    fn requeue_failed_issue_with_notice(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        now: &str,
+        notice: String,
+    ) -> IssueMonitorRequeueOutcome {
         // Fail closed on anything a launch still owns. `record_failed_issue`
         // clears active tracking, so a genuinely failed row never trips this;
         // a row that does trip it is live, and killing a running agent is the
@@ -8738,11 +8795,7 @@ impl IssueMonitorState {
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number, true);
-        self.push_autonomous_notice(
-            "info",
-            issue_number,
-            format!("Issue #{issue_number} requeued by operator: {reason}"),
-        );
+        self.push_autonomous_notice("info", issue_number, notice);
         IssueMonitorRequeueOutcome::Requeued {
             stale_window_id,
             attempts_before,
@@ -13098,6 +13151,65 @@ mod tests {
             Some(MonitorInboxState::AgentFailed)
         );
         monitor
+    }
+
+    #[test]
+    fn issue_3833_releases_only_recovered_generation_collision_failures() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-09-01T00:00:00Z",
+        );
+        monitor.record_agent_issue_failed(
+            42,
+            "an execution generation already exists for issue #42 (inactive holder)",
+        );
+        monitor.record_agent_issue_failed(43, "provider authentication failed");
+
+        let released =
+            monitor.release_recovered_generation_failures(&[42, 43, 42], "2026-09-01T00:01:00Z");
+
+        assert_eq!(released, vec![42]);
+        assert!(monitor.queued_issue_numbers().contains(&42));
+        assert!(!monitor.failed_issues.contains_key(&42));
+        assert!(monitor.failed_issues.contains_key(&43));
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+    }
+
+    #[test]
+    fn issue_3833_recovery_reduces_45_collision_holds_to_7_running_holders() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let issues = (1..=45).map(issue).collect::<Vec<_>>();
+        scan_issue_monitor_candidates(&mut monitor, &issues, "2026-09-01T00:00:00Z");
+        for issue_number in 1..=45 {
+            monitor.record_agent_issue_failed(
+                issue_number,
+                format!(
+                    "an execution generation already exists for issue #{issue_number} (active holder)"
+                ),
+            );
+        }
+        let recovered = (1..=38).collect::<Vec<_>>();
+
+        let released = monitor.release_recovered_generation_failures(
+            &recovered,
+            "2026-09-01T00:01:00Z",
+        );
+
+        assert_eq!(released.len(), 38);
+        assert_eq!(monitor.failed_issues.len(), 7);
+        assert_eq!(
+            monitor
+                .failed_issues
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            (39..=45).collect::<Vec<_>>()
+        );
     }
 
     /// Issue #3645 AC-1 / #3628 AC-1: an `agent_failed` row holds no live

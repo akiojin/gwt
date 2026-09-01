@@ -3848,6 +3848,7 @@ impl AppRuntime {
         classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
     }
 
+    #[cfg(test)]
     pub(super) fn classify_nonlocal_active_owner_liveness_batch<'a>(
         &self,
         session_ids: impl IntoIterator<Item = &'a str>,

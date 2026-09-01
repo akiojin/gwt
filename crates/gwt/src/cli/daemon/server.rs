@@ -3495,6 +3495,13 @@ fn scan_issue_monitor_once_blocking(
     // #3223 follow-up (codex P2): expire claimed-but-never-acked launches past
     // claim_ttl_secs so a crashed launch cannot hold a slot forever.
     monitor.expire_stale_unbound_launches(&now);
+    let generation_recovery_error =
+        crate::issue_monitor_worker::recover_inactive_execution_generations_for_scan(
+            &mut monitor,
+            &scope.project_root,
+            &now,
+        )
+        .err();
     let (owner, repo) = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
@@ -3632,6 +3639,9 @@ fn scan_issue_monitor_once_blocking(
         }
     }
     crate::issue_monitor_worker::ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)?;
+    if let Some(error) = generation_recovery_error {
+        monitor.record_scan_error(&now, error);
+    }
     Ok(monitor)
 }
 

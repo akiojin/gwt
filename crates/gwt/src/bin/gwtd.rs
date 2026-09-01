@@ -460,6 +460,7 @@ fn format_execution_help() -> String {
         "Usage:",
         "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}",
+        "  {\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{\"issue\":3833}}",
         "  {\"schema_version\":1,\"operation\":\"execution.continue\",\"params\":{\"operation_id\":\"<stable-operation-id>\"}}",
         "  JSON",
         "  gwtd <<'JSON'",

@@ -516,12 +516,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             reason: optional_string(params, "reason")?,
         }),
         "execution.status" => {
-            if !params.is_empty() {
-                return Err(CliParseError::InvalidJson(
-                    "execution.status accepts no params".to_string(),
-                ));
+            reject_unknown_params(params, &["issue"], "execution.status")?;
+            if params.is_empty() {
+                CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+            } else {
+                let issue_number = required_u64(params, "issue")?;
+                if issue_number == 0 {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status params.issue must be greater than zero".to_string(),
+                    ));
+                }
+                CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::IssueStatus {
+                    issue_number,
+                })
             }
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -2628,6 +2636,30 @@ mod tests {
 
     // SPEC-3248 P8a: execution settlement parse variants.
     #[test]
+    fn issue_3833_execution_status_accepts_explicit_issue() {
+        assert!(matches!(
+            ok("execution.status", json!({"issue": 3833})),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::IssueStatus {
+                    issue_number: 3833
+                }
+            )
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 0})),
+            CliParseError::InvalidJson(message) if message.contains("greater than zero")
+        ));
+        assert!(matches!(
+            err(
+                "execution.status",
+                json!({"issue": 3833, "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("accepted: issue")
+        ));
+    }
+
+    #[test]
     fn execution_settlement_variants() {
         assert!(matches!(
             ok("execution.status", json!({})),
@@ -2636,7 +2668,7 @@ mod tests {
         assert!(matches!(
             err("execution.status", json!({"unexpected": true})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts no params")
+                if message.contains("accepted: issue")
         ));
         assert!(matches!(
             ok("execution.complete", json!({})),

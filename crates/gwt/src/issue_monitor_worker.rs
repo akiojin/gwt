@@ -110,6 +110,45 @@ pub fn ensure_scan_deadline(stage: IssueMonitorScanStage) -> Result<(), IssueMon
         .map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))
 }
 
+/// Reap exact inactive execution holders before one real Issue Monitor scan
+/// and release only the collision failures backed by those durable receipts.
+pub fn recover_inactive_execution_generations_for_scan(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> Result<crate::cli::execution_state::InactiveGenerationReaperSummary, String> {
+    let worktrees = crate::worktree_inventory::enumerate_worktrees(project_root, None)
+        .map_err(|error| format!("execution generation worktree inventory failed: {error}"))?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    let summary = crate::cli::execution_state::reap_inactive_active_generations(
+        &worktrees,
+        &gwt_core::paths::gwt_sessions_dir(),
+        &[],
+        &std::collections::HashSet::new(),
+    );
+    let recovered_issue_numbers = summary
+        .recovered_owners
+        .iter()
+        .map(|owner| owner.number)
+        .collect::<Vec<_>>();
+    let released = monitor.release_recovered_generation_failures(&recovered_issue_numbers, now);
+    if !released.is_empty() {
+        tracing::info!(
+            issues = ?released,
+            "released Issue Monitor holds after inactive generation recovery"
+        );
+    }
+    if summary.failures > 0 {
+        return Err(format!(
+            "execution generation recovery failed closed for {} owner entries",
+            summary.failures
+        ));
+    }
+    Ok(summary)
+}
+
 pub(crate) fn run_scan_stage<T, E>(
     stage: IssueMonitorScanStage,
     operation: impl FnOnce() -> Result<T, E>,
