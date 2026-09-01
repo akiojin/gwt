@@ -19069,6 +19069,15 @@ mod tests {
             "gwt-execute"
         );
         assert_eq!(
+            entrypoint_from_launch(
+                &args(&[
+                    "$gwt-execute #3832\n\nBefore changing code, evaluate every remaining acceptance criterion."
+                ]),
+                false,
+            ),
+            "gwt-execute"
+        );
+        assert_eq!(
             entrypoint_from_launch(&args(&["$gwt-build-spec SPEC-3248"]), false),
             "gwt-build-spec"
         );
