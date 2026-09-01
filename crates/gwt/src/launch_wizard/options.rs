@@ -1098,7 +1098,10 @@ pub(super) fn agent_description(agent: &AgentOption) -> String {
     match agent.installed_version.as_deref() {
         Some(version) => format!("Detected · {version}"),
         None if agent.custom_agent.is_some() => "Configured".to_string(),
-        None => "Built-in".to_string(),
+        None if agent.available => "Detected".to_string(),
+        // SPEC-3864 FR-004: `available` is the real detection result, so an
+        // undetected built-in says so instead of the neutral "Built-in".
+        None => "Not installed".to_string(),
     }
 }
 
@@ -1138,8 +1141,15 @@ pub fn build_agent_options(
     options
 }
 
+/// Production wizard entry point: runs install detection for every built-in
+/// (SPEC-3864 FR-002) so `available` / `installed_version` reflect the host
+/// instead of an empty detection list.
 pub fn load_agent_options(cache: &gwt_agent::VersionCache) -> Vec<AgentOption> {
-    build_agent_options(Vec::new(), cache, load_global_custom_agents())
+    build_agent_options(
+        gwt_agent::AgentDetector::detect_all(),
+        cache,
+        load_global_custom_agents(),
+    )
 }
 
 pub fn build_builtin_agent_options(
@@ -1156,7 +1166,8 @@ pub fn build_builtin_agent_options(
             AgentOption {
                 id: agent_id.command().to_string(),
                 name: agent_id.display_name().to_string(),
-                available: true,
+                // SPEC-3864 FR-004: derived from detection, never hardcoded.
+                available: detected.is_some(),
                 installed_version: detected.and_then(|detected| detected.version.clone()),
                 versions: cache
                     .get(&agent_id)
@@ -1279,6 +1290,78 @@ mod tests {
             options[missing].available,
             "configured custom agents must stay selectable; runtime preparation validates execution"
         );
+    }
+
+    /// SPEC-3864 FR-002 / FR-004 (AC-2 / AC-4): the production wizard entry
+    /// point must run real install detection and derive `available` from it.
+    /// A fake `agy` on PATH is the only detectable built-in, so Antigravity
+    /// must come back available with its probed version while every other
+    /// built-in is reported as not installed instead of hardcoded `true`.
+    #[cfg(unix)]
+    #[test]
+    fn load_agent_options_runs_detection_and_derives_availability() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempdir().expect("tempdir");
+        let executable = dir.path().join("agy");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write agy stub");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("stub metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("chmod stub");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", dir.path());
+        let _no_custom = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
+            "1",
+        );
+
+        let options = load_agent_options(&gwt_agent::VersionCache::new());
+
+        let agy = options
+            .iter()
+            .find(|option| option.id == "agy")
+            .expect("Antigravity option");
+        assert!(agy.available, "detected agent must be available");
+        assert_eq!(agy.installed_version.as_deref(), Some("1.2.3"));
+        for option in options.iter().filter(|option| option.id != "agy") {
+            assert!(
+                !option.available,
+                "{} is not on PATH and must not be reported available",
+                option.id
+            );
+            assert_eq!(option.installed_version, None, "{}", option.id);
+        }
+    }
+
+    #[test]
+    fn build_builtin_agent_options_marks_undetected_builtins_unavailable() {
+        // SPEC-3864 FR-004: `available` is a detection result, not a label.
+        let options = build_builtin_agent_options(
+            vec![gwt_agent::DetectedAgent {
+                agent_id: gwt_agent::AgentId::OpenClaw,
+                version: Some("2026.1.0".to_string()),
+                path: PathBuf::from("/opt/homebrew/bin/openclaw"),
+            }],
+            &gwt_agent::VersionCache::new(),
+        );
+        let openclaw = options
+            .iter()
+            .find(|option| option.id == "openclaw")
+            .expect("OpenClaw option");
+        assert!(openclaw.available);
+        assert_eq!(openclaw.installed_version.as_deref(), Some("2026.1.0"));
+        assert_eq!(agent_description(openclaw), "Detected · 2026.1.0");
+
+        let agy = options
+            .iter()
+            .find(|option| option.id == "agy")
+            .expect("Antigravity option");
+        assert!(!agy.available);
+        assert_eq!(agent_description(agy), "Not installed");
     }
 
     #[test]

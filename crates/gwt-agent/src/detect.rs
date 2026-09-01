@@ -41,14 +41,23 @@ pub struct AgentDetector;
 
 impl AgentDetector {
     /// Scan the system for all known builtin agents.
+    ///
+    /// Each probe spawns `<command> --version`, so the probes run on scoped
+    /// threads and the wall-clock cost is bounded by the slowest CLI rather
+    /// than the sum of all nine (SPEC-3864 T-006). Results keep descriptor
+    /// order so callers see a deterministic list.
     pub fn detect_all() -> Vec<DetectedAgent> {
-        let mut found = Vec::new();
-        for probe in builtin_probes() {
-            if let Some(detected) = Self::detect_one(&probe) {
-                found.push(detected);
-            }
-        }
-        found
+        let probes = builtin_probes();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = probes
+                .iter()
+                .map(|probe| scope.spawn(move || Self::detect_one(probe)))
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok().flatten())
+                .collect()
+        })
     }
 
     /// Detect a single agent by its command name.
