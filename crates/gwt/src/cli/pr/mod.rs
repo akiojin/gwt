@@ -115,6 +115,24 @@ fn dispatch_pr_mutation<T>(
     }
 }
 
+fn verification_adjudication_note(
+    references: &[crate::cli::verification_record::VerificationAdjudicationRef],
+) -> String {
+    let mut note = String::from(
+        "<!-- gwt:verification-adjudication -->\nVerification adjudication applied for this PR handoff.\n\n",
+    );
+    for reference in references {
+        note.push_str(&format!(
+            "- Board decision `{}` for `{}`\n",
+            reference.board_entry_id, reference.command
+        ));
+    }
+    note.push_str(
+        "\nRaw verification results remain failing for completion and obligation gates.\n",
+    );
+    note
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: PrCommand,
@@ -122,9 +140,11 @@ pub(super) fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     // SPEC-3248 P8b (T-112/FR-037/AS-33): Ready handoffs — a non-draft PR
     // creation or `pr.ready` — require the current session's execution to be
-    // settled or backed by fresh verification evidence. A terminally blocked
-    // execution refuses every PR mutation, draft creation and edits
-    // included; an active execution keeps the mid-work Draft flow available.
+    // settled or backed by fresh verification evidence. Exact Board decision
+    // references may classify failed commands for `pr.ready` only. A
+    // terminally blocked execution refuses every PR mutation, draft creation
+    // and edits included; an active execution keeps the mid-work Draft flow
+    // available.
     let is_pr_mutation = matches!(
         cmd,
         PrCommand::Create { .. }
@@ -134,6 +154,7 @@ pub(super) fn run<E: CliEnv>(
             | PrCommand::Ready { .. }
     );
     let mut mutation_binding = None;
+    let mut ready_adjudications = Vec::new();
     if is_pr_mutation {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
@@ -156,7 +177,16 @@ pub(super) fn run<E: CliEnv>(
                 | PrCommand::CreateBody { draft: false, .. }
                 | PrCommand::Ready { .. }
         );
-        if let Some(refusal) =
+        if matches!(cmd, PrCommand::Ready { .. }) {
+            match crate::cli::execution_state::pr_ready_adjudications(env.repo_path()) {
+                Ok(references) => ready_adjudications = references,
+                Err(refusal) => {
+                    out.push_str(&refusal);
+                    out.push('\n');
+                    return Ok(2);
+                }
+            }
+        } else if let Some(refusal) =
             crate::cli::execution_state::pr_handoff_refusal(env.repo_path(), is_ready_handoff)
         {
             out.push_str(&refusal);
@@ -279,8 +309,15 @@ pub(super) fn run<E: CliEnv>(
             // sync workspace PR metadata (that path is reserved for current/create
             // where the PR is provably the workspace's own). Draft↔Ready also does
             // not change pr.state (OPEN→OPEN), so there is no metadata to refresh.
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || env.mark_pr_ready(number))
-                .map_err(super::io_as_api_error)?;
+            let adjudication_note = (!ready_adjudications.is_empty())
+                .then(|| verification_adjudication_note(&ready_adjudications));
+            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                if let Some(note) = adjudication_note.as_deref() {
+                    env.comment_on_pr(number, note)?;
+                }
+                env.mark_pr_ready(number)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str(&format!("marked pull request #{number} ready for review\n"));
             render_pr(out, &pr);
             0
@@ -1564,6 +1601,153 @@ mod tests {
         .expect("run pr edit while blocked");
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+    }
+
+    #[test]
+    fn pr_ready_accepts_exact_board_decision_without_relaxing_other_gates() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-pr");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        crate::cli::execution_state::materialize_at_launch(
+            tmp.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr",
+            "launch",
+            false,
+        )
+        .unwrap();
+
+        let command = "git definitely-not-a-subcommand".to_string();
+        let second_command = "git still-not-a-subcommand".to_string();
+        crate::cli::verification_record::save_plan(
+            tmp.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "sess-pr".to_string(),
+                owner_number: Some(42),
+                execution_binding: None,
+                commands: vec![command.clone(), second_command.clone()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, _) = crate::cli::verification_record::run_verification(
+            tmp.path(),
+            "sess-pr",
+            &[command.clone(), second_command.clone()],
+        )
+        .unwrap();
+        assert!(!record.all_passed);
+
+        let decision = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            format!(
+                "Verification record: {}\nFailing command: {command}\nReason: accepted for PR handoff",
+                record.record_id
+            ),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let decision_id = decision.id.clone();
+        gwt_core::coordination::post_entry(tmp.path(), decision).unwrap();
+
+        let second_decision = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            format!(
+                "Verification record: {}\nFailing command: {second_command}\nReason: accepted for PR handoff",
+                record.record_id
+            ),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let second_decision_id = second_decision.id.clone();
+        gwt_core::coordination::post_entry(tmp.path(), second_decision).unwrap();
+
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        let mut verify_out = String::new();
+        let code = crate::cli::verification_record::run(
+            &mut env,
+            crate::cli::verification_record::VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command: command.clone(),
+                board_entry_id: decision_id.clone(),
+            },
+            &mut verify_out,
+        )
+        .expect("attach Board decision");
+        assert_eq!(code, 0, "{verify_out}");
+        assert_eq!(
+            crate::cli::verification_record::evaluate_evidence(tmp.path(), "sess-pr", Some(42),),
+            crate::cli::verification_record::EvidenceStatus::Failing,
+            "non-PR evidence consumers must retain the raw failure",
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("non-draft create"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run non-draft create");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_create_call_log.is_empty());
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run partially adjudicated pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_ready_call_log.is_empty());
+        assert!(env.pr_comments.is_empty());
+
+        let mut verify_out = String::new();
+        let code = crate::cli::verification_record::run(
+            &mut env,
+            crate::cli::verification_record::VerifyCommand::Adjudicate {
+                record_id: record.record_id,
+                command: second_command.clone(),
+                board_entry_id: second_decision_id.clone(),
+            },
+            &mut verify_out,
+        )
+        .expect("attach second Board decision");
+        assert_eq!(code, 0, "{verify_out}");
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run adjudicated pr ready");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+        assert_eq!(env.pr_comments.len(), 1);
+        assert_eq!(env.pr_comments[0].0, 7);
+        assert!(env.pr_comments[0].1.contains(&decision_id));
+        assert!(env.pr_comments[0].1.contains(&command));
+        assert!(env.pr_comments[0].1.contains(&second_decision_id));
+        assert!(env.pr_comments[0].1.contains(&second_command));
     }
 
     #[test]

@@ -2272,6 +2272,13 @@ pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> 
     Ok(find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)?.is_some())
 }
 
+/// Load one immutable Board entry by its durable id, including entries that
+/// have aged out of the hot projection.
+pub fn load_board_entry(worktree_root: &Path, entry_id: &str) -> Result<Option<BoardEntry>> {
+    ensure_repo_local_files(worktree_root)?;
+    find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)
+}
+
 fn find_board_entry_in_segments(
     coordination_root: &Path,
     entry_id: &str,
@@ -3457,7 +3464,15 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "entry-0"));
         assert!(board_entry_exists(dir.path(), "entry-0").unwrap());
+        let historical = load_board_entry(dir.path(), "entry-0")
+            .unwrap()
+            .expect("load entry outside hot projection");
+        assert_eq!(historical.id, "entry-0");
+        assert_eq!(historical.body, "entry-0");
         assert!(!board_entry_exists(dir.path(), "missing-entry").unwrap());
+        assert!(load_board_entry(dir.path(), "missing-entry")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
