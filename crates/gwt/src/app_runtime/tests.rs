@@ -12747,6 +12747,100 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
 }
 
 #[test]
+fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let delivery_id = "launch:stale-pre-pty";
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(3851),
+            issue_monitor_delivery_id: Some(delivery_id.to_string()),
+            issue_monitor_project_root: Some(temp.path().to_path_buf()),
+            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
+        },
+    );
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: window_id.clone(),
+            started_at: Instant::now(),
+        },
+    );
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Err("stale preparation failure".to_string()),
+    );
+
+    let feedback_retained = runtime
+        .pending_launch_feedback_contexts
+        .contains_key(&window_id);
+    let delivery_retained = matches!(
+        runtime.issue_monitor_launch_deliveries.get(delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: delivery_window_id,
+            ..
+        }) if delivery_window_id == &window_id
+    );
+    let runtime_retained = runtime.runtimes.contains_key(&window_id);
+    let active_session_retained = runtime.active_agent_sessions.contains_key(&window_id);
+    let status = runtime.window_status(&window_id);
+    let diagnostic_retained = runtime
+        .launch_error_terminal_details
+        .contains_key(&window_id);
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+
+    assert!(
+        events.is_empty(),
+        "a stale pre-PTY result must not emit launch failure events: {events:#?}"
+    );
+    assert!(
+        feedback_retained,
+        "the current launch feedback must survive"
+    );
+    assert!(
+        delivery_retained,
+        "the current Monitor delivery must survive"
+    );
+    assert!(runtime_retained, "the live PTY runtime must survive");
+    assert!(active_session_retained, "the active Session must survive");
+    assert!(
+        status.is_some_and(|status| !matches!(
+            status,
+            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+        )),
+        "the composed live-agent status must remain non-terminal: {status:?}"
+    );
+    assert!(
+        !diagnostic_retained,
+        "a stale result must not append the pre-PTY diagnostic"
+    );
+}
+
+#[test]
 fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry() {
     let _env_guard = env_test_lock()
         .lock()
@@ -44120,7 +44214,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
 }
 
 #[test]
-fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears() {
+fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -44196,19 +44290,43 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         1,
     );
 
-    match runtime
+    let live_window_id = match runtime
         .issue_monitor_launch_deliveries
         .get_mut("launch:effect-3165")
         .expect("replayed delivery is materializing")
     {
         super::IssueMonitorLaunchDeliveryState::Materializing {
-            window_id: _,
+            window_id,
             started_at,
         } => {
             *started_at = Instant::now() - Duration::from_secs(61);
+            window_id.clone()
         }
         state => panic!("expected materializing delivery, got {state:?}"),
-    }
+    };
+    insert_test_pane_runtime(&mut runtime, &live_window_id);
+
+    let waiting_replay = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+
+    assert!(
+        waiting_replay.is_empty(),
+        "a materializer with a live PTY must keep its delivery slot while awaiting input",
+    );
+    assert!(runtime.runtimes.contains_key(&live_window_id));
+    assert!(matches!(
+        runtime
+            .issue_monitor_launch_deliveries
+            .get("launch:effect-3165"),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &live_window_id
+    ));
+
+    runtime.stop_window_runtime_without_session_projection(&live_window_id);
 
     let expired_replay = runtime.auto_launch_issue_monitor_delivery_events(
         3165,
