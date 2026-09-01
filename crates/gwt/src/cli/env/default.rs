@@ -473,6 +473,17 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
             .map_err(|err| io::Error::other(err.to_string()))
     }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        crate::cli::pr::fetch_pr_quarantine_context_via_gh(
+            &self.owner,
+            &self.repo,
+            &self.repo_path,
+            number,
+        )
+    }
     fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
         gwt_git::fetch_pr_inventory(&self.repo_path)
             .map_err(|err| io::Error::other(err.to_string()))

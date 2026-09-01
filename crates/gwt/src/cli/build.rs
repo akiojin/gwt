@@ -17,6 +17,8 @@ pub(super) fn run<E: CliEnv>(
     action: SkillStateAction,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let mut completion_verification_hash = None;
+    let mut completion_session_id = None;
     if matches!(&action, SkillStateAction::Complete { .. }) {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         if let Some(refusal) =
@@ -25,8 +27,136 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("{VERB}: completion refused — {refusal}\n"));
             return Ok(2);
         }
+        let verification = crate::cli::verification_record::load(&worktree).map_err(|error| {
+            gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(format!(
+                "failed to load verification evidence: {error}"
+            )))
+        })?;
+        if verification
+            .as_ref()
+            .is_some_and(|record| !record.quarantined_failures.is_empty())
+        {
+            let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            else {
+                out.push_str(&format!(
+                    "{VERB}: completion refused — typed quarantine requires the current owning Session\n"
+                ));
+                return Ok(2);
+            };
+            let expected_owner = match &action {
+                SkillStateAction::Complete { spec } => Some(*spec),
+                _ => None,
+            };
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                &session_id,
+                expected_owner,
+            );
+            if evidence != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                out.push_str(&format!(
+                    "{VERB}: completion refused — {}\n",
+                    evidence.describe()
+                ));
+                return Ok(2);
+            }
+            if let Err(refusal) =
+                crate::cli::verification_record::validate_current_quarantine_references(
+                    env,
+                    verification.as_ref().expect("typed record checked above"),
+                    None,
+                )
+            {
+                out.push_str(&format!(
+                    "{VERB}: completion refused — typed quarantine evidence is not current: {refusal}\n"
+                ));
+                return Ok(2);
+            }
+            completion_verification_hash = verification.map(|record| record.content_hash);
+            completion_session_id = Some(session_id);
+        }
     }
-    if let Err(error) = record_current_work_terminal_before_finalize(env, &action) {
+    if let (Some(expected_hash), Some(session_id)) = (
+        completion_verification_hash.as_deref(),
+        completion_session_id.as_deref(),
+    ) {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        if let Some(refusal) =
+            crate::cli::action_obligation::open_obligation_refusal(&worktree, session_id, &[])
+        {
+            out.push_str(&format!("{VERB}: completion refused — {refusal}\n"));
+            return Ok(2);
+        }
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&worktree)
+            .ok_or_else(|| {
+                gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
+                    "typed quarantine build completion requires canonical trusted storage"
+                        .to_string(),
+                ))
+            })?;
+        let result = crate::cli::trusted_store::with_write_lease_for_resolved_dir(
+            &trusted_dir,
+            || {
+            let current = crate::cli::verification_record::load(&worktree)?;
+            if current
+                .as_ref()
+                .is_none_or(|record| record.content_hash != expected_hash)
+            {
+                out.push_str(
+                    "build: completion refused — typed quarantine verification evidence changed after live PR validation\n",
+                );
+                return Ok(Ok(2));
+            }
+            let expected_owner = match &action {
+                SkillStateAction::Complete { spec } => Some(*spec),
+                _ => None,
+            };
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                session_id,
+                expected_owner,
+            );
+            if evidence != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                out.push_str(&format!(
+                    "build: completion refused — {}\n",
+                    evidence.describe()
+                ));
+                return Ok(Ok(2));
+            }
+            Ok(run_after_quarantine_precheck(
+                env,
+                action,
+                out,
+                Some(expected_hash),
+                Some(&trusted_dir),
+            ))
+            },
+        )
+        .map_err(|error| {
+            gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error(
+                    "holding typed quarantine build completion lease",
+                    &error,
+                ),
+            ))
+        })?;
+        return result;
+    }
+    run_after_quarantine_precheck(env, action, out, None, None)
+}
+
+fn run_after_quarantine_precheck<E: CliEnv>(
+    env: &mut E,
+    action: SkillStateAction,
+    out: &mut String,
+    completion_verification_hash: Option<&str>,
+    held_trusted_dir: Option<&std::path::Path>,
+) -> Result<i32, SpecOpsError> {
+    if let Err(error) =
+        record_current_work_terminal_before_finalize_with_lease(env, &action, held_trusted_dir)
+    {
         out.push_str(&format!("{VERB}: Work lifecycle update failed: {error}\n"));
         return Ok(1);
     }
@@ -78,12 +208,35 @@ pub(super) fn run<E: CliEnv>(
                         &session_id,
                         Some(spec),
                     );
-                    if status == crate::cli::verification_record::EvidenceStatus::Fresh {
-                        crate::cli::execution_state::settle_completed_best_effort(
-                            &worktree,
-                            &session_id,
-                            spec,
-                        );
+                    if status.is_delivery_acceptable() {
+                        let settled = if let Some(expected_hash) = completion_verification_hash {
+                            debug_assert!(held_trusted_dir.is_some());
+                            match crate::cli::execution_state::settle_completed_with_evidence_locked(
+                                &worktree,
+                                &session_id,
+                                Some(spec),
+                                Some(expected_hash),
+                            ) {
+                                Ok(Ok(
+                                    crate::cli::execution_state::SettleResult::Settled(_)
+                                    | crate::cli::execution_state::SettleResult::AlreadySettled(_),
+                                )) => true,
+                                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => false,
+                            }
+                        } else {
+                            crate::cli::execution_state::settle_completed_best_effort(
+                                &worktree,
+                                &session_id,
+                                spec,
+                            );
+                            true
+                        };
+                        if completion_verification_hash.is_some() && !settled {
+                            out.push_str(
+                                "build: completion refused — typed quarantine verification evidence changed after live PR validation\n",
+                            );
+                            return Ok(2);
+                        }
                     } else {
                         out.push_str(&format!(
                             "{VERB}: execution control not settled — {}\n",
@@ -97,9 +250,18 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
+#[cfg(test)]
 fn record_current_work_terminal_before_finalize<E: CliEnv>(
     env: &E,
     action: &SkillStateAction,
+) -> Result<(), String> {
+    record_current_work_terminal_before_finalize_with_lease(env, action, None)
+}
+
+fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
+    env: &E,
+    action: &SkillStateAction,
+    held_trusted_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let (spec, close_kind, abort_reason) = match action {
         SkillStateAction::Complete { spec } => (*spec, WorkTerminalKind::Done, None),
@@ -198,10 +360,19 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
             ) {
                 Ok(receipt) => receipt,
                 Err(bridge_error) if bridge_error.is_missing_route_rejection() => {
-                    return crate::agent_project_state::continue_bound_terminal_compatibility(
-                        &compatibility_authority,
-                        request,
-                    )
+                    let reconciliation = if let Some(held_trusted_dir) = held_trusted_dir {
+                        crate::agent_project_state::continue_bound_terminal_compatibility_held_global_lease(
+                            &compatibility_authority,
+                            request,
+                            held_trusted_dir,
+                        )
+                    } else {
+                        crate::agent_project_state::continue_bound_terminal_compatibility(
+                            &compatibility_authority,
+                            request,
+                        )
+                    };
+                    return reconciliation
                     .map(|_| ())
                     .map_err(|local_error| {
                         format!(
@@ -216,10 +387,19 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         };
         return match receipt.outcome {
             crate::AgentWorkTerminalizationOutcome::Emitted => {
-                crate::agent_project_state::confirm_bound_terminal_compatibility_authority(
-                    &compatibility_authority,
-                    request,
-                )
+                let confirmation = if let Some(held_trusted_dir) = held_trusted_dir {
+                    crate::agent_project_state::confirm_bound_terminal_compatibility_authority_held_global_lease(
+                        &compatibility_authority,
+                        request,
+                        held_trusted_dir,
+                    )
+                } else {
+                    crate::agent_project_state::confirm_bound_terminal_compatibility_authority(
+                        &compatibility_authority,
+                        request,
+                    )
+                };
+                confirmation
                 .map_err(|error| {
                     format!(
                         "Host emitted a terminal event outside the canonical Work authority: {error}"
@@ -229,13 +409,21 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
             crate::AgentWorkTerminalizationOutcome::AlreadyMatching
             | crate::AgentWorkTerminalizationOutcome::WrongTerminal
             | crate::AgentWorkTerminalizationOutcome::AssignedWorkMissing
-            | crate::AgentWorkTerminalizationOutcome::NoTarget => {
+            | crate::AgentWorkTerminalizationOutcome::NoTarget => if let Some(held_trusted_dir) =
+                held_trusted_dir
+            {
+                crate::agent_project_state::continue_bound_terminal_compatibility_held_global_lease(
+                    &compatibility_authority,
+                    request,
+                    held_trusted_dir,
+                )
+            } else {
                 crate::agent_project_state::continue_bound_terminal_compatibility(
                     &compatibility_authority,
                     request,
                 )
-                .map(|_| ())
             }
+            .map(|_| ()),
             crate::AgentWorkTerminalizationOutcome::AmbiguousTerminal => {
                 map_agent_terminal_outcome(receipt.outcome, close_kind)
             }
@@ -1179,6 +1367,228 @@ mod tests {
             repo.join("managed-runtime.json"),
         );
         operation(&crate::cli::TestEnv::new(repo.to_path_buf()))
+    }
+
+    #[test]
+    fn build_complete_rejects_typed_quarantine_without_session_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        crate::cli::verification_record::save_plan(
+            repo.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "session-missing".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (mut verification, _) = crate::cli::verification_record::run_verification(
+            repo.path(),
+            "session-missing",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        verification.quarantined_failures =
+            vec![crate::cli::verification_record::TypedQuarantinedFailure {
+                failed_command: "cargo test -p gwt --lib".to_string(),
+                test_identity: "tests::flake".to_string(),
+                owner_issue: 3755,
+                head_sha: "head".to_string(),
+                merge_base_sha: "base".to_string(),
+                baseline_command: "cargo test -p gwt --lib tests::flake -- --exact".to_string(),
+                baseline_exit_code: 0,
+                baseline_result_line: "test tests::flake ... ok".to_string(),
+                pr_number: 3854,
+                pr_reference: crate::cli::verification_record::PrQuarantineReference {
+                    kind: crate::cli::verification_record::PrQuarantineReferenceKind::Body,
+                    comment_id: None,
+                    marker: crate::cli::verification_record::quarantine_marker(
+                        "tests::flake",
+                        3755,
+                    ),
+                },
+            }];
+        crate::cli::verification_record::save(repo.path(), &verification).unwrap();
+
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            SkillStateAction::Complete { spec: 3248 },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("current owning Session"), "{out}");
+    }
+
+    #[test]
+    fn build_complete_atomically_settles_typed_quarantine_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let session_id = "session-typed-build";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        crate::cli::execution_state::materialize_at_launch(
+            repo.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            3248,
+            session_id,
+            "launch",
+            false,
+        )
+        .unwrap();
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 3248,
+        };
+        let binding =
+            crate::cli::execution_state::current_execution_binding(repo.path(), owner).unwrap();
+        let command = "cargo test -p gwt --lib".to_string();
+        let test_identity = "tests::flake";
+        let baseline_command = format!("{command} {test_identity} -- --exact");
+        crate::cli::verification_record::save_plan(
+            repo.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: session_id.to_string(),
+                owner_number: Some(3248),
+                execution_binding: binding.clone(),
+                commands: vec![command.clone()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: vec![
+                    crate::cli::verification_record::VerificationQuarantineRequest {
+                        failed_command: command.clone(),
+                        test_identity: test_identity.to_string(),
+                        baseline_command: baseline_command.clone(),
+                        owner_issue: 3755,
+                        pr_number: 3854,
+                    },
+                ],
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let plan = crate::cli::verification_record::load_plan(repo.path())
+            .unwrap()
+            .unwrap();
+        let marker = crate::cli::verification_record::quarantine_marker(test_identity, 3755);
+        crate::cli::verification_record::save(
+            repo.path(),
+            &crate::cli::verification_record::VerificationRunRecord {
+                record_id: "vrr-typed-build".to_string(),
+                session_id: session_id.to_string(),
+                owner_number: Some(3248),
+                execution_binding: binding,
+                worktree_fingerprint: plan.worktree_fingerprint.clone(),
+                commands: vec![crate::cli::verification_record::VerificationCommandResult {
+                    command: command.clone(),
+                    exit_code: 101,
+                    output_tail: format!(
+                        "failures:\n    {test_identity}\n\ntest result: FAILED. 0 passed; 1 failed"
+                    ),
+                }],
+                all_passed: false,
+                quarantined_failures: vec![
+                    crate::cli::verification_record::TypedQuarantinedFailure {
+                        failed_command: command,
+                        test_identity: test_identity.to_string(),
+                        owner_issue: 3755,
+                        head_sha: "head".to_string(),
+                        merge_base_sha: "base".to_string(),
+                        baseline_command,
+                        baseline_exit_code: 0,
+                        baseline_result_line: format!("test {test_identity} ... ok"),
+                        pr_number: 3854,
+                        pr_reference: crate::cli::verification_record::PrQuarantineReference {
+                            kind: crate::cli::verification_record::PrQuarantineReferenceKind::Body,
+                            comment_id: None,
+                            marker: marker.clone(),
+                        },
+                    },
+                ],
+                started_at: Some(chrono::Utc::now()),
+                created_at: chrono::Utc::now(),
+                plan_covered: true,
+                planned_missing: Vec::new(),
+                verification_plan_hash: plan.content_hash,
+                plan_derived: false,
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(3755),
+            title: "owned flake".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        env.pr_quarantine_contexts.insert(
+            3854,
+            crate::cli::pr::PrQuarantineContext {
+                number: 3854,
+                body: marker,
+                comments: Vec::new(),
+            },
+        );
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, SkillStateAction::Start { spec: 3248 }, &mut out,).unwrap(),
+            0,
+            "{out}"
+        );
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                SkillStateAction::Complete { spec: 3248 },
+                &mut out,
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let completed = crate::cli::execution_state::load(repo.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed.status,
+            crate::cli::execution_state::ExecutionControlStatus::Completed
+        );
+        assert!(
+            completed
+                .completion_evidence
+                .is_some_and(|receipt| receipt.used_typed_quarantine),
+            "typed quarantine must be pinned in the Completed ECR"
+        );
     }
 
     #[test]

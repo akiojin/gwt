@@ -7173,6 +7173,7 @@ mod tests {
                 missing_verification: None,
                 launched_at: completed_at,
                 settled_at: Some(completed_at),
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),

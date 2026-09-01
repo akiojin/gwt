@@ -23,6 +23,8 @@ use crate::cli::{
     PrCheckItem, PrChecksSummary, PrCreateCall, PrReview, PrReviewThread, PrReviewThreadComment,
 };
 
+use super::{PrQuarantineComment, PrQuarantineContext};
+
 fn run_gh_in<I, S>(label: &str, repo_path: Option<&Path>, args: I) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,
@@ -500,6 +502,98 @@ pub fn comment_on_pr_via_gh(
         )));
     }
     Ok(())
+}
+
+fn quarantine_body(value: &serde_json::Value, field: &str) -> io::Result<String> {
+    match value.get(field) {
+        Some(serde_json::Value::String(body)) => Ok(body.clone()),
+        Some(serde_json::Value::Null) => Ok(String::new()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("GitHub response is missing a valid {field}"),
+        )),
+    }
+}
+
+fn parse_pr_quarantine_context(
+    expected_number: u64,
+    pr_json: &str,
+    comments_json: &str,
+) -> io::Result<PrQuarantineContext> {
+    let pr: serde_json::Value = serde_json::from_str(pr_json)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let number = pr
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "PR response is missing number")
+        })?;
+    if number != expected_number {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("PR response number #{number} does not match requested #{expected_number}"),
+        ));
+    }
+    let body = quarantine_body(&pr, "body")?;
+    let pages: Vec<Vec<serde_json::Value>> = serde_json::from_str(comments_json)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let comments = pages
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            let id = value
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "PR comment response is missing durable id",
+                    )
+                })?;
+            let body = quarantine_body(&value, "body")?;
+            Ok(PrQuarantineComment { id, body })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(PrQuarantineContext {
+        number,
+        body,
+        comments,
+    })
+}
+
+pub fn fetch_pr_quarantine_context_via_gh(
+    owner: &str,
+    repo: &str,
+    repo_path: &Path,
+    number: u64,
+) -> io::Result<PrQuarantineContext> {
+    let pr_endpoint = format!("repos/{owner}/{repo}/pulls/{number}");
+    let pr = run_gh_in(
+        &format!("gh api {pr_endpoint}"),
+        Some(repo_path),
+        ["api", pr_endpoint.as_str()],
+    )?;
+    if !pr.success() {
+        return Err(io::Error::other(format!(
+            "gh api {pr_endpoint}: {}",
+            pr.stderr.trim()
+        )));
+    }
+
+    let comments_endpoint = format!("repos/{owner}/{repo}/issues/{number}/comments?per_page=100");
+    let comments = run_gh_in(
+        &format!("gh api --paginate {comments_endpoint}"),
+        Some(repo_path),
+        ["api", "--paginate", "--slurp", comments_endpoint.as_str()],
+    )?;
+    if !comments.success() {
+        return Err(io::Error::other(format!(
+            "gh api {comments_endpoint}: {}",
+            comments.stderr.trim()
+        )));
+    }
+
+    parse_pr_quarantine_context(number, &pr.stdout, &comments.stdout)
 }
 
 pub fn fetch_pr_reviews_via_gh(owner: &str, repo: &str, number: u64) -> io::Result<Vec<PrReview>> {
@@ -984,5 +1078,33 @@ mod tests {
         assert!(should_resolve_review_thread(&review_thread(false, false)));
         assert!(!should_resolve_review_thread(&review_thread(true, true)));
         assert!(!should_resolve_review_thread(&review_thread(true, false)));
+    }
+
+    #[test]
+    fn quarantine_context_parser_flattens_every_comment_page() {
+        let context = parse_pr_quarantine_context(
+            42,
+            r#"{"number":42,"body":"body marker"}"#,
+            r#"[[{"id":1,"body":"first"}],[{"id":2,"body":"later marker"}]]"#,
+        )
+        .expect("parse paginated quarantine context");
+
+        assert_eq!(context.number, 42);
+        assert_eq!(context.body, "body marker");
+        assert_eq!(context.comments.len(), 2);
+        assert_eq!(context.comments[1].id, 2);
+        assert_eq!(context.comments[1].body, "later marker");
+    }
+
+    #[test]
+    fn quarantine_context_parser_rejects_incomplete_comment_identity() {
+        let error = parse_pr_quarantine_context(
+            42,
+            r#"{"number":42,"body":null}"#,
+            r#"[[{"body":"marker without durable id"}]]"#,
+        )
+        .expect_err("comment id must be present");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

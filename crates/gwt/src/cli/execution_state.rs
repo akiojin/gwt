@@ -172,6 +172,7 @@ fn inject_repair_binding_authority_race_if_requested(worktree: &Path) -> io::Res
         missing_verification: None,
         launched_at: now,
         settled_at: None,
+        completion_evidence: None,
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
@@ -483,6 +484,14 @@ pub struct ExecutionRecovery {
 
 /// The Execution Control Record (T-106).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionCompletionEvidence {
+    pub verification_record_id: String,
+    pub verification_run_hash: String,
+    pub verification_plan_hash: String,
+    pub used_typed_quarantine: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionControlRecord {
     pub owner_kind: ExecutionOwnerKind,
     pub owner_number: u64,
@@ -503,6 +512,12 @@ pub struct ExecutionControlRecord {
     pub launched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,
+    /// Exact integrity-protected verification snapshot that authorized a
+    /// Completed transition. Ready handoff must consume this same snapshot;
+    /// replacing or deleting the run after completion cannot erase a typed
+    /// quarantine disposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_evidence: Option<ExecutionCompletionEvidence>,
     /// Audited ownership transfer chain (P9a, T-117/T-123): every takeover —
     /// `execution.adopt`, launch takeover, resume takeover — appends here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4426,6 +4441,130 @@ pub(crate) fn with_blocked_build_abort_session_execution_identity_global_lease<T
     )
 }
 
+/// Variant for callers that already hold the exact worktree-global trusted
+/// write lease. It acquires only owner -> Session beneath that lease, avoiding
+/// a nested attempt on the non-reentrant global lock.
+pub(crate) fn with_current_active_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_held_global_lease(
+        sessions_dir,
+        expected,
+        held_trusted_dir,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+pub(crate) fn with_blocked_build_abort_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_held_global_lease(
+        sessions_dir,
+        expected,
+        held_trusted_dir,
+        CurrentExecutionBindingAuthority::BlockedBuildAbort,
+        operation,
+    )
+}
+
+fn with_current_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    authority: CurrentExecutionBindingAuthority,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "owner lease must be acquired before the Session lease; retry outside the nested Session operation",
+        ));
+    }
+    let binding = &expected.execution_binding;
+    if expected.session_id != binding.session_id
+        || gwt_agent::validate_session_id_path_component(&expected.session_id).is_err()
+    {
+        return Ok(None);
+    }
+    let owner = match binding.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: binding.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let session_path = sessions_dir.join(format!("{}.toml", expected.session_id));
+    let route_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => session,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if gwt_agent::SessionExecutionIdentity::from_session(&route_session)
+        .ok()
+        .flatten()
+        .as_ref()
+        != Some(expected)
+    {
+        return Ok(None);
+    }
+    let context = match GenerationTransactionContext::resolve(&expected.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if context.worktree_trusted_dir != held_trusted_dir {
+        return Ok(None);
+    }
+    context.validate_unchanged()?;
+    with_resolved_generation_owner_lease(&context, |context| {
+        gwt_agent::with_session_lease(sessions_dir, &expected.session_id, |session| {
+            let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
+                Ok(path) => path,
+                Err(_) => return Ok(None),
+            };
+            let execution_binding_matches = match authority {
+                CurrentExecutionBindingAuthority::ActiveMutation => {
+                    current_active_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &binding.identity,
+                    )?
+                }
+                CurrentExecutionBindingAuthority::BlockedBuildAbort => {
+                    blocked_build_abort_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &binding.identity,
+                    )?
+                }
+                CurrentExecutionBindingAuthority::PrMutation => false,
+            };
+            if gwt_agent::SessionExecutionIdentity::from_session(session)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(expected)
+                || canonical_worktree != context.worktree
+                || !execution_binding_matches
+            {
+                return Ok(None);
+            }
+            Ok(Some(operation(held_trusted_dir)))
+        })
+    })
+}
+
 fn with_current_session_execution_identity_global_lease<T>(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
@@ -4680,6 +4819,7 @@ fn invalid_generation_authority_record(hint: &GenerationAuthorityHint) -> Execut
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -5624,6 +5764,7 @@ fn build_successor_generation(
         missing_verification: None,
         launched_at: request.requested_at,
         settled_at: None,
+        completion_evidence: None,
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
@@ -8954,6 +9095,7 @@ fn materialize_at_launch_locked(
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers,
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -9015,6 +9157,9 @@ pub fn entrypoint_from_launch(args: &[String], resume: bool) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionSettlement {
     Completed,
+    CompletedWithEvidence {
+        evidence: ExecutionCompletionEvidence,
+    },
     Blocked {
         reason: String,
         missing_verification: Option<String>,
@@ -9077,6 +9222,11 @@ fn settle_locked(
             record.status = ExecutionControlStatus::Completed;
             "completed".to_string()
         }
+        ExecutionSettlement::CompletedWithEvidence { evidence } => {
+            record.status = ExecutionControlStatus::Completed;
+            record.completion_evidence = Some(evidence);
+            "completed with verification evidence".to_string()
+        }
         ExecutionSettlement::Blocked {
             reason,
             missing_verification,
@@ -9118,43 +9268,72 @@ fn settle_completed_with_evidence(
     worktree: &Path,
     session_id: &str,
     expected_owner_number: Option<u64>,
+    expected_verification_hash: Option<&str>,
 ) -> io::Result<Result<SettleResult, crate::cli::verification_record::EvidenceStatus>> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
-        let Some(record) = load(worktree)? else {
-            return Ok(Ok(SettleResult::NoRecord));
-        };
-        if expected_owner_number.is_some_and(|expected| record.owner_number != expected) {
-            return Ok(Ok(SettleResult::NoRecord));
-        }
-        if !integrity_ok(&record)
-            || record.primary_session_id != session_id
-            || record.status != ExecutionControlStatus::Active
-        {
-            return settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok);
-        }
-
-        use crate::cli::verification_record as vr;
-        let verification = match vr::load(worktree) {
-            Ok(Some(verification)) => verification,
-            Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
-            Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
-        };
-        let plan = match vr::load_plan(worktree) {
-            Ok(plan) => plan,
-            Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
-        };
-        let status = vr::evaluate_evidence_snapshot(
+        settle_completed_with_evidence_locked(
             worktree,
             session_id,
-            Some(record.owner_number),
-            plan.as_ref(),
-            &verification,
-        );
-        if status != vr::EvidenceStatus::Fresh {
-            return Ok(Err(status));
-        }
-        settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok)
+            expected_owner_number,
+            expected_verification_hash,
+        )
     })
+}
+
+pub(crate) fn settle_completed_with_evidence_locked(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+    expected_verification_hash: Option<&str>,
+) -> io::Result<Result<SettleResult, crate::cli::verification_record::EvidenceStatus>> {
+    let Some(record) = load(worktree)? else {
+        return Ok(Ok(SettleResult::NoRecord));
+    };
+    if expected_owner_number.is_some_and(|expected| record.owner_number != expected) {
+        return Ok(Ok(SettleResult::NoRecord));
+    }
+    if !integrity_ok(&record)
+        || record.primary_session_id != session_id
+        || record.status != ExecutionControlStatus::Active
+    {
+        return settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok);
+    }
+
+    use crate::cli::verification_record as vr;
+    let verification = match vr::load(worktree) {
+        Ok(Some(verification)) => verification,
+        Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
+        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+    };
+    if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
+        return Ok(Err(vr::EvidenceStatus::PlanChanged));
+    }
+    let plan = match vr::load_plan(worktree) {
+        Ok(plan) => plan,
+        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+    };
+    let status = vr::evaluate_evidence_snapshot(
+        worktree,
+        session_id,
+        Some(record.owner_number),
+        plan.as_ref(),
+        &verification,
+    );
+    if !status.is_delivery_acceptable() {
+        return Ok(Err(status));
+    }
+    let evidence = ExecutionCompletionEvidence {
+        verification_record_id: verification.record_id.clone(),
+        verification_run_hash: verification.content_hash.clone(),
+        verification_plan_hash: verification.verification_plan_hash.clone(),
+        used_typed_quarantine: status == vr::EvidenceStatus::FreshWithQuarantine,
+    };
+    settle_locked(
+        worktree,
+        session_id,
+        ExecutionSettlement::CompletedWithEvidence { evidence },
+    )
+    .map(Ok)
 }
 
 /// Best-effort settlement used by sibling flows (`build.complete`): settles
@@ -9167,21 +9346,38 @@ pub(crate) fn settle_completed_best_effort(
     session_id: &str,
     expected_owner_number: u64,
 ) {
+    let _ = settle_completed_best_effort_guarded(worktree, session_id, expected_owner_number, None);
+}
+
+pub(crate) fn settle_completed_best_effort_guarded(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: u64,
+    expected_verification_hash: Option<&str>,
+) -> bool {
     // T-247: build.complete settlement also skips while obligations stay
     // open — the ECR stays active and the Stop gate keeps holding.
     if let Some(refusal) =
         crate::cli::action_obligation::open_obligation_refusal(worktree, session_id, &[])
     {
         tracing::warn!(%refusal, "execution control settlement skipped");
-        return;
+        return false;
     }
-    match settle_completed_with_evidence(worktree, session_id, Some(expected_owner_number)) {
-        Ok(Ok(_)) => {}
+    match settle_completed_with_evidence(
+        worktree,
+        session_id,
+        Some(expected_owner_number),
+        expected_verification_hash,
+    ) {
+        Ok(Ok(SettleResult::Settled(_) | SettleResult::AlreadySettled(_))) => true,
+        Ok(Ok(_)) => false,
         Ok(Err(status)) => {
             tracing::warn!(?status, "execution control settlement evidence refused");
+            false
         }
         Err(error) => {
             tracing::warn!(?error, "execution control settlement failed");
+            false
         }
     }
 }
@@ -9192,7 +9388,7 @@ pub(crate) fn settle_completed_best_effort(
 /// - A terminally **blocked** execution refuses every PR mutation (create —
 ///   draft included —, edit, ready): a blocked execution cannot hand off.
 /// - An **active** execution gates only Ready handoffs (`ready_handoff` =
-///   non-draft create or `pr.ready`) on fresh, all-passing verification
+///   non-draft create or `pr.ready`) on fresh delivery-acceptable verification
 ///   evidence. Draft creation and `pr.edit` stay available as the
 ///   sanctioned mid-work sharing path (AGENTS Draft policy); the full PR
 ///   lifecycle matrix (Draft conversion, head/base drift) is T-199+.
@@ -9261,7 +9457,7 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
                 &session_id,
                 Some(record.owner_number),
             );
-            if status == crate::cli::verification_record::EvidenceStatus::Fresh {
+            if status.is_delivery_acceptable() {
                 None
             } else {
                 Some(format!("PR handoff refused: {}", status.describe()))
@@ -9649,6 +9845,7 @@ fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus)
     use crate::cli::verification_record::EvidenceStatus;
     match status {
         EvidenceStatus::Fresh => "fresh",
+        EvidenceStatus::FreshWithQuarantine => "fresh_with_quarantine",
         EvidenceStatus::MissingRecord => "missing_record",
         EvidenceStatus::WrongSession => "wrong_session",
         EvidenceStatus::WrongOwner => "wrong_owner",
@@ -10825,6 +11022,7 @@ enum ExecutionReopenPrerequisites {
 fn evaluate_execution_reopen_prerequisites(
     worktree: &Path,
     session_id: &str,
+    allow_current_typed_quarantine: bool,
 ) -> Result<ExecutionReopenPrerequisites, RecoveryPrerequisiteRefusal> {
     use crate::cli::governance::GovernanceCause;
     if session_id.trim().is_empty() {
@@ -10960,7 +11158,10 @@ fn evaluate_execution_reopen_prerequisites(
         Some(&plan),
         &verification,
     );
-    if evidence_status != vr::EvidenceStatus::Fresh {
+    if evidence_status != vr::EvidenceStatus::Fresh
+        && !(allow_current_typed_quarantine
+            && evidence_status == vr::EvidenceStatus::FreshWithQuarantine)
+    {
         return Err(unavailable_recovery_prerequisite(
             GovernanceCause::NotReady,
             evidence_status.describe(),
@@ -11018,7 +11219,10 @@ fn probe_execution_reopen(
     session_id: &str,
 ) -> crate::cli::governance::RecoveryProbe {
     use crate::cli::governance::{GovernanceMetadata, RecoveryProbe};
-    match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+    // The probe reports the local typed evidence as conditionally available;
+    // the mutating operation still re-reads the live PR marker and pins the
+    // exact verification hash before reopening.
+    match evaluate_execution_reopen_prerequisites(worktree, session_id, true) {
         Ok(ExecutionReopenPrerequisites::Satisfied { binding, .. }) => RecoveryProbe::satisfied(
             "execution.reopen",
             GovernanceMetadata {
@@ -11751,6 +11955,7 @@ fn repair_corrupt_execution_impl(
                 missing_verification: None,
                 launched_at: now,
                 settled_at: None,
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
@@ -12184,10 +12389,47 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
+        let allow_current_typed_quarantine = crate::cli::verification_record::evaluate_evidence(
+            recovery_worktree,
+            &session_id,
+            load(recovery_worktree)
+                .ok()
+                .flatten()
+                .map(|record| record.owner_number),
+        )
+            == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine;
+        let mut expected_verification_hash = None;
+        if allow_current_typed_quarantine {
+            let verification = crate::cli::verification_record::load(recovery_worktree)
+                .map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load typed quarantine evidence: {error}"
+                    )))
+                })?
+                .ok_or_else(|| {
+                    SpecOpsError::from(ApiError::Unexpected(
+                        "typed quarantine verification record disappeared".to_string(),
+                    ))
+                })?;
+            if let Err(refusal) =
+                crate::cli::verification_record::validate_current_quarantine_references(
+                    env,
+                    &verification,
+                    None,
+                )
+            {
+                out.push_str(&format!(
+                    "execution: reopen refused — typed quarantine evidence is not current: {refusal}\n"
+                ));
+                return Ok(2);
+            }
+            expected_verification_hash = Some(verification.content_hash);
+        }
         return run_reopen_with_session_snapshot(
             recovery_worktree,
             &session_id,
             expected_session,
+            expected_verification_hash.as_deref(),
             reason,
             out,
         );
@@ -12222,7 +12464,48 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&format!("execution: completion refused — {refusal}\n"));
                 return Ok(2);
             }
-            match settle_completed_with_evidence(&worktree, &session_id, None).map_err(|err| {
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                &session_id,
+                load(&worktree)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.owner_number),
+            );
+            let mut expected_verification_hash = None;
+            if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                let verification = crate::cli::verification_record::load(&worktree)
+                    .map_err(|error| {
+                        SpecOpsError::from(ApiError::Unexpected(format!(
+                            "failed to load typed quarantine evidence: {error}"
+                        )))
+                    })?
+                    .ok_or_else(|| {
+                        SpecOpsError::from(ApiError::Unexpected(
+                            "typed quarantine verification record disappeared".to_string(),
+                        ))
+                    })?;
+                if let Err(refusal) =
+                    crate::cli::verification_record::validate_current_quarantine_references(
+                        env,
+                        &verification,
+                        None,
+                    )
+                {
+                    out.push_str(&format!(
+                        "execution: completion refused — typed quarantine evidence is not current: {refusal}\n"
+                    ));
+                    return Ok(2);
+                }
+                expected_verification_hash = Some(verification.content_hash);
+            }
+            match settle_completed_with_evidence(
+                &worktree,
+                &session_id,
+                None,
+                expected_verification_hash.as_deref(),
+            )
+            .map_err(|err| {
                 SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
                 ))
@@ -12417,10 +12700,18 @@ fn run_reopen_with_session_snapshot(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, Some(expected_session), reason, out)
+    run_reopen_impl(
+        worktree,
+        session_id,
+        Some(expected_session),
+        expected_verification_hash,
+        reason,
+        out,
+    )
 }
 
 #[cfg(test)]
@@ -12430,13 +12721,14 @@ fn run_reopen(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, None, reason, out)
+    run_reopen_impl(worktree, session_id, None, None, reason, out)
 }
 
 fn run_reopen_impl(
     worktree: &Path,
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -12450,6 +12742,7 @@ fn run_reopen_impl(
             worktree,
             session_id,
             expected_session,
+            expected_verification_hash,
             reason,
             out,
         ))
@@ -12488,10 +12781,15 @@ fn run_reopen_locked(
     worktree: &Path,
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let prerequisites = match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+    let prerequisites = match evaluate_execution_reopen_prerequisites(
+        worktree,
+        session_id,
+        expected_verification_hash.is_some(),
+    ) {
         Ok(prerequisites) => prerequisites,
         Err(refusal) => {
             out.push_str(&format!("execution: reopen refused — {}\n", refusal.reason));
@@ -12557,6 +12855,12 @@ fn run_reopen_locked(
             verification_started_at,
         ),
     };
+    if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
+        out.push_str(
+            "execution: reopen refused — typed quarantine verification evidence changed after live PR validation\n",
+        );
+        return Ok(2);
+    }
 
     let reopened_at = Utc::now();
     record.recoveries.push(ExecutionRecovery {
@@ -12959,6 +13263,7 @@ mod tests {
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -20745,6 +21050,7 @@ exit 1
                     derived: true,
                     surfaces: vec!["rust".to_string()],
                     generated_outputs: vec!["projection-artifact.json".to_string()],
+                    quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
@@ -22527,6 +22833,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -22734,6 +23041,7 @@ exit 1
                     derived: true,
                     surfaces: vec!["rust(gwt)".to_string()],
                     generated_outputs: vec!["artifacts/report.json".to_string()],
+                    quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
@@ -23126,6 +23434,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23155,6 +23464,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23500,6 +23810,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23531,6 +23842,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23979,6 +24291,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -24033,6 +24346,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -24047,9 +24361,68 @@ exit 1
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("completed"), "{out}");
+            let completed = load(dir.path()).unwrap().unwrap();
+            assert_eq!(completed.status, ExecutionControlStatus::Completed);
+            let verification = crate::cli::verification_record::load(dir.path())
+                .unwrap()
+                .unwrap();
+            let receipt = completed
+                .completion_evidence
+                .expect("completion must pin its verification snapshot");
+            assert_eq!(receipt.verification_record_id, verification.record_id);
+            assert_eq!(receipt.verification_run_hash, verification.content_hash);
+            assert_eq!(
+                receipt.verification_plan_hash,
+                verification.verification_plan_hash
+            );
+            assert!(!receipt.used_typed_quarantine);
+        }
+
+        #[test]
+        fn completion_rejects_verification_record_substitution_after_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            crate::cli::verification_record::save_plan(
+                dir.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "sess-op".to_string(),
+                    owner_number: Some(3248),
+                    execution_binding: None,
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            let (original, _) = crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-op",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            let mut replacement = original.clone();
+            replacement.record_id = "vrr-substituted".to_string();
+            crate::cli::verification_record::save(dir.path(), &replacement).unwrap();
+
+            let outcome = settle_completed_with_evidence(
+                dir.path(),
+                "sess-op",
+                Some(3248),
+                Some(&original.content_hash),
+            )
+            .unwrap();
+            assert_eq!(
+                outcome,
+                Err(crate::cli::verification_record::EvidenceStatus::PlanChanged)
+            );
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
-                ExecutionControlStatus::Completed
+                ExecutionControlStatus::Active
             );
         }
 
@@ -24272,6 +24645,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -24769,6 +25143,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
