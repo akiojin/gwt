@@ -589,8 +589,12 @@ fn run_monitor_launch_now<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        let hold_cleared = monitor.clear_retry_hold(number);
-        if hold_cleared {
+        let retry_hold_cleared = monitor.clear_retry_hold(number);
+        let completion_hold_cleared = monitor.clear_completion_hold(number);
+        let hold_cleared = retry_hold_cleared || completion_hold_cleared;
+        if completion_hold_cleared {
+            *prefs = monitor.prefs();
+        } else if retry_hold_cleared {
             prefs.autonomous_records = monitor.prefs().autonomous_records;
         }
         Ok(hold_cleared)
@@ -808,18 +812,24 @@ fn run_monitor_requeue<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
-        let outcome = monitor.requeue_failed_issue(number, reason, &now);
-        if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
-            *prefs = monitor.prefs();
-        }
-        Ok(outcome)
-    })
-    .map_err(io_as_api_error)?;
+    let (prefs, (outcome, completion_hold_cleared)) =
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let outcome = monitor.requeue_failed_issue(number, reason, &now);
+            let completion_hold_cleared =
+                matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld)
+                    && monitor.clear_completion_hold(number);
+            if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. })
+                || completion_hold_cleared
+            {
+                *prefs = monitor.prefs();
+            }
+            Ok((outcome, completion_hold_cleared))
+        })
+        .map_err(io_as_api_error)?;
 
     let (stale_window_id, attempts_before, attempts_after) = match outcome {
         crate::IssueMonitorRequeueOutcome::Requeued {
@@ -844,6 +854,26 @@ fn run_monitor_requeue<E: CliEnv>(
             return Ok(1);
         }
         crate::IssueMonitorRequeueOutcome::NotHeld => {
+            if completion_hold_cleared {
+                let delivery =
+                    issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+                out.push_str(
+                    &serde_json::json!({
+                        "number": number,
+                        "status": "requeued",
+                        "reason": reason,
+                        "released_hold": "completion",
+                        "released_at": now,
+                        "scan_requested": delivery.scan_requested,
+                        "scan_delivery": delivery.scan_delivery,
+                        "scan_error": delivery.scan_error,
+                        "pane_teardown": "none",
+                    })
+                    .to_string(),
+                );
+                out.push('\n');
+                return Ok(0);
+            }
             // Issue #3683 (AC-3): a `BlockedByClaim` hold lives only in the
             // driving process's inbox, never in the prefs this process reads,
             // so the failure gate above cannot see it. Ask the live daemon's
@@ -2399,6 +2429,58 @@ mod tests {
         assert_eq!(record.retry_hold_provider, None);
     }
 
+    #[test]
+    fn launch_now_clears_a_stale_completion_hold_and_requires_a_fresh_session() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version:
+                    crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+                completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                    issue_number: 42,
+                    generation: 1,
+                    state: crate::issue_monitor::IssueCompletionState::Completed,
+                    issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                    evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let _ = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(result["hold_cleared"], true);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.merged_issues.is_empty());
+        assert_eq!(
+            persisted.completion_records[0].state,
+            crate::issue_monitor::IssueCompletionState::Reopened
+        );
+        assert_eq!(
+            persisted.queued_launch_session_strategies.get(&42),
+            Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+    }
+
     /// Issue #3655 AC-4: an open unblock request has to be visible in the one
     /// field the PM reads to find work that needs a human.
     #[test]
@@ -3617,6 +3699,59 @@ mod tests {
         .expect("requeue runs");
         assert_eq!(code, 1);
         assert!(out.contains("not_held"), "{out}");
+    }
+
+    #[test]
+    fn monitor_requeue_releases_a_stale_completion_hold_instead_of_refusing_not_held() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version:
+                    crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+                completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                    issue_number: 42,
+                    generation: 7,
+                    state: crate::issue_monitor::IssueCompletionState::Completed,
+                    issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                    evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+
+        assert_eq!(code, 0);
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("requeue response is JSON");
+        assert_eq!(response["status"], "requeued");
+        assert_eq!(response["released_hold"], "completion");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.merged_issues.is_empty());
+        assert_eq!(persisted.completion_records[0].generation, 8);
+        assert_eq!(
+            persisted.completion_records[0].state,
+            crate::issue_monitor::IssueCompletionState::Reopened
+        );
     }
 
     // -------------------------------------------------------------------
