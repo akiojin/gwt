@@ -464,14 +464,34 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let commands = optional_string_vec(params, "commands")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
         }
+        "verify.adjudicate" => {
+            reject_unknown_params(
+                params,
+                &["record_id", "command", "board_entry_id"],
+                "verify.adjudicate",
+            )?;
+            let command = required_string(params, "command")?;
+            if command == "*" {
+                return Err(CliParseError::InvalidValue {
+                    flag: "command",
+                    reason: "must identify one exact command, not the whole record",
+                });
+            }
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Adjudicate {
+                record_id: required_string(params, "record_id")?,
+                command,
+                board_entry_id: required_string(params, "board_entry_id")?,
+            })
+        }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
+            let quarantines = verification_quarantine_requests(params)?;
             if commands.is_empty() && !derive {
                 return Err(CliParseError::MissingFlag("commands"));
             }
-            if generated_outputs.is_empty() {
+            if generated_outputs.is_empty() && quarantines.is_empty() {
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
                     commands,
                     derive,
@@ -482,6 +502,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                         commands,
                         derive,
                         generated_outputs,
+                        quarantines,
                     },
                 )
             }
@@ -1484,6 +1505,38 @@ fn optional_json_array(
             "{key} must be an array"
         ))),
     }
+}
+
+fn verification_quarantine_requests(
+    params: &Map<String, Value>,
+) -> Result<Vec<crate::cli::verification_record::VerificationQuarantineRequest>, CliParseError> {
+    let requests = optional_json_array(params, "quarantines")?
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value::<
+                crate::cli::verification_record::VerificationQuarantineRequest,
+            >(value)
+            .map_err(|error| {
+                CliParseError::InvalidJson(format!(
+                    "quarantines must contain typed quarantine requests: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut identities = std::collections::HashSet::new();
+    for request in &requests {
+        request.validate().map_err(CliParseError::InvalidJson)?;
+        if !identities.insert((
+            request.failed_command.as_str(),
+            request.test_identity.as_str(),
+        )) {
+            return Err(CliParseError::InvalidJson(
+                "quarantines must not contain duplicate failed_command/test_identity pairs"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(requests)
 }
 
 #[cfg(test)]
@@ -2714,6 +2767,37 @@ mod tests {
         ));
     }
 
+    // Issue #3841 / SPEC #3248 AS-48: quarantine is plan-bound typed input,
+    // not prose that verify.run may invent after observing a failure.
+    #[test]
+    fn verification_plan_preserves_typed_quarantine_request() {
+        let command = ok(
+            "verify.plan",
+            json!({
+                "derive": true,
+                "quarantines": [{
+                    "failed_command": "cargo test -p gwt --all-features --lib",
+                    "test_identity": "app_runtime::tests::bounded_sync",
+                    "baseline_command": "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact",
+                    "owner_issue": 3755,
+                    "pr_number": 3854
+                }]
+            }),
+        );
+
+        let typed = format!("{command:?}");
+        for expected in [
+            "app_runtime::tests::bounded_sync",
+            "owner_issue: 3755",
+            "pr_number: 3854",
+        ] {
+            assert!(
+                typed.contains(expected),
+                "typed quarantine field was discarded: {typed}"
+            );
+        }
+    }
+
     // SPEC #3576 T-007: verification lease operation parsing.
     #[test]
     fn verification_lease_operations_are_typed() {
@@ -3094,6 +3178,50 @@ mod tests {
             ),
             CliCommand::Discussion(_)
         ));
+    }
+
+    #[test]
+    fn verification_adjudication_requires_exact_board_decision_reference() {
+        assert!(parse(&envelope(
+            "verify.adjudicate",
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+        ))
+        .is_ok());
+
+        for params in [
+            json!({
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "*",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+                "waive_record": true,
+            }),
+        ] {
+            assert!(
+                parse(&envelope("verify.adjudicate", params)).is_err(),
+                "invalid adjudication input must fail closed"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,44 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.85.0] - 2026-09-01
+
+### Bug Fixes
+
+- **test:** LaunchFeedbackContext 初期化子に autonomous handoff フィールドを補完 (#3671)
+- **test:** Data URL ロードで launch-pending-controller の相対 import を差し替える
+- **issue-monitor:** JSON からの自動運転再有効化を拒否する
+- **test:** Direct Stop の settlement fixture を安定化する
+- **verify:** Honor Board decisions at pr.ready
+- Requeue open issues after merged work
+
+### Documentation
+
+- **test:** Clarify settlement reserve assertion
+
+### Features
+
+- **window:** Issue Monitor 自動起動をキャンバス外プレビューにする
+- **window:** Issue 行に Work 情報と Work 操作を移設し面の命名を揃える
+- **pm:** 常駐報告と周回駆動規範を恒久化する
+- **verify:** Add typed failure quarantine gate
+- **perf:** Add performance record persistence foundation
+
+### Miscellaneous Tasks
+
+- **ci:** Migration_e2e t107 の単発 flake を再トリガー — ローカル 10/10 PASS (#3612)
+- **coordination:** Issue 3814 の検証経過を記録する
+- **coordination:** Issue 3814 の配送状態を記録する
+- **coordination:** PR 3831 の監視状態を記録する
+- **work:** Issue 3791 の配送状態を記録する
+- **work:** Issue 3848 の配送状態を記録する
+- **work:** Record Issue #3832 completion
+- **work:** Record issue 3841 terminal receipt
+
+### Testing
+
+- **pr:** Isolate verification guard home
+
 
 ## [9.84.0] - 2026-08-31
 

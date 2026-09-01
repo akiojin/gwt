@@ -4553,6 +4553,7 @@ pub(crate) mod tests {
             missing_verification: None,
             launched_at: now,
             settled_at: Some(now),
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
