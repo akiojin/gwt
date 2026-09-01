@@ -464,6 +464,25 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let commands = optional_string_vec(params, "commands")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
         }
+        "verify.adjudicate" => {
+            reject_unknown_params(
+                params,
+                &["record_id", "command", "board_entry_id"],
+                "verify.adjudicate",
+            )?;
+            let command = required_string(params, "command")?;
+            if command == "*" {
+                return Err(CliParseError::InvalidValue {
+                    flag: "command",
+                    reason: "must identify one exact command, not the whole record",
+                });
+            }
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Adjudicate {
+                record_id: required_string(params, "record_id")?,
+                command,
+                board_entry_id: required_string(params, "board_entry_id")?,
+            })
+        }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
@@ -3159,6 +3178,50 @@ mod tests {
             ),
             CliCommand::Discussion(_)
         ));
+    }
+
+    #[test]
+    fn verification_adjudication_requires_exact_board_decision_reference() {
+        assert!(parse(&envelope(
+            "verify.adjudicate",
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+        ))
+        .is_ok());
+
+        for params in [
+            json!({
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "*",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+                "waive_record": true,
+            }),
+        ] {
+            assert!(
+                parse(&envelope("verify.adjudicate", params)).is_err(),
+                "invalid adjudication input must fail closed"
+            );
+        }
     }
 
     #[test]

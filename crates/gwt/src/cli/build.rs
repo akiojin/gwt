@@ -1530,6 +1530,7 @@ mod tests {
                         },
                     },
                 ],
+                adjudications: Vec::new(),
                 started_at: Some(chrono::Utc::now()),
                 created_at: chrono::Utc::now(),
                 plan_covered: true,

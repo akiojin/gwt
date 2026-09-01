@@ -1215,7 +1215,15 @@ pub(super) fn update<T>(
     repo_root: &Path,
     operation: impl FnOnce(&mut CandidateStore) -> Result<T, SpecOpsError>,
 ) -> Result<T, SpecOpsError> {
-    with_store_lock(repo_root, || {
+    update_observed(repo_root, || {}, operation)
+}
+
+pub(super) fn update_observed<T>(
+    repo_root: &Path,
+    on_first_contention: impl FnMut(),
+    operation: impl FnOnce(&mut CandidateStore) -> Result<T, SpecOpsError>,
+) -> Result<T, SpecOpsError> {
+    with_store_lock_observed(repo_root, on_first_contention, || {
         let mut store = load_and_repair_unlocked(repo_root)?;
         let result = operation(&mut store)?;
         save_unlocked(repo_root, &store)?;
@@ -1921,6 +1929,14 @@ fn with_store_lock<T>(
     repo_root: &Path,
     operation: impl FnOnce() -> Result<T, SpecOpsError>,
 ) -> Result<T, SpecOpsError> {
+    with_store_lock_observed(repo_root, || {}, operation)
+}
+
+fn with_store_lock_observed<T>(
+    repo_root: &Path,
+    on_first_contention: impl FnMut(),
+    operation: impl FnOnce() -> Result<T, SpecOpsError>,
+) -> Result<T, SpecOpsError> {
     let improvements_dir =
         gwt_core::paths::gwt_project_dir_for_repo_path(repo_root).join("improvements");
     fs::create_dir_all(&improvements_dir).map_err(io_as_spec_error)?;
@@ -1931,7 +1947,8 @@ fn with_store_lock<T>(
         .truncate(false)
         .open(improvements_dir.join(".lock"))
         .map_err(io_as_spec_error)?;
-    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(io_as_spec_error)?;
+    gwt_core::operation_deadline::lock_exclusive_with_observer(&lock, on_first_contention)
+        .map_err(io_as_spec_error)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock).map_err(io_as_spec_error);
     match (result, unlock_result) {

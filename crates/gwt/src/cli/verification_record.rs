@@ -255,6 +255,16 @@ pub struct TypedQuarantinedFailure {
     pub pr_reference: PrQuarantineReference,
 }
 
+/// Reference from one exact failing command to the immutable Board decision
+/// that classified it for PR handoff. This never changes the command result
+/// or `all_passed`; non-PR gates continue to consume raw evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationAdjudicationRef {
+    pub board_entry_id: String,
+    pub command: String,
+    pub attached_at: DateTime<Utc>,
+}
+
 /// One tool-generated verification run (T-110).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationRunRecord {
@@ -277,6 +287,10 @@ pub struct VerificationRunRecord {
     /// `all_passed` remain authoritative and are never rewritten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined_failures: Vec<TypedQuarantinedFailure>,
+    /// Integrity-covered Board references attached through
+    /// `verify.adjudicate` and consumed only by `pr.ready`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adjudications: Vec<VerificationAdjudicationRef>,
     /// Timestamp captured before the verification commands start. Recovery
     /// requires this to be later than the terminal block, so a run that was
     /// merely committed after the block cannot be replayed as post-block
@@ -2574,6 +2588,7 @@ where
         commands: results,
         all_passed,
         quarantined_failures,
+        adjudications: Vec::new(),
         started_at: Some(started_at),
         created_at: Utc::now(),
         plan_covered,
@@ -3048,6 +3063,7 @@ pub fn evaluate_evidence_snapshot(
         plan,
         record,
         true,
+        false,
     )
 }
 
@@ -3065,6 +3081,7 @@ fn evaluate_completion_evidence_snapshot(
         plan,
         record,
         false,
+        false,
     )
 }
 
@@ -3075,6 +3092,7 @@ fn evaluate_evidence_snapshot_inner(
     plan: Option<&VerificationPlanRecord>,
     record: &VerificationRunRecord,
     require_current_execution_binding: bool,
+    allow_failing_commands: bool,
 ) -> EvidenceStatus {
     if !record.quarantined_failures.is_empty() && record.content_hash.is_empty() {
         return EvidenceStatus::Tampered;
@@ -3123,6 +3141,8 @@ fn evaluate_evidence_snapshot_inner(
         false
     } else if typed_quarantines_cover_all_failures(record, plan) {
         true
+    } else if allow_failing_commands {
+        false
     } else {
         return EvidenceStatus::Failing;
     };
@@ -3289,6 +3309,114 @@ fn revalidate_verification_caller_authority(
     Ok(())
 }
 
+fn board_decision_field<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    body.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(label)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn validate_board_decision(
+    worktree: &Path,
+    entry_id: &str,
+    record_id: &str,
+    command: &str,
+) -> io::Result<gwt_core::coordination::BoardEntry> {
+    let entry = gwt_core::coordination::load_board_entry(worktree, entry_id)
+        .map_err(|err| io::Error::other(err.to_string()))?
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Board decision entry was not found"))?;
+    if entry.kind != gwt_core::coordination::BoardEntryKind::Decision {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board entry must have kind=decision",
+        ));
+    }
+    if board_decision_field(&entry.body, "Verification record:") != Some(record_id) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board decision does not name the exact verification record",
+        ));
+    }
+    if board_decision_field(&entry.body, "Failing command:") != Some(command) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board decision does not name the exact failing command",
+        ));
+    }
+    if board_decision_field(&entry.body, "Reason:").is_none() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Board decision requires a non-empty Reason field",
+        ));
+    }
+    Ok(entry)
+}
+
+fn attach_board_decision_for_caller(
+    worktree: &Path,
+    session_id: &str,
+    record_id: &str,
+    command: &str,
+    board_entry_id: &str,
+    authority: &VerificationCallerAuthority,
+) -> io::Result<VerificationRunRecord> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        revalidate_verification_caller_authority(worktree, session_id, authority)?;
+        let mut record = load(worktree)?.ok_or_else(|| {
+            io::Error::new(ErrorKind::NotFound, "verification record was not found")
+        })?;
+        if !integrity_ok(&record) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "verification record failed integrity validation",
+            ));
+        }
+        if record.record_id != record_id {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "adjudication targets a stale verification record",
+            ));
+        }
+        if record.session_id != session_id
+            || record.owner_number != authority.owner_number
+            || record.execution_binding != authority.execution_binding
+        {
+            return Err(verification_caller_authority_error());
+        }
+        let matching = record
+            .commands
+            .iter()
+            .filter(|result| result.command == command)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 || matching[0].exit_code == 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "adjudication must target one exact failing command",
+            ));
+        }
+        validate_board_decision(worktree, board_entry_id, record_id, command)?;
+        if record.adjudications.iter().any(|reference| {
+            reference.board_entry_id == board_entry_id && reference.command == command
+        }) {
+            return Ok(record);
+        }
+        record.adjudications.push(VerificationAdjudicationRef {
+            board_entry_id: board_entry_id.to_string(),
+            command: command.to_string(),
+            attached_at: Utc::now(),
+        });
+        save(worktree, &record)?;
+        load(worktree)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "verification record disappeared after adjudication",
+            )
+        })
+    })
+}
+
 /// Authenticate the ambient caller against the exact durable Session for the
 /// current generation, when this worktree has generation authority.
 ///
@@ -3368,6 +3496,71 @@ pub fn evaluate_evidence(
     )
 }
 
+/// Evaluate evidence for the exact `pr.ready` handoff. Raw verification
+/// remains failing. Fully typed quarantines are accepted without a Board
+/// reference (the PR path separately revalidates their exact PR marker);
+/// otherwise every failed command requires a readable exact decision entry.
+pub(crate) fn evaluate_pr_ready_evidence(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+) -> Result<Vec<VerificationAdjudicationRef>, EvidenceStatus> {
+    let record = match load(worktree) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Err(EvidenceStatus::MissingRecord),
+        Err(_) => return Err(EvidenceStatus::Unreadable),
+    };
+    let plan = load_plan(worktree).map_err(|_| EvidenceStatus::Unreadable)?;
+    let status = evaluate_evidence_snapshot_inner(
+        worktree,
+        session_id,
+        expected_owner_number,
+        plan.as_ref(),
+        &record,
+        true,
+        true,
+    );
+    if !matches!(
+        status,
+        EvidenceStatus::Fresh | EvidenceStatus::FreshWithQuarantine
+    ) {
+        return Err(status);
+    }
+    if record.all_passed || status == EvidenceStatus::FreshWithQuarantine {
+        return Ok(Vec::new());
+    }
+
+    for reference in &record.adjudications {
+        validate_board_decision(
+            worktree,
+            &reference.board_entry_id,
+            &record.record_id,
+            &reference.command,
+        )
+        .map_err(|_| EvidenceStatus::Failing)?;
+    }
+
+    let failed_commands = record
+        .commands
+        .iter()
+        .filter(|result| result.exit_code != 0)
+        .collect::<Vec<_>>();
+    if failed_commands.is_empty() {
+        return Err(EvidenceStatus::Failing);
+    }
+    failed_commands
+        .into_iter()
+        .map(|result| {
+            record
+                .adjudications
+                .iter()
+                .find(|reference| reference.command == result.command)
+                .cloned()
+                .ok_or(EvidenceStatus::Failing)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // CLI command surface (`verify.run`)
 // ---------------------------------------------------------------------------
@@ -3377,6 +3570,14 @@ pub fn evaluate_evidence(
 pub enum VerifyCommand {
     Run {
         commands: Vec<String>,
+    },
+    /// Attach one existing Board decision to one exact failing command in the
+    /// latest canonical record. The Board remains the decision audit source;
+    /// this operation only records the reference consumed by `pr.ready`.
+    Adjudicate {
+        record_id: String,
+        command: String,
+        board_entry_id: String,
     },
     /// T-130-lite: register the required verification matrix before running.
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
@@ -3498,6 +3699,26 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
         VerifyCommand::Plan { .. } => unreachable!("normalized above"),
+        VerifyCommand::Adjudicate {
+            record_id,
+            command,
+            board_entry_id,
+        } => {
+            let record = attach_board_decision_for_caller(
+                &worktree,
+                &session_id,
+                &record_id,
+                &command,
+                &board_entry_id,
+                &authority,
+            )
+            .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?;
+            out.push_str(&format!(
+                "verify: adjudication attached — record {} command {:?} Board decision {}\n",
+                record.record_id, command, board_entry_id
+            ));
+            Ok(0)
+        }
         VerifyCommand::Run { commands } => {
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
@@ -3616,6 +3837,7 @@ pub(crate) mod tests {
             }],
             all_passed: true,
             quarantined_failures: Vec::new(),
+            adjudications: Vec::new(),
             started_at: Some(Utc::now()),
             created_at: Utc::now(),
             plan_covered: true,
@@ -4113,6 +4335,7 @@ mod tests {
             }],
             all_passed: true,
             quarantined_failures: Vec::new(),
+            adjudications: Vec::new(),
             started_at: Some(Utc::now()),
             created_at: Utc::now(),
             plan_covered: true,
@@ -4194,6 +4417,94 @@ mod tests {
             roundtrip["quarantined_failures"][0]["owner_issue"],
             serde_json::json!(3755),
             "typed quarantine evidence was discarded from the run record"
+        );
+    }
+
+    #[test]
+    fn adjudication_attaches_exact_board_decision_without_changing_raw_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let command = "git definitely-not-a-subcommand".to_string();
+        let (record, _) = plan_and_run(
+            dir.path(),
+            "sess-adjudicate",
+            std::slice::from_ref(&command),
+        );
+        assert!(!record.all_passed);
+
+        let decision = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            format!(
+                "Verification record: {}\nFailing command: {command}\nReason: unrelated known failure",
+                record.record_id
+            ),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let decision_id = decision.id.clone();
+
+        let wrong_kind = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Status,
+            decision.body.clone(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let wrong_kind_id = wrong_kind.id.clone();
+        gwt_core::coordination::post_entry(dir.path(), wrong_kind).unwrap();
+        let error = run_verify_cli_as(
+            dir.path(),
+            "sess-adjudicate",
+            VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command: command.clone(),
+                board_entry_id: wrong_kind_id,
+            },
+        )
+        .expect_err("non-decision Board entry must fail closed");
+        assert!(error.to_string().contains("kind=decision"), "{error}");
+
+        gwt_core::coordination::post_entry(dir.path(), decision).unwrap();
+
+        let (code, output) = run_verify_cli_as(
+            dir.path(),
+            "sess-adjudicate",
+            VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command: command.clone(),
+                board_entry_id: decision_id.clone(),
+            },
+        )
+        .expect("attach Board decision");
+        assert_eq!(code, 0, "{output}");
+
+        let attached = load(dir.path()).unwrap().unwrap();
+        assert!(
+            !attached.all_passed,
+            "raw verification result must stay failing"
+        );
+        assert!(integrity_ok(&attached));
+        assert_eq!(
+            attached.adjudications,
+            vec![VerificationAdjudicationRef {
+                board_entry_id: decision_id,
+                command,
+                attached_at: attached.adjudications[0].attached_at,
+            }]
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-adjudicate", None),
+            EvidenceStatus::Failing,
+            "completion/recovery evidence must ignore PR-only adjudication"
         );
     }
 
