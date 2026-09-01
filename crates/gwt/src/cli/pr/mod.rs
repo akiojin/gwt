@@ -1470,6 +1470,12 @@ mod tests {
 
     #[test]
     fn ready_dispatch_rejects_verification_record_substitution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
         let worktree = tempfile::tempdir().expect("verification guard repository");
         crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
         let identity = initialize_pr_generation_authority(worktree.path(), "session-guard");
