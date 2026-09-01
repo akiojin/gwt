@@ -324,11 +324,11 @@ Hard limits, no exceptions:
 Keep the PM turn responsive even when gwtd or its endpoint is slow.
 
 - Run only short read-only gwtd operations directly. Set the execution
-  tool's outer wall-clock deadline to 10 seconds or less; an operation's
-  internal timeout does not replace the outer wall-clock deadline of 10 seconds.
-- Treat `daemon.subscribe` with a timeout above that budget, batch mutations,
-  repeated `pane.read`, and any operation that has already reached the deadline
-  as long-running or hang-risk work. Delegate it to a
+  tool's outer wall-clock deadline to 5 seconds or less; an operation's
+  internal timeout does not replace the outer wall-clock deadline of 5 seconds.
+- Treat every `daemon.subscribe`, batch mutations, repeated `pane.read`, and
+  any operation that has already reached the deadline as long-running or
+  hang-risk work. Delegate it to a
   background job or exactly one in-session sub-agent. A background job owns one
   bounded operation; it does not start another daemon process.
 - Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
@@ -368,12 +368,13 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   dead loop. On runtimes without a scheduler (Codex), gwt itself wakes
   you on the scheduled monitor tick, so no manual setup is needed;
   treat an injected `[gwt]` wake prompt as the start of a normal cycle.
-- Run a bounded subscribe in the background: `daemon.subscribe` on the
+- Launch one bounded subscribe as a background task: `daemon.subscribe` on the
   `issue_monitor`, `errors` (and optionally `board`) channels with
-  `params.timeout_seconds` set, so the stream ends and hands control
-  back to you. When it returns, reconcile against a fresh
-  `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
-  is the truth — then act on the differences: triage newly arrived
+  `params.timeout_seconds:5`; keep the `params.timeout_seconds` field independent
+  of the loop interval. Do not await or synchronously poll it; immediately
+  continue the same cycle with a fresh `issue.monitor.status` snapshot. The
+  broadcast ring is lossy, so the snapshot is the truth. Act on the differences:
+  triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
 - Every cycle, call `errors.list` with `params.since` set to the timestamp
   of the last successful check. Triage every new launch failure, hook
@@ -742,7 +743,7 @@ mod tests {
             // Issue #3776: a slow gwtd process cannot own the PM turn.
             "## gwtd execution isolation",
             "short read-only gwtd operations",
-            "outer wall-clock deadline of 10 seconds",
+            "outer wall-clock deadline of 5 seconds",
             "background job or exactly one in-session sub-agent",
             "task-completion notification",
             "pending operation key",
@@ -917,7 +918,7 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
-    /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
+    /// Issue #3776 / SPEC-3431 FR-145〜148 and Issue #3825 / FR-155: a slow gwtd process must not own
     /// the resident PM's conversational turn. The detailed contract belongs in
     /// one section so the compact wake/Stop reminder cannot become an
     /// incomplete second policy.
@@ -931,7 +932,7 @@ mod tests {
 
         for phrase in [
             "short read-only gwtd operations",
-            "outer wall-clock deadline of 10 seconds",
+            "outer wall-clock deadline of 5 seconds",
             "`daemon.subscribe`",
             "batch mutations",
             "repeated `pane.read`",
@@ -952,6 +953,35 @@ mod tests {
             assert!(
                 execution.contains(phrase),
                 "gwtd execution isolation contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            !execution.contains("outer wall-clock deadline of 10 seconds"),
+            "the superseded 10-second foreground ceiling must not remain"
+        );
+    }
+
+    /// Issue #3825 / SPEC-3431 FR-156〜158: the resident observer must never
+    /// gate the same cycle's authoritative snapshots or the conversation turn.
+    #[test]
+    fn contract_subscribes_in_background_then_immediately_reconciles() {
+        let resident_loop = SKILL_BODY_EN
+            .split_once("## Resident loop (unattended)")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("resident loop section must be present");
+        let resident_loop = unwrapped(resident_loop);
+
+        for phrase in [
+            "`params.timeout_seconds:5`",
+            "as a background task",
+            "Do not await or synchronously poll it",
+            "immediately continue the same cycle with a fresh `issue.monitor.status` snapshot",
+            "the snapshot is the truth",
+        ] {
+            assert!(
+                resident_loop.contains(phrase),
+                "nonblocking resident-loop contract is missing: {phrase}"
             );
         }
     }

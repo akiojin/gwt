@@ -59068,6 +59068,24 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         "{label} must carry the canonical gwtd execution-isolation clause verbatim; got: {prompt}"
     );
     assert!(
+        prompt.contains("contract's 5-second outer deadline"),
+        "{label} must cap every direct gwtd read at five seconds; got: {prompt}"
+    );
+    assert!(
+        !prompt.contains("contract's 10-second outer deadline"),
+        "{label} must not retain the superseded ten-second ceiling; got: {prompt}"
+    );
+    for phrase in [
+        "`params.timeout_seconds:5`",
+        "do not wait for it",
+        "immediately reconcile a fresh `issue.monitor.status` snapshot",
+    ] {
+        assert!(
+            prompt.contains(phrase),
+            "{label} must carry the nonblocking subscribe contract `{phrase}`; got: {prompt}"
+        );
+    }
+    assert!(
         prompt.contains("`pr.list`"),
         "{label} must inventory open PRs each cycle (Issue #3781); got: {prompt}"
     );

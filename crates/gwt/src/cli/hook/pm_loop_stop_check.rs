@@ -19,10 +19,9 @@ use std::{io, path::Path};
 use super::HookOutput;
 use crate::pm_registry::{self, PmLoopState};
 
-// The floor between continuations and the subscribe timeout both come from
-// `PmSettings::loop_interval_secs` (FR-035, default 60s): one knob, because a
-// floor shorter than the wait would never fire and a longer one would skip
-// cycles.
+// The floor between continuations comes from `PmSettings::loop_interval_secs`
+// (FR-035, default 60s). Per-operation budgets are deliberately independent:
+// a scheduling cadence must never become foreground waiting time (FR-156).
 
 /// Consecutive continuations without user contact before the PM parks.
 /// At the default 60s `loop_interval_secs` this is ~12 minutes of unattended
@@ -268,11 +267,11 @@ fn handle_at(
         .map(|context| format!(" Worktree status: {context}."))
         .unwrap_or_default();
     HookOutput::stop_block(format!(
-        "Resident PM loop: run one cycle before stopping. Try JSON operation `daemon.subscribe` \
-         on the `issue_monitor` channel with `params.timeout_seconds:{interval_secs}`; if the \
-         subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
-         mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
-         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
+        "Resident PM loop: run one cycle before stopping. {execution_clause} \
+         If a background task is unavailable or the subscribe fails (e.g. no daemon endpoint), \
+         skip it and continue the same cycle in degraded polling mode instead of treating it as a \
+         failure (FR-109). Either way, use the `issue.monitor.status` snapshot: triage new issues, \
+         re-evaluate order, and check the \
          running agents' `last_activity_at`. Inventory open PRs with `pr.list` and act on each \
          row's `lifecycle` and `default_action`; stale (no update for 72h), SUPERSEDED, and \
          owner-Issue-closed rows are digest escalations — never auto-close them. \
@@ -285,7 +284,7 @@ fn handle_at(
          unavailable`; do not promote a pane or window ID to the primary identity. For a decision \
          include the question, your recommendation and rationale, and a copy-paste answer \
          example. Only an empty stalled-item inventory may end silently. \
-         {execution_clause} {clause} \
+         {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
          failures do not count as empty).{refresh_context}",
@@ -564,6 +563,31 @@ mod tests {
         };
         assert!(reason.contains("daemon.subscribe"));
         assert!(reason.contains("issue.monitor.status"));
+        assert_eq!(
+            reason.matches("`daemon.subscribe`").count(),
+            1,
+            "the shared clause must be the single subscribe command authority; got: {reason}"
+        );
+        let subscribe_timeout_secs = reason
+            .split_once("`params.timeout_seconds:")
+            .and_then(|(_, tail)| tail.split_once('`').map(|(value, _)| value))
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("the shared subscribe command must carry a numeric timeout");
+        assert!(
+            subscribe_timeout_secs <= 5,
+            "one resident subscribe may block for at most five seconds; got: {reason}"
+        );
+        assert!(
+            reason.contains("`params.timeout_seconds:5`"),
+            "the default 60-second loop cadence must not become the subscribe budget; got: {reason}"
+        );
+        assert!(
+            !reason.contains("`params.timeout_seconds:60`"),
+            "the loop cadence leaked into the per-operation timeout; got: {reason}"
+        );
+        assert!(reason.contains("background task"));
+        assert!(reason.contains("do not wait for it"));
+        assert!(reason.contains("immediately reconcile a fresh `issue.monitor.status` snapshot"));
     }
 
     /// Issue #3632 AC-1/AC-6: the forced continuation is the highest-frequency

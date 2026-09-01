@@ -42,17 +42,19 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
      changed, end the cycle with no user-facing output.";
 
-/// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
-/// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
-/// guidance owns the detailed timeout, retry, readback, and lifecycle rules;
-/// this clause only prevents injected prompts from silently restoring direct
-/// long-running execution.
+/// Issue #3776 / SPEC-3431 FR-148 and Issue #3825 / FR-155〜158: compact
+/// execution budget and subscribe-ordering reminder shared by the delta wake,
+/// periodic wake, and Stop-gate continuation. The generated gwt-pm guidance
+/// owns the full retry, readback, and lifecycle rules; this clause keeps every
+/// injected prompt aligned on the five-second, nonblocking path.
 pub const PM_GWTD_EXECUTION_CLAUSE: &str =
     "Keep the PM turn responsive: run only short read-only gwtd operations directly with the \
-     contract's 10-second outer deadline. Delegate `daemon.subscribe`, batch mutations, repeated \
-     `pane.read`, and every long-running or hang-risk operation to exactly one background task or \
-     in-session sub-agent; collect the result only from its task-completion notification, and \
-     never duplicate an operation while it is pending.";
+     contract's 5-second outer deadline. Launch `daemon.subscribe` only as one background task \
+     with `params.timeout_seconds:5`; do not wait for it, and immediately reconcile a fresh \
+     `issue.monitor.status` snapshot. Delegate batch mutations, repeated `pane.read`, and every \
+     long-running or hang-risk operation to exactly one background task or in-session sub-agent; \
+     collect the result only from its task-completion notification, and never duplicate an \
+     operation while it is pending.";
 
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,8 +129,9 @@ pub struct PmSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
     /// FR-035 (user ruling 2026-08-08): resident-loop cycle interval in
-    /// seconds. Both the Stop-gate floor and the subscribe timeout the PM is
-    /// told to use. Clamped to at least 10s so a typo cannot spin the loop.
+    /// seconds. This controls scheduling and the Stop-gate floor only; it is
+    /// not an operation timeout. Clamped to at least 10s so a typo cannot spin
+    /// the loop.
     #[serde(default = "default_loop_interval_secs")]
     pub loop_interval_secs: u64,
 }
