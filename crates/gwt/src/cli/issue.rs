@@ -1451,6 +1451,15 @@ fn run_issue_edit<E: CliEnv>(
         ));
     }
 
+    // Issue #3873 guard, applied to the post-edit state: replacing the body
+    // or the labels must not leave an `auto-merge` Issue without the
+    // machine-checkable acceptance block that `issue.create` requires.
+    if body.is_some() || labels.is_some() {
+        let effective_labels = labels.as_deref().unwrap_or(&current.labels);
+        let effective_body = body.as_deref().unwrap_or(&current.body);
+        guard_autonomous_acceptance_block(effective_labels, effective_body)?;
+    }
+
     let mut updated = Vec::new();
     if let Some(title) = title {
         env.client().patch_title(issue, &title)?;
@@ -2299,7 +2308,7 @@ mod tests {
                 number: 7,
                 title: None,
                 body: Some("Corrected body".to_string()),
-                labels: Some(vec!["bug".to_string(), "auto-merge".to_string()]),
+                labels: Some(vec!["bug".to_string(), "enhancement".to_string()]),
             },
             &mut out,
         )
@@ -2309,7 +2318,7 @@ mod tests {
         let snapshot = fetched(&env, 7);
         assert_eq!(snapshot.title, "Renamed title");
         assert_eq!(snapshot.body, "Corrected body");
-        assert_eq!(snapshot.labels, vec!["bug", "auto-merge"]);
+        assert_eq!(snapshot.labels, vec!["bug", "enhancement"]);
 
         let cached = Cache::new(env.cache_root())
             .load_entry(IssueNumber(7))
@@ -2386,6 +2395,61 @@ mod tests {
         );
 
         assert_eq!(fetched(&env, 7).body, "Original body");
+    }
+
+    /// Issue #3865 x #3873: `issue.edit` cannot bypass the autonomous
+    /// acceptance-block guard — neither by replacing the body of an
+    /// `auto-merge` Issue with one the Monitor cannot read, nor by adding the
+    /// label to an Issue whose body has no block. A compliant body still goes
+    /// through.
+    #[test]
+    fn issue_edit_keeps_the_autonomous_acceptance_block_guard() {
+        let (_tmp, mut env) = seeded_edit_env(&["auto-merge"]);
+        let mut out = String::new();
+
+        let stripped = run(
+            &mut env,
+            edit_body(7, "## 成功基準\n- [ ] AC-1: wrong heading\n"),
+            &mut out,
+        )
+        .expect_err("auto-merge body without a readable AC block must be refused");
+        let message = stripped.to_string();
+        assert!(
+            message.contains("受け入れ基準") && message.contains("AC-"),
+            "{message}"
+        );
+
+        let (_tmp2, mut plain) = seeded_edit_env(&["bug"]);
+        let labelled = run(
+            &mut plain,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: Some(vec!["bug".to_string(), "auto-merge".to_string()]),
+            },
+            &mut out,
+        )
+        .expect_err("adding auto-merge to a body without an AC block must be refused");
+        assert!(labelled.to_string().contains("受け入れ基準"), "{labelled}");
+        for env in [&env, &plain] {
+            assert!(
+                !env.client
+                    .call_log()
+                    .iter()
+                    .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")),
+                "refused edits must not reach the API"
+            );
+        }
+
+        let code = run(
+            &mut env,
+            edit_body(7, "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n"),
+            &mut out,
+        )
+        .expect("compliant body is accepted");
+        assert_eq!(code, 0, "{out}");
+        assert!(fetched(&env, 7).body.contains("AC-1"));
     }
 
     #[test]

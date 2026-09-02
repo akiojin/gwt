@@ -97,7 +97,10 @@ You own the backlog for its whole life, not just at creation.
   pass are updated. `params.body` replaces the whole body, so read it
   with `issue.view` first and write it back in full. `issue.edit`
   refuses a body update on a `gwt-spec` Issue and points you at
-  `issue.spec.edit`; title and labels stay editable either way.
+  `issue.spec.edit`; title and labels stay editable either way. The
+  `auto-merge` acceptance-block guard of `issue.create` applies to the
+  edited result too: a body or label change that leaves an `auto-merge`
+  Issue without a `- [ ] AC-N:` block is refused.
 - `issue.spec.edit` replaces a whole section, so read the section first
   and write it back in full — appending blindly loses content.
 - Keep the backlog honest. Fold duplicates into the surviving Issue and
