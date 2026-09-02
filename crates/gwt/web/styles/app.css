@@ -3481,9 +3481,12 @@ body {
 .issue-agent-status {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 2fr) auto;
+  /* Row 1: title · elapsed · Windowize (the state is the Issue row's primary
+     badge, SPEC #3885 AC-5). Row 2: the activity line spans the full width so a
+     long agent title is not squeezed by it. */
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   min-width: 0;
   margin-top: 4px;
   padding: 6px 10px;
@@ -3525,6 +3528,7 @@ body {
 }
 
 .issue-agent-status-output {
+  grid-column: 1 / -1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

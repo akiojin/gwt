@@ -2350,6 +2350,11 @@ export function createKnowledgeKanbanSurface({
         elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
         row.appendChild(elapsed);
 
+        row.appendChild(issueRowActionButton("windowize-issue-preview", context));
+
+        // Last in DOM order: the activity line spans the full width on its own
+        // grid row, so it must follow every first-row cell (title / elapsed /
+        // Windowize) or auto-placement pushes Windowize below it.
         const output = createNode(
           "div",
           "issue-agent-status-output",
@@ -2357,8 +2362,6 @@ export function createKnowledgeKanbanSurface({
         );
         output.title = output.textContent;
         row.appendChild(output);
-
-        row.appendChild(issueRowActionButton("windowize-issue-preview", context));
         return row;
       }
 
