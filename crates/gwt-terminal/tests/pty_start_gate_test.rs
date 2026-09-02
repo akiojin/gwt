@@ -348,3 +348,32 @@ fn start_gate_policy_lowers_target_and_grandchild_priority() {
     }
     drop(handle);
 }
+
+/// SPEC #1921 Phase 86 T518: a target that cannot exist must surface as a
+/// pre-spawn failure from `spawn_pending`, exactly like the direct PTY route,
+/// so launch retry bookkeeping never observes a released-then-dead target.
+#[test]
+fn pending_pty_reports_a_missing_target_before_release() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config.command = temp
+        .path()
+        .join("definitely-missing-target")
+        .display()
+        .to_string();
+
+    let error = match PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        gate_args_prefix(),
+        "missing-target-nonce",
+    ) {
+        Ok(_pending) => panic!("a missing target must fail before release"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("definitely-missing-target"),
+        "error must name the missing target: {error}"
+    );
+}
