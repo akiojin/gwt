@@ -1021,6 +1021,10 @@ pub struct AppRuntime {
     /// transient daemon disconnect.
     pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
     pub(crate) issue_monitor_materializer_id: String,
+    /// Issue #3878: budget for one local fallback commit of the Issue Monitor
+    /// prefs. Injected at construction so a test runtime owns its budget
+    /// instead of inheriting the GUI-thread one through process state.
+    pub(crate) issue_monitor_fallback_commit_timeout: std::time::Duration,
     /// Issue #3676 AC-2: credential preflight consulted before any Issue
     /// Monitor launch spawns a terminal. Injected at construction so tests
     /// control ambient credential facts without mutating process state; only
@@ -1312,16 +1316,24 @@ fn local_issue_monitor_fallback_projection_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(1)
 }
 
-fn local_issue_monitor_fallback_commit_timeout() -> std::time::Duration {
-    #[cfg(test)]
-    if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT_MS")
-        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
-        .filter(|timeout| *timeout <= 60_000)
-    {
-        return std::time::Duration::from_millis(timeout);
-    }
-    std::time::Duration::from_millis(250)
-}
+/// Wall-clock budget for one GUI-thread local fallback commit of the Issue
+/// Monitor prefs: lock wait, authority fence check, read, mutate and the
+/// durable (fsync + rename) write. The daemon is the primary control
+/// transport; this bounds how long the GUI thread blocks when that transport
+/// is unavailable and the prefs lock is held elsewhere. Expiry surfaces as
+/// `Rejected`, which delivery claim/mark callers treat as "not the owner".
+pub(crate) const ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+/// Issue #3878: the fallback commit budget a test runtime owns explicitly.
+/// A durable delivery spends several commits, each with two fsyncs, inside
+/// [`ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT`]; under CI parallel load that
+/// budget expires and the delivery silently stays unmaterialized. Tests that
+/// assert the production budget itself set
+/// [`ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT`] on their runtime instead.
+#[cfg(test)]
+pub(crate) const TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 thread_local! {
@@ -2274,6 +2286,7 @@ impl AppRuntime {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
+            issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             issue_monitor_scheduled_scans_in_flight: HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::gwtd(),
@@ -4179,6 +4192,7 @@ impl AppRuntime {
     pub(crate) fn finalize_issue_monitor_window_close_in_background(
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
+        commit_timeout: std::time::Duration,
     ) -> WindowCloseMonitorResult {
         #[cfg_attr(not(unix), allow(unused_variables))]
         let window_id = target.window_id.as_deref().unwrap_or_default();
@@ -4209,7 +4223,11 @@ impl AppRuntime {
         match publication {
             Ok(()) => WindowCloseMonitorResult::Published,
             Err(error) if error.allows_local_fallback() => {
-                match Self::commit_local_issue_monitor_window_close(project_root, target) {
+                match Self::commit_local_issue_monitor_window_close(
+                    project_root,
+                    target,
+                    commit_timeout,
+                ) {
                     Ok(Some(monitor)) => WindowCloseMonitorResult::LocalFallback(Box::new(monitor)),
                     Ok(None) => WindowCloseMonitorResult::Noop,
                     Err(local_error) => WindowCloseMonitorResult::Failed(local_error),
@@ -4225,6 +4243,7 @@ impl AppRuntime {
     fn finalize_issue_monitor_vanished_windows_in_background(
         project_root: &Path,
         live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
+        commit_timeout: std::time::Duration,
     ) -> Vec<String> {
         if live_windows_per_tab.is_empty() {
             return Vec::new();
@@ -4266,8 +4285,11 @@ impl AppRuntime {
         targets
             .iter()
             .filter_map(|target| {
-                match Self::finalize_issue_monitor_window_close_in_background(project_root, target)
-                {
+                match Self::finalize_issue_monitor_window_close_in_background(
+                    project_root,
+                    target,
+                    commit_timeout,
+                ) {
                     WindowCloseMonitorResult::Failed(error) => Some(error.to_string()),
                     WindowCloseMonitorResult::Noop
                     | WindowCloseMonitorResult::Published
@@ -4280,6 +4302,7 @@ impl AppRuntime {
     fn commit_local_issue_monitor_window_close(
         project_root: &Path,
         target: &gwt::IssueMonitorStopTarget,
+        commit_timeout: std::time::Duration,
     ) -> Result<
         Option<gwt::IssueMonitorState>,
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
@@ -4288,7 +4311,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
+            std::time::Instant::now() + commit_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -4620,7 +4643,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
+            std::time::Instant::now() + self.issue_monitor_fallback_commit_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -4666,7 +4689,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + local_issue_monitor_fallback_commit_timeout(),
+            std::time::Instant::now() + self.issue_monitor_fallback_commit_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -5330,12 +5353,14 @@ impl AppRuntime {
         let worker_expected_project_tab_id = expected_project_tab_id.to_string();
         let worker_now = now.to_string();
         let issue_client_factory = self.issue_client_factory.clone();
+        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let vanished_window_failures =
                     Self::finalize_issue_monitor_vanished_windows_in_background(
                         &worker_project_root,
                         &live_windows_per_tab,
+                        fallback_commit_timeout,
                     );
                 let outcome = run_scheduled_issue_monitor_scan(
                     &worker_project_root,
