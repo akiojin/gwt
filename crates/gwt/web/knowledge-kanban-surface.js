@@ -2158,14 +2158,6 @@ export function createKnowledgeKanbanSurface({
         elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
         row.appendChild(elapsed);
 
-        const output = createNode(
-          "div",
-          "issue-agent-status-output",
-          String(windowActivityDetail?.(target) || "").trim(),
-        );
-        output.title = output.textContent;
-        row.appendChild(output);
-
         const windowize = createNode("button", "wizard-button", "Windowize");
         windowize.type = "button";
         windowize.dataset.action = "windowize-issue-preview";
@@ -2176,6 +2168,17 @@ export function createKnowledgeKanbanSurface({
           windowizeIssuePreviewWindow?.(target.id);
         });
         row.appendChild(windowize);
+
+        // Last in DOM order: the activity line spans the full width on its own
+        // grid row, so it must follow every first-row cell (title / state /
+        // elapsed / Windowize) or auto-placement pushes Windowize below it.
+        const output = createNode(
+          "div",
+          "issue-agent-status-output",
+          String(windowActivityDetail?.(target) || "").trim(),
+        );
+        output.title = output.textContent;
+        row.appendChild(output);
         return row;
       }
 
