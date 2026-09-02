@@ -61419,3 +61419,164 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
         "a stale PM registration must not deliver"
     );
 }
+
+// Issue #3863 AC-6: every wizard-open path must inject the Hermes launch
+// choices enumerated from the user's global Hermes home. Missing one path
+// would leave that entry point with empty candidates only.
+fn seed_hermes_home_with_profile(root: &Path) -> PathBuf {
+    let hermes_home = root.join("hermes-home");
+    fs::create_dir_all(&hermes_home).expect("hermes home");
+    fs::write(
+        hermes_home.join("config.yaml"),
+        "model:\n  provider: zai\n  default: glm-5.2\nagent:\n  personalities:\n    concise: Be brief.\n",
+    )
+    .expect("hermes config");
+    hermes_home
+}
+
+fn assert_hermes_choices_injected(view: &gwt::LaunchWizardView, path: &str) {
+    assert_eq!(
+        view.hermes_profile_options,
+        vec!["concise".to_string()],
+        "{path}: Hermes profile choices must come from HERMES_HOME config"
+    );
+    assert_eq!(
+        view.hermes_model_options,
+        vec!["glm-5.2".to_string()],
+        "{path}: Hermes model choices must follow the config default provider"
+    );
+}
+
+#[test]
+fn app_runtime_manual_launch_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
+        .expect("open launch wizard");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_launch_wizard_for_branch");
+}
+
+#[test]
+fn app_runtime_knowledge_launch_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3863,
+            "Hermes launch choices",
+            &["enhancement"],
+            "body",
+            "2026-09-02T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            3863,
+            LinkedIssueKind::Issue,
+        )
+        .expect("open issue launch wizard");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_knowledge_launch_wizard_for_base_branch");
+}
+
+#[test]
+fn app_runtime_start_work_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let workspace_home = temp.path().join("workspace");
+    let _ = init_managed_workspace_with_develop_worktree(&workspace_home);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        workspace_home.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Branches],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_start_work_for_project("tab-1", &workspace_home)
+        .expect("open start work");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_start_work_for_project");
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    assert_hermes_choices_injected(view, "open_issue_monitor_configure_profile_wizard_events");
+}
