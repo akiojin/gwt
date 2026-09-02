@@ -3351,6 +3351,15 @@
       const { applyProviderUsageUi, renderUsagePanel } = createProviderUsageSurface({
         send,
         renderWorkspaceWindows: () => workspaceOverviewSurface.renderWindows(),
+        // Issue #3862 — name popover session rows by their window title.
+        sessionLabel: (sessionId) => {
+          for (const tab of appState?.tabs || []) {
+            for (const windowData of tab.workspace?.windows || []) {
+              if (windowData?.session_id === sessionId) return windowDisplayTitle(windowData);
+            }
+          }
+          return null;
+        },
       });
 
       function activeWorkFocusableAgents(work) {
