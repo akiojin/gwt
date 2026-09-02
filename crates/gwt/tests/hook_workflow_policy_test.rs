@@ -1661,6 +1661,8 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         ),
         ("pr.current", json!({})),
         ("pr.list", json!({})),
+        // Issue #3891 AC-3: budget observation is a read, ownerless-safe.
+        ("github.budget", json!({})),
         ("pr.view", json!({ "number": 1 })),
         ("pr.checks", json!({ "number": 1 })),
         ("search", json!({ "query": "workflow policy owner" })),

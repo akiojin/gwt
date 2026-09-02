@@ -17,6 +17,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
@@ -196,6 +197,10 @@ pub enum CliCommand {
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
+    /// Issue #3891 AC-3: `github.budget` observes the GitHub API budget.
+    GithubBudget {
+        refresh: bool,
+    },
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -659,6 +664,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
+        CliCommand::GithubBudget { refresh } => github_budget::run(env, refresh, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

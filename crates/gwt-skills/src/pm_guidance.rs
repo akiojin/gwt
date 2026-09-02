@@ -397,9 +397,32 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
 
 ## Open PR inventory
 
-Every resident cycle inventories open pull requests. Do not wait to
-be asked, and do not skip the inventory because the Issue Monitor
-queue looks quiet — agent windows disappear, PRs do not.
+Every resident cycle reads the open pull request inventory through
+`pr.list`. Do not wait to be asked, and do not skip the read because
+the Issue Monitor queue looks quiet — agent windows disappear, PRs do
+not. The read itself is budget-aware (Issue #3891), so a cycle never
+has to choose between inventorying and protecting the shared GitHub
+quota:
+
+- `pr.list` is cache-first. Inside its TTL (5 minutes, one PM cycle)
+  the answer comes from the machine-local snapshot and spends nothing;
+  the bulk query is light (no `body`, no `statusCheckRollup`), and
+  checks are hydrated per PR only when that PR changed or its CI is not
+  final yet.
+- Every answer carries `source` (`github` / `cache` / `stale-cache`),
+  `cache_age_secs`, `throttled`, and `github_calls`. When the budget is
+  below its reserve, `pr.list` serves the last snapshot with
+  `source: stale-cache` and the reason in `throttled`: act on those rows
+  as usual, say "PR inventory throttled: <reason>" in the digest, and do
+  not retry the read this cycle. With no snapshot to serve it fails as
+  unobservable (see below).
+- Do not pass `refresh:true` on the periodic inventory. Reserve it for
+  the single read that precedes a merge proposal, a Ready flip, or a
+  close proposal, where the decision needs the live state.
+- `github.budget` shows the primary budgets, the local estimate of the
+  secondary limit, the newest refusal, and the throttle decision a
+  periodic read would get right now. Read it when `throttled` appears
+  or before a burst of live reads; it is free.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -471,7 +494,8 @@ that then stalls the Issue Monitor scan and every agent's PR handoff.
   proposal), never inside a survey loop over many Issues.
 - Spend at most 5 live reads per cycle (`refresh:true` on `issue.view`,
   `issue.comments`, `issue.linked_prs`, plus `pr.list`). Beyond that,
-  defer the rest to the next cycle.
+  defer the rest to the next cycle. A `pr.list` answer whose `source` is
+  `cache` or `stale-cache` counts as zero live reads.
 - On `github_rate_limited`, stop every GitHub read for the cycle and
   report the unobservable state as described in the inventory rules.
 
@@ -1169,6 +1193,32 @@ mod tests {
             "cache-first",
             "`refresh:true` only when",
             "at most 5 live reads per cycle",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3891 AC-6: the inventory is no longer an unconditional
+    /// every-cycle GitHub read. The contract names the cache-first,
+    /// budget-aware mechanics of `pr.list`, tells the PM what a throttled
+    /// answer means, keeps `refresh:true` off the periodic read, and points
+    /// at `github.budget` for observation.
+    #[test]
+    fn contract_makes_the_open_pr_inventory_budget_aware() {
+        let body = body();
+        assert!(
+            !body.contains("Every resident cycle inventories open pull requests"),
+            "the unconditional inventory wording must be gone"
+        );
+        for phrase in [
+            "`pr.list` is cache-first",
+            "spends nothing",
+            "no `body`, no `statusCheckRollup`",
+            "`source: stale-cache`",
+            "PR inventory throttled:",
+            "Do not pass `refresh:true` on the periodic inventory",
+            "`github.budget`",
+            "counts as zero live reads",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

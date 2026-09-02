@@ -69,7 +69,9 @@ pub trait CliEnv {
     fn list_open_prs(
         &mut self,
         options: &gwt_git::PrInventoryOptions,
-    ) -> io::Result<Vec<gwt_git::PrInventoryItem>>;
+    ) -> io::Result<gwt_git::PrInventoryRead>;
+    /// Issue #3891 AC-3: raw `gh api rate_limit` payload (a free endpoint).
+    fn probe_github_rate_limit(&mut self) -> io::Result<String>;
     fn create_pr(
         &mut self,
         base: &str,
