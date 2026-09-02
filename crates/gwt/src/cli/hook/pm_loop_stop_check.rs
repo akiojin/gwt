@@ -274,10 +274,15 @@ fn handle_at(
          mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
          `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
          running agents' `last_activity_at`. Inventory open PRs with `pr.list` and act on each \
-         row's `lifecycle` and `default_action`; stale (no update for 72h), SUPERSEDED, and \
-         owner-Issue-closed rows are digest escalations — never auto-close them. \
+         row's `lifecycle` and `default_action`; a row with `default_action_executable` false \
+         follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
+         stale (no update for `stale_after_hours`), SUPERSEDED, owner-Issue-closed, and \
+         `escalation_due` rows are digest escalations — never auto-close them. \
+         A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change \
+         cycle: advance one or escalate with the reason. \
          Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, \
-         and quiet agents; advance at least one item with a concrete action or user handoff. \
+         red or escalation-due PRs, and quiet agents; advance at least one item with a concrete \
+         action or user handoff. \
          Treat that required advance or handoff as a reportable milestone or escalation under \
          the shared conditional-reporting clause below. \
          Re-report every unresolved wait in every cycle using the window title and required user \
@@ -633,8 +638,12 @@ mod tests {
             panic!("expected the loop to continue, got {output:?}");
         };
         for phrase in [
-            "Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, and quiet agents",
+            "Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, red or escalation-due PRs, and quiet agents",
             "advance at least one item",
+            // Issue #3868 AC-2 / AC-3: the fallback order and the red-PR
+            // exception to the silent cycle are in the Stop hook itself.
+            "a row with `default_action_executable` false follows its `fallback`",
+            "A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change cycle",
             "Treat that required advance or handoff as a reportable milestone or escalation",
             "Re-report every unresolved wait in every cycle using the window title and required user action",
             "identify the owning Issue and say `title unavailable`",
