@@ -110,8 +110,11 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_pr_quarantine_context(number)
     }
 
-    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
-        self.inner.list_open_prs()
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+        self.inner.list_open_prs(options)
     }
 
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
