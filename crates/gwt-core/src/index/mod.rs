@@ -2,6 +2,7 @@
 //!
 //! This module owns:
 //! - On-disk path layout (`paths`)
+//! - Host-wide Refresh Broker for admission coalescing (`broker`)
 //! - Manifest read/write for incremental indexing (`manifest`)
 //! - File watcher for live re-indexing (`watcher`)
 //! - Tokio job spawning for index/refresh/reconcile work (`runtime`)
@@ -10,6 +11,7 @@
 //! (`crates/gwt-core/runtime/chroma_index_runner.py`); the Rust side
 //! coordinates job dispatch and on-disk metadata only.
 
+pub mod broker;
 pub mod manifest;
 pub mod path_policy;
 pub mod paths;

@@ -52,6 +52,7 @@ impl RunnerSpawner for RecordingSpawner {
     }
 }
 
+#[cfg(unix)]
 use gwt_core::test_support::ScopedEnvVar;
 
 fn env_lock() -> &'static Mutex<()> {

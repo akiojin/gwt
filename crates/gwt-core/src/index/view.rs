@@ -204,7 +204,9 @@ fn write_canonical_json(output: &mut String, value: &Value) {
     }
 }
 
-fn canonical_json_sha256(value: &Value) -> String {
+/// SHA-256 of the canonical JSON encoding shared with the Python runner
+/// (`sort_keys`, compact separators, ASCII-escaped strings).
+pub fn canonical_json_sha256(value: &Value) -> String {
     let mut canonical = String::new();
     write_canonical_json(&mut canonical, value);
     format!("{:x}", Sha256::digest(canonical.as_bytes()))
