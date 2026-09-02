@@ -737,17 +737,39 @@ mod tests {
         path
     }
 
+    #[cfg(windows)]
+    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+
+        if path.is_dir() {
+            return OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path);
+        }
+        fs::File::options().write(true).open(path)
+    }
+
+    #[cfg(not(windows))]
+    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .or_else(|_| fs::File::open(path))
+    }
+
     /// Backdate a directory and its outcome past the grace window so the sweep
     /// treats it as residue without the test having to wait.
     fn age_out(dir: &Path) {
         let stale = std::time::SystemTime::now() - CONTROL_RESIDUE_GRACE * 2;
         for path in [dir.join(OUTCOME_FILE), dir.to_path_buf()] {
             if path.exists() {
-                let file = fs::File::options()
-                    .write(true)
-                    .open(&path)
-                    .or_else(|_| fs::File::open(&path))
-                    .expect("open for backdating");
+                let file = open_for_backdating(&path).expect("open for backdating");
                 file.set_modified(stale).expect("backdate");
             }
         }

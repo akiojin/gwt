@@ -5504,6 +5504,14 @@ impl AppRuntime {
                 return self.continue_work_failure_events(client_id, operation_id, work_id, failure)
             }
         };
+        // Issue #3759: Continue work is the GUI recovery route for a
+        // stranded owner. Rebuild a lost worktree pointer/projection from
+        // the owner ledger before the strict read so the route does not
+        // refuse the exact state it exists to recover from.
+        super::launch::heal_lost_generation_publication_best_effort(
+            &target.worktree_path,
+            target.owner,
+        );
         let generation_was_missing = match gwt::cli::execution_state::load_generation_ledger(
             &target.worktree_path,
             target.owner,
