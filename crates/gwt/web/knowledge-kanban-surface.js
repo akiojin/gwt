@@ -114,6 +114,189 @@ export function issuePreviewWindowsForIssue(windows, issueWindowId, issueNumber)
   });
 }
 
+// SPEC #3885 Phase 2 (T-004 / FR-006): the Issue row state model. A row shows
+// exactly one primary badge, at most two pieces of secondary information, and at
+// most two visible actions; the remaining actions go to the row's overflow menu.
+// The model is pure so the limits are testable without the DOM.
+const ISSUE_ROW_SECONDARY_LIMIT = 2;
+const ISSUE_ROW_ACTION_LIMIT = 2;
+const ISSUE_ROW_LIVE_AGENT_STATUSES = new Set(["running", "starting", "idle", "waiting", "error"]);
+const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_failed"]);
+const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
+  closed: Object.freeze({ label: "Done", tone: "done" }),
+  remote: Object.freeze({ label: "Remote", tone: "remote" }),
+  needs_attention: Object.freeze({ label: "Needs attention", tone: "needs-input" }),
+  running: Object.freeze({ label: "Active", tone: "active" }),
+  paused: Object.freeze({ label: "Paused", tone: "idle" }),
+});
+
+function issueEntryStateKey(entry) {
+  return String(entry?.state || "open").toLowerCase() === "closed" ? "closed" : "open";
+}
+
+function issueEntryHasLabel(entry, name) {
+  const labels = Array.isArray(entry?.labels) ? entry.labels : [];
+  return labels.some((label) => String(label || "").trim().toLowerCase() === name);
+}
+
+function issueRowPrimaryView({ entry, attention, inlineWindow, canvasWindow }) {
+  const live = inlineWindow || canvasWindow;
+  if (live) {
+    const view = issuePreviewStatusView(live);
+    if (ISSUE_ROW_LIVE_AGENT_STATUSES.has(view.status)) {
+      return { key: `agent:${view.status}`, label: view.label, tone: view.tone };
+    }
+  }
+  const monitor = monitorStateView(entry?.monitor_state);
+  if (monitor) {
+    return { key: `monitor:${monitor.state}`, label: monitor.label, tone: monitor.tone };
+  }
+  const lane = ISSUE_ROW_WORK_LANE_VIEWS[attention?.lane];
+  if (lane) {
+    return { key: `work:${attention.lane}`, label: lane.label, tone: lane.tone };
+  }
+  return issueEntryStateKey(entry) === "closed"
+    ? { key: "issue:closed", label: "Closed", tone: "done" }
+    : { key: "issue:open", label: "Open", tone: "idle" };
+}
+
+function issueRowSecondaryItems({ entry, work, attention, primary }) {
+  const items = [];
+  if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
+    items.push({ kind: "chip", key: "closed", label: "Closed" });
+  }
+  const exclusion = String(entry?.exclusion_reason || "").trim();
+  const attentionReason =
+    attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
+  const reason = exclusion || attentionReason;
+  if (reason) {
+    items.push({ kind: "reason", key: "reason", label: reason });
+  }
+  if (Number.isFinite(entry?.queue_position)) {
+    items.push({ kind: "chip", key: "queue", label: `Queue ${entry.queue_position}` });
+  }
+  if (work?.pr_number) {
+    const prState = String(work.pr_state || "").trim();
+    items.push({
+      kind: "chip",
+      key: "pr",
+      label: prState ? `PR #${work.pr_number} · ${prState}` : `PR #${work.pr_number}`,
+      title: work.pr_url || "",
+    });
+  }
+  if (entry?.is_spec || issueEntryHasLabel(entry, "gwt-spec")) {
+    items.push({ kind: "chip", key: "spec", label: "Spec" });
+  }
+  if (issueEntryHasLabel(entry, "auto-merge")) {
+    items.push({ kind: "chip", key: "auto-merge", label: "Auto-merge" });
+  }
+  return items.slice(0, ISSUE_ROW_SECONDARY_LIMIT);
+}
+
+function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindow }) {
+  const workActions = ["continue-work", "resume-work", "cleanup-work"];
+  if (inlineWindow) {
+    return { order: ["windowize-inline-terminal", "configure-issue", ...workActions], limit: 1 };
+  }
+  if (canvasWindow) {
+    return { order: ["focus-canvas-window", "configure-issue", ...workActions], limit: 1 };
+  }
+  const monitor = monitorStateView(entry?.monitor_state);
+  switch (monitor?.state) {
+    case "queued":
+      return {
+        order: ["launch-now", "configure-issue", "move-up", "move-down", ...workActions],
+      };
+    case "launch_failed":
+    case "agent_failed":
+      return {
+        order: ["launch-now", "continue-work", "resume-work", "configure-issue", "cleanup-work"],
+      };
+    case "merged":
+    case "released":
+      return { order: ["cleanup-work", "resume-work", "continue-work", "configure-issue"] };
+    case "needs_human":
+    case "launching":
+    case "launched":
+      return { order: ["continue-work", "resume-work", "configure-issue", "cleanup-work"] };
+    default:
+      break;
+  }
+  if (monitor) {
+    return { order: ["configure-issue", ...workActions] };
+  }
+  if (work) {
+    return {
+      order:
+        attention?.lane === "closed"
+          ? ["cleanup-work", "resume-work", "continue-work"]
+          : workActions,
+    };
+  }
+  return { order: issueEntryStateKey(entry) === "open" ? ["launch-agent"] : [] };
+}
+
+function issueRowActionAvailable(action, { entry, work, queue }) {
+  const monitor = monitorStateView(entry?.monitor_state);
+  switch (action) {
+    case "launch-now":
+      return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "configure-issue":
+      return Boolean(monitor);
+    case "move-up":
+    case "move-down":
+      return Boolean(queue) && Number.isFinite(queue.index) && queue.index >= 0;
+    case "continue-work":
+    case "resume-work":
+      return Boolean(work);
+    case "cleanup-work":
+      return Boolean(work && (work.cleanup_candidate || work.cleanup_blocked_reason));
+    default:
+      return true;
+  }
+}
+
+export function issueRowStateModel({
+  entry,
+  work = null,
+  attention = null,
+  inlineWindow = null,
+  canvasWindow = null,
+  queue = null,
+} = {}) {
+  const context = { entry, work, attention, inlineWindow, canvasWindow, queue };
+  const primary = issueRowPrimaryView(context);
+  const secondary = issueRowSecondaryItems({ ...context, primary });
+  const { order, limit = ISSUE_ROW_ACTION_LIMIT } = issueRowActionOrder(context);
+  const available = order.filter((action) => issueRowActionAvailable(action, context));
+  return {
+    primary,
+    secondary,
+    actions: available.slice(0, limit),
+    overflow: available.slice(limit),
+  };
+}
+
+// SPEC #3885 T-005 / FR-003a: the canvas face of a Windowized agent. The link back
+// to the Issue comes from the Work projection's agent rows (window id or session
+// id) or from the ids this surface itself Windowized; only windows that are on
+// the canvas count, so a preview that returned to the row is never doubled.
+export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds) {
+  const list = Array.isArray(windows) ? windows : [];
+  const agents = Array.isArray(work?.agents) ? work.agents : [];
+  const windowIds = new Set(agents.map((agent) => agent?.window_id).filter(Boolean));
+  const sessionIds = new Set(agents.map((agent) => agent?.session_id).filter(Boolean));
+  const remembered =
+    rememberedIds instanceof Set ? rememberedIds : new Set(rememberedIds || []);
+  return list.filter((windowData) => {
+    if (!windowData?.id) return false;
+    const kind = windowData.placement?.kind || "canvas";
+    if (kind !== "canvas") return false;
+    if (remembered.has(windowData.id) || windowIds.has(windowData.id)) return true;
+    return Boolean(windowData.session_id) && sessionIds.has(windowData.session_id);
+  });
+}
+
 export function createKnowledgeKanbanSurface({
   send,
   // Semantic search must never use the reconnect queue. This dependency
@@ -556,6 +739,7 @@ export function createKnowledgeKanbanSurface({
             hideDone: readKanbanHideDonePreference(),
             issueStateFilter: "open",
             dndSnapshot: null,
+            expandedInlineTerminals: new Set(),
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
           });
@@ -2028,55 +2212,80 @@ export function createKnowledgeKanbanSurface({
       // in one container, so Windowize (the only hand-off) moves the runtime to
       // the canvas and the row releases it — the same PTY never has two input
       // faces. An errored / waiting agent is badged here, never auto-opened.
-      function renderIssueInlineTerminal(windowId, entry) {
-        const targets = issuePreviewWindowsForIssue(
-          typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
-          windowId,
-          entry.number,
-        );
-        if (targets.length === 0) {
+      // SPEC #3885 T-005 (FR-002 / FR-003 / FR-003a): the agent's face on the Issue
+      // row. While the agent is an `issue_preview` placement the row hosts the
+      // shared interactive runtime and can expand it in place; after Windowize the
+      // same row shows a "Shown on canvas" face so the Issue ↔ agent link stays
+      // visible without a second input face for the PTY.
+      function renderIssueInlineTerminal(windowId, state, entry, faces) {
+        const target = faces.inlineWindow || faces.canvasWindow;
+        if (!target) {
           return null;
         }
-        const target = targets[0];
+        const onCanvas = !faces.inlineWindow;
         const section = createNode("section", "issue-inline-terminal");
         section.dataset.windowId = target.id;
         section.dataset.issueNumber = String(entry.number);
         section.setAttribute("aria-label", `Agent terminal for Issue #${entry.number}`);
+        const title = windowDisplayTitle?.(target) || target.title || target.id;
+        const meta = windowRoleBadgeLabel?.(target) || target.agent_id || "Agent";
 
         const header = createNode("div", "issue-inline-terminal-header");
-        const titleWrap = createNode("div", "issue-inline-terminal-title-wrap");
-        titleWrap.appendChild(
-          createNode(
-            "div",
-            "issue-inline-terminal-title",
-            windowDisplayTitle?.(target) || target.title || target.id,
-          ),
-        );
-        titleWrap.appendChild(
-          createNode(
-            "div",
-            "issue-inline-terminal-meta",
-            windowRoleBadgeLabel?.(target) || target.agent_id || "Agent",
-          ),
-        );
-        header.appendChild(titleWrap);
+        if (onCanvas) {
+          section.classList.add("is-on-canvas");
+          const titleWrap = createNode("div", "issue-inline-terminal-title-wrap");
+          titleWrap.appendChild(createNode("div", "issue-inline-terminal-title", title));
+          titleWrap.appendChild(
+            createNode("div", "issue-inline-terminal-meta", `${meta} · Shown on canvas`),
+          );
+          header.appendChild(titleWrap);
+          header.appendChild(
+            issueRowActionButton("focus-canvas-window", { windowId, state, entry, target }),
+          );
+          section.appendChild(header);
+          section.appendChild(
+            createNode(
+              "div",
+              "issue-inline-terminal-placeholder",
+              "Shown on canvas. Input goes to the canvas window.",
+            ),
+          );
+          return section;
+        }
 
-        const statusView = issuePreviewStatusView(target);
-        const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
-        badge.dataset.tone = statusView.tone;
-        badge.dataset.status = statusView.status;
-        header.appendChild(badge);
-
-        const windowize = createNode("button", "wizard-button", "Windowize");
-        windowize.type = "button";
-        windowize.dataset.action = "windowize-inline-terminal";
-        windowize.setAttribute("aria-label", "Open this agent terminal as a canvas window");
-        windowize.addEventListener("click", (event) => {
+        const expanded = state.expandedInlineTerminals.has(entry.number);
+        if (expanded) {
+          section.classList.add("is-expanded");
+        }
+        const toggle = createNode("button", "issue-inline-terminal-toggle");
+        toggle.type = "button";
+        toggle.dataset.toggle = "inline-terminal-expand";
+        const syncToggle = (isExpanded) => {
+          toggle.setAttribute("aria-expanded", String(isExpanded));
+          toggle.setAttribute(
+            "aria-label",
+            `${isExpanded ? "Collapse" : "Expand"} the agent terminal for Issue #${entry.number}`,
+          );
+        };
+        syncToggle(expanded);
+        toggle.appendChild(createNode("div", "issue-inline-terminal-title", title));
+        toggle.appendChild(createNode("div", "issue-inline-terminal-meta", meta));
+        toggle.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
-          windowizeIssuePreviewWindow?.(target.id);
+          const next = !state.expandedInlineTerminals.has(entry.number);
+          if (next) {
+            state.expandedInlineTerminals.add(entry.number);
+          } else {
+            state.expandedInlineTerminals.delete(entry.number);
+          }
+          section.classList.toggle("is-expanded", next);
+          syncToggle(next);
         });
-        header.appendChild(windowize);
+        header.appendChild(toggle);
+        header.appendChild(
+          issueRowActionButton("windowize-inline-terminal", { windowId, state, entry, target }),
+        );
         section.appendChild(header);
 
         const body = createNode("div", "issue-inline-terminal-body");
@@ -2311,102 +2520,153 @@ export function createKnowledgeKanbanSurface({
         renderKnowledgeBridge(windowId);
       }
 
-      function issueMonitorActionButton(label, glyph, action, issueNumber) {
-        const button = createNode("button", "icon-button knowledge-row-action", glyph);
+      // SPEC #3885 T-004 (FR-006): every Issue action the row can offer, keyed by
+      // the `data-action` the tests and the Playwright specs address.
+      const ISSUE_ROW_ACTION_VIEWS = Object.freeze({
+        "launch-now": Object.freeze({ label: "Launch now", aria: "Launch now" }),
+        "configure-issue": Object.freeze({
+          label: "Settings",
+          aria: "Project Agent settings for",
+        }),
+        "move-up": Object.freeze({ label: "↑ Move up", aria: "Move up" }),
+        "move-down": Object.freeze({ label: "↓ Move down", aria: "Move down" }),
+        "continue-work": Object.freeze({ label: "Continue work", aria: "Continue work on" }),
+        "resume-work": Object.freeze({ label: "Resume", aria: "Resume work on" }),
+        "cleanup-work": Object.freeze({ label: "Clean Up", aria: "Clean up work for" }),
+        "launch-agent": Object.freeze({ label: "Launch agent", aria: "Launch an agent for" }),
+        "windowize-inline-terminal": Object.freeze({
+          label: "Windowize",
+          aria: "Open the agent terminal as a canvas window for",
+        }),
+        "focus-canvas-window": Object.freeze({
+          label: "Focus window",
+          aria: "Focus the agent's canvas window for",
+        }),
+      });
+      // Actions rendered inside the inline terminal header rather than the row's
+      // action group.
+      const ISSUE_ROW_TERMINAL_ACTIONS = new Set([
+        "windowize-inline-terminal",
+        "focus-canvas-window",
+      ]);
+      // Ids this surface Windowized, so the row keeps its "Shown on canvas" face
+      // even before the Work projection reports the agent's window id.
+      const windowizedAgentWindowIds = new Set();
+
+      function runIssueRowAction(action, { windowId, state, entry, work, target }) {
+        switch (action) {
+          case "launch-now":
+            send({
+              kind: "issue_monitor_launch_now",
+              issue_number: entry.number,
+              linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "configure-issue":
+            send({
+              kind: "issue_monitor_configure_issue",
+              issue_number: entry.number,
+              linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "move-up":
+            moveQueuedKnowledgeEntry(windowId, state, entry.number, -1);
+            return;
+          case "move-down":
+            moveQueuedKnowledgeEntry(windowId, state, entry.number, 1);
+            return;
+          case "continue-work":
+            continueWork?.(work.id, getResumeBounds?.());
+            return;
+          case "resume-work":
+            openWorkspaceResumePicker?.(work.id);
+            return;
+          case "cleanup-work":
+            if (work?.cleanup_candidate) {
+              openWorkspaceCleanup?.(work.cleanup_candidate, windowId);
+            }
+            return;
+          case "launch-agent":
+            openIssueLaunchWizard(windowId, entry.number);
+            return;
+          case "windowize-inline-terminal":
+            if (target?.id) {
+              windowizedAgentWindowIds.add(target.id);
+              windowizeIssuePreviewWindow?.(target.id);
+            }
+            return;
+          case "focus-canvas-window":
+            if (target?.id) {
+              focusWindowLocally(target.id);
+              sendWindowFocus(target.id);
+            }
+            return;
+          default:
+            return;
+        }
+      }
+
+      function issueRowActionButton(action, context, { menuItem = false } = {}) {
+        const view = ISSUE_ROW_ACTION_VIEWS[action] || { label: action, aria: action };
+        const button = createNode(
+          "button",
+          menuItem ? "knowledge-row-menu-item" : "wizard-button is-compact knowledge-row-action",
+          view.label,
+        );
         button.type = "button";
         button.dataset.action = action;
-        button.setAttribute("aria-label", `${label} Issue #${issueNumber}`);
-        button.title = `${label} Issue #${issueNumber}`;
+        button.setAttribute("aria-label", `${view.aria} Issue #${context.entry.number}`);
+        if (menuItem) {
+          button.setAttribute("role", "menuitem");
+        }
+        const { work, queue } = context;
+        if (action === "move-up" && queue) {
+          button.disabled = queue.index <= 0;
+        } else if (action === "move-down" && queue) {
+          button.disabled = queue.index >= queue.length - 1;
+        } else if (action === "cleanup-work" && !work?.cleanup_candidate) {
+          // The backend owns cleanup eligibility (live agent / live process).
+          // The row must never infer it from merged state alone.
+          button.disabled = true;
+          button.dataset.blockedReason = work?.cleanup_blocked_reason || "";
+          button.title = `Cleanup unavailable: ${work?.cleanup_blocked_reason || ""}`;
+        }
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (button.disabled) return;
+          const menu = menuItem ? button.closest(".knowledge-row-menu") : null;
+          if (menu) {
+            menu.open = false;
+            menu.removeAttribute("open");
+          }
+          runIssueRowAction(action, context);
+        });
         return button;
       }
 
-      // SPEC-3671 FR-012 / FR-013: the Work block on an Issue row. Everything it
-      // renders comes from the active Work projection row joined by
-      // `issueWorkRowForEntry`; the Issue surface adds no Work state of its own.
-      function renderIssueRowWork(windowId, entry) {
-        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
-        if (!work) return null;
-
-        const block = createNode("div", "knowledge-row-work");
-        block.dataset.workId = work.id || "";
-
-        const summary = createNode("div", "knowledge-work-summary");
-        const lifecycle = createNode(
-          "span",
-          "knowledge-work-lifecycle",
-          formatWorkLifecycleLabel?.(work.lifecycle_state) || "Active",
-        );
-        lifecycle.dataset.lifecycle = String(work.lifecycle_state || "active").toLowerCase();
-        summary.appendChild(lifecycle);
-
-        const attention = workAttentionFor?.(work);
-        if (attention?.lane === "needs_attention" && attention.reason) {
-          const reason = createNode("span", "knowledge-work-attention", attention.reason);
-          reason.dataset.lane = attention.lane;
-          summary.appendChild(reason);
+      function renderIssueRowMenu(overflow, context) {
+        const menu = createNode("details", "knowledge-row-menu");
+        const trigger = createNode("summary", "icon-button knowledge-row-menu-trigger", "⋯");
+        trigger.setAttribute("aria-label", `More actions for Issue #${context.entry.number}`);
+        trigger.title = `More actions for Issue #${context.entry.number}`;
+        menu.appendChild(trigger);
+        const list = createNode("div", "knowledge-row-menu-list");
+        list.setAttribute("role", "menu");
+        for (const action of overflow) {
+          list.appendChild(issueRowActionButton(action, context, { menuItem: true }));
         }
+        menu.appendChild(list);
+        return menu;
+      }
 
-        if (work.pr_number) {
-          const prState = String(work.pr_state || "").trim();
-          const pr = createNode(
-            "span",
-            "knowledge-work-pr",
-            prState ? `PR #${work.pr_number} · ${prState}` : `PR #${work.pr_number}`,
-          );
-          pr.dataset.prState = prState;
-          if (work.pr_url) {
-            pr.title = work.pr_url;
-          }
-          summary.appendChild(pr);
-        }
-        block.appendChild(summary);
-
-        const actions = createNode("div", "knowledge-work-actions");
-        actions.setAttribute("role", "group");
-        actions.setAttribute("aria-label", `Issue #${entry.number} work actions`);
-
-        const continueButton = createNode("button", "wizard-button", "Continue work");
-        continueButton.type = "button";
-        continueButton.dataset.action = "continue-work";
-        continueButton.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          continueWork?.(work.id, getResumeBounds?.());
-        });
-        actions.appendChild(continueButton);
-
-        const resumeButton = createNode("button", "wizard-button", "Resume");
-        resumeButton.type = "button";
-        resumeButton.dataset.action = "resume-work";
-        resumeButton.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          openWorkspaceResumePicker?.(work.id);
-        });
-        actions.appendChild(resumeButton);
-
-        if (work.cleanup_candidate || work.cleanup_blocked_reason) {
-          const cleanupButton = createNode("button", "wizard-button", "Clean Up");
-          cleanupButton.type = "button";
-          cleanupButton.dataset.action = "cleanup-work";
-          if (work.cleanup_candidate) {
-            cleanupButton.addEventListener("click", (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              openWorkspaceCleanup?.(work.cleanup_candidate, windowId);
-            });
-          } else {
-            // The backend owns cleanup eligibility (live agent / live process).
-            // The row must never infer it from merged state alone.
-            cleanupButton.disabled = true;
-            cleanupButton.dataset.blockedReason = work.cleanup_blocked_reason;
-            cleanupButton.title = `Cleanup unavailable: ${work.cleanup_blocked_reason}`;
-          }
-          actions.appendChild(cleanupButton);
-        }
-
-        block.appendChild(actions);
-        return block;
+      function issueRowFaces(windowId, entry, work) {
+        const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
+        const inlineWindow = issuePreviewWindowsForIssue(windows, windowId, entry.number)[0] || null;
+        const canvasWindow = inlineWindow
+          ? null
+          : issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds)[0] || null;
+        return { inlineWindow, canvasWindow };
       }
 
       function renderIssueRow(windowId, state, entry) {
@@ -2420,6 +2680,31 @@ export function createKnowledgeKanbanSurface({
           select.setAttribute("aria-current", "true");
         }
 
+        // SPEC-3671 FR-012: the Work row joined from the already-broadcast projection;
+        // SPEC #3885 T-004: everything the row shows derives from one state model.
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        const attention = work ? workAttentionFor?.(work) || null : null;
+        const faces = issueRowFaces(windowId, entry, work);
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const queueIndex = queued.findIndex((queuedEntry) => queuedEntry.number === entry.number);
+        const queue = queueIndex >= 0 ? { index: queueIndex, length: queued.length } : null;
+        const model = issueRowStateModel({
+          entry,
+          work,
+          attention,
+          inlineWindow: faces.inlineWindow,
+          canvasWindow: faces.canvasWindow,
+          queue,
+        });
+        const context = {
+          windowId,
+          state,
+          entry,
+          work,
+          queue,
+          target: faces.inlineWindow || faces.canvasWindow,
+        };
+
         const main = createNode("div", "knowledge-row-main");
         const titleWrap = createNode("div", "");
         titleWrap.appendChild(
@@ -2429,77 +2714,30 @@ export function createKnowledgeKanbanSurface({
           createNode("div", "knowledge-row-number", `#${entry.number}`),
         );
         main.appendChild(titleWrap);
-        const rawState = issueEntryState(entry);
-        main.appendChild(
-          createNode(
-            "span",
-            `knowledge-state-chip ${rawState}`,
-            rawState === "closed" ? "Closed" : "Open",
-          ),
-        );
+        const badge = createNode("span", "knowledge-row-badge", model.primary.label);
+        badge.dataset.tone = model.primary.tone;
+        badge.dataset.stateKey = model.primary.key;
+        main.appendChild(badge);
         select.appendChild(main);
 
-        const meta = createNode("div", "knowledge-row-meta");
-        const monitorView = monitorStateView(entry.monitor_state);
-        if (monitorView) {
-          const chip = createNode(
-            "span",
-            "knowledge-monitor-chip",
-            monitorView.label,
-          );
-          chip.dataset.monitorState = monitorView.state;
-          chip.dataset.tone = monitorView.tone;
-          meta.appendChild(chip);
-        }
-        if (Number.isFinite(entry.queue_position)) {
-          meta.appendChild(
-            createNode(
-              "span",
-              "knowledge-meta-copy knowledge-monitor-position",
-              `Queue ${entry.queue_position}`,
-            ),
-          );
-        }
-        if (entry.exclusion_reason) {
-          meta.appendChild(
-            createNode(
-              "span",
-              "knowledge-monitor-reason",
-              entry.exclusion_reason,
-            ),
-          );
-        }
-        for (const label of visibleKnowledgeLabels(entry.labels || [])) {
-          meta.appendChild(createNode("span", "knowledge-chip", label));
-        }
-        if ((entry.linked_branch_count || 0) > 0) {
-          meta.appendChild(
-            createNode(
-              "span",
-              "knowledge-meta-copy",
-              `${entry.linked_branch_count} branch${entry.linked_branch_count === 1 ? "" : "es"}`,
-            ),
-          );
-        }
-        if (Number.isFinite(entry.match_score)) {
-          meta.appendChild(
-            createNode("span", "knowledge-meta-copy", `${entry.match_score}% match`),
-          );
-        }
-        appendKnowledgeRelatedCountChips(meta, entry, "knowledge-meta-copy");
-        if (entry.meta) {
-          meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
-        }
-        if (meta.childElementCount > 0) {
-          select.appendChild(meta);
+        if (model.secondary.length > 0) {
+          const secondary = createNode("div", "knowledge-row-secondary");
+          for (const item of model.secondary) {
+            const node = createNode("span", "knowledge-row-secondary-item", item.label);
+            node.dataset.kind = item.kind;
+            node.dataset.key = item.key;
+            if (item.title) {
+              node.title = item.title;
+            }
+            secondary.appendChild(node);
+          }
+          select.appendChild(secondary);
         }
 
         row.addEventListener("click", (event) => {
           if (event.target?.closest?.(".knowledge-row-actions")) return;
-          // SPEC-3671 FR-013: the Work actions live on the row but are not a
-          // selection gesture.
-          if (event.target?.closest?.(".knowledge-work-actions")) return;
-          // Issue #3884 AC-6: neither is interacting with the inline terminal.
+          // Issue #3884 AC-6: interacting with the inline terminal is not a
+          // selection gesture either.
           if (event.target?.closest?.(".issue-inline-terminal")) return;
           requestKnowledgeDetail(windowId, state.kind, entry.number);
         });
@@ -2507,72 +2745,20 @@ export function createKnowledgeKanbanSurface({
 
         const actions = createNode("div", "knowledge-row-actions");
         actions.setAttribute("role", "group");
-        actions.setAttribute("aria-label", `Issue #${entry.number} monitor actions`);
-        const queued = canonicalQueuedKnowledgeEntries(state);
-        const queueIndex = queued.findIndex((queuedEntry) => queuedEntry.number === entry.number);
-        if (queueIndex >= 0) {
-          const moveUp = issueMonitorActionButton("Move up", "↑", "move-up", entry.number);
-          moveUp.disabled = queueIndex === 0;
-          moveUp.addEventListener("click", () => {
-            moveQueuedKnowledgeEntry(windowId, state, entry.number, -1);
-          });
-          const moveDown = issueMonitorActionButton(
-            "Move down",
-            "↓",
-            "move-down",
-            entry.number,
-          );
-          moveDown.disabled = queueIndex === queued.length - 1;
-          moveDown.addEventListener("click", () => {
-            moveQueuedKnowledgeEntry(windowId, state, entry.number, 1);
-          });
-          actions.appendChild(moveUp);
-          actions.appendChild(moveDown);
+        actions.setAttribute("aria-label", `Issue #${entry.number} actions`);
+        for (const action of model.actions) {
+          if (ISSUE_ROW_TERMINAL_ACTIONS.has(action)) continue;
+          actions.appendChild(issueRowActionButton(action, context));
         }
-        if (monitorView) {
-          const configure = issueMonitorActionButton(
-            "Project Agent settings for",
-            "⚙",
-            "configure-issue",
-            entry.number,
-          );
-          configure.addEventListener("click", () => {
-            send({
-              kind: "issue_monitor_configure_issue",
-              issue_number: entry.number,
-              linked_issue_kind: entry.is_spec ? "spec" : "issue",
-            });
-          });
-          actions.appendChild(configure);
-        }
-        if (["queued", "launch_failed", "agent_failed"].includes(monitorView?.state)) {
-          const launchNow = issueMonitorActionButton(
-            "Launch now",
-            "⚡",
-            "launch-now",
-            entry.number,
-          );
-          launchNow.addEventListener("click", () => {
-            send({
-              kind: "issue_monitor_launch_now",
-              issue_number: entry.number,
-              linked_issue_kind: entry.is_spec ? "spec" : "issue",
-            });
-          });
-          actions.appendChild(launchNow);
+        if (model.overflow.length > 0) {
+          actions.appendChild(renderIssueRowMenu(model.overflow, context));
         }
         if (actions.childElementCount > 0) {
           row.appendChild(actions);
         }
-        // SPEC-3671 FR-012 / FR-013: the Work block sits outside `.knowledge-row-select`
-        // so its controls are never nested inside the row's select button.
-        const workBlock = renderIssueRowWork(windowId, entry);
-        if (workBlock) {
-          row.appendChild(workBlock);
-        }
         // Issue #3884 AC-6: the agent's inline terminal, shown whether or not the
-        // row is selected, likewise outside the select button.
-        const inlineTerminal = renderIssueInlineTerminal(windowId, entry);
+        // row is selected, outside the select button.
+        const inlineTerminal = renderIssueInlineTerminal(windowId, state, entry, faces);
         if (inlineTerminal) {
           row.appendChild(inlineTerminal);
         }

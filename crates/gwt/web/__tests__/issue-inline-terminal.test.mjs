@@ -291,8 +291,9 @@ test("clicking inside the inline terminal does not select the Issue", async (t) 
   );
 });
 
-// FR-010 / AC-7: Windowize is the hand-off, and once the placement is `canvas` the
-// row stops hosting the terminal so the window id is mounted in one place only.
+// FR-010 / AC-7 (SPEC #3885 T-005): Windowize is the hand-off, and once the
+// placement is `canvas` the row stops hosting the terminal so the window id is
+// mounted in one place only — the row keeps a "Shown on canvas" face instead.
 test("Windowize hands the inline terminal to the canvas and the row releases it", async (t) => {
   const agent = previewWindow("agent-1", 3671);
   const fixture = await makeFixture({ workspaceWindows: [agent] });
@@ -309,7 +310,10 @@ test("Windowize hands the inline terminal to the canvas and the row releases it"
 
   fixture.setWindows([{ ...agent, placement: { kind: "canvas" } }]);
   fixture.surface.renderKnowledgeBridge("win-1");
-  assert.equal(fixture.body.querySelector(".issue-inline-terminal"), null);
+  const face = fixture.body.querySelector(".issue-inline-terminal");
+  assert.equal(face.classList.contains("is-on-canvas"), true);
+  assert.equal(face.querySelector(".terminal-root"), null, "the row no longer hosts the PTY");
+  assert.equal(fixture.terminalMounts.length, 1, "the runtime was mounted inline once only");
 });
 
 // FR-011.
@@ -324,10 +328,16 @@ test("an errored or waiting agent is badged, never auto-opened on the canvas", a
     t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
     applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
 
-    const badge = fixture.body.querySelector(".issue-inline-terminal .knowledge-monitor-chip");
+    // SPEC #3885 T-004: the agent status is the row's single primary badge.
+    const badge = fixture.body.querySelector('[data-issue-number="3671"] .knowledge-row-badge');
     assert.equal(badge.textContent, label);
     assert.equal(badge.dataset.tone, tone);
-    assert.equal(badge.dataset.status, status);
+    assert.equal(badge.dataset.stateKey, `agent:${status}`);
+    assert.equal(
+      fixture.body.querySelector(".issue-inline-terminal .knowledge-monitor-chip"),
+      null,
+      "the terminal header does not repeat the badge",
+    );
     assert.deepEqual(fixture.windowized, []);
     assert.equal(
       fixture.sent.some((message) => message.kind === "undock_agent_window"),

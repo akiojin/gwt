@@ -91,7 +91,23 @@ test.describe("Issue inline terminal placement", () => {
         `.surface-knowledge [data-issue-number='${issue}'] .issue-inline-terminal`,
       );
       await expect(section).toHaveAttribute("data-window-id", id);
-      await expect(section.locator(".knowledge-monitor-chip")).toHaveText("Running");
+      // SPEC #3885 T-004: the agent status is the row's single primary badge.
+      const row = page.locator(`.surface-knowledge [data-issue-number='${issue}']`);
+      await expect(row.locator(".knowledge-row-badge")).toHaveText("Running");
+      await expect(section.locator(".knowledge-monitor-chip")).toHaveCount(0);
+    }
+    // SPEC #3885 AC-5: one primary badge, at most two secondary items, at most
+    // two visible actions on every row.
+    for (const issue of ["3671", "3672", "3673", "3674"]) {
+      const row = page.locator(`.surface-knowledge [data-issue-number='${issue}']`);
+      await expect(row.locator(".knowledge-row-badge")).toHaveCount(1);
+      expect(await row.locator(".knowledge-row-secondary-item").count()).toBeLessThanOrEqual(2);
+      const visibleActions = await row
+        .locator("button[data-action]:not(.knowledge-row-menu-list button)")
+        .count();
+      expect(visibleActions).toBeLessThanOrEqual(2);
+      await expect(row.locator(".knowledge-chip")).toHaveCount(0);
+      await expect(row.locator(".knowledge-state-chip")).toHaveCount(0);
     }
     await expect(
       page.locator(".surface-knowledge [data-issue-number='3674'] .issue-inline-terminal"),
@@ -171,10 +187,32 @@ test.describe("Issue inline terminal placement", () => {
     const canvasWindow = page.locator(".workspace-window.surface-terminal:visible");
     await expect(canvasWindow).toHaveCount(1);
     await expect(canvasWindow).toHaveAttribute("data-id", "tab-issue::agent-preview");
+    // SPEC #3885 T-005 / AC-2a: the row keeps the Issue ↔ agent link as a
+    // "Shown on canvas" face with no second input face for the PTY.
+    const face = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal",
+    );
+    await expect(face).toHaveCount(1);
+    await expect(face).toHaveClass(/is-on-canvas/);
+    await expect(face).toContainText("Shown on canvas");
+    await expect(face.locator(".terminal-root")).toHaveCount(0);
+    await expect(face.locator("[data-action='windowize-inline-terminal']")).toHaveCount(0);
     await expect(
-      page.locator(".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal"),
-    ).toHaveCount(0);
-    await expect(page.locator(".surface-knowledge .issue-inline-terminal")).toHaveCount(2);
+      page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
+    ).toHaveText("Running");
+    await expect(page.locator(".surface-knowledge .issue-inline-terminal .terminal-root")).toHaveCount(2);
+    await face.locator("[data-action='focus-canvas-window']").click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__knowledgeLoadMessages
+            .filter((message) => message.kind === "focus_window")
+            .map((message) => message.id)
+            .at(-1),
+        ),
+      )
+      .toBe("tab-issue::agent-preview");
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(0);
     // AC-7: exactly one xterm instance exists per window id — the canvas one for
     // the windowized agent, the inline ones for the other two.
     await expect(canvasWindow.locator(".terminal-root .xterm")).toHaveCount(1);
@@ -204,10 +242,11 @@ test.describe("Issue inline terminal placement", () => {
     await page.goto(APP_URL);
 
     await expect(
-      page.locator(
-        ".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal .knowledge-monitor-chip",
-      ),
+      page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
     ).toHaveText("Error");
+    await expect(
+      page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
+    ).toHaveAttribute("data-tone", "blocked");
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
     // An errored agent is not "running", so it is not counted inline either.
@@ -226,22 +265,84 @@ test.describe("Issue inline terminal placement", () => {
 
     await expect(page.locator(".workspace-window.surface-work")).toHaveCount(0);
 
-    const work = page.locator(
-      ".surface-knowledge [data-issue-number='3671'] .knowledge-row-work",
-    );
-    await expect(work).toHaveCount(1);
-    await expect(work.locator(".knowledge-work-lifecycle")).toHaveText("Active");
-    await expect(work.locator(".knowledge-work-attention")).toHaveText("Waiting on review");
-    await expect(work.locator(".knowledge-work-pr")).toHaveText("PR #3699 · open");
-    await expect(work.locator('[data-action="continue-work"]')).toBeEnabled();
-    await expect(work.locator('[data-action="resume-work"]')).toBeEnabled();
-    // The backend owns cleanup eligibility; a live agent keeps the action off.
-    await expect(work.locator('[data-action="cleanup-work"]')).toBeDisabled();
-
-    // An Issue with no correlated Work row shows no Work band.
+    // SPEC #3885 T-004: the Work state is folded into the row — the attention
+    // reason and the PR are the two secondary items under the primary badge, and
+    // the Work actions sit in the row's overflow menu while the agent is live.
+    const row = page.locator(".surface-knowledge [data-issue-number='3671']");
+    await expect(row.locator(".knowledge-row-work")).toHaveCount(0);
+    const secondary = row.locator(".knowledge-row-secondary-item");
+    await expect(secondary).toHaveCount(2);
+    await expect(secondary.nth(0)).toHaveAttribute("data-kind", "reason");
+    await expect(secondary.nth(0)).toHaveText("Waiting on review");
+    await expect(secondary.nth(1)).toHaveText("PR #3699 · open");
     await expect(
-      page.locator(".surface-knowledge [data-issue-number='3672'] .knowledge-row-work"),
-    ).toHaveCount(0);
+      row.locator("button[data-action]:not(.knowledge-row-menu-list button)"),
+    ).toHaveText(["Windowize"]);
+    const menu = row.locator(".knowledge-row-menu");
+    await expect(menu).toHaveCount(1);
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
+    await expect(menu.locator('[data-action="continue-work"]')).toBeVisible();
+    await expect(menu.locator('[data-action="continue-work"]')).toBeEnabled();
+    await expect(menu.locator('[data-action="resume-work"]')).toBeEnabled();
+    // The backend owns cleanup eligibility; a live agent keeps the action off.
+    await expect(menu.locator('[data-action="cleanup-work"]')).toBeDisabled();
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(0);
+
+    // An Issue with no correlated Work row has no PR chip and no Work actions.
+    const other = page.locator(".surface-knowledge [data-issue-number='3672']");
+    await expect(other.locator('.knowledge-row-secondary-item[data-key="pr"]')).toHaveCount(0);
+    await expect(other.locator('[data-action="continue-work"]')).toHaveCount(0);
+  });
+
+  // SPEC #3885 T-005 / FR-003: the inline terminal expands to full size in place
+  // and keeps its runtime (same xterm, same PTY input route).
+  test("the inline terminal expands in place without remounting", async ({ page }) => {
+    const { consoleErrors, pageErrors } = collectPageErrors(page);
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    const section = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal",
+    );
+    const body = section.locator(".issue-inline-terminal-body");
+    await expect(body.locator(".xterm-rows")).toBeVisible();
+    const collapsed = await body.boundingBox();
+    const toggle = section.locator("[data-toggle='inline-terminal-expand']");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    await toggle.click();
+    await expect(section).toHaveClass(/is-expanded/);
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const expanded = await body.boundingBox();
+    expect(expanded!.height).toBeGreaterThan(collapsed!.height * 1.5);
+    await expect(page.locator(".xterm")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(0);
+
+    await page.evaluate(() => window.__emitAgentOutput("SPEC-3885 expanded line"));
+    await expect(body.locator(".terminal-root")).toContainText("SPEC-3885 expanded line");
+    await body.locator(".terminal-root").click();
+    await page.keyboard.type("x");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__knowledgeLoadMessages
+            .filter((message) => message.kind === "terminal_input")
+            .map((message) => message.id)
+            .at(-1),
+        ),
+      )
+      .toBe("tab-issue::agent-preview");
+
+    await toggle.click();
+    await expect(section).not.toHaveClass(/is-expanded/);
+    const restored = await body.boundingBox();
+    expect(Math.abs(restored!.height - collapsed!.height)).toBeLessThan(2);
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
   });
 });
 

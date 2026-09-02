@@ -199,16 +199,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(issueSurface).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(
-      issueSurface.locator('[data-issue-number="3273"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3273"] .knowledge-row-badge'),
     ).toHaveText("Queued");
     await expect(issueSurface.locator('[data-issue-number="3273"]')).toContainText(
       "Queue 1",
     );
     await expect(
-      issueSurface.locator('[data-issue-number="3096"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3096"] .knowledge-row-badge'),
     ).toHaveText("Needs human");
     await expect(
-      issueSurface.locator('[data-issue-number="3097"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3097"] .knowledge-row-badge'),
     ).toHaveText("On hold");
     await expect(issueSurface.locator('[data-issue-number="3097"]')).toContainText(
       "Excluded by label: hold",
