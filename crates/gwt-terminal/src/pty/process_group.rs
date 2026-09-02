@@ -83,16 +83,20 @@ mod imp {
             })
         }
 
-        /// Set the tree root's nice value. fork/exec descendants inherit it.
+        /// Set the nice value of the whole process group (portable_pty runs the
+        /// child under `setsid`, so the group id is the child pid). fork/exec
+        /// descendants inherit it. `PRIO_PGRP` is deliberate: on Linux
+        /// `PRIO_PROCESS` only reaches the thread whose id equals `pid`, and a
+        /// helper that execs the target from another thread would keep nice 0.
         /// `cpu_limit_percent` has no tree-wide Unix equivalent and is ignored.
         pub fn apply_policy(&mut self, pid: u32, policy: ProcessPolicy) -> Result<(), String> {
             let nice = policy.priority.unix_nice();
             // SAFETY: setpriority has no memory-safety preconditions.
             let status =
-                unsafe { libc::setpriority(libc::PRIO_PROCESS as _, pid as libc::id_t, nice) };
+                unsafe { libc::setpriority(libc::PRIO_PGRP as _, pid as libc::id_t, nice) };
             if status != 0 {
                 return Err(format!(
-                    "setpriority(pid {pid}, nice {nice}): {}",
+                    "setpriority(pgrp {pid}, nice {nice}): {}",
                     std::io::Error::last_os_error()
                 ));
             }
