@@ -502,21 +502,108 @@ mod tests {
 
     use super::*;
 
+    /// Issue #3895: `PATH` is process-global and libtest runs tests on
+    /// parallel threads, so a test that swaps `PATH` (even while holding
+    /// `env_lock`) races every concurrent test that spawns `sh` / `git` /
+    /// `docker` by name and fails them with `No such file or directory`.
+    /// Tests must inject `PATH` into the probe or child environment instead
+    /// (`AgentDetector::detect_by_command_in_env`,
+    /// `detect_claude_version_raw_in_env`, the launch `host_path` seams, or
+    /// `ProcessPlanRequest::env`). This scan covers every test region in the
+    /// crate; the only sanctioned process-wide write is the pre-thread PATH
+    /// hydration in production code, which lives outside any test region.
     #[test]
-    fn environment_tests_never_mutate_the_process_path() {
-        let test_source = include_str!("environment.rs")
-            .split_once("mod tests {")
-            .expect("environment test module")
-            .1;
-        for mutation in [
-            concat!("std::env::", "set_var(\"PATH\""),
-            concat!("std::env::", "remove_var(\"PATH\""),
-        ] {
-            assert!(
-                !test_source.contains(mutation),
-                "PATH-mutating tests race every parallel process-spawn test: {mutation}"
-            );
+    fn agent_tests_never_mutate_the_process_path() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        for (file, test_only) in rust_sources(&manifest_dir.join("src"))
+            .into_iter()
+            .map(|file| (file, false))
+            .chain(
+                rust_sources(&manifest_dir.join("tests"))
+                    .into_iter()
+                    .map(|file| (file, true)),
+            )
+        {
+            let source = std::fs::read_to_string(&file).expect("read gwt-agent source");
+            let (skipped_lines, region) = if test_only {
+                (0, source.as_str())
+            } else {
+                match test_region(&source) {
+                    Some(region) => region,
+                    None => continue,
+                }
+            };
+            for (line, pattern) in process_path_mutations(region) {
+                offenders.push(format!(
+                    "{}:{} ({pattern})",
+                    file.strip_prefix(manifest_dir).unwrap_or(&file).display(),
+                    skipped_lines + line
+                ));
+            }
         }
+        assert!(
+            offenders.is_empty(),
+            "tests must not mutate the process-global PATH; inject it into the probe \
+             environment instead (Issue #3895):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn rust_sources(dir: &std::path::Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let path = entry.expect("read dir entry").path();
+            if path.is_dir() {
+                files.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// The source from the first `#[cfg(test` / `#[cfg(all(test` marker on,
+    /// with the number of lines skipped before it.
+    fn test_region(source: &str) -> Option<(usize, &str)> {
+        let start = ["#[cfg(test", "#[cfg(all(test"]
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min()?;
+        Some((source[..start].lines().count(), &source[start..]))
+    }
+
+    /// `(1-based line, pattern)` for every process-global PATH write in
+    /// `region`. Whitespace is ignored so rustfmt line breaks cannot hide a
+    /// call; a hit is attributed to the line the call starts on.
+    fn process_path_mutations(region: &str) -> Vec<(usize, &'static str)> {
+        const PATTERNS: [&str; 4] = [
+            concat!("std::env::set_var(", "\"PATH\""),
+            concat!("std::env::remove_var(", "\"PATH\""),
+            concat!("ScopedEnvVar::set(", "\"PATH\""),
+            concat!("ScopedEnvVar::unset(", "\"PATH\""),
+        ];
+        let compact =
+            |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+        let lines: Vec<&str> = region.lines().collect();
+        let mut hits = Vec::new();
+        for index in 0..lines.len() {
+            let first = compact(lines[index]);
+            let window = compact(&lines[index..(index + 4).min(lines.len())].join(""));
+            for pattern in PATTERNS {
+                if window
+                    .find(pattern)
+                    .is_some_and(|position| position < first.len())
+                {
+                    hits.push((index + 1, pattern));
+                }
+            }
+        }
+        hits
     }
 
     #[cfg(unix)]
