@@ -24,6 +24,51 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         code_review_weekly: "Code review weekly",
       };
 
+      // Issue #3860 — a window's reported length in minutes, when it is a
+      // finite positive number; otherwise null.
+      function usageWindowMinutes(w) {
+        const minutes = Number(w && w.window_minutes);
+        return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : null;
+      }
+
+      // "1-day" / "5-hour" / "90-minute" style length for labels.
+      function usageWindowLengthShort(minutes) {
+        if (minutes % 1440 === 0) return `${minutes / 1440}-day`;
+        if (minutes % 60 === 0) return `${minutes / 60}-hour`;
+        return `${minutes}-minute`;
+      }
+
+      // "7 days" / "5 hours" / "90 minutes" style length for tooltips.
+      function usageWindowLengthLong(minutes) {
+        const unit = (n, name) => `${n} ${name}${n === 1 ? "" : "s"}`;
+        if (minutes % 1440 === 0) return unit(minutes / 1440, "day");
+        if (minutes % 60 === 0) return unit(minutes / 60, "hour");
+        return unit(minutes, "minute");
+      }
+
+      // Row label for one window. Known kinds keep their fixed label; an
+      // `unknown` kind (length missing or unrecognized upstream) is shown as
+      // such, with the reported length when there is one, instead of being
+      // forced into a known window or dropped.
+      function usageWindowLabel(w) {
+        const known = USAGE_WINDOW_LABEL[w.kind];
+        if (known) return known;
+        if (w.kind !== "unknown") return w.kind;
+        const minutes = usageWindowMinutes(w);
+        return minutes == null ? "Unknown" : `Unknown (${usageWindowLengthShort(minutes)})`;
+      }
+
+      // Apply the label plus the real window length (data attribute + tooltip)
+      // to a label element so the UI can surface the length for every window.
+      function applyUsageWindowLabel(el, w) {
+        el.textContent = usageWindowLabel(w);
+        const minutes = usageWindowMinutes(w);
+        if (minutes != null) {
+          el.dataset.windowMinutes = String(minutes);
+          el.title = `Window length: ${usageWindowLengthLong(minutes)}`;
+        }
+      }
+
       function usageStateReason(state) {
         if (!state) return "";
         switch (state.kind) {
@@ -144,7 +189,7 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
           line.className = "op-usage-window";
           const label = document.createElement("span");
           label.className = "op-usage-window__label";
-          label.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
+          applyUsageWindowLabel(label, w);
           const pct = document.createElement("span");
           pct.className = "op-usage-window__pct";
           pct.textContent = `${Math.round(w.used_percent)}%`;
@@ -218,7 +263,7 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         row.className = "op-usage-win";
         const lbl = document.createElement("span");
         lbl.className = "op-usage-win__lbl";
-        lbl.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
+        applyUsageWindowLabel(lbl, w);
         const bar = buildUsageBar(w.used_percent, limitReached);
         bar.classList.add("op-usage-win__bar");
         const pct = document.createElement("span");

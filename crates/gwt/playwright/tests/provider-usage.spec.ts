@@ -116,6 +116,49 @@ test.describe("Provider usage status summary", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("labels an unknown-length window by its reported minutes (Issue #3860)", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    await page.goto(APP_URL);
+
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    await emitProviderUsage(page, [
+      {
+        provider: "codex",
+        plan: "pro",
+        windows: [
+          { kind: "weekly", used_percent: 5, window_minutes: 10080 },
+          { kind: "unknown", used_percent: 40, window_minutes: 1440 },
+          { kind: "unknown", used_percent: 12 },
+        ],
+        state: { kind: "ok" },
+      },
+    ]);
+    await expect(strip).toContainText("CX 40%");
+
+    await strip.hover();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    await expect(popover).toContainText(/Weekly\s*5%/);
+    await expect(popover).toContainText(/Unknown \(1-day\)\s*40%/);
+    await expect(popover).toContainText(/Unknown\s*12%/);
+    const weekly = popover.locator(".op-usage-win__lbl", { hasText: "Weekly" });
+    await expect(weekly).toHaveAttribute("data-window-minutes", "10080");
+    await expect(weekly).toHaveAttribute("title", "Window length: 7 days");
+    expect(pageErrors).toEqual([]);
+    expect(consoleErrors).toEqual([]);
+  });
+
   test("keeps a stable width and compacts three providers to the critical one", async ({
     page,
   }) => {
