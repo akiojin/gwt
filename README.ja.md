@@ -303,7 +303,12 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 `issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
-`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。各 operation
+`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+`issue.monitor.profiles` は起動候補プール（provider ごとに 1 件、優先順、rate limit
+による hold 付き）を返し、`issue.monitor.profiles.set` はプール全体を置き換えます。
+候補が 2 件以上あると、Monitor は各 Issue を hold されていない最初の候補で起動する
+ため、1 つの provider が rate limit に入ってもキューは止まりません。GUI の Agent
+settings で別 provider を保存すると同じプールに追加されます。各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。

@@ -137,6 +137,18 @@ pub enum IssueCommand {
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
     },
+    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
+    /// the usage threshold.
+    MonitorProfiles {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
+    /// and optionally the usage threshold.
+    MonitorProfilesSet {
+        project_root: Option<std::path::PathBuf>,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        usage_threshold_percent: Option<u8>,
+    },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.
     MonitorLaunchNow {

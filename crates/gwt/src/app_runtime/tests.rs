@@ -7395,6 +7395,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     }
 }
 
@@ -44811,6 +44812,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     }
 }
 
@@ -44827,6 +44829,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     }
 }
 
@@ -45242,6 +45245,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+        prefer_for: Vec::new(),
     });
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save Grok Monitor profile");
 
@@ -47411,6 +47415,148 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
             .values()
             .any(|context| context.issue_monitor_issue_number == Some(3165)),
         "saved-profile auto launch errors must be wired back to Issue Monitor"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why() {
+    // SPEC #3914 AC-4 / US-1: pool [codex, claude] with codex held launches
+    // claude and surfaces the skip reason as a toast.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let mut prefs = gwt::IssueMonitorPrefs {
+        provider_quota_holds: std::collections::BTreeMap::from([(
+            "codex".to_string(),
+            "2999-01-01T04:00:00Z".to_string(),
+        )]),
+        ..Default::default()
+    };
+    prefs.set_launch_profile_pool(vec![
+        codex_issue_monitor_launch_profile(),
+        claude_issue_monitor_launch_profile(),
+    ]);
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("save issue monitor prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut agent_options = sample_agent_options();
+    agent_options.push(gwt::AgentOption {
+        id: "claude".to_string(),
+        name: "Claude Code".to_string(),
+        available: true,
+        installed_version: Some("latest".to_string()),
+        versions: vec!["latest".to_string()],
+        custom_agent: None,
+    });
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load_with_agent_options(
+        &temp.path().join("sessions"),
+        agent_options,
+    );
+
+    let events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3914,
+        LinkedIssueKind::Spec,
+    );
+
+    assert!(
+        runtime.launch_wizard.is_none(),
+        "pool launch must stay silent"
+    );
+    let agent_window = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window");
+    assert_eq!(
+        agent_window.agent_id.as_deref(),
+        Some("claude"),
+        "the held head candidate yields to the next one"
+    );
+    let toast = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast {
+                level,
+                message,
+                issue_number: Some(3914),
+            } if message.contains("Held codex") => Some((level.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("skip reason toast");
+    assert_eq!(toast.0, "info");
+    assert!(toast.1.contains("claude"), "{}", toast.1);
+    assert!(toast.1.contains("04:00"), "{}", toast.1);
+}
+
+#[test]
+fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
+    // SPEC #3914 FR-003 / US-7: saving a second provider from Agent settings
+    // appends it to the pool instead of replacing the saved profile.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![claude_issue_monitor_launch_profile()]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+    let request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("develop")
+            .build(),
+    ));
+
+    let events = runtime.save_issue_monitor_profile_from_launch_request(
+        session,
+        IssueMonitorProfileSaveContext {
+            client_id: "client-1".to_string(),
+            issue_number: None,
+        },
+        request,
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message == "Issue Monitor settings saved"
+    )));
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let pool = persisted.launch_profile_pool();
+    assert_eq!(
+        pool.iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude", "codex"]
+    );
+    assert_eq!(
+        persisted
+            .launch_profile
+            .as_ref()
+            .map(|profile| profile.agent_id.as_str()),
+        Some("claude"),
+        "the compatibility mirror keeps the pool head"
     );
 }
 

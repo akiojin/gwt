@@ -374,6 +374,35 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 max_active,
             })
         }
+        "issue.monitor.profiles" => CliCommand::Issue(IssueCommand::MonitorProfiles {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            let Some(profiles) = params.get("profiles") else {
+                return Err(CliParseError::MissingFlag("profiles"));
+            };
+            let profiles =
+                serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfile>>(profiles.clone())
+                    .map_err(|error| {
+                    CliParseError::InvalidJson(format!(
+                        "profiles must be an array of launch profiles with agent_id: {error}"
+                    ))
+                })?;
+            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
+                .map(|value| {
+                    u8::try_from(value).map_err(|_| {
+                        CliParseError::InvalidJson(
+                            "usage_threshold_percent must be between 1 and 100".to_string(),
+                        )
+                    })
+                })
+                .transpose()?;
+            CliCommand::Issue(IssueCommand::MonitorProfilesSet {
+                project_root: optional_path(params, "project_root")?,
+                profiles,
+                usage_threshold_percent,
+            })
+        }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
         "pr.list" => CliCommand::Pr(PrCommand::List {
             stale_after_hours: optional_u64(params, "stale_after_hours")?
@@ -2194,6 +2223,63 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.review_verdict", json!({"issue_number": 42})),
             CliParseError::MissingFlag(_)
+        ));
+    }
+
+    // SPEC #3914 FR-011 / AC-8: the pool operations accept the shorthand
+    // `{"agent_id": ...}` profile; semantic validation (empty / duplicate /
+    // unknown agent / tag format / threshold range) lives in the handler.
+    #[test]
+    fn issue_monitor_profiles_operations_parse_shorthand_profiles() {
+        assert_eq!(
+            ok("issue.monitor.profiles", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorProfiles { project_root: None })
+        );
+        let parsed = ok(
+            "issue.monitor.profiles.set",
+            json!({
+                "profiles": [
+                    {"agent_id": "codex"},
+                    {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
+                ],
+                "usage_threshold_percent": 70,
+            }),
+        );
+        let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
+            project_root,
+            profiles,
+            usage_threshold_percent,
+        }) = parsed
+        else {
+            panic!("expected MonitorProfilesSet, got {parsed:?}");
+        };
+        assert_eq!(project_root, None);
+        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].agent_id, "codex");
+        assert_eq!(profiles[0].model, None);
+        assert!(profiles[0].prefer_for.is_empty());
+        assert_eq!(profiles[1].agent_id, "claude");
+        assert_eq!(profiles[1].model.as_deref(), Some("opus"));
+        assert_eq!(profiles[1].prefer_for, vec!["kind:spec".to_string()]);
+
+        assert!(matches!(
+            err("issue.monitor.profiles.set", json!({})),
+            CliParseError::MissingFlag(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.profiles.set",
+                json!({"profiles": [{"model": "opus"}]})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.profiles.set",
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
+            ),
+            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
         ));
     }
 
