@@ -8242,10 +8242,10 @@ mod tests {
     fn index_status(message: &str) -> BackendEvent {
         BackendEvent::ProjectIndexStatus {
             project_root: "/tmp/project".to_string(),
-            status: gwt::ProjectIndexStatusView::new(
+            status: Box::new(gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 message,
-            ),
+            )),
         }
     }
 

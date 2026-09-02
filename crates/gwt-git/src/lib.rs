@@ -32,7 +32,7 @@ pub use pr_status::{
     PR_FALLBACK_WHEN_NOT_EXECUTABLE, PR_INVENTORY_CACHE_FILE, PR_INVENTORY_CACHE_TTL_SECS,
     PR_INVENTORY_HISTORY_FILE, PR_STALE_AFTER_HOURS,
 };
-pub use refs::list_existing_refs;
+pub use refs::{list_existing_refs, resolve_canonical_root_tree, CanonicalRootTree};
 pub use repository::{
     clone_project_as_nested_bare, clone_repo, derive_github_project_clone_target, detect_repo_type,
     initialize_workspace, install_develop_protection, GitHubProjectCloneOutcome,

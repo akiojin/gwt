@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fmt, io,
     path::{Path, PathBuf},
@@ -232,6 +232,10 @@ pub struct ScopeHealthView {
     pub repair_required: bool,
     pub document_count: u64,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legacy_residue_detected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +249,8 @@ impl ScopeHealthView {
             repair_required: false,
             document_count,
             reason: "ready".to_string(),
+            fallback_source: None,
+            view_id: None,
             legacy_residue_detected: None,
             last_repair_at: None,
         }
@@ -256,6 +262,8 @@ impl ScopeHealthView {
             repair_required: true,
             document_count: 0,
             reason: reason.into(),
+            fallback_source: None,
+            view_id: None,
             legacy_residue_detected: None,
             last_repair_at: None,
         }
@@ -415,6 +423,14 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    let fallback_source = obj
+        .get("fallback_source")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let view_id = obj
+        .get("view_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
     let legacy_residue_detected = obj
         .get("legacy_residue_detected")
         .and_then(serde_json::Value::as_bool);
@@ -428,6 +444,8 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
         repair_required,
         document_count,
         reason,
+        fallback_source,
+        view_id,
         legacy_residue_detected,
         last_repair_at,
     })
@@ -536,28 +554,41 @@ pub fn build_aggregated_status_view(
     }
 }
 
+fn scope_requires_repair(view: &ScopeHealthView) -> bool {
+    !view.healthy || view.repair_required
+}
+
+fn scope_requires_immediate_repair(view: &ScopeHealthView) -> bool {
+    scope_requires_repair(view)
+        && !(view.healthy && view.fallback_source.as_deref() == Some("legacy"))
+}
+
 fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
     let mut count = 0;
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    count += scopes.files.values().filter(|view| !view.healthy).count();
+    count += scopes
+        .files
+        .values()
+        .filter(|view| scope_requires_repair(view))
+        .count();
     count += scopes
         .files_docs
         .values()
-        .filter(|view| !view.healthy)
+        .filter(|view| scope_requires_repair(view))
         .count();
     count
 }
@@ -963,6 +994,34 @@ fn push_worktree_probe_input(
     Ok(())
 }
 
+fn current_status_runner_args(repo_hash: &str, worktree_hash: &str) -> Vec<OsString> {
+    vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from("status"),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+        OsString::from("--worktree-hash"),
+        OsString::from(worktree_hash),
+        OsString::from("--file-index-protocol"),
+        OsString::from("v2"),
+    ]
+}
+
+fn batch_status_runner_args(repo_hash: &str, worktree_hashes: &[String]) -> Vec<OsString> {
+    vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from("status"),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+        OsString::from("--worktree-hashes"),
+        OsString::from(worktree_hashes.join(",")),
+        OsString::from("--file-index-protocol"),
+        OsString::from("v2"),
+    ]
+}
+
 /// One batch status process for every selected worktree (FR-393 / AS-13).
 fn probe_worktrees_status_batch(
     repo_root: &Path,
@@ -970,14 +1029,9 @@ fn probe_worktrees_status_batch(
     worktree_hashes: &[String],
 ) -> Result<serde_json::Value, String> {
     let runner_started = Instant::now();
+    let args = batch_status_runner_args(repo_hash.as_str(), worktree_hashes);
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash.as_str())
-        .arg("--worktree-hashes")
-        .arg(worktree_hashes.join(","))
+        .args(&args)
         .current_dir(repo_root)
         .output()
         .map_err(|err| format!("run project index status: {err}"))?;
@@ -1224,7 +1278,7 @@ pub fn default_rebuild_runner(
     rebuild_index_target(project_root, scope, worktree_hash, JobPriority::Background)
 }
 
-/// User-initiated rebuild runner (per-cell GUI rebuild, `gwt index rebuild`).
+/// User-initiated rebuild runner for the per-cell GUI/background worker path.
 pub fn manual_rebuild_runner(
     project_root: &Path,
     scope: IndexRebuildScope,
@@ -1238,12 +1292,31 @@ pub fn manual_rebuild_runner(
     )
 }
 
+fn rebuild_action_uses_file_index_v2(action: crate::cli::index::runtime::RebuildAction) -> bool {
+    matches!(action.scope, Some("files") | Some("files-docs"))
+}
+
+fn protocol_aware_rebuild_runner_args(
+    context: &crate::cli::index::runtime::IndexContext,
+    action: crate::cli::index::runtime::RebuildAction,
+    qos: &str,
+) -> Vec<OsString> {
+    let mut args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+    if rebuild_action_uses_file_index_v2(action) {
+        args.extend([
+            OsString::from("--file-index-protocol"),
+            OsString::from("v2"),
+        ]);
+    }
+    args
+}
+
 fn run_rebuild_runner_observing_deadline(
     context: &crate::cli::index::runtime::IndexContext,
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> io::Result<gwt_core::process_console::SpawnOutput> {
-    let args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+    let args = protocol_aware_rebuild_runner_args(context, action, qos);
 
     gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
     gwt_core::process_console::spawn_logged_blocking(
@@ -1304,6 +1377,15 @@ fn run_rebuild_runner_for_target(
     qos: &str,
 ) -> Result<RebuildRunnerOutput, String> {
     if gwt_core::operation_deadline::current().is_none() {
+        if rebuild_action_uses_file_index_v2(action) {
+            let args = protocol_aware_rebuild_runner_args(context, action, qos);
+            return gwt_core::process::hidden_command(&context.python)
+                .args(&args)
+                .current_dir(&context.project_root)
+                .output()
+                .map(RebuildRunnerOutput::Canonical)
+                .map_err(|error| error.to_string());
+        }
         return crate::cli::index::runtime::run_runner_rebuild(context, action, qos)
             .map(RebuildRunnerOutput::Canonical)
             .map_err(|error| error.to_string());
@@ -1452,6 +1534,9 @@ pub fn rebuild_index_target(
             if !output.success() {
                 return Err(output.failure());
             }
+            if let Some(failure) = runner_payload_failure(output.stdout()) {
+                return Err(failure);
+            }
             if runner_payload_yielded(output.stdout()) {
                 tracing::info!(
                     target: "gwt::index",
@@ -1482,33 +1567,66 @@ pub(crate) fn runner_payload_yielded(stdout: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// Convert an action-aware runner's structured failure into the build error
+/// consumed by the coordinator. File-index-v2 intentionally uses exit status
+/// 0 for typed action results, so process status alone cannot distinguish a
+/// published generation from a failed publication.
+fn runner_payload_failure(stdout: &[u8]) -> Option<String> {
+    let payload = serde_json::from_slice::<serde_json::Value>(stdout).ok()?;
+    if payload.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    let code = payload
+        .get("error_code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("RUNNER_FAILED");
+    let detail = ["error", "detail", "message"]
+        .into_iter()
+        .find_map(|field| payload.get(field).and_then(serde_json::Value::as_str));
+    Some(match detail {
+        Some(detail) if !detail.is_empty() => {
+            format!("runner structured failure: {code}: {detail}")
+        }
+        _ => format!("runner structured failure: {code}"),
+    })
+}
+
 /// Collect every unhealthy `(scope, worktree_hash?)` cell from an aggregated
 /// status payload, in a deterministic order: issues, specs, files, files-docs.
 pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<RebuildTarget> {
     let mut targets = Vec::new();
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Memory, None));
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Discussions, None));
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
-    for (wt_hash, view) in &scopes.files {
-        if !view.healthy {
-            targets.push((IndexRebuildScope::Files, Some(wt_hash.clone())));
-        }
-    }
-    for (wt_hash, view) in &scopes.files_docs {
-        if !view.healthy {
-            targets.push((IndexRebuildScope::FilesDocs, Some(wt_hash.clone())));
+    let worktree_hashes = scopes
+        .files
+        .keys()
+        .chain(scopes.files_docs.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for wt_hash in worktree_hashes {
+        let file_view_requires_repair = scopes
+            .files
+            .get(&wt_hash)
+            .is_some_and(scope_requires_immediate_repair)
+            || scopes
+                .files_docs
+                .get(&wt_hash)
+                .is_some_and(scope_requires_immediate_repair);
+        if file_view_requires_repair {
+            targets.push((IndexRebuildScope::Files, Some(wt_hash)));
         }
     }
     targets
@@ -1536,27 +1654,32 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     current_worktree_hash: Option<&str>,
 ) -> Vec<RebuildTarget> {
     let mut targets = Vec::new();
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Memory, None));
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Discussions, None));
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
     if let Some(current_hash) = current_worktree_hash {
-        if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
+        let file_view_requires_repair = scopes
+            .files
+            .get(current_hash)
+            .is_some_and(scope_requires_immediate_repair)
+            || scopes
+                .files_docs
+                .get(current_hash)
+                .is_some_and(scope_requires_immediate_repair);
+        if file_view_requires_repair {
             targets.push((IndexRebuildScope::Files, Some(current_hash.to_string())));
-        }
-        if matches!(scopes.files_docs.get(current_hash), Some(view) if !view.healthy) {
-            targets.push((IndexRebuildScope::FilesDocs, Some(current_hash.to_string())));
         }
     }
     targets
@@ -1715,14 +1838,9 @@ fn project_index_status_for_path_inner(
         "project index runtime ensured for status"
     );
     let runner_started = Instant::now();
+    let args = current_status_runner_args(repo_hash.as_str(), worktree_hash.as_str());
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash.as_str())
-        .arg("--worktree-hash")
-        .arg(worktree_hash.as_str())
+        .args(&args)
         .current_dir(&repo_root)
         .output()
         .map_err(|err| format!("run project index status: {err}"))?;
@@ -1751,10 +1869,9 @@ fn project_index_status_for_path_inner(
             status
                 .values()
                 .filter(|scope| {
-                    !scope
-                        .get("healthy")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
+                    parse_scope_health(scope)
+                        .map(|view| scope_requires_repair(&view))
+                        .unwrap_or(true)
                 })
                 .count()
         })
@@ -2123,6 +2240,149 @@ mod tests {
     use super::*;
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn arg_pair_count(args: &[OsString], flag: &str, value: &str) -> usize {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag && pair[1] == value)
+            .count()
+    }
+
+    fn protocol_rebuild_context() -> crate::cli::index::runtime::IndexContext {
+        crate::cli::index::runtime::IndexContext {
+            project_root: PathBuf::from("project-root"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://example.com/protocol-aware-rebuild.git",
+            ),
+            worktree_hash: "wt-hash".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        }
+    }
+
+    #[test]
+    fn current_and_all_worktree_status_args_request_explicit_v2() {
+        // T-IDX-431 RED: both status entry points are Rust-owned explicit-v2
+        // callers. Python's default/no-flag action remains legacy-compatible.
+        let current = current_status_runner_args("repo-hash", "wt-a");
+        let batch_hashes = vec!["wt-a".to_string(), "wt-b".to_string()];
+        let all_worktrees = batch_status_runner_args("repo-hash", &batch_hashes);
+
+        assert_eq!(arg_pair_count(&current, "--action", "status"), 1);
+        assert_eq!(arg_pair_count(&current, "--repo-hash", "repo-hash"), 1);
+        assert_eq!(arg_pair_count(&current, "--worktree-hash", "wt-a"), 1);
+        assert_eq!(arg_pair_count(&current, "--file-index-protocol", "v2"), 1);
+        assert_eq!(
+            current
+                .iter()
+                .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                .count(),
+            1,
+            "current status protocol flag must appear exactly once: {current:?}"
+        );
+
+        assert_eq!(arg_pair_count(&all_worktrees, "--action", "status"), 1);
+        assert_eq!(
+            arg_pair_count(&all_worktrees, "--repo-hash", "repo-hash"),
+            1
+        );
+        assert_eq!(
+            arg_pair_count(&all_worktrees, "--worktree-hashes", "wt-a,wt-b"),
+            1
+        );
+        assert_eq!(
+            arg_pair_count(&all_worktrees, "--file-index-protocol", "v2"),
+            1
+        );
+        assert_eq!(
+            all_worktrees
+                .iter()
+                .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                .count(),
+            1,
+            "all-worktree status protocol flag must appear exactly once: {all_worktrees:?}"
+        );
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_request_v2_for_file_scopes() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            RebuildAction {
+                label: "files",
+                action: "index-files",
+                scope: Some("files"),
+                needs_worktree_hash: true,
+            },
+            RebuildAction {
+                label: "files-docs",
+                action: "index-files",
+                scope: Some("files-docs"),
+                needs_worktree_hash: true,
+            },
+        ];
+
+        for action in actions {
+            let args = protocol_aware_rebuild_runner_args(&context, action, "background");
+
+            assert_eq!(arg_pair_count(&args, "--action", action.action), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--worktree-hash", "wt-hash"), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--scope", action.scope.expect("file scope")),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "background"), 1);
+            assert_eq!(arg_pair_count(&args, "--file-index-protocol", "v2"), 1);
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                    .count(),
+                1,
+                "file rebuild protocol flag must appear exactly once: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_keep_non_file_scopes_legacy() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            ("issues", "index-issues"),
+            ("specs", "index-specs"),
+            ("memory", "index-memory"),
+            ("discussions", "index-discussions"),
+            ("board", "index-board"),
+            ("works", "index-works"),
+        ];
+
+        for (label, action_name) in actions {
+            let action = RebuildAction {
+                label,
+                action: action_name,
+                scope: None,
+                needs_worktree_hash: false,
+            };
+            let args = protocol_aware_rebuild_runner_args(&context, action, "interactive");
+
+            assert_eq!(arg_pair_count(&args, "--action", action_name), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "interactive"), 1);
+            assert!(
+                !args.iter().any(|arg| arg == "--file-index-protocol"),
+                "repo scope {label} must retain legacy/default argv: {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn automatic_background_index_opt_out_is_exact() {
@@ -2650,6 +2910,8 @@ detached
             "repair_required": true,
             "document_count": 42,
             "reason": "manifest_missing",
+            "fallback_source": "previous",
+            "view_id": "view-previous",
             "legacy_residue_detected": true,
             "last_repair_at": "2026-04-24T06:15:20Z"
         });
@@ -2660,10 +2922,104 @@ detached
         assert!(view.repair_required);
         assert_eq!(view.document_count, 42);
         assert_eq!(view.reason, "manifest_missing");
+        assert_eq!(view.fallback_source.as_deref(), Some("previous"));
+        assert_eq!(view.view_id.as_deref(), Some("view-previous"));
         assert_eq!(view.legacy_residue_detected, Some(true));
         assert_eq!(
             view.last_repair_at.expect("timestamp").to_rfc3339(),
             "2026-04-24T06:15:20+00:00"
+        );
+    }
+
+    fn fallback_serving_file_status_view() -> ProjectIndexStatusView {
+        build_aggregated_status_view(
+            "asset-hash-12",
+            &[WorktreeProbeOutcome {
+                input: WorktreeProbeInput {
+                    worktree_hash: "wtAhash".to_string(),
+                    branch: "develop".to_string(),
+                    path: PathBuf::from("/abs/wtA"),
+                },
+                status_payload: Ok(serde_json::json!({
+                    "status": {
+                        "files": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 310
+                        },
+                        "files-docs": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 16
+                        }
+                    }
+                })),
+            }],
+        )
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_still_requires_repair() {
+        // T-IDX-431 RED: a previous View can keep queries healthy while the
+        // corrupt active View still requires a coordinated repair.
+        let view = fallback_serving_file_status_view();
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert_eq!(view.detail, "2 index scope(s) require repair");
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_is_collected_as_rebuild_target() {
+        let view = fallback_serving_file_status_view();
+        let targets = collect_unhealthy_rebuild_targets(&view.scopes);
+
+        assert!(
+            targets.contains(&(IndexRebuildScope::Files, Some("wtAhash".to_string()))),
+            "healthy fallback serving must not hide the required Files repair: {targets:?}"
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|(_, worktree)| worktree.as_deref() == Some("wtAhash"))
+                .count(),
+            1,
+            "one atomic Files/FilesDocs View must map to one canonical rebuild: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn healthy_legacy_file_fallback_does_not_trigger_eager_auto_repair() {
+        let mut scopes = ProjectIndexScopes::default();
+        for target in [&mut scopes.files, &mut scopes.files_docs] {
+            target.insert(
+                "wtAhash".to_string(),
+                ScopeHealthView {
+                    healthy: true,
+                    repair_required: true,
+                    document_count: 1,
+                    reason: "view_head_missing".to_string(),
+                    fallback_source: Some("legacy".to_string()),
+                    view_id: None,
+                    legacy_residue_detected: None,
+                    last_repair_at: None,
+                },
+            );
+        }
+
+        assert!(
+            collect_unhealthy_rebuild_targets(&scopes).is_empty(),
+            "a readable legacy fallback migrates lazily on demand, not at startup"
+        );
+        assert!(
+            collect_unhealthy_rebuild_targets_for_worktree_hash(&scopes, Some("wtAhash"))
+                .is_empty(),
+            "the current worktree bootstrap must preserve lazy migration"
         );
     }
 
@@ -3151,7 +3507,6 @@ detached
                 (IndexRebuildScope::Issues, None),
                 (IndexRebuildScope::Specs, None),
                 (IndexRebuildScope::Files, Some(current_hash.clone())),
-                (IndexRebuildScope::FilesDocs, Some(current_hash)),
             ]
         );
     }

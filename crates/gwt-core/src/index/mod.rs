@@ -14,4 +14,5 @@ pub mod manifest;
 pub mod path_policy;
 pub mod paths;
 pub mod runtime;
+pub mod view;
 pub mod watcher;
