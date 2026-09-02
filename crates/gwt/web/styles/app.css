@@ -3410,13 +3410,39 @@ body {
 }
 
 .knowledge-chip,
-.knowledge-state-chip {
+.knowledge-state-chip,
+.knowledge-monitor-chip {
   padding: 4px 8px;
   border-radius: var(--radius-pill);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
   text-transform: uppercase;
+}
+
+.knowledge-monitor-chip {
+  background: color-mix(in oklab, var(--color-state-idle) 18%, transparent);
+  color: var(--color-state-idle);
+}
+
+.knowledge-monitor-chip[data-tone="active"] {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  color: var(--color-state-active);
+}
+
+.knowledge-monitor-chip[data-tone="blocked"] {
+  background: color-mix(in oklab, var(--color-state-blocked) 18%, transparent);
+  color: var(--color-state-blocked);
+}
+
+.knowledge-monitor-chip[data-tone="done"] {
+  background: color-mix(in oklab, var(--color-state-done) 18%, transparent);
+  color: var(--color-state-done);
+}
+
+.knowledge-monitor-chip[data-tone="needs-input"] {
+  background: color-mix(in oklab, var(--color-state-needs-input) 18%, transparent);
+  color: var(--color-state-needs-input);
 }
 
 .knowledge-chip {
@@ -3448,39 +3474,31 @@ body {
   color: var(--color-text-muted);
 }
 
-/* Issue #3884 AC-6 (SPEC-3671 FR-007 amended): the Issue row's inline agent
- * terminal. It spans both row columns under the Issue / Work bands so every
- * running agent is visible — and typeable — from the list itself. */
-.issue-inline-terminal {
+/* Issue #3884 AC-6: the read-only agent status row on an Issue row — name,
+ * last activity line, elapsed time, Windowize (the state is the row's primary
+ * badge, SPEC #3885 AC-5). Spans both row columns so every running agent is
+ * visible from the list. */
+.issue-agent-status {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: auto minmax(120px, 1fr);
-  min-width: 0;
-  min-height: 0;
-  margin-top: 4px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  overflow: hidden;
-}
-
-.issue-inline-terminal-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 2fr) auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  margin-top: 4px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--color-border);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
 }
 
-.issue-inline-terminal-title-wrap {
+.issue-agent-status-title-wrap {
   min-width: 0;
   display: grid;
   gap: 2px;
 }
 
-.issue-inline-terminal-title {
+.issue-agent-status-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3490,7 +3508,8 @@ body {
   color: var(--color-text);
 }
 
-.issue-inline-terminal-meta {
+.issue-agent-status-meta,
+.issue-agent-status-elapsed {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3501,26 +3520,95 @@ body {
   color: var(--color-text-muted);
 }
 
-.issue-inline-terminal-body {
+.issue-agent-status-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-agent-status-output {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-agent-status-output:empty {
+  display: none;
+}
+
+/* SPEC-3671 FR-007: the Issue window's read-only agent mirror. It sits above the
+ * Issue detail so an auto-launched agent is visible without opening a window. */
+.issue-preview {
+  display: grid;
+  grid-template-rows: auto minmax(160px, 1fr);
+  min-height: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.issue-preview-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.issue-preview-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.issue-preview-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.issue-preview-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-preview-terminal {
   position: relative;
-  min-height: 120px;
-  height: clamp(120px, 22vh, 240px);
+  min-height: 160px;
+  height: clamp(160px, 32vh, 340px);
   overflow: hidden;
 }
 
-.issue-inline-terminal-body .terminal-root {
+.issue-preview-terminal .terminal-root {
   position: absolute;
   inset: 0;
 }
 
-/* SPEC #3885 T-005 (FR-003a / FR-012): after Windowize the row keeps a
- * "Shown on canvas" face with no second input face. */
-.issue-inline-terminal.is-on-canvas {
-  grid-template-rows: auto auto;
+/* SPEC #3885 T-005 (FR-003a / FR-012): after Windowize the status row slot
+ * shows a "Shown on canvas" face with no second input face. */
+.issue-agent-status.is-on-canvas {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
 }
 
-.issue-inline-terminal-placeholder {
-  padding: 10px;
+.issue-agent-status-placeholder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-body);
   font-size: var(--type-xs);
   color: var(--color-text-muted);

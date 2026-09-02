@@ -249,6 +249,9 @@
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
+      // Issue #3884: when each window's runtime state was last observed to change
+      // (ms epoch). Feeds the Issue row status row's elapsed-time label.
+      const windowRuntimeStateSinceMap = new Map();
       const terminalMap = new Map();
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
@@ -700,8 +703,8 @@
         return parts.join("");
       }
 
-      // SPEC-3671 FR-007 / FR-011 / Issue #3884: the Issue rows' inline terminals
-      // are driven by workspace state (which agents exist, what they are doing), not by knowledge events, so
+      // SPEC-3671 FR-007 / FR-011: the Issue preview pane is driven by workspace
+      // state (which agents exist, what they are doing), not by knowledge events, so
       // it needs its own render key to stay live.
       function issuePreviewBodyRenderKey(issueWindow) {
         const parts = [];
@@ -723,6 +726,15 @@
           appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+          // Issue #3884: the status row shows the activity line and elapsed time.
+          appendRenderKeyPart(parts, "activity");
+          appendRenderKeyPart(parts, windowActivityDetail(windowData));
+          appendRenderKeyPart(parts, "since_minute");
+          const since = windowRuntimeStateSinceMap.get(windowData.id);
+          appendRenderKeyPart(
+            parts,
+            Number.isFinite(since) ? Math.floor((Date.now() - since) / 60000) : "",
+          );
         }
         return parts.join("");
       }
@@ -1682,6 +1694,15 @@
       // (dynamic_title_detail) so glanceable surfaces (Fleet Minimap cells,
       // switcher rows) read like "title · detail". Collapses to just the
       // title when there is no distinct detail.
+      // Issue #3884: the one-line "what is it doing now" for an agent window — the
+      // runtime status detail when the backend reported one (error / stopped),
+      // otherwise the live dynamic title detail.
+      function windowActivityDetail(windowData) {
+        const statusDetail = String(detailMap.get(windowData?.id) || "").trim();
+        if (statusDetail) return statusDetail;
+        return String(windowData?.dynamic_title_detail || "").trim();
+      }
+
       function windowActivityLabel(windowData) {
         const title = windowDisplayTitle(windowData);
         const detail = String(windowData?.dynamic_title_detail || "").trim();
@@ -3294,7 +3315,7 @@
         const counts = {
           running: 0,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
-          // them off the canvas — they live as inline terminals in the Issue window.
+          // them off the canvas — they live inside the Issue window.
           running_inline: 0,
           idle: 0,
           // FR-039 (anshin): waiting is its own LOUD telemetry state for
@@ -3441,6 +3462,9 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
+            if (windowRuntimeStateMap.get(windowId) !== runtimeState) {
+              windowRuntimeStateSinceMap.set(windowId, Date.now());
+            }
             windowRuntimeStateMap.set(windowId, runtimeState);
             if (detail) {
               detailMap.set(windowId, detail);
@@ -3914,26 +3938,29 @@
         );
       }
 
-      // Issue #3884 (SPEC-3671 amended): every host of a terminal runtime — the
-      // canvas window and the Issue row's inline terminal alike — gets the full
-      // interactive binding set. There is no read-only mirror.
-      function attachTerminalContainerBindings(windowId, terminalContainer, terminal) {
+      // SPEC-3671 FR-008: an Issue-preview mirror is read-only. Every binding that
+      // can reach the PTY — paste, file drop, context menu, wheel-driven input — is
+      // left unattached; only selection/copy and the resize reflow remain, and
+      // neither writes to the agent.
+      const noopCleanup = () => {};
+
+      function attachTerminalContainerBindings(
+        windowId,
+        terminalContainer,
+        terminal,
+        options = {},
+      ) {
+        const readOnly = options.readOnly === true;
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
-        const imagePasteCleanup = installTerminalImagePasteHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
-        const fileDropCleanup = installTerminalFileDropHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
-        const contextMenuCleanup = installTerminalContextMenuHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
+        const imagePasteCleanup = readOnly
+          ? noopCleanup
+          : installTerminalImagePasteHandlers(windowId, terminalContainer, terminal);
+        const fileDropCleanup = readOnly
+          ? noopCleanup
+          : installTerminalFileDropHandlers(windowId, terminalContainer, terminal);
+        const contextMenuCleanup = readOnly
+          ? noopCleanup
+          : installTerminalContextMenuHandlers(windowId, terminalContainer, terminal);
         const wheelScrollCleanup = createTerminalWheelScrollController({
           terminalRoot: terminalContainer,
           terminal,
@@ -3941,7 +3968,7 @@
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
           sendTerminalInput: (data) => {
-            if (terminalMap.get(windowId)?.isReady !== true) {
+            if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
             terminal.focus();
@@ -3964,17 +3991,25 @@
         };
       }
 
-      // SPEC-3671 / Issue #3884: one xterm runtime per window id, moved between
-      // hosts (canvas body, Issue row inline terminal). Because the runtime lives
-      // in exactly one container at a time, the same PTY is never shown by two
-      // input-capable faces — that is the AC-7 guarantee.
-      function reparentTerminalRuntime(windowId, runtime, terminalContainer) {
+      // SPEC-3671 FR-008: the single place that flips a runtime between the
+      // interactive canvas terminal and the read-only Issue preview mirror.
+      function applyTerminalReadOnly(runtime, readOnly) {
+        if (!runtime) return;
+        runtime.readOnly = readOnly === true;
+        if (runtime.terminal?.options) {
+          runtime.terminal.options.disableStdin = runtime.readOnly;
+        }
+      }
+
+      function reparentTerminalRuntime(windowId, runtime, terminalContainer, options = {}) {
+        const readOnly = options.readOnly === true;
         if (!runtime) {
           return runtime;
         }
-        if (runtime.terminalContainer === terminalContainer) {
+        if (runtime.terminalContainer === terminalContainer && runtime.readOnly === readOnly) {
           return runtime;
         }
+        applyTerminalReadOnly(runtime, readOnly);
         const terminalElement = runtime.terminal?.element;
         if (terminalElement && terminalElement.parentElement !== terminalContainer) {
           terminalContainer.appendChild(terminalElement);
@@ -3985,6 +4020,7 @@
           windowId,
           terminalContainer,
           runtime.terminal,
+          { readOnly },
         );
         requestAnimationFrame(() => {
           // SPEC-3671: a runtime created inside a hidden host never completed its
@@ -3997,9 +4033,14 @@
         return runtime;
       }
 
-      function createTerminalRuntime(windowId, terminalContainer) {
+      function createTerminalRuntime(windowId, terminalContainer, options = {}) {
         if (terminalMap.has(windowId)) {
-          return reparentTerminalRuntime(windowId, terminalMap.get(windowId), terminalContainer);
+          return reparentTerminalRuntime(
+            windowId,
+            terminalMap.get(windowId),
+            terminalContainer,
+            options,
+          );
         }
         const terminal = new Terminal({
           cursorBlink: true,
@@ -4009,6 +4050,8 @@
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          // SPEC-3671 FR-008.
+          disableStdin: options.readOnly === true,
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -4018,6 +4061,7 @@
           windowId,
           terminalContainer,
           terminal,
+          { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
@@ -4026,6 +4070,11 @@
         terminal.onData((data) => {
           inputTraceSeq += 1;
           const wsState = socket ? socket.readyState : -1;
+          // SPEC-3671 FR-008: a read-only mirror never forwards data to the PTY,
+          // whatever produced it.
+          if (terminalMap.get(windowId)?.readOnly === true) {
+            return;
+          }
           // Issue #2924: drop pre-ready onData firings — see
           // gateTerminalInputForReadiness in terminal-viewport-reflow.js
           // for the contract. The runtime is fetched fresh each firing so
@@ -4080,6 +4129,8 @@
           handshakeAttempts: 0,
           terminalContainer,
           containerBindingsCleanup,
+          // SPEC-3671 FR-008.
+          readOnly: options.readOnly === true,
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
@@ -4536,20 +4587,25 @@
         openIssueLaunchWizard,
         visibleBounds,
         launchPending,
-        // SPEC-3671 FR-007 (amended by Issue #3884): the Issue row's inline
-        // terminal mounts the same interactive runtime the canvas uses.
-        createTerminalRuntime: (id, terminalRoot) => createTerminalRuntime(id, terminalRoot),
+        // SPEC-3671 FR-007 / FR-008: the Issue preview mounts the shared terminal
+        // runtime read-only, so the live output streams but no input path exists.
+        createTerminalRuntime: (id, terminalRoot, options) =>
+          createTerminalRuntime(id, terminalRoot, options),
         windowDisplayTitle,
         windowRoleBadgeLabel,
         // SPEC-3671 FR-010: Windowize is the same Canvas handoff the Agent Kanban
-        // undock control performs, plus focus. The row releases the runtime and the
-        // canvas body reclaims it (see the surface === "terminal" reclaim below).
+        // undock control performs, plus focus.
         windowizeIssuePreviewWindow: (id) => {
           const windowData = workspaceWindowById(id);
           send(undockAgentWindowMessage(id, issuePreviewWindowizeGeometry(windowData)));
           focusWindowLocally(id);
           socketTransport.send({ kind: "focus_window", id });
         },
+        // Issue #3884: the Issue row status row (agent name / state / last
+        // activity line / elapsed time) reads the same live-activity sources the
+        // minimap tooltip and the runtime-state cache already use.
+        windowActivityDetail,
+        windowRuntimeStateSince: (id) => windowRuntimeStateSinceMap.get(id) ?? null,
         // SPEC-3671 FR-012 / FR-013: the Issue row reads the active Work
         // projection that is already broadcast, and reuses the Work surface's own
         // derivations and action paths rather than re-deriving them.
@@ -5039,8 +5095,8 @@
             runtime?.terminal.focus();
           });
           // SPEC-3671 FR-004: an off-canvas window's terminal belongs to the
-          // surface that hosts it (Agent Kanban card / Issue row inline terminal),
-          // not to this hidden canvas body. Mounting it here would steal the live terminal
+          // surface that hosts it (Agent Kanban card / Issue preview pane), not to
+          // this hidden canvas body. Mounting it here would steal the live terminal
           // away from the visible host.
           if (!isOffCanvasPlacement(windowData)) {
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
@@ -5447,8 +5503,8 @@
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
         }
-        // SPEC-3671 FR-007 / Issue #3884: keep the Issue rows' inline terminals in
-        // step with workspace state. Re-render the bridge (not the whole body) so list state, scroll,
+        // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
+        // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
         if (surface === "knowledge") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
@@ -5603,6 +5659,7 @@
                   decoderMap.delete(windowId);
                   detailMap.delete(windowId);
                   windowRuntimeStateMap.delete(windowId);
+                  windowRuntimeStateSinceMap.delete(windowId);
                   agentCompletionNotifier.forgetWindow(windowId);
                   agentAttentionToaster.forgetWindow(windowId);
                   // SPEC #3206: dismiss this window's attention toast from the shared
