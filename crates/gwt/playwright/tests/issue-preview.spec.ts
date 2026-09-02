@@ -1,11 +1,11 @@
 /* SPEC-3671 — Issue window as the primary surface, amended by Issue #3884.
  *
  * An Issue Monitor auto-launch must not add a window to the canvas. It becomes an
- * `issue_preview` placement. Since Issue #3884 that placement is presented as an
- * interactive inline terminal on the Issue row (no selection needed), it is not
- * drawn on the Fleet Minimap, and the Status Strip RUNNING cell breaks out how
- * many running agents live inline. Windowize remains the only hand-off to the
- * canvas, after which the row releases the terminal (one input face per PTY).
+ * `issue_preview` placement that the Issue window mirrors read-only in its right
+ * pane, and only an explicit Windowize puts it back on the canvas. Since Issue
+ * #3884 that placement is also visible without selection as a read-only status
+ * row on the Issue row, is not drawn on the Fleet Minimap, and is broken out of
+ * the Status Strip RUNNING cell as "N inline".
  *
  * The fixture serves the embedded frontend through Playwright routes and replaces
  * WebSocket with a deterministic backend, matching `tests/kanban.spec.ts`.
@@ -13,30 +13,21 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-function collectPageErrors(page) {
-  const consoleErrors: string[] = [];
-  const pageErrors: string[] = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
-  });
-  page.on("pageerror", (error) => pageErrors.push(String(error)));
-  return { consoleErrors, pageErrors };
-}
-
-test.describe("Issue inline terminal placement", () => {
+test.describe("Issue preview placement", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1600, height: 1000 },
   });
 
-  // 受け入れシナリオ 1 / FR-004, plus Issue #3884 AC-1 / AC-3 / AC-5: with three
-  // auto-launched agents and an otherwise empty canvas, nothing suggests a
-  // vanished window — the minimap shows only the Issue window, and RUNNING says
-  // where the agents are.
-  test("auto-launched agents add no canvas window, no minimap cell, and RUNNING explains itself", async ({
-    page,
-  }) => {
-    const { consoleErrors, pageErrors } = collectPageErrors(page);
+  // 受け入れシナリオ 1 / FR-004.
+  test("an auto-launched agent does not add a window to the canvas", async ({ page }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
     await installEmbeddedRoutes(page);
     await installIssuePreviewBackend(page);
 
@@ -46,118 +37,67 @@ test.describe("Issue inline terminal placement", () => {
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
 
-    // AC-1: only the canvas-placed Issue window has a radar cell.
-    const cells = page.locator("#fleet-minimap .fleet-minimap__cell");
-    await expect(cells).toHaveCount(1);
-    await expect(cells.first()).toHaveAttribute("data-window-id", "tab-issue::issue-1");
-
-    // AC-3: RUNNING 3 with all 3 inline, and the hover explains it.
-    await expect(page.locator("#op-strip-running")).toHaveText("3");
-    const inline = page.locator("#op-strip-running-inline");
-    await expect(inline).toBeVisible();
-    await expect(inline).toHaveText("3 inline");
-    await expect(page.locator(".op-status-strip__cell--running")).toHaveAttribute(
-      "title",
-      "3 of 3 running agents are inline terminals in the Issue window",
-    );
-
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
 
-  // Issue #3884 AC-6 (SPEC #3885 AC-2): every launched Issue row shows its agent
-  // terminal inline without any selection, and typing into it reaches the PTY.
-  test("each launched Issue row hosts an interactive inline terminal without selection", async ({
-    page,
-  }) => {
-    const { consoleErrors, pageErrors } = collectPageErrors(page);
+  // 受け入れシナリオ 2 / FR-007 / FR-008.
+  test("the Issue window mirrors the agent output read-only", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIssuePreviewBackend(page);
 
     await page.goto(APP_URL);
 
-    const rows = page.locator(".surface-knowledge .knowledge-row");
-    await expect(rows).toHaveCount(4);
-    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(0);
+    const preview = page.locator(".surface-knowledge .issue-preview");
+    await expect(preview).toHaveCount(1);
+    await expect(preview).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
+    await expect(preview.locator(".issue-preview-title")).toHaveText("Issue #3671 agent");
 
-    const inlineTerminals = page.locator(".surface-knowledge .issue-inline-terminal");
-    await expect(inlineTerminals).toHaveCount(3);
-    for (const [issue, id] of [
-      ["3671", "tab-issue::agent-preview"],
-      ["3672", "tab-issue::agent-preview-2"],
-      ["3673", "tab-issue::agent-preview-3"],
-    ]) {
-      const section = page.locator(
-        `.surface-knowledge [data-issue-number='${issue}'] .issue-inline-terminal`,
-      );
-      await expect(section).toHaveAttribute("data-window-id", id);
-      await expect(section.locator(".knowledge-monitor-chip")).toHaveText("Running");
-    }
-    await expect(
-      page.locator(".surface-knowledge [data-issue-number='3674'] .issue-inline-terminal"),
-    ).toHaveCount(0);
-    // The old selection-bound mirror is gone, and no copy says "preview".
-    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(0);
-    await expect(page.locator(".surface-knowledge")).not.toContainText(/preview/i);
-
-    const first = page.locator(
-      ".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal",
-    );
-    await expect(first.locator(".issue-inline-terminal-title")).toHaveText("Issue #3671 agent");
-    const terminal = first.locator(".issue-inline-terminal-body .terminal-root");
+    const terminal = preview.locator(".issue-preview-terminal .terminal-root");
     await expect(terminal).toBeVisible();
-    await expect(terminal.locator(".xterm-rows")).toBeVisible();
 
-    await page.evaluate(() => window.__emitAgentOutput("SPEC-3671 inline line"));
-    await expect(terminal).toContainText("SPEC-3671 inline line");
+    await page.evaluate(() => window.__emitAgentOutput("SPEC-3671 preview line"));
+    await expect(terminal).toContainText("SPEC-3671 preview line");
 
     await terminal.click();
-    await page.keyboard.type("echo hi");
-    await expect
-      .poll(() =>
-        page.evaluate(() =>
-          window.__knowledgeLoadMessages
-            .filter((message) => message.kind === "terminal_input")
-            .map((message) => `${message.id}:${message.data}`)
-            .join(""),
-        ),
-      )
-      .toContain("tab-issue::agent-preview:e");
-    const inputIds = await page.evaluate(() =>
-      Array.from(
-        new Set(
-          window.__knowledgeLoadMessages
-            .filter((message) => message.kind === "terminal_input")
-            .map((message) => message.id),
-        ),
-      ),
+    await page.keyboard.type("rm -rf /");
+    const inputMessages = await page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter((message) => message.kind === "terminal_input"),
     );
-    expect(inputIds).toEqual(["tab-issue::agent-preview"]);
-    // Typing into the terminal is not a row-selection gesture.
-    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(0);
-
-    expect(consoleErrors).toEqual([]);
-    expect(pageErrors).toEqual([]);
+    expect(inputMessages).toEqual([]);
   });
 
-  // 受け入れシナリオ 4 / FR-010, plus Issue #3884 AC-7 / AC-1 / AC-3: Windowize
-  // puts the agent on the canvas, the row releases its terminal so the PTY has a
-  // single input face, the minimap gains the cell, and RUNNING's breakdown drops.
-  test("Windowize moves the inline terminal to the canvas and the row releases it", async ({
-    page,
-  }) => {
-    const { consoleErrors, pageErrors } = collectPageErrors(page);
+  // 受け入れシナリオ 3 / FR-009.
+  test("only the selected Issue's agent is mirrored", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveAttribute(
+      "data-window-id",
+      "tab-issue::agent-preview",
+    );
+
+    await page.locator(".surface-knowledge [data-issue-number='3672']").click();
+
+    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(1);
+    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveAttribute(
+      "data-window-id",
+      "tab-issue::agent-preview-2",
+    );
+  });
+
+  // 受け入れシナリオ 4 / FR-010.
+  test("Windowize puts the mirrored agent on the canvas", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIssuePreviewBackend(page);
 
     await page.goto(APP_URL);
 
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
-    await expect(page.locator(".surface-knowledge .issue-inline-terminal")).toHaveCount(3);
     await page
-      .locator(
-        ".surface-knowledge [data-issue-number='3671'] [data-action='windowize-inline-terminal']",
-      )
+      .locator(".surface-knowledge .issue-preview [data-action='windowize-issue-preview']")
       .click();
 
     const undocked = await page.evaluate(() =>
@@ -168,30 +108,8 @@ test.describe("Issue inline terminal placement", () => {
     expect(undocked).toHaveLength(1);
     expect(undocked[0].id).toBe("tab-issue::agent-preview");
 
-    const canvasWindow = page.locator(".workspace-window.surface-terminal:visible");
-    await expect(canvasWindow).toHaveCount(1);
-    await expect(canvasWindow).toHaveAttribute("data-id", "tab-issue::agent-preview");
-    await expect(
-      page.locator(".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal"),
-    ).toHaveCount(0);
-    await expect(page.locator(".surface-knowledge .issue-inline-terminal")).toHaveCount(2);
-    // AC-7: exactly one xterm instance exists per window id — the canvas one for
-    // the windowized agent, the inline ones for the other two.
-    await expect(canvasWindow.locator(".terminal-root .xterm")).toHaveCount(1);
-    await expect(page.locator(".xterm")).toHaveCount(3);
-
-    // AC-1: the windowized agent now has a radar cell alongside the Issue window.
-    await expect(page.locator("#fleet-minimap .fleet-minimap__cell")).toHaveCount(2);
-    await expect(
-      page.locator("#fleet-minimap .fleet-minimap__cell[data-window-id='tab-issue::agent-preview']"),
-    ).toHaveCount(1);
-
-    // AC-3: RUNNING stays 3, of which 2 are still inline.
-    await expect(page.locator("#op-strip-running")).toHaveText("3");
-    await expect(page.locator("#op-strip-running-inline")).toHaveText("2 inline");
-
-    expect(consoleErrors).toEqual([]);
-    expect(pageErrors).toEqual([]);
+    await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(1);
+    await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(0);
   });
 
   // 受け入れシナリオ 5 / FR-011.
@@ -204,14 +122,10 @@ test.describe("Issue inline terminal placement", () => {
     await page.goto(APP_URL);
 
     await expect(
-      page.locator(
-        ".surface-knowledge [data-issue-number='3671'] .issue-inline-terminal .knowledge-monitor-chip",
-      ),
+      page.locator(".surface-knowledge .issue-preview .knowledge-monitor-chip"),
     ).toHaveText("Error");
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
-    // An errored agent is not "running", so it is not counted inline either.
-    await expect(page.locator("#op-strip-running-inline")).toBeHidden();
   });
 
   // 受け入れシナリオ 8 / FR-012 / FR-013 / T-025: the Work information and the
@@ -242,6 +156,112 @@ test.describe("Issue inline terminal placement", () => {
     await expect(
       page.locator(".surface-knowledge [data-issue-number='3672'] .knowledge-row-work"),
     ).toHaveCount(0);
+  });
+
+  // Issue #3884 AC-1 / AC-3 / AC-5: with three auto-launched agents and an
+  // otherwise empty canvas, nothing suggests a vanished window — the minimap
+  // shows only the Issue window, and RUNNING says where the agents are.
+  test("Issue #3884: no minimap cell for auto-launched agents, and RUNNING explains itself", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
+    const cells = page.locator("#fleet-minimap .fleet-minimap__cell");
+    await expect(cells).toHaveCount(1);
+    await expect(cells.first()).toHaveAttribute("data-window-id", "tab-issue::issue-1");
+
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    const inline = page.locator("#op-strip-running-inline");
+    await expect(inline).toBeVisible();
+    await expect(inline).toHaveText("3 inline");
+    await expect(page.locator(".op-status-strip__cell--running")).toHaveAttribute(
+      "title",
+      "3 of 3 running agents are inline terminals in the Issue window",
+    );
+
+    // Windowize one: it gains a minimap cell and the breakdown drops.
+    await page
+      .locator(
+        ".surface-knowledge [data-issue-number='3671'] .issue-agent-status [data-action='windowize-issue-preview']",
+      )
+      .click();
+    await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(1);
+    await expect(page.locator("#fleet-minimap .fleet-minimap__cell")).toHaveCount(2);
+    await expect(
+      page.locator("#fleet-minimap .fleet-minimap__cell[data-window-id='tab-issue::agent-preview']"),
+    ).toHaveCount(1);
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    await expect(inline).toHaveText("2 inline");
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  // Issue #3884 AC-6 (PM ruling): every launched Issue row carries a read-only
+  // status row — name, state, last activity line, elapsed — without selection.
+  test("Issue #3884: each launched Issue row shows a read-only agent status row", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+
+    await page.goto(APP_URL);
+
+    const statusRows = page.locator(".surface-knowledge .issue-agent-status");
+    await expect(statusRows).toHaveCount(3);
+    for (const [issue, id] of [
+      ["3671", "tab-issue::agent-preview"],
+      ["3672", "tab-issue::agent-preview-2"],
+      ["3673", "tab-issue::agent-preview-3"],
+    ]) {
+      const row = page.locator(
+        `.surface-knowledge [data-issue-number='${issue}'] .issue-agent-status`,
+      );
+      await expect(row).toHaveAttribute("data-window-id", id);
+      await expect(row.locator(".knowledge-monitor-chip")).toHaveText("Running");
+      await expect(row.locator(".terminal-root")).toHaveCount(0);
+    }
+    await expect(
+      page.locator(".surface-knowledge [data-issue-number='3674'] .issue-agent-status"),
+    ).toHaveCount(0);
+    // Unselected rows carry the status row too (3672 / 3673 are not selected).
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveCount(1);
+
+    const first = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
+    );
+    await expect(first.locator(".issue-agent-status-title")).toHaveText("Issue #3671 agent");
+    await expect(first.locator(".issue-agent-status-output")).toHaveText("Running cargo test");
+    await expect(first.locator(".issue-agent-status-elapsed")).toHaveText("<1m");
+    await expect(page.locator(".surface-knowledge .knowledge-list")).not.toContainText(
+      /preview/i,
+    );
+
+    // Clicking the status row is not a selection gesture.
+    await first.locator(".issue-agent-status-output").click();
+    await expect(page.locator(".surface-knowledge .knowledge-row.selected")).toHaveAttribute(
+      "data-issue-number",
+      "3671",
+    );
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
   });
 });
 
@@ -291,7 +311,10 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
 
       let windows = [
         issueWindow,
-        agentWindow("tab-issue::agent-preview", 3671, "Issue #3671 agent"),
+        {
+          ...agentWindow("tab-issue::agent-preview", 3671, "Issue #3671 agent"),
+          dynamic_title_detail: "Running cargo test",
+        },
         agentWindow("tab-issue::agent-preview-2", 3672, "Issue #3672 agent"),
         agentWindow("tab-issue::agent-preview-3", 3673, "Issue #3673 agent"),
       ];
@@ -409,9 +432,7 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
               knowledge_kind: message.knowledge_kind,
               request_id: message.request_id,
               entries,
-              // Issue #3884 AC-6: nothing is selected — the rows must still show
-              // their inline terminals.
-              selected_number: null,
+              selected_number: 3671,
               empty_message: null,
               refresh_enabled: true,
             });
