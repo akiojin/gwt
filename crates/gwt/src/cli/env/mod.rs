@@ -66,7 +66,10 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
-    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>>;
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<Vec<gwt_git::PrInventoryItem>>;
     fn create_pr(
         &mut self,
         base: &str,
@@ -147,6 +150,13 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         new_title: &str,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.inner.patch_title(number, new_title)
+    }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.inner.patch_issue_fields(number, fields)
     }
     fn patch_comment(
         &self,

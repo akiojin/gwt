@@ -270,6 +270,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             body: required_string(params, "body")?,
             labels: optional_string_vec(params, "labels")?,
         }),
+        "issue.edit" => CliCommand::Issue(IssueCommand::Edit {
+            number: required_u64(params, "number")?,
+            title: optional_string(params, "title")?,
+            body: optional_string(params, "body")?,
+            // Absent or `null` means "leave labels alone"; only an explicit
+            // empty array clears them.
+            labels: params
+                .get("labels")
+                .filter(|value| !value.is_null())
+                .map(|_| optional_string_vec(params, "labels"))
+                .transpose()?,
+        }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -363,7 +375,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
-        "pr.list" => CliCommand::Pr(PrCommand::List),
+        "pr.list" => CliCommand::Pr(PrCommand::List {
+            stale_after_hours: optional_u64(params, "stale_after_hours")?
+                .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
+            escalate_after_cycles: optional_u64(params, "escalate_after_cycles")?
+                .map(|cycles| u32::try_from(cycles).unwrap_or(u32::MAX)),
+        }),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -2536,6 +2553,28 @@ mod tests {
         ));
     }
 
+    /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
+    /// while an explicit empty array clears them.
+    #[test]
+    fn issue_edit_labels_null_means_omitted_and_empty_array_clears() {
+        let absent = ok("issue.edit", json!({"number": 7, "body": "b"}));
+        let null = ok(
+            "issue.edit",
+            json!({"number": 7, "body": "b", "labels": null}),
+        );
+        let cleared = ok("issue.edit", json!({"number": 7, "labels": []}));
+        for command in [absent, null] {
+            assert!(matches!(
+                command,
+                CliCommand::Issue(IssueCommand::Edit { labels: None, .. })
+            ));
+        }
+        assert!(matches!(
+            cleared,
+            CliCommand::Issue(IssueCommand::Edit { labels: Some(ref labels), .. }) if labels.is_empty()
+        ));
+    }
+
     #[test]
     fn issue_operations_parse() {
         for op in [
@@ -2871,7 +2910,20 @@ mod tests {
         ));
         assert!(matches!(
             ok("pr.list", json!({})),
-            CliCommand::Pr(PrCommand::List)
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"stale_after_hours": 24, "escalate_after_cycles": 2})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: Some(24),
+                escalate_after_cycles: Some(2),
+            })
         ));
         assert!(matches!(
             ok(

@@ -1659,6 +1659,12 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
             "issue.spec.edit",
             json!({ "number": 1935, "section": "plan", "body": "plan" }),
         ),
+        // Issue #3865 AC-4: the PM corrects a plain Issue body from its own
+        // surface, so the edit must not be gated by an owner either.
+        (
+            "issue.edit",
+            json!({ "number": 3858, "body": "- [ ] AC-1: corrected" }),
+        ),
         ("pr.current", json!({})),
         ("pr.list", json!({})),
         ("pr.view", json!({ "number": 1 })),

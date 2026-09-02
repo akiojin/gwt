@@ -854,6 +854,58 @@ fn dispatch_json_envelope_actions_logs_uses_json_params() {
     assert!(stdout.contains("run log from JSON envelope"), "{stdout}");
 }
 
+/// Issue #3865 AC-1: `issue.edit` updates a plain Issue body and the change
+/// is readable through `issue.view` with `refresh:true`.
+#[test]
+fn dispatch_json_envelope_issue_edit_roundtrips_through_issue_view_refresh() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.client.seed(sample_issue_snapshot(7, &["bug"]));
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.edit",
+        "params": {
+            "number": 7,
+            "body": "Corrected: the official curl installer exists"
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_eq!(
+        code,
+        0,
+        "issue.edit JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(stdout.contains(r#""operation":"issue.edit""#), "{stdout}");
+    assert!(stdout.contains("updated issue #7"), "{stdout}");
+
+    env.stdout.clear();
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.view",
+        "params": { "number": 7, "refresh": true }
+    }"#
+    .to_string();
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&env.stderr));
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains("Corrected: the official curl installer exists"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Issue 7"),
+        "title must be untouched: {stdout}"
+    );
+    assert!(
+        stdout.contains("labels: bug"),
+        "labels must be untouched: {stdout}"
+    );
+}
+
 #[test]
 fn dispatch_json_envelope_issue_create_uses_body_param() {
     let temp = tempfile::tempdir().expect("tempdir");

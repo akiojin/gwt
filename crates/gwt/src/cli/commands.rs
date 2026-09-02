@@ -94,6 +94,15 @@ pub enum IssueCommand {
         body: String,
         labels: Vec<String>,
     },
+    /// Issue #3865: update a plain Issue in place. Every field is optional and
+    /// only the supplied ones are sent; `body` is a whole-body replacement and
+    /// is refused for `gwt-spec` Issues, whose body is section-managed.
+    Edit {
+        number: u64,
+        title: Option<String>,
+        body: Option<String>,
+        labels: Option<Vec<String>>,
+    },
     Comment {
         number: u64,
         file: String,
@@ -190,7 +199,12 @@ pub enum IssueCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
     Current,
-    List,
+    /// `pr.list` with the optional PM thresholds from Issue #3868 (AC-5 /
+    /// AC-6); `None` keeps the crate defaults.
+    List {
+        stale_after_hours: Option<i64>,
+        escalate_after_cycles: Option<u32>,
+    },
     Create {
         base: String,
         head: Option<String>,

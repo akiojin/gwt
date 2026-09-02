@@ -59304,6 +59304,19 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         prompt.contains("never auto-close"),
         "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
     );
+    // Issue #3868 / #3825: both prompts are written into the PM pane's PTY,
+    // whose canonical queue is 1024 bytes on macOS. A longer prompt does not
+    // fail — the writer blocks forever and the whole suite hangs with it.
+    // Keep a margin for the composer line the wake can be submitted behind.
+    const PTY_CANONICAL_QUEUE_BYTES: usize = 1024;
+    const COMPOSER_LINE_MARGIN_BYTES: usize = 64;
+    assert!(
+        prompt.len() + COMPOSER_LINE_MARGIN_BYTES <= PTY_CANONICAL_QUEUE_BYTES,
+        "{label} is {} bytes; it must stay at or under {} bytes so the PTY write cannot block \
+         (#3825); got: {prompt}",
+        prompt.len(),
+        PTY_CANONICAL_QUEUE_BYTES - COMPOSER_LINE_MARGIN_BYTES
+    );
 }
 
 /// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
