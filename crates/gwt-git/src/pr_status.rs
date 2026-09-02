@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
+use gwt_core::github_quota::GitHubQuota;
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -73,13 +75,19 @@ pub const PR_ESCALATE_AFTER_UNCHANGED_CYCLES: u32 = 3;
 pub const PR_FALLBACK_WHEN_NOT_EXECUTABLE: &str = "PM triages the failure (#3790) → flake: \
 arrange a rerun → regression: arrange a fresh launch → neither possible: escalate to a human now";
 
-/// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6).
+/// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6) and the
+/// budget behaviour of the read itself (Issue #3891).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrInventoryOptions {
     /// Hours without an `updated_at` bump before a row is `stale`.
     pub stale_after_hours: i64,
     /// Unchanged consecutive observations before a row is `escalation_due`.
     pub escalate_after_cycles: u32,
+    /// Bypass the TTL cache and the budget throttle: the caller needs the live
+    /// state for a decision. Default `false` (periodic, non-essential read).
+    pub refresh: bool,
+    /// Heavy per-PR fields to hydrate on top of the light list query.
+    pub include: PrInventoryInclude,
 }
 
 impl Default for PrInventoryOptions {
@@ -87,7 +95,52 @@ impl Default for PrInventoryOptions {
         Self {
             stale_after_hours: PR_STALE_AFTER_HOURS,
             escalate_after_cycles: PR_ESCALATE_AFTER_UNCHANGED_CYCLES,
+            refresh: false,
+            include: PrInventoryInclude::default(),
         }
+    }
+}
+
+/// Heavy fields `pr.list` fetches per PR instead of in the bulk list query
+/// (Issue #3891 AC-2). The list query itself never carries them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrInventoryInclude {
+    /// `statusCheckRollup` — the input of CI-RED / MERGE-CANDIDATE. Costs
+    /// ~100 GraphQL points in a 100-row list, ~2 per single `pr view`.
+    pub checks: bool,
+    /// The PR body — only the "superseded" heuristic reads it.
+    pub body: bool,
+}
+
+impl Default for PrInventoryInclude {
+    fn default() -> Self {
+        Self {
+            checks: true,
+            body: false,
+        }
+    }
+}
+
+impl PrInventoryInclude {
+    /// Whether data hydrated with `self` satisfies a caller wanting `wanted`.
+    fn covers(self, wanted: Self) -> bool {
+        (!wanted.checks || self.checks) && (!wanted.body || self.body)
+    }
+
+    fn is_empty(self) -> bool {
+        !self.checks && !self.body
+    }
+
+    /// `gh pr view --json` field list for the hydration call.
+    fn view_json_fields(self) -> String {
+        let mut fields = Vec::new();
+        if self.checks {
+            fields.push("statusCheckRollup");
+        }
+        if self.body {
+            fields.push("body");
+        }
+        fields.join(",")
     }
 }
 
@@ -638,36 +691,146 @@ pub fn parse_pr_inventory_json_with(
         .collect()
 }
 
-const INVENTORY_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,closingIssuesReferences";
-const INVENTORY_JSON_FIELDS_WITHOUT_CLOSING: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body";
+/// The bulk list query (Issue #3891 AC-2): no `body`, no `statusCheckRollup`.
+/// Both are hydrated per PR, and only when that PR needs it.
+const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences";
+const INVENTORY_LIGHT_JSON_FIELDS_WITHOUT_CLOSING: &str =
+    "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
 
 /// File under the machine-local project dir that remembers the previous
 /// `pr.list` observation per PR (Issue #3868 AC-6).
 pub const PR_INVENTORY_HISTORY_FILE: &str = "pr-inventory-history.json";
 
-/// Fetch open PRs and classify them for the PM inventory (`pr.list`) with
-/// default thresholds and no cross-call memory.
-pub fn fetch_pr_inventory(repo_path: &Path) -> Result<Vec<PrInventoryItem>> {
-    fetch_pr_inventory_with(
-        repo_path,
-        Utc::now(),
-        &PrInventoryOptions::default(),
-        run_gh_command,
-    )
+/// File under the machine-local project dir that holds the last `pr.list`
+/// snapshot (Issue #3891 AC-1). Shared by every worktree and session of the
+/// repository on this machine, so N readers cost one fetch per TTL.
+pub const PR_INVENTORY_CACHE_FILE: &str = "pr-inventory-cache.json";
+
+/// How long a snapshot answers `pr.list` without touching GitHub. One PM
+/// cycle: repeated reads inside a cycle are free, and a cycle never sees data
+/// older than the previous cycle.
+pub const PR_INVENTORY_CACHE_TTL_SECS: i64 = 300;
+
+/// Per-PR hydration calls allowed in one read. Bounds the spawn burst on a
+/// cold cache; the rest hydrate on the next read.
+const PR_INVENTORY_HYDRATION_CAP: usize = 30;
+
+/// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrInventoryHeavy {
+    pub updated_at: Option<DateTime<Utc>>,
+    pub status_check_rollup: Option<serde_json::Value>,
+    pub body: Option<String>,
+    pub hydrated_at: DateTime<Utc>,
+}
+
+/// The persisted `pr.list` snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PrInventoryCache {
+    pub fetched_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub include: PrInventoryInclude,
+    #[serde(default)]
+    pub rows: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub heavy: BTreeMap<u64, PrInventoryHeavy>,
+}
+
+impl PrInventoryCache {
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let rendered = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, rendered)?;
+        std::fs::rename(&tmp, path)
+    }
+
+    fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.fetched_at
+            .map(|fetched_at| (now - fetched_at).num_seconds())
+    }
+
+    /// Classified rows from the snapshot, exposing only the heavy fields the
+    /// caller asked for.
+    fn items(
+        &self,
+        now: DateTime<Utc>,
+        options: &PrInventoryOptions,
+    ) -> Result<Vec<PrInventoryItem>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                let number = row.get("number").and_then(serde_json::Value::as_u64);
+                if let Some(heavy) = number.and_then(|number| self.heavy.get(&number)) {
+                    if let Some(map) = row.as_object_mut() {
+                        if options.include.checks {
+                            if let Some(rollup) = &heavy.status_check_rollup {
+                                map.insert("statusCheckRollup".to_string(), rollup.clone());
+                            }
+                        }
+                        if options.include.body {
+                            if let Some(body) = &heavy.body {
+                                map.insert(
+                                    "body".to_string(),
+                                    serde_json::Value::String(body.clone()),
+                                );
+                            }
+                        }
+                    }
+                }
+                inventory_item_from_value(&row, now, options)
+            })
+            .collect()
+    }
+}
+
+/// Result of one `pr.list` read: the rows plus where they came from and what
+/// the read cost (Issue #3891 AC-1 / AC-4 observability).
+#[derive(Debug, Clone)]
+pub struct PrInventoryRead {
+    pub items: Vec<PrInventoryItem>,
+    /// `github` (fetched now), `cache` (inside the TTL), or `stale-cache`
+    /// (served because the budget throttled the fetch).
+    pub source: &'static str,
+    pub fetched_at: Option<DateTime<Utc>>,
+    pub cache_age_secs: Option<i64>,
+    /// Why the live fetch was skipped, when it was.
+    pub throttled: Option<String>,
+    /// Budget-spending `gh` calls this read made (the free probe excluded).
+    pub github_calls: u32,
 }
 
 /// Fetch open PRs, classify them, and fold the read into the per-project
 /// history so `unchanged_cycles`, `escalation_due`, and held classes are
-/// meaningful across resident PM cycles.
+/// meaningful across resident PM cycles. Cache-first and budget-aware
+/// (Issue #3891): see [`PrInventoryOptions::refresh`].
 pub fn fetch_pr_inventory_tracked(
     repo_path: &Path,
     history_path: &Path,
+    cache_path: &Path,
     options: &PrInventoryOptions,
-) -> Result<Vec<PrInventoryItem>> {
+) -> Result<PrInventoryRead> {
     let now = Utc::now();
-    let mut items = fetch_pr_inventory_with(repo_path, now, options, run_gh_command)?;
+    let mut read = fetch_pr_inventory_cached_with(
+        repo_path,
+        cache_path,
+        &BudgetLedger::global(),
+        now,
+        options,
+        run_gh_command,
+    )?;
     let mut history = PrInventoryHistory::load(history_path);
-    history.observe(&mut items, now, options);
+    history.observe(&mut read.items, now, options);
     if let Err(error) = history.save(history_path) {
         // Bookkeeping never fails the read; the next call simply starts the
         // counters over. gwt-git has no tracing sink, so stderr is the
@@ -677,15 +840,223 @@ pub fn fetch_pr_inventory_tracked(
             history_path.display()
         );
     }
-    Ok(items)
+    Ok(read)
 }
 
-fn fetch_pr_inventory_with<F>(
+/// The cache-first, budget-aware read behind `pr.list`.
+///
+/// 1. Inside the TTL (and the cached hydration covers the request) the
+///    snapshot answers without any GitHub call.
+/// 2. Otherwise, unless `refresh` is set, the shared budget ledger decides
+///    whether this non-essential read may spend: below the reserve, in an
+///    active refusal window, or during a local burst, the last snapshot is
+///    served and the skip is reported; with no snapshot the inventory is
+///    unobservable, not empty.
+/// 3. A live read is the light list query plus per-PR hydration of the
+///    requested heavy fields, only for PRs whose real data changed or whose
+///    CI is not final yet.
+fn fetch_pr_inventory_cached_with<F>(
     repo_path: &Path,
+    cache_path: &Path,
+    ledger: &BudgetLedger,
     now: DateTime<Utc>,
     options: &PrInventoryOptions,
     mut run_gh: F,
-) -> Result<Vec<PrInventoryItem>>
+) -> Result<PrInventoryRead>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let mut cache = PrInventoryCache::load(cache_path);
+    let cache_age = cache.age_secs(now);
+    if !options.refresh {
+        if let Some(age) = cache_age {
+            if (0..PR_INVENTORY_CACHE_TTL_SECS).contains(&age)
+                && cache.include.covers(options.include)
+            {
+                return Ok(PrInventoryRead {
+                    items: cache.items(now, options)?,
+                    source: "cache",
+                    fetched_at: cache.fetched_at,
+                    cache_age_secs: Some(age),
+                    throttled: None,
+                    github_calls: 0,
+                });
+            }
+        }
+        if let Some(reason) = periodic_read_throttle(repo_path, ledger, now, &mut run_gh) {
+            if cache.fetched_at.is_some() {
+                return Ok(PrInventoryRead {
+                    items: cache.items(now, options)?,
+                    source: "stale-cache",
+                    fetched_at: cache.fetched_at,
+                    cache_age_secs: cache_age,
+                    throttled: Some(reason),
+                    github_calls: 0,
+                });
+            }
+            return Err(GwtError::Git(format!(
+                "pr inventory unobservable: the GitHub budget throttled this read and no \
+                 cached snapshot exists ({reason}); pass refresh:true only if the decision \
+                 at hand needs the live inventory"
+            )));
+        }
+    }
+
+    let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
+    let mut heavy = BTreeMap::new();
+    let mut hydrated = 0usize;
+    for row in &rows {
+        let Some(number) = row.get("number").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let updated_at =
+            parse_github_timestamp(row.get("updatedAt").and_then(serde_json::Value::as_str));
+        let previous = cache.heavy.remove(&number);
+        let mut entry = previous.clone();
+        if let Some(fields) = hydration_needed(previous.as_ref(), updated_at, options.include, now)
+        {
+            if hydrated < PR_INVENTORY_HYDRATION_CAP {
+                hydrated += 1;
+                github_calls += 1;
+                if let Ok((rollup, body)) = hydrate_pr(repo_path, number, fields, &mut run_gh) {
+                    entry = Some(PrInventoryHeavy {
+                        updated_at,
+                        status_check_rollup: rollup.or_else(|| {
+                            previous
+                                .as_ref()
+                                .and_then(|p| p.status_check_rollup.clone())
+                        }),
+                        body: body.or_else(|| previous.as_ref().and_then(|p| p.body.clone())),
+                        hydrated_at: now,
+                    });
+                }
+            }
+        }
+        if let Some(entry) = entry {
+            heavy.insert(number, entry);
+        }
+    }
+    cache = PrInventoryCache {
+        fetched_at: Some(now),
+        include: options.include,
+        rows,
+        heavy,
+    };
+    if let Err(error) = cache.save(cache_path) {
+        eprintln!(
+            "warning: pr inventory cache at {} could not be saved: {error}",
+            cache_path.display()
+        );
+    }
+    Ok(PrInventoryRead {
+        items: cache.items(now, options)?,
+        source: "github",
+        fetched_at: Some(now),
+        cache_age_secs: Some(0),
+        throttled: None,
+        github_calls,
+    })
+}
+
+/// Issue #3891 AC-4: the reason a periodic read must not spend right now.
+/// Refreshes the shared probe first when it is stale — `gh api rate_limit`
+/// is free — so the decision rests on a current primary window.
+fn periodic_read_throttle<F>(
+    repo_path: &Path,
+    ledger: &BudgetLedger,
+    now: DateTime<Utc>,
+    run_gh: &mut F,
+) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let policy = ThrottlePolicy::default();
+    let mut snapshot = ledger.snapshot(now);
+    if github_budget::probe_is_stale(&snapshot, &policy) {
+        if let Ok(output) = run_gh(repo_path, &["api", "rate_limit"]) {
+            if output.success {
+                if let Some(probe) = github_budget::parse_rate_limit_probe_all(&output.stdout, now)
+                {
+                    ledger.record_probe(&probe);
+                    snapshot = ledger.snapshot(now);
+                }
+            }
+        }
+    }
+    github_budget::throttle_reason(&snapshot, GitHubQuota::GraphQl, &policy, now)
+}
+
+/// Which heavy fields PR `number` must (re-)fetch, or `None` when the cached
+/// entry still answers: unchanged real data, final CI, body already held.
+fn hydration_needed(
+    previous: Option<&PrInventoryHeavy>,
+    updated_at: Option<DateTime<Utc>>,
+    wanted: PrInventoryInclude,
+    now: DateTime<Utc>,
+) -> Option<PrInventoryInclude> {
+    if wanted.is_empty() {
+        return None;
+    }
+    let Some(previous) = previous else {
+        return Some(wanted);
+    };
+    if previous.updated_at != updated_at {
+        return Some(wanted);
+    }
+    let checks = wanted.checks
+        && match &previous.status_check_rollup {
+            None => true,
+            Some(rollup) => {
+                !ci_is_final(&ci_status_from_rollup(Some(rollup)))
+                    && (now - previous.hydrated_at).num_seconds() >= PR_INVENTORY_CACHE_TTL_SECS
+            }
+        };
+    let body = wanted.body && previous.body.is_none();
+    let needed = PrInventoryInclude { checks, body };
+    (!needed.is_empty()).then_some(needed)
+}
+
+fn ci_is_final(ci_status: &str) -> bool {
+    ci_status.eq_ignore_ascii_case("SUCCESS") || ci_status.eq_ignore_ascii_case("FAILURE")
+}
+
+/// One `gh pr view <n> --json <fields>` for the heavy fields.
+fn hydrate_pr<F>(
+    repo_path: &Path,
+    number: u64,
+    fields: PrInventoryInclude,
+    run_gh: &mut F,
+) -> Result<(Option<serde_json::Value>, Option<String>)>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let json_fields = fields.view_json_fields();
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", &json_fields])?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view {number} {json_fields}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
+    Ok((
+        value.get("statusCheckRollup").cloned(),
+        value
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    ))
+}
+
+/// The light bulk query, with the pre-#3891 fallback for a `gh` that does not
+/// know `closingIssuesReferences`. Returns the raw rows and the number of
+/// budget-spending calls made.
+fn fetch_light_inventory_rows_with<F>(
+    repo_path: &Path,
+    run_gh: &mut F,
+) -> Result<(Vec<serde_json::Value>, u32)>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
@@ -699,11 +1070,11 @@ where
             "--limit",
             "100",
             "--json",
-            INVENTORY_JSON_FIELDS,
+            INVENTORY_LIGHT_JSON_FIELDS,
         ],
     )?;
     if primary.success {
-        return parse_pr_inventory_json_with(&primary.stdout, now, options);
+        return Ok((parse_inventory_rows(&primary.stdout)?, 1));
     }
     let fallback = run_gh(
         repo_path,
@@ -715,7 +1086,7 @@ where
             "--limit",
             "100",
             "--json",
-            INVENTORY_JSON_FIELDS_WITHOUT_CLOSING,
+            INVENTORY_LIGHT_JSON_FIELDS_WITHOUT_CLOSING,
         ],
     )?;
     if !fallback.success {
@@ -724,7 +1095,35 @@ where
             fallback.stderr.trim()
         )));
     }
-    parse_pr_inventory_json_with(&fallback.stdout, now, options)
+    Ok((parse_inventory_rows(&fallback.stdout)?, 2))
+}
+
+fn parse_inventory_rows(json: &str) -> Result<Vec<serde_json::Value>> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+    match value {
+        serde_json::Value::Array(rows) => Ok(rows),
+        _ => Err(GwtError::Other(
+            "gh pr list JSON: expected an array".to_string(),
+        )),
+    }
+}
+
+/// Uncached light read: list rows classified without any heavy hydration.
+#[cfg(test)]
+fn fetch_pr_inventory_with<F>(
+    repo_path: &Path,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+    mut run_gh: F,
+) -> Result<Vec<PrInventoryItem>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let (rows, _) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
+    rows.iter()
+        .map(|row| inventory_item_from_value(row, now, options))
+        .collect()
 }
 
 /// Fetch the status of a PR by number using `gh pr view --json`.
@@ -779,9 +1178,30 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
         .unwrap_or("UNKNOWN")
         .to_string();
 
-    // Determine CI status from statusCheckRollup
-    let ci_status = v["statusCheckRollup"]
-        .as_array()
+    let ci_status = ci_status_from_rollup(v.get("statusCheckRollup"));
+
+    let review_status = v["reviewDecision"]
+        .as_str()
+        .unwrap_or("UNKNOWN")
+        .to_string();
+
+    Ok(PrStatus {
+        number,
+        title,
+        state,
+        url,
+        created_at,
+        ci_status,
+        mergeable,
+        merge_state_status,
+        review_status,
+    })
+}
+
+/// Determine CI status from a `statusCheckRollup` array.
+fn ci_status_from_rollup(rollup: Option<&serde_json::Value>) -> String {
+    rollup
+        .and_then(serde_json::Value::as_array)
         .map(|checks| {
             if checks.is_empty() {
                 return "UNKNOWN".to_string();
@@ -803,24 +1223,7 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
                 "SUCCESS".to_string()
             }
         })
-        .unwrap_or_else(|| "UNKNOWN".to_string());
-
-    let review_status = v["reviewDecision"]
-        .as_str()
-        .unwrap_or("UNKNOWN")
-        .to_string();
-
-    Ok(PrStatus {
-        number,
-        title,
-        state,
-        url,
-        created_at,
-        ci_status,
-        mergeable,
-        merge_state_status,
-        review_status,
-    })
+        .unwrap_or_else(|| "UNKNOWN".to_string())
 }
 
 fn parse_github_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
@@ -3482,5 +3885,356 @@ mod tests {
         );
         assert_eq!(items[0].lifecycle_source, "observed");
         assert_eq!(items[0].unchanged_cycles, 0);
+    }
+
+    // ---- Issue #3891: TTL cache, light query, per-PR hydration, throttle ----
+
+    use gwt_core::github_budget::{BudgetLedger, ProbeSnapshot, ResourceWindow};
+
+    fn now_3891() -> DateTime<Utc> {
+        "2026-09-02T00:00:00Z".parse().expect("now")
+    }
+
+    fn healthy_probe_payload() -> String {
+        r#"{"resources":{"core":{"limit":5000,"remaining":4990,"reset":1756777200},
+            "graphql":{"limit":5000,"remaining":4800,"reset":1756777200}}}"#
+            .to_string()
+    }
+
+    fn light_row(number: u64, updated_at: &str, merge_state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "title": format!("feat: pr {number}"),
+            "url": format!("https://github.com/o/r/pull/{number}"),
+            "isDraft": false,
+            "headRefName": format!("work/issue-{number}"),
+            "updatedAt": updated_at,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": merge_state,
+            "reviewDecision": "APPROVED"
+        })
+    }
+
+    fn rollup(conclusion: &str) -> String {
+        format!(
+            r#"{{"statusCheckRollup":[{{"conclusion":"{conclusion}","status":"COMPLETED"}}],"body":""}}"#
+        )
+    }
+
+    /// A scripted `gh` that records every argv and answers list / view /
+    /// rate_limit from the given rows.
+    struct FakeGh {
+        rows: Vec<serde_json::Value>,
+        views: BTreeMap<u64, String>,
+        calls: Vec<String>,
+        probe_remaining: u64,
+    }
+
+    impl FakeGh {
+        fn new(rows: Vec<serde_json::Value>) -> Self {
+            Self {
+                rows,
+                views: BTreeMap::new(),
+                calls: Vec::new(),
+                probe_remaining: 4800,
+            }
+        }
+
+        fn run(&mut self, args: &[&str]) -> Result<GhCliOutput> {
+            self.calls.push(args.join(" "));
+            let ok = |stdout: String| {
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout,
+                    stderr: String::new(),
+                })
+            };
+            match args {
+                ["api", "rate_limit"] => ok(healthy_probe_payload().replace(
+                    "\"remaining\":4800",
+                    &format!("\"remaining\":{}", self.probe_remaining),
+                )),
+                ["pr", "list", ..] => {
+                    let json_fields = args[args.len() - 1];
+                    assert!(
+                        !json_fields.contains("statusCheckRollup") && !json_fields.contains("body"),
+                        "the list query must stay light (AC-2): {json_fields}"
+                    );
+                    ok(serde_json::Value::Array(self.rows.clone()).to_string())
+                }
+                ["pr", "view", number, "--json", _fields] => {
+                    let number: u64 = number.parse().expect("number");
+                    ok(self
+                        .views
+                        .get(&number)
+                        .cloned()
+                        .unwrap_or_else(|| rollup("SUCCESS")))
+                }
+                other => panic!("unexpected gh invocation: {other:?}"),
+            }
+        }
+    }
+
+    fn cached_read(
+        tmp: &Path,
+        ledger: &BudgetLedger,
+        gh: &mut FakeGh,
+        now: DateTime<Utc>,
+        options: &PrInventoryOptions,
+    ) -> Result<PrInventoryRead> {
+        fetch_pr_inventory_cached_with(
+            Path::new("/tmp/repo"),
+            &tmp.join(PR_INVENTORY_CACHE_FILE),
+            ledger,
+            now,
+            options,
+            |_, args| gh.run(args),
+        )
+    }
+
+    fn light_list_call() -> String {
+        format!("pr list --state open --limit 100 --json {INVENTORY_LIGHT_JSON_FIELDS}")
+    }
+
+    #[test]
+    fn inventory_default_query_is_light_and_hydrates_checks_per_pr() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![
+            light_row(3, "2026-09-01T00:00:00Z", "CLEAN"),
+            light_row(4, "2026-09-01T00:00:00Z", "CLEAN"),
+        ]);
+        gh.views.insert(4, rollup("FAILURE"));
+
+        let read = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891(),
+            &PrInventoryOptions::default(),
+        )
+        .expect("read");
+
+        assert_eq!(
+            gh.calls,
+            vec![
+                "api rate_limit".to_string(),
+                light_list_call(),
+                "pr view 3 --json statusCheckRollup".to_string(),
+                "pr view 4 --json statusCheckRollup".to_string(),
+            ]
+        );
+        assert_eq!(read.source, "github");
+        assert_eq!(read.github_calls, 3, "the free probe is not a budget call");
+        assert_eq!(read.throttled, None);
+        assert_eq!(read.items[0].lifecycle, "MERGE-CANDIDATE");
+        assert_eq!(read.items[1].lifecycle, "CI-RED");
+    }
+
+    #[test]
+    fn inventory_include_body_requests_body_only_when_asked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![light_row(5, "2026-09-01T00:00:00Z", "CLEAN")]);
+        gh.views.insert(
+            5,
+            r#"{"statusCheckRollup":[],"body":"Superseded by #6"}"#.to_string(),
+        );
+        let options = PrInventoryOptions {
+            include: PrInventoryInclude {
+                checks: true,
+                body: true,
+            },
+            ..PrInventoryOptions::default()
+        };
+        let read = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("read");
+        assert!(
+            gh.calls
+                .iter()
+                .any(|call| call == "pr view 5 --json statusCheckRollup,body"),
+            "{:?}",
+            gh.calls
+        );
+        assert_eq!(read.items[0].lifecycle, "SUPERSEDED");
+        assert_eq!(read.items[0].body, "Superseded by #6");
+    }
+
+    #[test]
+    fn inventory_include_nothing_skips_hydration_entirely() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![light_row(5, "2026-09-01T00:00:00Z", "CLEAN")]);
+        let options = PrInventoryOptions {
+            include: PrInventoryInclude {
+                checks: false,
+                body: false,
+            },
+            ..PrInventoryOptions::default()
+        };
+        let read = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("read");
+        assert!(
+            !gh.calls.iter().any(|call| call.starts_with("pr view")),
+            "{:?}",
+            gh.calls
+        );
+        assert_eq!(read.github_calls, 1);
+        assert_eq!(read.items[0].ci_status, "UNKNOWN");
+    }
+
+    /// AC-1: a second read inside the TTL is served from the cache and spends
+    /// no GitHub budget at all.
+    #[test]
+    fn inventory_read_within_ttl_makes_no_github_call() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        let options = PrInventoryOptions::default();
+        let first = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("first");
+        gh.calls.clear();
+
+        let later = now_3891() + chrono::Duration::seconds(60);
+        let second = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("second");
+
+        assert!(
+            gh.calls.is_empty(),
+            "cache hit must not spawn gh: {:?}",
+            gh.calls
+        );
+        assert_eq!(second.source, "cache");
+        assert_eq!(second.github_calls, 0);
+        assert_eq!(second.cache_age_secs, Some(60));
+        assert_eq!(second.items[0].lifecycle, first.items[0].lifecycle);
+        assert_eq!(second.items[0].ci_status, "SUCCESS");
+    }
+
+    /// AC-2: heavy fields are re-fetched only for PRs whose real data changed
+    /// or whose CI is not final yet.
+    #[test]
+    fn inventory_hydrates_only_changed_or_pending_prs_after_ttl() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![
+            light_row(3, "2026-09-01T00:00:00Z", "CLEAN"),
+            light_row(4, "2026-09-01T00:00:00Z", "BLOCKED"),
+        ]);
+        gh.views.insert(
+            4,
+            r#"{"statusCheckRollup":[{"conclusion":null,"status":"IN_PROGRESS"}]}"#.to_string(),
+        );
+        let options = PrInventoryOptions::default();
+        cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("first");
+        gh.calls.clear();
+
+        // TTL elapsed, nothing changed: only the pending PR is re-checked.
+        let second_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        cached_read(tmp.path(), &ledger, &mut gh, second_at, &options).expect("second");
+        assert_eq!(
+            gh.calls,
+            vec![
+                light_list_call(),
+                "pr view 4 --json statusCheckRollup".to_string(),
+            ],
+            "the probe is still fresh and PR 3 is final, so neither is re-read"
+        );
+        gh.calls.clear();
+
+        // PR 3 got a new commit: its updatedAt moved, so it is hydrated again.
+        gh.rows[0] = light_row(3, "2026-09-02T00:30:00Z", "CLEAN");
+        let third_at = second_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let third = cached_read(tmp.path(), &ledger, &mut gh, third_at, &options).expect("third");
+        assert!(
+            gh.calls
+                .contains(&"pr view 3 --json statusCheckRollup".to_string()),
+            "{:?}",
+            gh.calls
+        );
+        assert_eq!(third.items[0].lifecycle, "MERGE-CANDIDATE");
+    }
+
+    /// AC-4 / AC-7: with the budget below the reserve, a periodic read is
+    /// thinned out — the last snapshot is served, the skip and its reason are
+    /// visible, and no GitHub budget is spent.
+    #[test]
+    fn inventory_below_reserve_serves_stale_cache_and_reports_the_throttle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        let options = PrInventoryOptions::default();
+        cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("warm");
+        gh.calls.clear();
+
+        // The account's GraphQL budget is nearly gone (observed by any process).
+        let exhausted_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "graphql".to_string(),
+            ResourceWindow {
+                limit: 5000,
+                remaining: 120,
+                reset_at: exhausted_at + chrono::Duration::minutes(30),
+            },
+        );
+        ledger.record_probe(&ProbeSnapshot {
+            probed_at: exhausted_at,
+            resources,
+        });
+
+        let read = cached_read(tmp.path(), &ledger, &mut gh, exhausted_at, &options).expect("read");
+        assert!(
+            gh.calls.is_empty(),
+            "throttled read must not spawn gh: {:?}",
+            gh.calls
+        );
+        assert_eq!(read.source, "stale-cache");
+        assert_eq!(read.github_calls, 0);
+        let reason = read.throttled.expect("throttle reason");
+        assert!(reason.contains("budget_reserve"), "{reason}");
+        assert!(reason.contains("remaining=120"), "{reason}");
+        assert_eq!(read.items[0].number, 3);
+        assert_eq!(read.items[0].ci_status, "SUCCESS");
+    }
+
+    #[test]
+    fn inventory_below_reserve_without_any_cache_is_unobservable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        gh.probe_remaining = 50;
+        let error = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891(),
+            &PrInventoryOptions::default(),
+        )
+        .expect_err("no snapshot to serve");
+        let message = error.to_string();
+        assert!(message.contains("unobservable"), "{message}");
+        assert!(message.contains("budget_reserve"), "{message}");
+        assert_eq!(gh.calls, vec!["api rate_limit".to_string()]);
+    }
+
+    #[test]
+    fn inventory_refresh_bypasses_cache_and_throttle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut gh = FakeGh::new(vec![light_row(3, "2026-09-01T00:00:00Z", "CLEAN")]);
+        gh.probe_remaining = 50;
+        let options = PrInventoryOptions {
+            refresh: true,
+            ..PrInventoryOptions::default()
+        };
+        let read = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("read");
+        assert_eq!(read.source, "github");
+        assert!(
+            gh.calls.iter().any(|call| call.starts_with("pr list")),
+            "{:?}",
+            gh.calls
+        );
+        assert!(
+            !gh.calls.iter().any(|call| call == "api rate_limit"),
+            "an explicit refresh is essential and never probes to throttle itself: {:?}",
+            gh.calls
+        );
     }
 }
