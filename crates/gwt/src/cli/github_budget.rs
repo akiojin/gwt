@@ -13,12 +13,26 @@ use gwt_github::SpecOpsError;
 
 use crate::cli::CliEnv;
 
+/// Command model for the `github.budget` JSON operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubBudgetCommand {
+    /// Take a fresh `gh api rate_limit` probe even when the shared one is
+    /// still within the policy's maximum age.
+    pub refresh: bool,
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
-    refresh: bool,
+    command: GithubBudgetCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_with(env, refresh, &BudgetLedger::global(), Utc::now(), out)
+    run_with(
+        env,
+        command.refresh,
+        &BudgetLedger::global(),
+        Utc::now(),
+        out,
+    )
 }
 
 fn run_with<E: CliEnv>(

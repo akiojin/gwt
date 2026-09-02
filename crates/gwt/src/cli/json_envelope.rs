@@ -375,9 +375,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .transpose()?,
         }),
         // Issue #3891 AC-3: GitHub API budget observation.
-        "github.budget" => CliCommand::GithubBudget {
+        "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
             refresh: optional_bool(params, "refresh")?.unwrap_or(false),
-        },
+        }),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -2964,11 +2964,15 @@ mod tests {
         // Issue #3891 AC-3: budget observation.
         assert!(matches!(
             ok("github.budget", json!({})),
-            CliCommand::GithubBudget { refresh: false }
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: false
+            })
         ));
         assert!(matches!(
             ok("github.budget", json!({"refresh": true})),
-            CliCommand::GithubBudget { refresh: true }
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: true
+            })
         ));
         assert!(matches!(
             ok(
