@@ -1639,6 +1639,23 @@ def _file_index_v2_reader_state_exists(v2_root: Path, worktree_hash: str) -> boo
     ).is_file()
 
 
+def _file_index_v2_reader_pin_if_present(
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+):
+    """Reader pin for search / status, or a no-op when only legacy can serve.
+
+    AS-31: a worktree without any v2 head or journal has no closure to
+    protect, and the read-only legacy fallback must not create ``leases/``
+    or any other byte below the v2 layout.
+    """
+    v2_root = resolve_file_index_v2_root(_safe_artifact_id(repo_hash), db_root=db_root)
+    if _file_index_v2_reader_state_exists(v2_root, _safe_artifact_id(worktree_hash)):
+        return _file_index_v2_pin(repo_hash, worktree_hash, "reader", db_root)
+    return contextlib.nullcontext()
+
+
 @contextlib.contextmanager
 def _file_index_v2_pin(
     repo_hash: str,
@@ -1657,14 +1674,6 @@ def _file_index_v2_pin(
     safe_repo_hash = _safe_artifact_id(repo_hash)
     safe_worktree_hash = _safe_artifact_id(worktree_hash)
     v2_root = resolve_file_index_v2_root(safe_repo_hash, db_root=db_root)
-    if kind == "reader" and not _file_index_v2_reader_state_exists(
-        v2_root, safe_worktree_hash
-    ):
-        # AS-31: a reader that can only serve legacy (no v2 head or journal)
-        # has no closure to protect, and the read-only fallback must not
-        # create leases/ or any other byte below the v2 layout.
-        yield None
-        return
     leases_root = v2_root / "leases"
     pin_id = uuid.uuid4().hex
     pin_dir = leases_root / pin_id
@@ -2847,7 +2856,9 @@ def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> Non
     for current_root, _directories, filenames in os.walk(staging, topdown=False):
         current = Path(current_root)
         for filename in filenames:
-            with (current / filename).open("rb") as artifact:
+            # Windows rejects fsync on a read-only handle (EBADF), so open
+            # read/write without truncating; POSIX accepts either mode.
+            with (current / filename).open("r+b") as artifact:
                 os.fsync(artifact.fileno())
         _fsync_directory(current)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -8711,10 +8722,9 @@ def action_search_multi_v2(
 ) -> Dict[str, Any]:
     has_v2_file_scope = any(scope in {"files", "files-docs"} for scope in scopes)
     if file_index_protocol == "v2" and has_v2_file_scope and worktree_hash:
-        with _file_index_v2_pin(
+        with _file_index_v2_reader_pin_if_present(
             repo_hash,
             worktree_hash,
-            "reader",
             db_root,
         ):
             return _action_search_multi_v2_pinned(
@@ -8765,10 +8775,9 @@ def _explicit_file_index_v2_status(
     worktree_hash: str,
     db_root: Optional[Path],
 ) -> Dict[str, Dict[str, Any]]:
-    with _file_index_v2_pin(
+    with _file_index_v2_reader_pin_if_present(
         repo_hash,
         worktree_hash,
-        "reader",
         db_root,
     ):
         return _explicit_file_index_v2_status_pinned(
