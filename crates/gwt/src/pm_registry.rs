@@ -3970,8 +3970,11 @@ pub fn pm_worktree_store_dir(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let project_dir = pm_dir.parent()?;
-    (project_dir.parent()? == gwt_core::paths::gwt_projects_dir())
-        .then(|| project_dir.to_path_buf())
+    let projects_dir = project_dir.parent()?;
+    let expected_projects_dir = gwt_core::paths::gwt_projects_dir();
+    (gwt_core::paths::normalize_windows_child_process_path(projects_dir)
+        == gwt_core::paths::normalize_windows_child_process_path(&expected_projects_dir))
+    .then(|| project_dir.to_path_buf())
 }
 
 /// Issue #3607 AC-3: whether restoring a session rooted at `session_worktree`
@@ -5257,15 +5260,26 @@ mod tests {
     #[test]
     fn pm_worktree_path_is_canonical_and_predicate_matches_only_it() {
         let home = tempfile::tempdir().expect("tempdir");
-        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let canonical_home = std::fs::canonicalize(home.path()).expect("canonical temp home");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(&canonical_home);
 
         let repo = Path::new("/tmp/some-repo");
         let worktree = pm_worktree_path_for_repo_path(repo);
+        let normalized_worktree = gwt_core::paths::normalize_windows_child_process_path(&worktree);
         assert_eq!(
             worktree,
             gwt_core::paths::gwt_project_dir_for_repo_path(repo).join("pm/worktree")
         );
         assert!(is_pm_worktree(&worktree));
+        #[cfg(windows)]
+        assert_ne!(
+            worktree, normalized_worktree,
+            "the Windows regression fixture must exercise verbatim and normalized spellings"
+        );
+        assert!(
+            is_pm_worktree(&normalized_worktree),
+            "the same PM worktree must match after child-process path normalization"
+        );
 
         let pm_dir = worktree.parent().expect("pm dir");
         assert!(
