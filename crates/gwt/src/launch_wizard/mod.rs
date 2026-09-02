@@ -366,9 +366,18 @@ pub struct LaunchWizardView {
     pub opencode_needs_setup: bool,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
+    /// Issue #3863: model candidates for the selected provider (blank
+    /// provider = config default provider), from `providers.<id>.models`.
+    pub hermes_model_options: Vec<String>,
     pub hermes_profile: String,
+    /// Issue #3863: `agent.personalities` keys.
+    pub hermes_profile_options: Vec<String>,
     pub hermes_toolsets: String,
+    /// Issue #3863: toolset names known to the user's Hermes config.
+    pub hermes_toolset_options: Vec<String>,
     pub hermes_skills: String,
+    /// Issue #3863: installed skill names under the user's Hermes home.
+    pub hermes_skill_options: Vec<String>,
     pub hermes_max_turns: String,
     pub hermes_safe_mode: bool,
     pub show_branch_controls: bool,
@@ -441,6 +450,21 @@ pub struct LaunchWizardPreviousProfile {
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub windows_shell: Option<gwt_agent::WindowsShellKind>,
+    /// Issue #3863 AC-7: Hermes-specific values from the previous Hermes
+    /// launch. Always default for other agents.
+    pub hermes: HermesLaunchPreferences,
+}
+
+/// Issue #3863 AC-7: the Hermes launch options worth restoring across
+/// launches. Safe mode is deliberately excluded — it disables gwt hooks, so
+/// it must be re-chosen per launch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HermesLaunchPreferences {
+    pub provider: Option<String>,
+    pub profile: Option<String>,
+    pub toolsets: Option<String>,
+    pub skills: Option<String>,
+    pub max_turns: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -927,11 +951,12 @@ pub struct LaunchWizardState {
     pub hermes_skills: String,
     pub hermes_max_turns: String,
     pub hermes_safe_mode: bool,
-    /// SPEC-3152: providers enumerated from the user's `~/.hermes/config.yaml`
-    /// (model.provider + `providers:` keys), populated at wizard open. Empty
-    /// in tests / when no config exists; the wizard then offers only the
-    /// "use config default" and free-text "Other" provider entries.
-    pub hermes_provider_choices: Vec<String>,
+    /// SPEC-3152 / Issue #3863: launch-option candidates enumerated from the
+    /// user's `~/.hermes` (providers, models per provider, profiles,
+    /// toolsets, skills), populated at wizard open. Empty in tests / when no
+    /// config exists; the wizard then offers only the "use config default"
+    /// and free-text "Other" entries.
+    pub hermes_choices: gwt_skills::HermesLaunchChoices,
     /// SPEC-3152 FR-005: `true` when the user's global Hermes home has no
     /// resolvable credentials, so the wizard shows a non-blocking "Hermes is
     /// not set up" hint. Populated at wizard open; never blocks launch.
