@@ -6823,6 +6823,13 @@ pub(super) fn owner_resolution_failure_from_error(
             failure_subcode: None,
             remediation: "REFRESH_OWNER_CORPUS",
         },
+        // Issue #3873: a pre-write content guard refused the body. Nothing was
+        // created or updated; the candidate body itself needs fixing.
+        gwt_github::SpecOpsError::Validation(_) => OwnerResolutionFailure {
+            reason: BlockedReason::Create,
+            failure_subcode: None,
+            remediation: "FIX_CANDIDATE_BODY",
+        },
     }
 }
 
