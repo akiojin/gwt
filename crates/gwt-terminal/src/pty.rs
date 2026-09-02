@@ -355,7 +355,12 @@ impl PtyHandle {
         loop {
             match listener.accept() {
                 Ok((mut gate, peer)) if peer.ip().is_loopback() => {
-                    gate.set_read_timeout(Some(Duration::from_secs(2)))
+                    // Windows hands out accepted sockets in the listener's
+                    // non-blocking mode; the handshake read below must block
+                    // (bounded by the timeout) until the helper's HELLO
+                    // arrives instead of failing with WSAEWOULDBLOCK.
+                    gate.set_nonblocking(false)
+                        .and_then(|()| gate.set_read_timeout(Some(Duration::from_secs(2))))
                         .map_err(|error| {
                             pending_spawn_error(
                                 handle.take().expect("pending handle"),

@@ -17,6 +17,7 @@ const HELPER_ROLE_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_HELPER";
 const TARGET_SENTINEL_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_TARGET_SENTINEL";
 const CRASH_PARENT_READY_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_CRASH_READY";
 const PRIORITY_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_REPORT";
+const SLOW_HELLO_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_SLOW_HELLO";
 const PRIORITY_GRANDCHILD_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_GRANDCHILD";
 
 fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -376,4 +377,47 @@ fn pending_pty_reports_a_missing_target_before_release() {
         error.contains("definitely-missing-target"),
         "error must name the missing target: {error}"
     );
+}
+
+/// Helper role that connects to the gate, then waits before sending HELLO.
+/// On Windows an accepted socket inherits the listener's non-blocking mode,
+/// so an owner that reads before the bytes arrive sees WSAEWOULDBLOCK
+/// (os error 10035) unless it switches the stream back to blocking first.
+#[test]
+fn start_gate_slow_hello_helper_process() {
+    if std::env::var_os(SLOW_HELLO_ENV).is_none() {
+        return;
+    }
+    use std::io::{Read as _, Write as _};
+    let endpoint = std::env::var("GWT_INTERNAL_PTY_GATE_ENDPOINT").expect("gate endpoint");
+    let nonce = std::env::var("GWT_INTERNAL_PTY_GATE_NONCE").expect("gate nonce");
+    let mut gate = std::net::TcpStream::connect(&endpoint).expect("connect gate");
+    thread::sleep(Duration::from_millis(400));
+    let mut hello = vec![1_u8];
+    hello.extend_from_slice(nonce.as_bytes());
+    gate.write_all(&hello).expect("send delayed hello");
+    gate.flush().expect("flush hello");
+    let mut release = [0_u8; 1];
+    let _ = gate.read_exact(&mut release);
+    std::process::exit(0);
+}
+
+#[test]
+fn pending_pty_waits_for_a_delayed_helper_hello() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config
+        .env
+        .insert(SLOW_HELLO_ENV.to_string(), "1".to_string());
+
+    let pending = PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        exact_test_args("start_gate_slow_hello_helper_process"),
+        "slow-hello-nonce",
+    )
+    .expect("a delayed HELLO must not be mistaken for a failed handshake");
+    assert!(pending.process_id().is_some());
+    pending.abort().expect("abort pending PTY");
 }
