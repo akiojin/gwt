@@ -33,6 +33,10 @@ pub enum SpecOpsError {
     Split(#[from] crate::routing::SplitError),
     #[error("section '{0}' not found")]
     SectionNotFound(String),
+    /// Pre-write content validation refused the operation (Issue #3873). No
+    /// remote mutation happened; the caller must fix the body and retry.
+    #[error("validation failed: {0}")]
+    Validation(String),
     /// Post-write readback found remote content that differs from what was
     /// written (SPEC-3248 P7C / #3284). The write was rolled back where
     /// possible and must not be treated as committed.
@@ -360,7 +364,9 @@ impl<C: IssueClient> SpecOps<C> {
     // Helpers
     // -----------------------------------------------------------------
 
-    fn refresh_cache(&self, number: IssueNumber) -> Result<(), SpecOpsError> {
+    /// Conditionally refetch the Issue so the cache reflects the latest labels
+    /// and body before a caller inspects them (a pre-write guard, for one).
+    pub fn refresh_cache(&self, number: IssueNumber) -> Result<(), SpecOpsError> {
         let entry = self.cache.load_entry(number);
         let since: Option<UpdatedAt> = entry.as_ref().map(|e| e.snapshot.updated_at.clone());
         let res = self.client.fetch(number, since.as_ref())?;

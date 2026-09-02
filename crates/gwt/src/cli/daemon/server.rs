@@ -4651,6 +4651,76 @@ exit 0
         .is_ok()
     }
 
+    /// Wait for one live fake-gh owner published atomically in `active_root`.
+    ///
+    /// The shared PID file is not a readiness marker: shell redirection makes
+    /// it visible before `printf` writes the PID, and concurrent invocations
+    /// may truncate it again. Owner markers are written to a unique temporary
+    /// file and renamed only after both PID and process start are complete.
+    async fn wait_for_live_fake_gh_owner(active_root: &Path) -> Result<u32, String> {
+        let started = Instant::now();
+        let mut last_observation = format!("{} does not exist", active_root.display());
+        loop {
+            match fs::read_dir(active_root) {
+                Ok(entries) => {
+                    let mut found_owner = false;
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(error) => {
+                                last_observation = format!("read owner entry: {error}");
+                                continue;
+                            }
+                        };
+                        if !entry.file_name().to_string_lossy().starts_with("owner-") {
+                            continue;
+                        }
+                        found_owner = true;
+                        let path = entry.path();
+                        let owner = match fs::read_to_string(&path) {
+                            Ok(owner) => owner,
+                            Err(error) => {
+                                last_observation =
+                                    format!("read owner marker {}: {error}", path.display());
+                                continue;
+                            }
+                        };
+                        let Some(pid) = owner
+                            .lines()
+                            .next()
+                            .and_then(|pid| pid.trim().parse::<u32>().ok())
+                        else {
+                            last_observation =
+                                format!("owner marker {} has no valid pid", path.display());
+                            continue;
+                        };
+                        if process_exists(pid) {
+                            return Ok(pid);
+                        }
+                        last_observation =
+                            format!("owner marker {} names exited pid {pid}", path.display());
+                    }
+                    if !found_owner {
+                        last_observation =
+                            format!("{} has no published owner marker", active_root.display());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    last_observation =
+                        format!("read active owner root {}: {error}", active_root.display());
+                }
+            }
+            if started.elapsed() >= MARKER_WAIT_HANG_GUARD {
+                return Err(format!(
+                    "fake gh did not publish a live owner within {MARKER_WAIT_HANG_GUARD:?}; \
+                     last observation: {last_observation}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// One `block`-mode fake `gh` arena. `started`, `release`, `active` and
     /// `overlap` describe the shared scan state every invocation competes over;
     /// each invocation additionally publishes its own markers.
@@ -8851,7 +8921,6 @@ exit 0
         let release_path = temp.path().join("never-release");
         let active_path = temp.path().join("active-scan");
         let overlap_path = temp.path().join("overlap-scan");
-        let pid_path = temp.path().join("gh.pid");
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "block");
@@ -8859,7 +8928,6 @@ exit 0
         let _release = ScopedEnvVar::set("GWT_FAKE_GH_RELEASE", &release_path);
         let _active = ScopedEnvVar::set("GWT_FAKE_GH_ACTIVE", &active_path);
         let _overlap = ScopedEnvVar::set("GWT_FAKE_GH_OVERLAP", &overlap_path);
-        let _pid = ScopedEnvVar::set("GWT_FAKE_GH_PID", &pid_path);
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -8899,7 +8967,7 @@ exit 0
         let socket_path = temp.path().join("shutdown-daemon.sock");
         let endpoint_path = temp.path().join("shutdown-endpoint.json");
         let endpoint = sample_endpoint(scope, &socket_path, "shutdown-secret");
-        let server = tokio::spawn(run_server_with_shutdown_and_worker_config(
+        let mut server = tokio::spawn(run_server_with_shutdown_and_worker_config(
             endpoint,
             socket_path,
             endpoint_path,
@@ -8912,32 +8980,42 @@ exit 0
             Duration::from_secs(1),
         ));
 
-        assert!(wait_for_path(&started_path).await);
-        assert!(wait_for_path(&pid_path).await);
-        let pid = fs::read_to_string(&pid_path)
-            .expect("read fake gh pid")
-            .trim()
-            .parse::<u32>()
-            .expect("parse fake gh pid");
-        assert!(process_exists(pid), "fake gh must be alive before shutdown");
+        let ready_pid = wait_for_live_fake_gh_owner(&active_path).await;
 
         let shutdown_started = Instant::now();
         shutdown.request();
-        let exit_code = tokio::time::timeout(Duration::from_secs(3), server)
+        let server_result = match tokio::time::timeout(Duration::from_secs(3), &mut server).await {
+            Ok(result) => Some(result),
+            Err(_) => {
+                server.abort();
+                let _ = server.await;
+                None
+            }
+        };
+
+        let reaped = match ready_pid.as_ref() {
+            Ok(pid) => tokio::time::timeout(Duration::from_secs(1), async {
+                while process_exists(*pid) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
             .await
+            .is_ok(),
+            Err(_) => true,
+        };
+        if let Ok(pid) = ready_pid.as_ref() {
+            assert!(
+                reaped,
+                "deadline owner must terminate and reap fake gh {pid}"
+            );
+        }
+
+        let exit_code = server_result
             .expect("server shutdown is bounded")
             .expect("server task exits cleanly")
             .expect("server exits successfully");
         assert_eq!(exit_code, 0);
-
-        let reaped = tokio::time::timeout(Duration::from_secs(1), async {
-            while process_exists(pid) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .is_ok();
-        assert!(reaped, "deadline owner must terminate and reap fake gh");
+        ready_pid.unwrap_or_else(|error| panic!("{error}"));
         assert!(
             shutdown_started.elapsed() < Duration::from_secs(3),
             "shutdown exceeded its absolute operation deadline"
