@@ -9,6 +9,8 @@
 
 #[cfg(windows)]
 mod imp {
+    use super::super::ProcessPolicy;
+
     #[derive(Default)]
     pub struct ProcessGroup {
         job: Option<gwt_core::process_tree::WindowsJobObject>,
@@ -19,6 +21,25 @@ mod imp {
             gwt_core::process_tree::WindowsJobObject::attach_running(pid)
                 .map(|job| Self { job: Some(job) })
                 .map_err(|error| format!("Windows Job attach failed for child {pid}: {error}"))
+        }
+
+        /// Lower the tree root's priority class and, when requested, cap the
+        /// Job's CPU rate. Kill-on-close remains armed either way.
+        pub fn apply_policy(&mut self, pid: u32, policy: ProcessPolicy) -> Result<(), String> {
+            gwt_core::process_tree::set_process_priority_class(
+                pid,
+                policy.priority.windows_priority_class(),
+            )
+            .map_err(|error| format!("set priority class for child {pid}: {error}"))?;
+            if let Some(percent) = policy.cpu_limit_percent {
+                let job = self
+                    .job
+                    .as_mut()
+                    .ok_or_else(|| format!("Windows Job is not attached for child {pid}"))?;
+                job.set_cpu_rate_hard_cap(percent)
+                    .map_err(|error| format!("configure Job CPU hard cap: {error}"))?;
+            }
+            Ok(())
         }
 
         /// Synchronously terminate every process in the group.
@@ -46,6 +67,8 @@ mod imp {
         unistd::Pid,
     };
 
+    use super::super::ProcessPolicy;
+
     #[derive(Default)]
     pub struct ProcessGroup {
         pgid: Option<Pid>,
@@ -58,6 +81,22 @@ mod imp {
             Ok(Self {
                 pgid: Some(Pid::from_raw(pid as i32)),
             })
+        }
+
+        /// Set the tree root's nice value. fork/exec descendants inherit it.
+        /// `cpu_limit_percent` has no tree-wide Unix equivalent and is ignored.
+        pub fn apply_policy(&mut self, pid: u32, policy: ProcessPolicy) -> Result<(), String> {
+            let nice = policy.priority.unix_nice();
+            // SAFETY: setpriority has no memory-safety preconditions.
+            let status =
+                unsafe { libc::setpriority(libc::PRIO_PROCESS as _, pid as libc::id_t, nice) };
+            if status != 0 {
+                return Err(format!(
+                    "setpriority(pid {pid}, nice {nice}): {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
         }
 
         /// Signal every process in the group without waiting for reap.

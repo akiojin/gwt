@@ -534,3 +534,66 @@ test("switchSettingsTab toggles aria-selected and hidden together", () => {
     "switchSettingsTab must toggle hidden on non-active panels",
   );
 });
+
+test("renderSystemPanel exposes agent process-tree resource controls (#3813)", () => {
+  assert.match(
+    settingsSource,
+    /agentResource:\s*\{\s*enabled:\s*true,\s*priority:\s*"below-normal",\s*cpuLimitPercent:\s*null,\s*cargoJobs:\s*null,?\s*\}/,
+    "expected agent resource UI state to default to enabled / below-normal / automatic",
+  );
+  for (const id of [
+    "settings-system-agent-resource-enabled",
+    "settings-system-agent-priority",
+    "settings-system-agent-cpu-limit",
+    "settings-system-agent-cargo-jobs",
+  ]) {
+    assert.match(
+      settingsSource,
+      new RegExp(`id\\s*=\\s*"${id}"`),
+      `expected agent resource control with id ${id}`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*agent_resource:/,
+    "expected agent resource controls to send the complete agent_resource object",
+  );
+  assert.match(
+    settingsSource,
+    /function parseOptionalPositiveInteger\(/,
+    "expected empty numeric inputs to resolve to automatic (null) mode",
+  );
+  assert.match(
+    settingsSource,
+    /applyAgentResourceSnapshot\(deferred\.agent_resource\)/,
+    "expected deferred backend events to reconcile agent resource state",
+  );
+  assert.match(
+    settingsSource,
+    /prioritySelect\.className\s*=\s*"settings-select"/,
+    "expected the priority select to reuse the shared settings-select primitive",
+  );
+  assert.match(
+    settingsSource,
+    /cpuInput\.className\s*=\s*"settings-input"/,
+    "expected numeric inputs to reuse the shared settings-input primitive",
+  );
+});
+
+test("app.js reconciles agent_resource from system settings events (#3813)", () => {
+  assert.match(
+    appSource,
+    /kind:\s*"system_settings",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
+    "expected deferred system_settings payload to carry agent_resource",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"system_settings_updated",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
+    "expected deferred system_settings_updated payload to carry agent_resource",
+  );
+  const applyCalls = appSource.match(/applyAgentResourceSnapshot\(event\.agent_resource\)/g) || [];
+  assert.ok(
+    applyCalls.length >= 2,
+    "expected both system_settings and system_settings_updated arms to reconcile agent_resource",
+  );
+});

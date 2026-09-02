@@ -9,13 +9,15 @@ use std::{
 };
 
 use gwt_terminal::{
-    pty::{run_start_gate_from_env, SpawnConfig},
+    pty::{run_start_gate_from_env, ProcessPolicy, ProcessPriority, SpawnConfig},
     Pane, PaneStatus, PtyHandle,
 };
 
 const HELPER_ROLE_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_HELPER";
 const TARGET_SENTINEL_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_TARGET_SENTINEL";
 const CRASH_PARENT_READY_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_CRASH_READY";
+const PRIORITY_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_REPORT";
+const PRIORITY_GRANDCHILD_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_GRANDCHILD";
 
 fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -225,4 +227,124 @@ fn pending_pane_materializes_only_after_release() {
     assert_eq!(pane.status(), &PaneStatus::Running);
     assert!(wait_for_path(&sentinel, Duration::from_secs(5)));
     drop(pane);
+}
+
+/// Report the scheduling priority of the current process in the platform's
+/// native unit: the Unix nice value, or the Windows priority class name.
+fn current_priority_report() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpriority has no memory-safety preconditions.
+        let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+        nice.to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!(
+            "{:?}",
+            gwt_core::process_tree::process_priority_class(std::process::id())
+                .expect("query current process priority class")
+        )
+    }
+}
+
+fn expected_priority_report(priority: ProcessPriority) -> String {
+    #[cfg(unix)]
+    {
+        priority.unix_nice().to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!("{:?}", priority.windows_priority_class())
+    }
+}
+
+/// Target role: record this process' priority, then spawn a grandchild with
+/// the same role so descendant inheritance is observable from the test.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the grandchild must be this exact integration-test binary"
+)]
+fn start_gate_priority_target_process() {
+    let Some(report) = std::env::var_os(PRIORITY_REPORT_ENV) else {
+        return;
+    };
+    fs::write(&report, current_priority_report()).expect("write priority report");
+    if let Some(grandchild_report) = std::env::var_os(PRIORITY_GRANDCHILD_REPORT_ENV) {
+        let status = Command::new(current_test_exe())
+            .args(exact_test_args("start_gate_priority_target_process"))
+            .env(PRIORITY_REPORT_ENV, grandchild_report)
+            .env_remove(PRIORITY_GRANDCHILD_REPORT_ENV)
+            .status()
+            .expect("spawn grandchild priority reporter");
+        assert!(status.success(), "grandchild priority reporter failed");
+    }
+}
+
+#[test]
+fn process_priority_maps_to_platform_scheduling_values() {
+    assert_eq!(ProcessPriority::Normal.unix_nice(), 0);
+    assert_eq!(ProcessPriority::BelowNormal.unix_nice(), 10);
+    assert_eq!(ProcessPriority::Idle.unix_nice(), 19);
+    let policy = ProcessPolicy {
+        priority: ProcessPriority::BelowNormal,
+        cpu_limit_percent: Some(50),
+    };
+    assert_eq!(policy.priority, ProcessPriority::BelowNormal);
+    assert_eq!(policy.cpu_limit_percent, Some(50));
+}
+
+#[test]
+fn start_gate_policy_lowers_target_and_grandchild_priority() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target_report = temp.path().join("target-priority");
+    let grandchild_report = temp.path().join("grandchild-priority");
+
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config.args = exact_test_args("start_gate_priority_target_process");
+    config.env.insert(
+        PRIORITY_REPORT_ENV.to_string(),
+        target_report.display().to_string(),
+    );
+    config.env.insert(
+        PRIORITY_GRANDCHILD_REPORT_ENV.to_string(),
+        grandchild_report.display().to_string(),
+    );
+
+    let pending = PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        gate_args_prefix(),
+        "policy-nonce",
+    )
+    .expect("spawn pending PTY");
+    pending
+        .apply_policy(ProcessPolicy {
+            priority: ProcessPriority::BelowNormal,
+            cpu_limit_percent: Some(50),
+        })
+        .expect("apply resource policy before release");
+    assert!(!target_report.exists(), "target ran before release");
+
+    let handle = pending.release().expect("release pending PTY");
+    assert!(wait_for_path(&target_report, Duration::from_secs(10)));
+    assert!(wait_for_path(&grandchild_report, Duration::from_secs(10)));
+    let expected = expected_priority_report(ProcessPriority::BelowNormal);
+    // The report file may be observed between create and write; poll briefly.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let target = fs::read_to_string(&target_report).unwrap_or_default();
+        let grandchild = fs::read_to_string(&grandchild_report).unwrap_or_default();
+        if target.trim() == expected && grandchild.trim() == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "target priority {target:?} / grandchild priority {grandchild:?}, expected {expected:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(handle);
 }

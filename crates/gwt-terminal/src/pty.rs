@@ -54,6 +54,48 @@ pub struct SpawnConfig {
     pub cwd: Option<PathBuf>,
 }
 
+/// Scheduling priority of a gated PTY process tree relative to the gwt
+/// process (SPEC #1921 Phase 86, Issue #3813).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessPriority {
+    Normal,
+    BelowNormal,
+    Idle,
+}
+
+impl ProcessPriority {
+    /// Unix nice value. Descendants inherit it across fork/exec.
+    pub fn unix_nice(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::BelowNormal => 10,
+            Self::Idle => 19,
+        }
+    }
+
+    /// Windows process priority class. Children created without an explicit
+    /// class inherit BELOW_NORMAL / IDLE from their parent.
+    #[cfg(windows)]
+    pub fn windows_priority_class(self) -> gwt_core::process_tree::ProcessPriorityClass {
+        use gwt_core::process_tree::ProcessPriorityClass;
+        match self {
+            Self::Normal => ProcessPriorityClass::Normal,
+            Self::BelowNormal => ProcessPriorityClass::BelowNormal,
+            Self::Idle => ProcessPriorityClass::Idle,
+        }
+    }
+}
+
+/// Resource policy applied to a pending PTY tree before its target runs.
+///
+/// `cpu_limit_percent` is enforced through the Windows Job Object hard cap;
+/// Unix has no equivalent tree-wide cap and relies on the nice value alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessPolicy {
+    pub priority: ProcessPriority,
+    pub cpu_limit_percent: Option<u8>,
+}
+
 const START_GATE_ENDPOINT_ENV: &str = "GWT_INTERNAL_PTY_GATE_ENDPOINT";
 const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
 const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
@@ -76,6 +118,19 @@ impl PendingPty {
     /// when it replaces itself with the target on Unix.
     pub fn process_id(&self) -> Option<u32> {
         self.handle.as_ref().and_then(PtyHandle::process_id)
+    }
+
+    /// Apply a resource policy to the blocked gate helper. The target and
+    /// every descendant inherit it once [`Self::release`] runs, so no child
+    /// can exist outside the policy. Failure leaves the target unreleased.
+    pub fn apply_policy(&self, policy: ProcessPolicy) -> Result<(), TerminalError> {
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| TerminalError::PtyIoError {
+                details: "PTY start gate is unavailable".to_string(),
+            })?;
+        handle.apply_process_policy(policy)
     }
 
     /// Release the helper to execute the target and return the live PTY.
@@ -692,6 +747,23 @@ impl PtyHandle {
     /// Drop chain from running.
     ///
     /// This must not wait for the child to reap. `portable-pty`'s Unix
+    fn apply_process_policy(&self, policy: ProcessPolicy) -> Result<(), TerminalError> {
+        let pid = self
+            .process_id()
+            .ok_or_else(|| TerminalError::PtyCreationFailed {
+                reason: "apply process policy: PTY child has no process id".to_string(),
+            })?;
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group
+            .apply_policy(pid, policy)
+            .map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: format!("apply process policy: {reason}"),
+            })
+    }
+
     /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
     /// run on the GUI event loop and freeze every `pane.*` operation during
     /// consecutive live-PTY closes (Issue #3705).
@@ -1223,6 +1295,8 @@ impl Drop for PtyHandle {
 
 #[cfg(test)]
 mod tests {
+    // `Instant` is only consumed by the Unix reaping tests below.
+    #[cfg_attr(windows, allow(unused_imports))]
     use std::{
         sync::{Arc, Mutex},
         time::{Duration, Instant},

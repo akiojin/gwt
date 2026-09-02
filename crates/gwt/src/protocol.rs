@@ -208,6 +208,51 @@ pub enum ContinueWorkOutcomeKind {
     Failed,
 }
 
+/// SPEC #1921 Phase 86 (#3813): wire shape of the agent process-tree
+/// resource policy shared by `update_system_settings` and the
+/// `system_settings` / `system_settings_updated` replies. Numeric `null`
+/// means automatic mode; zero is rejected at the settings boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResourceSettings {
+    pub enabled: bool,
+    /// `normal` / `below-normal` / `idle`.
+    pub priority: String,
+    #[serde(default)]
+    pub cpu_limit_percent: Option<u8>,
+    #[serde(default)]
+    pub cargo_jobs: Option<u32>,
+}
+
+impl AgentResourceSettings {
+    pub fn from_config(config: &gwt_config::AgentResourceConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            priority: config.priority.as_str().to_string(),
+            cpu_limit_percent: config.cpu_limit_percent,
+            cargo_jobs: config.cargo_jobs,
+        }
+    }
+
+    /// Convert to the persisted config, rejecting unknown priority names.
+    /// Range validation of the numeric fields happens in
+    /// [`gwt_config::AgentResourceConfig::validate`].
+    pub fn to_config(&self) -> Result<gwt_config::AgentResourceConfig, String> {
+        let priority =
+            gwt_config::AgentProcessPriority::parse(&self.priority).ok_or_else(|| {
+                format!(
+                "invalid agent process priority `{}`: expected `normal`, `below-normal`, or `idle`",
+                self.priority
+            )
+            })?;
+        Ok(gwt_config::AgentResourceConfig {
+            enabled: self.enabled,
+            priority,
+            cpu_limit_percent: self.cpu_limit_percent,
+            cargo_jobs: self.cargo_jobs,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -918,6 +963,10 @@ pub enum FrontendEvent {
         /// `None` leaves the persisted value unchanged.
         #[serde(default)]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): complete agent process-tree resource
+        /// policy. `None` leaves the persisted policy unchanged.
+        #[serde(default)]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -2216,6 +2265,9 @@ pub enum BackendEvent {
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): authoritative agent resource policy.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC-2963: remote Board provider sign-in state, the editable provider
     /// configuration (non-secret), and an optional status message. The settings
@@ -2279,6 +2331,10 @@ pub enum BackendEvent {
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        /// SPEC #1921 Phase 86 (#3813): persisted agent resource policy echoed
+        /// back so every open Settings window reconciles to the same values.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_resource: Option<AgentResourceSettings>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is

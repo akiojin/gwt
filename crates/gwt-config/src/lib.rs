@@ -14,7 +14,9 @@ pub mod settings;
 pub mod usage_config;
 pub mod voice_config;
 
-pub use agent_config::AgentConfig;
+pub use agent_config::{
+    AgentConfig, AgentProcessPriority, AgentResourceConfig, AgentResourceConfigError,
+};
 pub use ai_settings::AISettings;
 pub use board_config::{
     BoardConfig, BoardProviderKind, ProjectBoardConfig, SlackConfig, TeamsConfig,

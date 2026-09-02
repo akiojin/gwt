@@ -4520,6 +4520,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    resource_policy: None,
                 },
                 "session-3".to_string(),
                 "feature/demo".to_string(),
@@ -4554,6 +4555,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             }),
         );
         assert!(matches!(
@@ -5638,6 +5640,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    resource_policy: None,
                 },
                 "session-1".to_string(),
                 "feature/demo".to_string(),
@@ -5681,6 +5684,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    resource_policy: None,
                 },
                 "session-2".to_string(),
                 "feature/demo".to_string(),
@@ -5715,6 +5719,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             }),
         );
         assert!(matches!(
@@ -5737,6 +5742,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             }),
         );
         assert!(matches!(
