@@ -16,6 +16,7 @@ pub mod voice_config;
 
 pub use agent_config::{
     AgentConfig, AgentProcessPriority, AgentResourceConfig, AgentResourceConfigError,
+    AgentResourcePreset,
 };
 pub use ai_settings::AISettings;
 pub use board_config::{

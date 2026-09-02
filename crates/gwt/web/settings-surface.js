@@ -74,6 +74,10 @@ export function createSettingsSurface({
         }
         systemSettingsState.agentResource = {
           enabled: snapshot.enabled !== false,
+          preset:
+            typeof snapshot.preset === "string" && snapshot.preset
+              ? snapshot.preset
+              : "automatic",
           priority:
             typeof snapshot.priority === "string" && snapshot.priority
               ? snapshot.priority
@@ -81,8 +85,8 @@ export function createSettingsSurface({
           cpuLimitPercent: Number.isInteger(snapshot.cpu_limit_percent)
             ? snapshot.cpu_limit_percent
             : null,
-          cargoJobs: Number.isInteger(snapshot.cargo_jobs)
-            ? snapshot.cargo_jobs
+          buildJobs: Number.isInteger(snapshot.build_jobs)
+            ? snapshot.build_jobs
             : null,
         };
       }
@@ -105,12 +109,13 @@ export function createSettingsSurface({
         const resource = systemSettingsState.agentResource;
         return {
           enabled: resource.enabled !== false,
+          preset: resource.preset || "automatic",
           priority: resource.priority || "below-normal",
           cpu_limit_percent: Number.isInteger(resource.cpuLimitPercent)
             ? resource.cpuLimitPercent
             : null,
-          cargo_jobs: Number.isInteger(resource.cargoJobs)
-            ? resource.cargoJobs
+          build_jobs: Number.isInteger(resource.buildJobs)
+            ? resource.buildJobs
             : null,
         };
       }
@@ -191,9 +196,10 @@ export function createSettingsSurface({
         // Numeric null = automatic (derived from max active agents / cores).
         agentResource: {
           enabled: true,
+          preset: "automatic",
           priority: "below-normal",
           cpuLimitPercent: null,
-          cargoJobs: null,
+          buildJobs: null,
         },
         // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
@@ -689,21 +695,63 @@ export function createSettingsSurface({
         const resourceHelp = document.createElement("p");
         resourceHelp.className = "settings-help";
         resourceHelp.textContent =
-          "Enabled by default. Agent launches (and everything they spawn, such as cargo and rustc) " +
-          "run below gwt's scheduling priority; on Windows the whole tree also gets a CPU cap.";
+          "Enabled by default. Agent launches (and everything they spawn: cargo, bun, tsc, " +
+          "docker build, ...) run below gwt's scheduling priority; on Windows the whole tree " +
+          "also gets a CPU cap.";
         resourceSection.appendChild(resourceHelp);
+
+        // User feedback 2026-09-02: thresholds are hard to pick by hand, so the
+        // preset carries the intent and Custom is the only place with numbers.
+        const presetLabel = document.createElement("label");
+        presetLabel.className = "settings-label";
+        presetLabel.setAttribute("for", "settings-system-agent-preset");
+        presetLabel.textContent = "Resource preset";
+        resourceSection.appendChild(presetLabel);
+        const presetSelect = document.createElement("select");
+        presetSelect.className = "settings-select";
+        presetSelect.id = "settings-system-agent-preset";
+        for (const opt of [
+          { value: "automatic", text: "Automatic (recommended)" },
+          { value: "gui-responsiveness", text: "Prioritize GUI responsiveness" },
+          { value: "build-speed", text: "Prioritize build speed" },
+          { value: "custom", text: "Custom" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          presetSelect.appendChild(option);
+        }
+        presetSelect.value = agentResource.preset || "automatic";
+        presetSelect.disabled = !resourceEnabled;
+        presetSelect.addEventListener("change", (e) => {
+          systemSettingsState.agentResource.preset = e.target.value;
+          sendAgentResourceUpdate();
+        });
+        resourceSection.appendChild(presetSelect);
+
+        const presetHelp = document.createElement("p");
+        presetHelp.className = "settings-help";
+        presetHelp.textContent =
+          "Automatic: below-normal priority, CPU and build parallelism shared by the max " +
+          "active agents. GUI responsiveness: idle priority and half of that budget. " +
+          "Build speed: below-normal priority with no CPU cap and full parallelism.";
+        resourceSection.appendChild(presetHelp);
+
+        const customSection = createDiv("settings-section");
+        customSection.dataset.role = "agent-resource-custom";
+        customSection.hidden = agentResource.preset !== "custom";
 
         const priorityLabel = document.createElement("label");
         priorityLabel.className = "settings-label";
         priorityLabel.setAttribute("for", "settings-system-agent-priority");
         priorityLabel.textContent = "Agent process priority";
-        resourceSection.appendChild(priorityLabel);
+        customSection.appendChild(priorityLabel);
         const prioritySelect = document.createElement("select");
         prioritySelect.className = "settings-select";
         prioritySelect.id = "settings-system-agent-priority";
         for (const opt of [
           { value: "normal", text: "Normal (same as gwt)" },
-          { value: "below-normal", text: "Below normal (default)" },
+          { value: "below-normal", text: "Below normal" },
           { value: "idle", text: "Idle" },
         ]) {
           const option = document.createElement("option");
@@ -717,13 +765,13 @@ export function createSettingsSurface({
           systemSettingsState.agentResource.priority = e.target.value;
           sendAgentResourceUpdate();
         });
-        resourceSection.appendChild(prioritySelect);
+        customSection.appendChild(prioritySelect);
 
         const cpuLabel = document.createElement("label");
         cpuLabel.className = "settings-label";
         cpuLabel.setAttribute("for", "settings-system-agent-cpu-limit");
         cpuLabel.textContent = "CPU limit per agent (%, Windows)";
-        resourceSection.appendChild(cpuLabel);
+        customSection.appendChild(cpuLabel);
         const cpuInput = document.createElement("input");
         cpuInput.type = "number";
         cpuInput.className = "settings-input";
@@ -749,46 +797,48 @@ export function createSettingsSurface({
           systemSettingsState.agentResource.cpuLimitPercent = next;
           sendAgentResourceUpdate();
         });
-        resourceSection.appendChild(cpuInput);
+        customSection.appendChild(cpuInput);
 
-        const cargoLabel = document.createElement("label");
-        cargoLabel.className = "settings-label";
-        cargoLabel.setAttribute("for", "settings-system-agent-cargo-jobs");
-        cargoLabel.textContent = "Cargo build jobs per agent";
-        resourceSection.appendChild(cargoLabel);
-        const cargoInput = document.createElement("input");
-        cargoInput.type = "number";
-        cargoInput.className = "settings-input";
-        cargoInput.id = "settings-system-agent-cargo-jobs";
-        cargoInput.min = "1";
-        cargoInput.step = "1";
-        cargoInput.placeholder = "Automatic";
-        cargoInput.value = Number.isInteger(agentResource.cargoJobs)
-          ? String(agentResource.cargoJobs)
+        const jobsLabel = document.createElement("label");
+        jobsLabel.className = "settings-label";
+        jobsLabel.setAttribute("for", "settings-system-agent-build-jobs");
+        jobsLabel.textContent = "Build parallelism per agent (jobs)";
+        customSection.appendChild(jobsLabel);
+        const jobsInput = document.createElement("input");
+        jobsInput.type = "number";
+        jobsInput.className = "settings-input";
+        jobsInput.id = "settings-system-agent-build-jobs";
+        jobsInput.min = "1";
+        jobsInput.step = "1";
+        jobsInput.placeholder = "Automatic";
+        jobsInput.value = Number.isInteger(agentResource.buildJobs)
+          ? String(agentResource.buildJobs)
           : "";
-        cargoInput.disabled = !resourceEnabled;
-        cargoInput.addEventListener("change", (e) => {
+        jobsInput.disabled = !resourceEnabled;
+        jobsInput.addEventListener("change", (e) => {
           const next = parseOptionalPositiveInteger(e.target.value);
           if (next === undefined) {
             rejectAgentResourceInput(
-              "Cargo build jobs must be a whole number of at least 1, or empty for automatic.",
+              "Build parallelism must be a whole number of at least 1, or empty for automatic.",
               e.target,
-              systemSettingsState.agentResource.cargoJobs,
+              systemSettingsState.agentResource.buildJobs,
             );
             return;
           }
-          systemSettingsState.agentResource.cargoJobs = next;
+          systemSettingsState.agentResource.buildJobs = next;
           sendAgentResourceUpdate();
         });
-        resourceSection.appendChild(cargoInput);
+        customSection.appendChild(jobsInput);
 
-        const resourceLimitsHelp = document.createElement("p");
-        resourceLimitsHelp.className = "settings-help";
-        resourceLimitsHelp.textContent =
+        const customHelp = document.createElement("p");
+        customHelp.className = "settings-help";
+        customHelp.textContent =
           "Leave a field empty for automatic values: CPU limit = 100 / max active agents, " +
-          "cargo jobs = logical cores / max active agents. An explicit CARGO_BUILD_JOBS in " +
-          "the launch environment always wins.";
-        resourceSection.appendChild(resourceLimitsHelp);
+          "parallelism = logical cores / max active agents. The parallelism is handed to " +
+          "build tools through their environment (CARGO_BUILD_JOBS, MAKEFLAGS); an explicit " +
+          "value already in the launch environment always wins.";
+        customSection.appendChild(customHelp);
+        resourceSection.appendChild(customSection);
 
         // SPEC-2959/2963: Board provider selector. `local` keeps the Board
         // offline; `slack` / `teams` are network-backed and selectable. Picking

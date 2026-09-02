@@ -812,9 +812,10 @@ mod tests {
         let path = tmp.path().join("config.toml");
         let resource = gwt_config::AgentResourceConfig {
             enabled: true,
+            preset: gwt_config::AgentResourcePreset::Custom,
             priority: gwt_config::AgentProcessPriority::Idle,
             cpu_limit_percent: Some(40),
-            cargo_jobs: Some(2),
+            build_jobs: Some(2),
         };
 
         let snapshot = write_settings(&path, "en", None, None, Some(&resource)).unwrap();
@@ -835,6 +836,7 @@ mod tests {
         write_settings(&path, "ja", None, None, None).unwrap();
 
         let invalid = gwt_config::AgentResourceConfig {
+            preset: gwt_config::AgentResourcePreset::Custom,
             cpu_limit_percent: Some(0),
             ..gwt_config::AgentResourceConfig::default()
         };
@@ -869,7 +871,7 @@ mod tests {
         ));
 
         let event: FrontendEvent = serde_json::from_str(
-            r#"{"kind":"update_system_settings","language":"en","agent_resource":{"enabled":true,"priority":"idle","cpu_limit_percent":null,"cargo_jobs":3}}"#,
+            r#"{"kind":"update_system_settings","language":"en","agent_resource":{"enabled":true,"preset":"custom","priority":"idle","cpu_limit_percent":null,"build_jobs":3}}"#,
         )
         .unwrap();
         let FrontendEvent::UpdateSystemSettings {
@@ -880,18 +882,28 @@ mod tests {
             panic!("expected agent_resource");
         };
         let config = wire.to_config().unwrap();
+        assert_eq!(config.preset, gwt_config::AgentResourcePreset::Custom);
         assert_eq!(config.priority, gwt_config::AgentProcessPriority::Idle);
         assert_eq!(config.cpu_limit_percent, None);
-        assert_eq!(config.cargo_jobs, Some(3));
+        assert_eq!(config.build_jobs, Some(3));
         assert_eq!(AgentResourceSettings::from_config(&config), wire);
 
         let unknown = AgentResourceSettings {
             enabled: true,
+            preset: "automatic".to_string(),
             priority: "realtime".to_string(),
             cpu_limit_percent: None,
-            cargo_jobs: None,
+            build_jobs: None,
         };
         assert!(unknown.to_config().is_err());
+        let unknown_preset = AgentResourceSettings {
+            enabled: true,
+            preset: "turbo".to_string(),
+            priority: "below-normal".to_string(),
+            cpu_limit_percent: None,
+            build_jobs: None,
+        };
+        assert!(unknown_preset.to_config().is_err());
 
         let reply = get_event(&tempdir().unwrap().path().join("config.toml"));
         let json = serde_json::to_value(&reply).unwrap();
@@ -899,8 +911,9 @@ mod tests {
             json["agent_resource"]["enabled"],
             serde_json::Value::Bool(true)
         );
+        assert_eq!(json["agent_resource"]["preset"], "automatic");
         assert_eq!(json["agent_resource"]["priority"], "below-normal");
         assert!(json["agent_resource"]["cpu_limit_percent"].is_null());
-        assert!(json["agent_resource"]["cargo_jobs"].is_null());
+        assert!(json["agent_resource"]["build_jobs"].is_null());
     }
 }

@@ -116,8 +116,8 @@ pub struct ProcessLaunch {
 }
 
 /// SPEC #1921 Phase 86 (#3813): resolve the AgentBootstrap resource policy
-/// for a launch whose repository is `repo_path`, injecting `CARGO_BUILD_JOBS`
-/// into `env` when the effective environment lacks one. Settings come from
+/// for a launch whose repository is `repo_path`, handing the build
+/// parallelism to build tools through `env` where it is not already pinned. Settings come from
 /// the global profile config; `max_active` from the repository's persisted
 /// Issue Monitor preferences (missing preferences count as one agent).
 fn resolve_agent_resource_launch(
@@ -145,7 +145,7 @@ fn resolve_agent_resource_launch(
         logical_cores,
     )
     .map_err(|error| format!("agent resource policy: {error}"))?;
-    gwt::agent_resource_policy::inject_cargo_build_jobs(env, resolved.cargo_jobs);
+    gwt::agent_resource_policy::inject_build_parallelism_env(env, resolved.build_jobs);
     Ok(resolved.process_policy)
 }
 
@@ -4430,8 +4430,8 @@ impl AppRuntime {
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
-            // cargo budget before Docker materializes the exec environment so
-            // container agents receive the same `CARGO_BUILD_JOBS`.
+            // build parallelism before Docker materializes the exec environment
+            // so container agents receive the same budget variables.
             let resource_policy = resolve_agent_resource_launch(
                 &profile_config_path,
                 Path::new(&project_root),

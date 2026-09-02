@@ -60,41 +60,98 @@ impl AgentProcessPriority {
     }
 }
 
+/// Resource preset selected in Settings > System (SPEC #1921 Phase 86,
+/// user feedback 2026-09-02). Presets describe the intent; the numeric budget
+/// is derived at launch. `Custom` exposes the explicit fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentResourcePreset {
+    /// Below-normal priority, CPU and build parallelism divided by the
+    /// repository's max active agents.
+    #[default]
+    Automatic,
+    /// Idle priority and half of the automatic CPU / parallelism budget.
+    GuiResponsiveness,
+    /// Below-normal priority with no CPU cap and full parallelism.
+    BuildSpeed,
+    /// Explicit priority / CPU limit / build parallelism.
+    Custom,
+}
+
+impl AgentResourcePreset {
+    /// Every preset in UI order.
+    pub const ALL: [Self; 4] = [
+        Self::Automatic,
+        Self::GuiResponsiveness,
+        Self::BuildSpeed,
+        Self::Custom,
+    ];
+
+    /// Stable serialized name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::GuiResponsiveness => "gui-responsiveness",
+            Self::BuildSpeed => "build-speed",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// Parse a serialized name, tolerating surrounding whitespace and case.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "automatic" => Some(Self::Automatic),
+            "gui-responsiveness" => Some(Self::GuiResponsiveness),
+            "build-speed" => Some(Self::BuildSpeed),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
 /// Validation failure for [`AgentResourceConfig`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentResourceConfigError {
     #[error("agent CPU limit must be between 1 and 100 percent, got {0}")]
     CpuLimitOutOfRange(u8),
-    #[error("agent cargo jobs must be at least 1")]
-    CargoJobsZero,
+    #[error("agent build parallelism must be at least 1")]
+    BuildJobsZero,
 }
 
 /// Agent process-tree resource policy (SPEC #1921 Phase 86 FR-235).
 ///
-/// `None` numeric values mean automatic derivation from the repository's
-/// Issue Monitor `max_active` and the host logical-core count. Zero is
-/// rejected by [`Self::validate`] rather than treated as a sentinel.
+/// `priority`, `cpu_limit_percent`, and `build_jobs` only take effect with
+/// the `Custom` preset; `None` numeric values there mean automatic derivation
+/// from the repository's Issue Monitor `max_active` and the host logical-core
+/// count. Zero is rejected by [`Self::validate`] rather than treated as a
+/// sentinel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentResourceConfig {
-    /// Master switch. Disabled means no priority, CPU cap, or cargo change.
+    /// Master switch. Disabled means no priority, CPU cap, or parallelism
+    /// change.
     pub enabled: bool,
-    /// Scheduling priority for the whole agent process tree.
+    /// Intent-level preset; `Custom` enables the explicit fields below.
+    pub preset: AgentResourcePreset,
+    /// Scheduling priority for the whole agent process tree (Custom).
     pub priority: AgentProcessPriority,
-    /// Windows Job CPU hard cap in percent (1..=100); `None` is automatic.
+    /// Windows Job CPU hard cap in percent (1..=100); `None` is automatic
+    /// (Custom).
     pub cpu_limit_percent: Option<u8>,
-    /// `CARGO_BUILD_JOBS` injected into the launch environment; `None` is
-    /// automatic.
-    pub cargo_jobs: Option<u32>,
+    /// Build parallelism per agent, handed to every build tool that reads a
+    /// job count from the environment (`CARGO_BUILD_JOBS`, `MAKEFLAGS`, ...);
+    /// `None` is automatic (Custom).
+    pub build_jobs: Option<u32>,
 }
 
 impl Default for AgentResourceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            preset: AgentResourcePreset::Automatic,
             priority: AgentProcessPriority::BelowNormal,
             cpu_limit_percent: None,
-            cargo_jobs: None,
+            build_jobs: None,
         }
     }
 }
@@ -108,8 +165,8 @@ impl AgentResourceConfig {
                 return Err(AgentResourceConfigError::CpuLimitOutOfRange(percent));
             }
         }
-        if self.cargo_jobs == Some(0) {
-            return Err(AgentResourceConfigError::CargoJobsZero);
+        if self.build_jobs == Some(0) {
+            return Err(AgentResourceConfigError::BuildJobsZero);
         }
         Ok(())
     }
@@ -162,12 +219,32 @@ mod tests {
     }
 
     #[test]
-    fn resource_policy_defaults_to_enabled_below_normal_automatic() {
+    fn resource_policy_defaults_to_enabled_automatic_preset() {
         let config = AgentConfig::default();
         assert!(config.resource.enabled);
+        assert_eq!(config.resource.preset, AgentResourcePreset::Automatic);
         assert_eq!(config.resource.priority, AgentProcessPriority::BelowNormal);
         assert_eq!(config.resource.cpu_limit_percent, None);
-        assert_eq!(config.resource.cargo_jobs, None);
+        assert_eq!(config.resource.build_jobs, None);
+    }
+
+    #[test]
+    fn resource_preset_names_are_stable_and_parse_case_insensitively() {
+        assert_eq!(AgentResourcePreset::Automatic.as_str(), "automatic");
+        assert_eq!(
+            AgentResourcePreset::GuiResponsiveness.as_str(),
+            "gui-responsiveness"
+        );
+        assert_eq!(AgentResourcePreset::BuildSpeed.as_str(), "build-speed");
+        assert_eq!(AgentResourcePreset::Custom.as_str(), "custom");
+        assert_eq!(
+            AgentResourcePreset::parse(" Build-Speed "),
+            Some(AgentResourcePreset::BuildSpeed)
+        );
+        assert_eq!(AgentResourcePreset::parse("turbo"), None);
+        let loaded: AgentResourceConfig =
+            toml::from_str("preset = \"gui-responsiveness\"\n").unwrap();
+        assert_eq!(loaded.preset, AgentResourcePreset::GuiResponsiveness);
     }
 
     #[test]
@@ -187,14 +264,17 @@ auto_install_deps = true
         let config = AgentConfig {
             resource: AgentResourceConfig {
                 enabled: true,
+                preset: AgentResourcePreset::Custom,
                 priority: AgentProcessPriority::Idle,
                 cpu_limit_percent: Some(40),
-                cargo_jobs: Some(3),
+                build_jobs: Some(3),
             },
             ..AgentConfig::default()
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("priority = \"idle\""), "{toml_str}");
+        assert!(toml_str.contains("preset = \"custom\""), "{toml_str}");
+        assert!(toml_str.contains("build_jobs = 3"), "{toml_str}");
         let loaded: AgentConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(loaded.resource, config.resource);
 
@@ -206,16 +286,17 @@ priority = \"normal\"
         )
         .unwrap();
         assert!(!automatic.resource.enabled);
+        assert_eq!(automatic.resource.preset, AgentResourcePreset::Automatic);
         assert_eq!(automatic.resource.priority, AgentProcessPriority::Normal);
         assert_eq!(automatic.resource.cpu_limit_percent, None);
-        assert_eq!(automatic.resource.cargo_jobs, None);
+        assert_eq!(automatic.resource.build_jobs, None);
     }
 
     #[test]
     fn resource_policy_validation_rejects_zero_and_out_of_range_values() {
         let valid = AgentResourceConfig {
             cpu_limit_percent: Some(1),
-            cargo_jobs: Some(1),
+            build_jobs: Some(1),
             ..AgentResourceConfig::default()
         };
         assert!(valid.validate().is_ok());
@@ -233,7 +314,7 @@ priority = \"normal\"
             assert!(invalid.validate().is_err(), "cpu {cpu} must be rejected");
         }
         let zero_jobs = AgentResourceConfig {
-            cargo_jobs: Some(0),
+            build_jobs: Some(0),
             ..AgentResourceConfig::default()
         };
         assert!(zero_jobs.validate().is_err());

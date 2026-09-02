@@ -133,53 +133,62 @@ test.describe.serial("Agent process-tree resource isolation (live backend)", () 
     await openSystemSettings(page);
     const panel = page.locator("[data-settings-panel='system']").first();
     const enabled = panel.locator("#settings-system-agent-resource-enabled");
-    const priority = panel.locator("#settings-system-agent-priority");
-    const cpu = panel.locator("#settings-system-agent-cpu-limit");
-    const cargo = panel.locator("#settings-system-agent-cargo-jobs");
+    const preset = panel.locator("#settings-system-agent-preset");
+    const custom = panel.locator("[data-role='agent-resource-custom']");
+    const status = () => panel.locator("[data-role='system-settings-status']");
 
     await expect(enabled).toBeVisible();
     await expect(enabled).toBeChecked();
-    await expect(priority).toHaveClass(/settings-select/);
-    await expect(priority).toHaveValue("below-normal");
-    await expect(cpu).toHaveClass(/settings-input/);
-    await expect(cpu).toHaveAttribute("placeholder", "Automatic");
-    await expect(cargo).toHaveClass(/settings-input/);
-    await expect(cargo).toHaveAttribute("placeholder", "Automatic");
+    await expect(preset).toHaveClass(/settings-select/);
+    await expect(preset).toHaveValue("automatic");
+    await expect(custom).toBeHidden();
 
     await testInfo.attach(`settings-system-${testInfo.project.name}`, {
       body: await page.screenshot({ fullPage: false }),
       contentType: "image/png",
     });
 
-    // Explicit value round-trips through the backend echo.
-    await cargo.fill("4");
-    await cargo.dispatchEvent("change");
-    await cargo.blur();
-    await expect(panel.locator("[data-role='system-settings-status']")).toHaveText(
-      "Saved system settings.",
-      { timeout: 20_000 },
-    );
-    await expect(panel.locator("#settings-system-agent-cargo-jobs")).toHaveValue("4");
+    // A preset round-trips through the backend echo.
+    await preset.selectOption("gui-responsiveness");
+    await preset.blur();
+    await expect(status()).toHaveText("Saved system settings.", { timeout: 20_000 });
+    await expect(panel.locator("#settings-system-agent-preset")).toHaveValue("gui-responsiveness");
+    await expect(panel.locator("[data-role='agent-resource-custom']")).toBeHidden();
+
+    // Custom reveals the explicit controls; an explicit value round-trips.
+    await panel.locator("#settings-system-agent-preset").selectOption("custom");
+    await panel.locator("#settings-system-agent-preset").blur();
+    await expect(status()).toHaveText("Saved system settings.", { timeout: 20_000 });
+    await expect(panel.locator("[data-role='agent-resource-custom']")).toBeVisible();
+    const jobs = panel.locator("#settings-system-agent-build-jobs");
+    await expect(jobs).toHaveClass(/settings-input/);
+    await expect(jobs).toHaveAttribute("placeholder", "Automatic");
+    await jobs.fill("4");
+    await jobs.dispatchEvent("change");
+    await jobs.blur();
+    await expect(status()).toHaveText("Saved system settings.", { timeout: 20_000 });
+    await expect(panel.locator("#settings-system-agent-build-jobs")).toHaveValue("4");
 
     // Empty input returns to automatic mode (null) rather than a magic zero.
-    const cargoAgain = panel.locator("#settings-system-agent-cargo-jobs");
-    await cargoAgain.fill("");
-    await cargoAgain.dispatchEvent("change");
-    await cargoAgain.blur();
-    await expect(panel.locator("[data-role='system-settings-status']")).toHaveText(
-      "Saved system settings.",
-      { timeout: 20_000 },
-    );
-    await expect(panel.locator("#settings-system-agent-cargo-jobs")).toHaveValue("");
+    const jobsAgain = panel.locator("#settings-system-agent-build-jobs");
+    await jobsAgain.fill("");
+    await jobsAgain.dispatchEvent("change");
+    await jobsAgain.blur();
+    await expect(status()).toHaveText("Saved system settings.", { timeout: 20_000 });
+    await expect(panel.locator("#settings-system-agent-build-jobs")).toHaveValue("");
 
     // Out-of-range input is rejected locally and never persisted.
     const cpuInput = panel.locator("#settings-system-agent-cpu-limit");
     await cpuInput.fill("0");
     await cpuInput.dispatchEvent("change");
-    await expect(panel.locator("[data-role='system-settings-status']")).toContainText(
-      "CPU limit must be a whole number between 1 and 100",
-    );
+    await expect(status()).toContainText("CPU limit must be a whole number between 1 and 100");
     await expect(panel.locator("#settings-system-agent-cpu-limit")).toHaveValue("");
+
+    // Back to the recommended preset so the latency test starts from defaults.
+    await panel.locator("#settings-system-agent-preset").selectOption("automatic");
+    await panel.locator("#settings-system-agent-preset").blur();
+    await expect(status()).toHaveText("Saved system settings.", { timeout: 20_000 });
+    await expect(panel.locator("[data-role='agent-resource-custom']")).toBeHidden();
   });
 
   test("N=0/1/3 agent full builds keep UI request/reply latency within budget", async ({

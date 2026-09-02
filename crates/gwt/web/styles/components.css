@@ -4643,6 +4643,13 @@ button.workspace-board-ref:focus-visible {
   max-width: 520px;
 }
 
+/* SPEC #1921 Phase 86 (#3813): the Custom-only resource controls are
+   toggled with the `hidden` attribute, which the flex display above would
+   otherwise override. */
+:root[data-theme] .settings-section[hidden] {
+  display: none;
+}
+
 :root[data-theme] .settings-section + .settings-section {
   margin-top: var(--space-3);
 }

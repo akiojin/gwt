@@ -538,14 +538,15 @@ test("switchSettingsTab toggles aria-selected and hidden together", () => {
 test("renderSystemPanel exposes agent process-tree resource controls (#3813)", () => {
   assert.match(
     settingsSource,
-    /agentResource:\s*\{\s*enabled:\s*true,\s*priority:\s*"below-normal",\s*cpuLimitPercent:\s*null,\s*cargoJobs:\s*null,?\s*\}/,
-    "expected agent resource UI state to default to enabled / below-normal / automatic",
+    /agentResource:\s*\{\s*enabled:\s*true,\s*preset:\s*"automatic",\s*priority:\s*"below-normal",\s*cpuLimitPercent:\s*null,\s*buildJobs:\s*null,?\s*\}/,
+    "expected agent resource UI state to default to enabled / automatic preset",
   );
   for (const id of [
     "settings-system-agent-resource-enabled",
+    "settings-system-agent-preset",
     "settings-system-agent-priority",
     "settings-system-agent-cpu-limit",
-    "settings-system-agent-cargo-jobs",
+    "settings-system-agent-build-jobs",
   ]) {
     assert.match(
       settingsSource,
@@ -567,6 +568,39 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
     settingsSource,
     /applyAgentResourceSnapshot\(deferred\.agent_resource\)/,
     "expected deferred backend events to reconcile agent resource state",
+  );
+  assert.match(
+    settingsSource,
+    /presetSelect\.className\s*=\s*"settings-select"/,
+    "expected the preset select to reuse the shared settings-select primitive",
+  );
+  for (const [value, label] of [
+    ["automatic", "Automatic (recommended)"],
+    ["gui-responsiveness", "Prioritize GUI responsiveness"],
+    ["build-speed", "Prioritize build speed"],
+    ["custom", "Custom"],
+  ]) {
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(
+      settingsSource,
+      new RegExp(`value:\\s*"${value}",\\s*text:\\s*"${escapedLabel}"`),
+      `expected preset option ${value} labelled "${label}"`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /customSection\.hidden\s*=\s*agentResource\.preset\s*!==\s*"custom"/,
+    "expected numeric / priority controls to be shown only for the Custom preset",
+  );
+  assert.match(
+    componentsCss,
+    /\.settings-section\[hidden\]\s*\{\s*display:\s*none;/,
+    "expected the hidden attribute to win over the flex display of settings sections",
+  );
+  assert.doesNotMatch(
+    settingsSource,
+    /Cargo build jobs/,
+    "expected the parallelism control to use generic build vocabulary, not cargo",
   );
   assert.match(
     settingsSource,

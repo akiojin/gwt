@@ -215,28 +215,46 @@ pub enum ContinueWorkOutcomeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentResourceSettings {
     pub enabled: bool,
-    /// `normal` / `below-normal` / `idle`.
+    /// `automatic` / `gui-responsiveness` / `build-speed` / `custom`.
+    /// Older senders omit it, which keeps the automatic preset.
+    #[serde(default = "default_agent_resource_preset")]
+    pub preset: String,
+    /// `normal` / `below-normal` / `idle` (Custom preset).
     pub priority: String,
     #[serde(default)]
     pub cpu_limit_percent: Option<u8>,
+    /// Build parallelism per agent (Custom preset).
     #[serde(default)]
-    pub cargo_jobs: Option<u32>,
+    pub build_jobs: Option<u32>,
+}
+
+fn default_agent_resource_preset() -> String {
+    gwt_config::AgentResourcePreset::Automatic
+        .as_str()
+        .to_string()
 }
 
 impl AgentResourceSettings {
     pub fn from_config(config: &gwt_config::AgentResourceConfig) -> Self {
         Self {
             enabled: config.enabled,
+            preset: config.preset.as_str().to_string(),
             priority: config.priority.as_str().to_string(),
             cpu_limit_percent: config.cpu_limit_percent,
-            cargo_jobs: config.cargo_jobs,
+            build_jobs: config.build_jobs,
         }
     }
 
-    /// Convert to the persisted config, rejecting unknown priority names.
-    /// Range validation of the numeric fields happens in
+    /// Convert to the persisted config, rejecting unknown preset / priority
+    /// names. Range validation of the numeric fields happens in
     /// [`gwt_config::AgentResourceConfig::validate`].
     pub fn to_config(&self) -> Result<gwt_config::AgentResourceConfig, String> {
+        let preset = gwt_config::AgentResourcePreset::parse(&self.preset).ok_or_else(|| {
+            format!(
+                "invalid agent resource preset `{}`: expected `automatic`, `gui-responsiveness`, `build-speed`, or `custom`",
+                self.preset
+            )
+        })?;
         let priority =
             gwt_config::AgentProcessPriority::parse(&self.priority).ok_or_else(|| {
                 format!(
@@ -246,9 +264,10 @@ impl AgentResourceSettings {
             })?;
         Ok(gwt_config::AgentResourceConfig {
             enabled: self.enabled,
+            preset,
             priority,
             cpu_limit_percent: self.cpu_limit_percent,
-            cargo_jobs: self.cargo_jobs,
+            build_jobs: self.build_jobs,
         })
     }
 }
