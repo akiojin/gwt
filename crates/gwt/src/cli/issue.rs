@@ -18,6 +18,35 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
 }
 
+/// Issue #3873: refuse to write an autonomous-candidate body the Issue Monitor
+/// cannot read.
+///
+/// An Issue carrying the `auto-merge` label opts into autonomous execution, and
+/// the Monitor only admits it when `classify_acceptance_criteria` finds a
+/// machine-checkable block. Without this guard the write succeeds and the Issue
+/// silently lands in `needs_human` on the next scan. The guard reuses the
+/// Monitor's classifier verbatim so the two can never disagree (AC-3); an Issue
+/// without the label keeps today's behaviour.
+pub(crate) fn guard_autonomous_acceptance_block(
+    labels: &[String],
+    body: &str,
+) -> Result<(), SpecOpsError> {
+    let opted_in = labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(crate::issue_monitor::AUTO_MERGE_LABEL));
+    if !opted_in || crate::issue_monitor_gate::classify_acceptance_criteria(body).machine_checkable
+    {
+        return Ok(());
+    }
+    Err(SpecOpsError::Validation(format!(
+        "the `{}` label opts this Issue into autonomous execution, but the body has no \
+         machine-checkable acceptance criteria block; add a `## 受け入れ基準` (or \
+         `## Acceptance Criteria`) heading followed by `- [ ] AC-1: ...` checklist items \
+         (`## 成功基準` is not scanned), or drop the label",
+        crate::issue_monitor::AUTO_MERGE_LABEL
+    )))
+}
+
 pub(super) fn parse(args: &[String]) -> Result<IssueCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
@@ -101,6 +130,7 @@ pub(super) fn run<E: CliEnv>(
             body,
             labels,
         } => {
+            guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
                 env.repo_path(),
@@ -4266,5 +4296,75 @@ mod tests {
         assert_eq!(persisted.updated_at, remote.updated_at);
         assert_eq!(persisted.comments[0].body, remote.comments[0].body);
         assert!(!cache.validation_receipt_path(remote.number).exists());
+    }
+
+    // Issue #3873 AC-1: `issue.create` with the auto-merge label refuses a
+    // body the Monitor's classifier cannot read, instead of creating an Issue
+    // that silently lands in needs_human.
+    #[test]
+    fn issue_create_with_auto_merge_refuses_body_without_acceptance_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let err = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "fix: something".to_string(),
+                body: "## 成功基準\n- [ ] AC-1: hidden under the wrong heading\n".to_string(),
+                labels: vec!["auto-merge".to_string()],
+            },
+            &mut out,
+        )
+        .expect_err("auto-merge without a machine-checkable AC block must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("受け入れ基準") && message.contains("AC-"),
+            "error must tell the author the required block shape, got: {message}"
+        );
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|c| c.contains("create_issue")),
+            "no Issue may be created when validation fails: {:?}",
+            env.client.call_log()
+        );
+    }
+
+    #[test]
+    fn issue_create_with_auto_merge_accepts_classifier_readable_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "fix: something".to_string(),
+                body: "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n".to_string(),
+                labels: vec!["Auto-Merge".to_string()],
+            },
+            &mut out,
+        )
+        .expect("well-formed AC block is accepted");
+        assert_eq!(code, 0);
+        assert!(out.contains("created issue #"), "out = {out}");
+    }
+
+    #[test]
+    fn issue_create_without_auto_merge_does_not_require_acceptance_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "docs: typo".to_string(),
+                body: "free text, no criteria".to_string(),
+                labels: vec!["documentation".to_string()],
+            },
+            &mut out,
+        )
+        .expect("plain issues keep today's behaviour");
+        assert_eq!(code, 0);
     }
 }

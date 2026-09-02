@@ -2670,6 +2670,25 @@ impl AppRuntime {
         window_id: String,
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
+        // Issue #3851: an Err result is produced before this handler spawns a
+        // PTY. If this window already owns a live agent runtime, the result is
+        // necessarily from an older preparation attempt and must not consume
+        // the current launch context or overwrite the live pane. Failures
+        // after PTY spawn enter through the Ok arm below and remain visible.
+        let stale_pre_pty_failure = result.is_err()
+            && self.active_agent_sessions.contains_key(&window_id)
+            && self.runtimes.contains_key(&window_id)
+            && self.window_status(&window_id).is_some_and(|status| {
+                !matches!(
+                    status,
+                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                )
+            });
+        if stale_pre_pty_failure {
+            self.inflight_launches
+                .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+            return Vec::new();
+        }
         let is_continue_work = self.pending_continue_work.contains_key(&window_id);
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let mut launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
