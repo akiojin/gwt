@@ -1,9 +1,12 @@
-// SPEC-3671 P3 — the Issue window's read-only agent preview pane.
+// Issue #3884 (SPEC-3671 follow-up, SPEC #3885 Phase 1) — the Issue row's inline
+// terminal.
 //
-// The pane mirrors the agent working on the selected Issue. It attaches no input
-// path (FR-008), shows exactly one terminal at a time (FR-009), offers Windowize as
-// its only control (FR-010), and never opens a canvas window when the agent errors
-// or waits for a human ruling (FR-011).
+// Every Issue row whose agent runs as an `issue_preview` placement mounts that
+// agent's terminal inline, whether or not the row is selected (AC-6). The terminal
+// is interactive — it is the same shared runtime the canvas uses, so keystrokes
+// reach the PTY — and one window id is only ever mounted in one container, which
+// is what rules out double input after Windowize (AC-7). Windowize stays the only
+// hand-off to the canvas, and an errored / waiting agent is badged, never opened.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -193,76 +196,120 @@ test("issuePreviewWindowsForIssue binds previews to their host Issue window", as
   assert.deepEqual(issuePreviewWindowsForIssue(windows, "win-1", 9999), []);
 });
 
-// FR-007 / FR-008.
-test("selecting an Issue mirrors its agent read-only in the right pane", async (t) => {
-  const fixture = await makeFixture({ workspaceWindows: [previewWindow("agent-1", 3671)] });
-  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
-
-  const preview = fixture.body.querySelector(".issue-preview");
-  assert.ok(preview, "the selected Issue's agent is mirrored in the detail pane");
-  assert.equal(preview.dataset.windowId, "agent-1");
-  assert.equal(preview.querySelector(".issue-preview-title").textContent, "Agent agent-1");
-  assert.equal(preview.querySelector(".issue-preview-meta").textContent, "codex");
-
-  assert.equal(fixture.terminalMounts.length, 1);
-  assert.equal(fixture.terminalMounts[0].id, "agent-1");
-  assert.deepEqual(
-    fixture.terminalMounts[0].options,
-    { readOnly: true },
-    "FR-008: the mirror mounts read-only so no input path is attached",
-  );
-  assert.equal(
-    fixture.terminalMounts[0].root,
-    preview.querySelector(".issue-preview-terminal .terminal-root"),
-  );
-});
-
-// FR-009.
-test("only one agent terminal is mirrored at a time", async (t) => {
+// AC-6: the inline terminal is mounted per row and does not depend on selection.
+test("every launched Issue row mounts its agent terminal inline without selection", async (t) => {
   const fixture = await makeFixture({
-    workspaceWindows: [
-      previewWindow("agent-1", 3671),
-      previewWindow("agent-2", 3672),
-      previewWindow("agent-3", 3673),
-    ],
+    workspaceWindows: [previewWindow("agent-1", 3671), previewWindow("agent-2", 3672)],
   });
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   applyEntries(
     fixture.surface,
     fixture.load,
     [knowledgeEntry(3671), knowledgeEntry(3672), knowledgeEntry(3673)],
-    3671,
+    null,
   );
 
-  assert.equal(fixture.body.querySelectorAll(".issue-preview").length, 1);
-  assert.equal(fixture.body.querySelector(".issue-preview").dataset.windowId, "agent-1");
-
-  fixture.body.querySelector('[data-issue-number="3672"]').click();
-
+  const inlineTerminals = [...fixture.body.querySelectorAll(".issue-inline-terminal")];
+  assert.deepEqual(
+    inlineTerminals.map((section) => section.dataset.windowId),
+    ["agent-1", "agent-2"],
+    "one inline terminal per running agent, none for the Issue without an agent",
+  );
+  for (const section of inlineTerminals) {
+    const row = section.closest(".knowledge-row");
+    assert.ok(row, "the terminal lives inside its Issue row");
+    assert.equal(row.dataset.issueNumber, section.dataset.issueNumber);
+    assert.equal(
+      section.closest(".knowledge-row-select"),
+      null,
+      "the terminal is not nested inside the row's select button",
+    );
+  }
   assert.equal(
-    fixture.body.querySelectorAll(".issue-preview").length,
-    1,
-    "switching selection replaces the mirror instead of stacking terminals",
+    fixture.body.querySelector(".knowledge-detail-pane .issue-inline-terminal"),
+    null,
+    "the detail pane no longer hosts a terminal",
   );
-  assert.equal(fixture.body.querySelector(".issue-preview").dataset.windowId, "agent-2");
+  assert.equal(fixture.body.querySelector(".issue-preview"), null, "the old mirror is gone");
+
+  const first = inlineTerminals[0];
+  assert.equal(first.querySelector(".issue-inline-terminal-title").textContent, "Agent agent-1");
+  assert.equal(first.querySelector(".issue-inline-terminal-meta").textContent, "codex");
+  assert.doesNotMatch(first.textContent, /preview/i, "UI copy never says preview");
+
   assert.deepEqual(
     fixture.terminalMounts.map((mount) => mount.id),
     ["agent-1", "agent-2"],
   );
+  for (const mount of fixture.terminalMounts) {
+    assert.equal(
+      mount.options?.readOnly,
+      undefined,
+      "AC-6: the inline terminal mounts the shared runtime interactive, never read-only",
+    );
+  }
+  assert.equal(
+    fixture.terminalMounts[0].root,
+    first.querySelector(".issue-inline-terminal-body .terminal-root"),
+  );
 });
 
-// FR-010.
-test("Windowize hands the mirrored agent back to the canvas", async (t) => {
+// AC-6: selecting a row keeps every inline terminal mounted exactly once.
+test("selection changes do not stack or drop inline terminals", async (t) => {
+  const fixture = await makeFixture({
+    workspaceWindows: [previewWindow("agent-1", 3671), previewWindow("agent-2", 3672)],
+  });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671), knowledgeEntry(3672)], null);
+
+  fixture.body.querySelector('[data-issue-number="3672"] .knowledge-row-select').click();
+
+  const ids = [...fixture.body.querySelectorAll(".issue-inline-terminal")].map(
+    (section) => section.dataset.windowId,
+  );
+  assert.deepEqual(ids, ["agent-1", "agent-2"]);
+  assert.equal(
+    fixture.sent.filter((message) => message.kind === "select_knowledge_bridge_entry").length,
+    1,
+    "clicking the row still selects the Issue",
+  );
+});
+
+// AC-6: interacting with the terminal is not a row-selection gesture.
+test("clicking inside the inline terminal does not select the Issue", async (t) => {
   const fixture = await makeFixture({ workspaceWindows: [previewWindow("agent-1", 3671)] });
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
 
-  const windowize = fixture.body.querySelector('[data-action="windowize-issue-preview"]');
-  assert.ok(windowize, "the mirror offers a Windowize control");
+  fixture.body
+    .querySelector(".issue-inline-terminal .terminal-root")
+    .dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+
+  assert.equal(
+    fixture.sent.some((message) => message.kind === "select_knowledge_bridge_entry"),
+    false,
+  );
+});
+
+// FR-010 / AC-7: Windowize is the hand-off, and once the placement is `canvas` the
+// row stops hosting the terminal so the window id is mounted in one place only.
+test("Windowize hands the inline terminal to the canvas and the row releases it", async (t) => {
+  const agent = previewWindow("agent-1", 3671);
+  const fixture = await makeFixture({ workspaceWindows: [agent] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
+
+  const windowize = fixture.body.querySelector(
+    '.issue-inline-terminal [data-action="windowize-inline-terminal"]',
+  );
+  assert.ok(windowize, "the inline terminal offers a Windowize control");
+  assert.equal(windowize.textContent, "Windowize");
   windowize.click();
-
   assert.deepEqual(fixture.windowized, ["agent-1"]);
+
+  fixture.setWindows([{ ...agent, placement: { kind: "canvas" } }]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  assert.equal(fixture.body.querySelector(".issue-inline-terminal"), null);
 });
 
 // FR-011.
@@ -275,17 +322,13 @@ test("an errored or waiting agent is badged, never auto-opened on the canvas", a
       workspaceWindows: [previewWindow("agent-1", 3671, { status })],
     });
     t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-    applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
+    applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
 
-    const badge = fixture.body.querySelector(".issue-preview .knowledge-monitor-chip");
+    const badge = fixture.body.querySelector(".issue-inline-terminal .knowledge-monitor-chip");
     assert.equal(badge.textContent, label);
     assert.equal(badge.dataset.tone, tone);
     assert.equal(badge.dataset.status, status);
-    assert.deepEqual(
-      fixture.windowized,
-      [],
-      "an unhealthy agent must not be pushed onto the canvas on its own",
-    );
+    assert.deepEqual(fixture.windowized, []);
     assert.equal(
       fixture.sent.some((message) => message.kind === "undock_agent_window"),
       false,
@@ -293,83 +336,33 @@ test("an errored or waiting agent is badged, never auto-opened on the canvas", a
   }
 });
 
-test("no preview pane is rendered when the Issue has no auto-launched agent", async (t) => {
+test("no inline terminal is rendered when the Issue has no auto-launched agent", async (t) => {
   const fixture = await makeFixture();
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
 
-  assert.equal(fixture.body.querySelector(".issue-preview"), null);
+  assert.equal(fixture.body.querySelector(".issue-inline-terminal"), null);
   assert.equal(fixture.terminalMounts.length, 0);
 });
 
-// FR-008 wiring contract: the shared terminal runtime must honour readOnly on every
-// input path, and app.js must pass it through from the Issue surface.
-test("app.js wires the read-only mirror and the Windowize handoff", () => {
+// AC-6 / AC-7 wiring contract: the Issue surface receives the same interactive
+// runtime factory the canvas uses, app.js keeps no read-only mirror path, and
+// Windowize reuses the undock transition.
+test("app.js wires the interactive inline terminal and the Windowize handoff", () => {
   assert.match(
     appSource,
-    /createTerminalRuntime:\s*\(id,\s*terminalRoot,\s*options\)\s*=>\s*\n?\s*createTerminalRuntime\(id,\s*terminalRoot,\s*options\)/,
-    "the Issue surface receives the shared terminal runtime factory",
+    /createTerminalRuntime:\s*\(id,\s*terminalRoot\)\s*=>\s*\n?\s*createTerminalRuntime\(id,\s*terminalRoot\)/,
+    "the Issue surface receives the shared terminal runtime factory without options",
   );
   assert.match(
     appSource,
     /windowizeIssuePreviewWindow:\s*\(id\)\s*=>\s*\{[\s\S]*undockAgentWindowMessage\(/,
     "Windowize reuses the undock_agent_window transition",
   );
-
-  const createRuntime = extractFunctionBody(appSource, "createTerminalRuntime");
-  assert.match(
-    createRuntime,
-    /terminalMap\.get\(windowId\)\?\.readOnly === true[\s\S]*return;/,
-    "onData must drop input for a read-only mirror",
+  assert.doesNotMatch(
+    appSource,
+    /readOnly/,
+    "no read-only terminal path remains: the inline terminal is interactive (Issue #3884)",
   );
-  assert.match(createRuntime, /\{ readOnly: options\.readOnly === true \}/);
-
-  const bindings = extractFunctionBody(appSource, "attachTerminalContainerBindings");
-  for (const installer of [
-    "installTerminalImagePasteHandlers",
-    "installTerminalFileDropHandlers",
-    "installTerminalContextMenuHandlers",
-  ]) {
-    assert.match(
-      bindings,
-      new RegExp(`readOnly\\s*\\n?\\s*\\?\\s*noopCleanup\\s*\\n?\\s*:\\s*${installer}`),
-      `${installer} must not be attached for a read-only mirror`,
-    );
-  }
-  assert.match(
-    bindings,
-    /if \(readOnly \|\| terminalMap\.get\(windowId\)\?\.isReady !== true\)/,
-    "wheel-driven PTY writes must be suppressed for a read-only mirror",
-  );
+  assert.doesNotMatch(appSource, /disableStdin/);
 });
-
-function extractFunctionBody(source, name) {
-  const start = source.indexOf(`function ${name}(`);
-  assert.notEqual(start, -1, `expected function ${name} in app.js`);
-  const paramsOpen = source.indexOf("(", start);
-  let parenDepth = 0;
-  let paramsClose = -1;
-  for (let i = paramsOpen; i < source.length; i += 1) {
-    const char = source[i];
-    if (char === "(") parenDepth += 1;
-    if (char === ")") {
-      parenDepth -= 1;
-      if (parenDepth === 0) {
-        paramsClose = i;
-        break;
-      }
-    }
-  }
-  assert.notEqual(paramsClose, -1, `expected function ${name} parameters`);
-  const open = source.indexOf("{", paramsClose);
-  let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    const char = source[i];
-    if (char === "{") depth += 1;
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(open + 1, i);
-    }
-  }
-  assert.fail(`expected function ${name} body`);
-}

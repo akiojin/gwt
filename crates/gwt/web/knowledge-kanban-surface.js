@@ -133,9 +133,9 @@ export function createKnowledgeKanbanSurface({
   openIssueLaunchWizard,
   visibleBounds,
   launchPending,
-  // SPEC-3671 FR-007 / FR-008 / FR-010: the Issue preview pane. The terminal
-  // runtime factory is the shared one from app.js; `readOnly` keeps every input
-  // path unattached. `windowizeIssuePreviewWindow` performs the Canvas handoff.
+  // SPEC-3671 FR-007 / FR-010, amended by Issue #3884: the Issue row's inline
+  // terminal. The terminal runtime is the shared interactive one from app.js;
+  // `windowizeIssuePreviewWindow` performs the Canvas handoff.
   createTerminalRuntime,
   windowDisplayTitle,
   windowRoleBadgeLabel,
@@ -2021,36 +2021,41 @@ export function createKnowledgeKanbanSurface({
         return card;
       }
 
-      // SPEC-3671 FR-007 / FR-008 / FR-009 / FR-010 / FR-011: the read-only live
-      // mirror of the agent working on the selected Issue. Exactly one terminal is
-      // mounted, and the only control it offers is Windowize.
-      function renderIssueAgentPreview(windowId, state) {
-        const previews = issuePreviewWindowsForIssue(
+      // Issue #3884 AC-6 / AC-7 (SPEC-3671 FR-007 / FR-010 / FR-011 as amended):
+      // the Issue row's inline terminal. Every row whose agent runs as an
+      // `issue_preview` placement mounts that agent's terminal, selected or not,
+      // through the same interactive runtime the canvas uses. One window id lives
+      // in one container, so Windowize (the only hand-off) moves the runtime to
+      // the canvas and the row releases it — the same PTY never has two input
+      // faces. An errored / waiting agent is badged here, never auto-opened.
+      function renderIssueInlineTerminal(windowId, entry) {
+        const targets = issuePreviewWindowsForIssue(
           typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
           windowId,
-          state.selectedNumber,
+          entry.number,
         );
-        if (previews.length === 0) {
+        if (targets.length === 0) {
           return null;
         }
-        const target = previews[0];
-        const section = createNode("section", "issue-preview");
+        const target = targets[0];
+        const section = createNode("section", "issue-inline-terminal");
         section.dataset.windowId = target.id;
-        section.dataset.issueNumber = String(state.selectedNumber);
+        section.dataset.issueNumber = String(entry.number);
+        section.setAttribute("aria-label", `Agent terminal for Issue #${entry.number}`);
 
-        const header = createNode("div", "issue-preview-header");
-        const titleWrap = createNode("div", "issue-preview-title-wrap");
+        const header = createNode("div", "issue-inline-terminal-header");
+        const titleWrap = createNode("div", "issue-inline-terminal-title-wrap");
         titleWrap.appendChild(
           createNode(
             "div",
-            "issue-preview-title",
+            "issue-inline-terminal-title",
             windowDisplayTitle?.(target) || target.title || target.id,
           ),
         );
         titleWrap.appendChild(
           createNode(
             "div",
-            "issue-preview-meta",
+            "issue-inline-terminal-meta",
             windowRoleBadgeLabel?.(target) || target.agent_id || "Agent",
           ),
         );
@@ -2064,8 +2069,8 @@ export function createKnowledgeKanbanSurface({
 
         const windowize = createNode("button", "wizard-button", "Windowize");
         windowize.type = "button";
-        windowize.dataset.action = "windowize-issue-preview";
-        windowize.setAttribute("aria-label", "Windowize agent preview");
+        windowize.dataset.action = "windowize-inline-terminal";
+        windowize.setAttribute("aria-label", "Open this agent terminal as a canvas window");
         windowize.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -2074,23 +2079,22 @@ export function createKnowledgeKanbanSurface({
         header.appendChild(windowize);
         section.appendChild(header);
 
-        const shell = createNode("div", "issue-preview-terminal");
+        const body = createNode("div", "issue-inline-terminal-body");
         const terminalRoot = createNode("div", "terminal-root");
-        // The mirror is read-only, but a stray mousedown must still not start a
-        // window drag on the host Issue window.
+        // A mousedown inside the terminal must not start a drag of the host Issue
+        // window; a click hands keyboard focus to the terminal like a canvas window.
         terminalRoot.addEventListener("mousedown", (event) => event.stopPropagation());
-        shell.appendChild(terminalRoot);
-        section.appendChild(shell);
-        createTerminalRuntime?.(target.id, terminalRoot, { readOnly: true });
+        body.appendChild(terminalRoot);
+        section.appendChild(body);
+        const runtime = createTerminalRuntime?.(target.id, terminalRoot);
+        terminalRoot.addEventListener("click", () => {
+          runtime?.terminal?.focus?.();
+        });
         return section;
       }
 
       function renderKnowledgeDetailPane(windowId, state, detailPane) {
         detailPane.innerHTML = "";
-        const preview = renderIssueAgentPreview(windowId, state);
-        if (preview) {
-          detailPane.appendChild(preview);
-        }
         const detail = state.detail;
         if (!detail) {
           detailPane.appendChild(
@@ -2495,6 +2499,8 @@ export function createKnowledgeKanbanSurface({
           // SPEC-3671 FR-013: the Work actions live on the row but are not a
           // selection gesture.
           if (event.target?.closest?.(".knowledge-work-actions")) return;
+          // Issue #3884 AC-6: neither is interacting with the inline terminal.
+          if (event.target?.closest?.(".issue-inline-terminal")) return;
           requestKnowledgeDetail(windowId, state.kind, entry.number);
         });
         row.appendChild(select);
@@ -2563,6 +2569,12 @@ export function createKnowledgeKanbanSurface({
         const workBlock = renderIssueRowWork(windowId, entry);
         if (workBlock) {
           row.appendChild(workBlock);
+        }
+        // Issue #3884 AC-6: the agent's inline terminal, shown whether or not the
+        // row is selected, likewise outside the select button.
+        const inlineTerminal = renderIssueInlineTerminal(windowId, entry);
+        if (inlineTerminal) {
+          row.appendChild(inlineTerminal);
         }
         return row;
       }
