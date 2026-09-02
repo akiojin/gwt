@@ -153,6 +153,13 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.inner.patch_title(number, new_title)
     }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.inner.patch_issue_fields(number, fields)
+    }
     fn patch_comment(
         &self,
         comment_id: gwt_github::client::CommentId,

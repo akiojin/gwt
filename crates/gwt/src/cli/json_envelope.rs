@@ -270,6 +270,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             body: required_string(params, "body")?,
             labels: optional_string_vec(params, "labels")?,
         }),
+        "issue.edit" => CliCommand::Issue(IssueCommand::Edit {
+            number: required_u64(params, "number")?,
+            title: optional_string(params, "title")?,
+            body: optional_string(params, "body")?,
+            // Absent or `null` means "leave labels alone"; only an explicit
+            // empty array clears them.
+            labels: params
+                .get("labels")
+                .filter(|value| !value.is_null())
+                .map(|_| optional_string_vec(params, "labels"))
+                .transpose()?,
+        }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -2571,6 +2583,28 @@ mod tests {
                 flag: "title_summary",
                 ..
             }
+        ));
+    }
+
+    /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
+    /// while an explicit empty array clears them.
+    #[test]
+    fn issue_edit_labels_null_means_omitted_and_empty_array_clears() {
+        let absent = ok("issue.edit", json!({"number": 7, "body": "b"}));
+        let null = ok(
+            "issue.edit",
+            json!({"number": 7, "body": "b", "labels": null}),
+        );
+        let cleared = ok("issue.edit", json!({"number": 7, "labels": []}));
+        for command in [absent, null] {
+            assert!(matches!(
+                command,
+                CliCommand::Issue(IssueCommand::Edit { labels: None, .. })
+            ));
+        }
+        assert!(matches!(
+            cleared,
+            CliCommand::Issue(IssueCommand::Edit { labels: Some(ref labels), .. }) if labels.is_empty()
         ));
     }
 
