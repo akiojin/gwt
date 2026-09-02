@@ -28,10 +28,11 @@ use sha2::{Digest, Sha256};
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
-    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
-    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
-    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 
 /// HTTP method.
@@ -1732,6 +1733,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let resp = self.rest_patch(&path, json!({ "title": new_title }))?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("patch_title json: {e}")))?;
+        parse_rest_issue(&value)
+    }
+
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut payload = serde_json::Map::new();
+        if let Some(title) = &fields.title {
+            payload.insert("title".to_string(), json!(title));
+        }
+        if let Some(body) = &fields.body {
+            payload.insert("body".to_string(), json!(body));
+        }
+        if let Some(labels) = &fields.labels {
+            payload.insert("labels".to_string(), json!(labels));
+        }
+        let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
+        let resp = self.rest_patch(&path, Value::Object(payload))?;
+        let value: Value = serde_json::from_str(&resp.body)
+            .map_err(|e| ApiError::Unexpected(format!("patch_issue_fields json: {e}")))?;
         parse_rest_issue(&value)
     }
 
