@@ -92,6 +92,13 @@ impl IssueClient for LazyIssueClient {
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.resolve()?.patch_title(number, new_title)
     }
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &gwt_github::client::IssueFieldsPatch,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.patch_issue_fields(number, fields)
+    }
 
     fn patch_comment(
         &self,
@@ -484,9 +491,23 @@ impl CliEnv for DefaultCliEnv {
             number,
         )
     }
-    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
-        gwt_git::fetch_pr_inventory(&self.repo_path)
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
+        // Issue #3868: the per-PR history lives in the machine-local project
+        // dir so `unchanged_cycles` and held classes survive between resident
+        // PM cycles, whichever worktree the PM reads from. Issue #3891: the
+        // snapshot cache sits next to it for the same reason — every PM and
+        // agent on this machine shares one fetch per TTL.
+        let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path);
+        let history_path = project_dir.join(gwt_git::PR_INVENTORY_HISTORY_FILE);
+        let cache_path = project_dir.join(gwt_git::PR_INVENTORY_CACHE_FILE);
+        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, options)
             .map_err(|err| io::Error::other(err.to_string()))
+    }
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        crate::cli::pr::probe_github_rate_limit_via_gh(&self.repo_path)
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;

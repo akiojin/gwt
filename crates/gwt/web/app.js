@@ -249,6 +249,9 @@
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
+      // Issue #3884: when each window's runtime state was last observed to change
+      // (ms epoch). Feeds the Issue row status row's elapsed-time label.
+      const windowRuntimeStateSinceMap = new Map();
       const terminalMap = new Map();
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
@@ -723,6 +726,15 @@
           appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+          // Issue #3884: the status row shows the activity line and elapsed time.
+          appendRenderKeyPart(parts, "activity");
+          appendRenderKeyPart(parts, windowActivityDetail(windowData));
+          appendRenderKeyPart(parts, "since_minute");
+          const since = windowRuntimeStateSinceMap.get(windowData.id);
+          appendRenderKeyPart(
+            parts,
+            Number.isFinite(since) ? Math.floor((Date.now() - since) / 60000) : "",
+          );
         }
         return parts.join("");
       }
@@ -1682,6 +1694,15 @@
       // (dynamic_title_detail) so glanceable surfaces (Fleet Minimap cells,
       // switcher rows) read like "title · detail". Collapses to just the
       // title when there is no distinct detail.
+      // Issue #3884: the one-line "what is it doing now" for an agent window — the
+      // runtime status detail when the backend reported one (error / stopped),
+      // otherwise the live dynamic title detail.
+      function windowActivityDetail(windowData) {
+        const statusDetail = String(detailMap.get(windowData?.id) || "").trim();
+        if (statusDetail) return statusDetail;
+        return String(windowData?.dynamic_title_detail || "").trim();
+      }
+
       function windowActivityLabel(windowData) {
         const title = windowDisplayTitle(windowData);
         const detail = String(windowData?.dynamic_title_detail || "").trim();
@@ -3161,6 +3182,9 @@
         const parts = [];
         appendRenderKeyPart(parts, "running");
         appendRenderKeyPart(parts, counts?.running ?? null);
+        // Issue #3884 AC-3: the inline-terminal breakdown of RUNNING.
+        appendRenderKeyPart(parts, "running_inline");
+        appendRenderKeyPart(parts, counts?.running_inline ?? null);
         appendRenderKeyPart(parts, "idle");
         appendRenderKeyPart(parts, counts?.idle ?? null);
         // FR-039 (anshin): the WAITING cell refreshes when the waiting count
@@ -3290,6 +3314,9 @@
         // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           running: 0,
+          // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
+          // them off the canvas — they live inside the Issue window.
+          running_inline: 0,
           idle: 0,
           // FR-039 (anshin): waiting is its own LOUD telemetry state for
           // agents waiting on the operator. It used to collapse into idle;
@@ -3310,6 +3337,9 @@
           const windowData = workspaceWindowById(windowId);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
           if (state in counts) counts[state] += 1;
+          if (state === "running" && windowData.placement?.kind === "issue_preview") {
+            counts.running_inline += 1;
+          }
           counts.agents += 1;
         }
         if (activeWorkProjection) {
@@ -3432,6 +3462,9 @@
             const windowData =
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
+            if (windowRuntimeStateMap.get(windowId) !== runtimeState) {
+              windowRuntimeStateSinceMap.set(windowId, Date.now());
+            }
             windowRuntimeStateMap.set(windowId, runtimeState);
             if (detail) {
               detailMap.set(windowId, detail);
@@ -4568,6 +4601,11 @@
           focusWindowLocally(id);
           socketTransport.send({ kind: "focus_window", id });
         },
+        // Issue #3884: the Issue row status row (agent name / state / last
+        // activity line / elapsed time) reads the same live-activity sources the
+        // minimap tooltip and the runtime-state cache already use.
+        windowActivityDetail,
+        windowRuntimeStateSince: (id) => windowRuntimeStateSinceMap.get(id) ?? null,
         // SPEC-3671 FR-012 / FR-013: the Issue row reads the active Work
         // projection that is already broadcast, and reuses the Work surface's own
         // derivations and action paths rather than re-deriving them.
@@ -5621,6 +5659,7 @@
                   decoderMap.delete(windowId);
                   detailMap.delete(windowId);
                   windowRuntimeStateMap.delete(windowId);
+                  windowRuntimeStateSinceMap.delete(windowId);
                   agentCompletionNotifier.forgetWindow(windowId);
                   agentAttentionToaster.forgetWindow(windowId);
                   // SPEC #3206: dismiss this window's attention toast from the shared

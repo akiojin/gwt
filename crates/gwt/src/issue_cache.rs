@@ -457,6 +457,10 @@ fn run_gh_issue_command_with_gate(
     if let Some(detail) = gwt_core::github_quota::suppressed_spawn_detail(gate, args, now) {
         return Err(format!("{label}: {detail}"));
     }
+    // Issue #3891 AC-3: this burst is the one most worth counting in the
+    // machine-local budget ledger, since it bypasses `spawn_logged`.
+    gwt_core::github_budget::BudgetLedger::global()
+        .record_spawn(gwt_core::github_quota::classify_gh_args(args), now);
 
     let cwd = gh_repo_cwd(repo_path);
     let output = gwt_core::process::hidden_command(gh_executable())
@@ -491,10 +495,17 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
         .current_dir(cwd)
         .output()
         .ok()?;
-    output
+    let payload = output
         .status
         .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())?;
+    // Issue #3891: share the fresh primary window with every other process.
+    if let Some(snapshot) =
+        gwt_core::github_budget::parse_rate_limit_probe_all(&payload, chrono::Utc::now())
+    {
+        gwt_core::github_budget::BudgetLedger::global().record_probe(&snapshot);
+    }
+    Some(payload)
 }
 
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
