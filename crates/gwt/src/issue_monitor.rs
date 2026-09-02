@@ -1170,6 +1170,7 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             docker_service: profile.docker_service,
             docker_lifecycle_intent: profile.docker_lifecycle_intent,
             windows_shell: profile.windows_shell,
+            hermes: Default::default(),
         }
     }
 }
@@ -2083,8 +2084,13 @@ pub fn autonomous_eligibility(
         ));
     }
     if !criteria.machine_checkable {
+        // Issue #3873 AC-6: a body edit alone never re-evaluates a needs_human
+        // row, so the reason has to carry both the fix and the next operation.
         return EligibilityDecision::NeedsHuman(
-            "no machine-checkable acceptance criteria block".to_string(),
+            "no machine-checkable acceptance criteria block; add a `## 受け入れ基準` heading \
+             with `- [ ] AC-1: ...` items (`## 成功基準` is not scanned), then run \
+             issue.monitor.requeue to re-evaluate"
+                .to_string(),
         );
     }
     if !protection.is_verified() {
@@ -4409,11 +4415,11 @@ impl IssueMonitorState {
                         .get(&held)
                         .and_then(|reset_at| parse_rfc3339_utc(reset_at))
                         .is_some_and(|reset_at| reset_at > now)
-                    && !self
+                    && self
                         .provider_quota_holds
                         .get(&saved)
                         .and_then(|reset_at| parse_rfc3339_utc(reset_at))
-                        .is_some_and(|reset_at| reset_at > now)
+                        .is_none_or(|reset_at| reset_at <= now)
             });
         if switched_to_healthy_provider {
             // The operator explicitly selected a healthy provider. The
@@ -17435,11 +17441,35 @@ mod tests {
             &bp,
             "2026-06-29T00:00:00Z",
         );
-        assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
+        let EligibilityDecision::NeedsHuman(reason) = decision else {
+            panic!("expected NeedsHuman, got {decision:?}");
+        };
         assert_eq!(
             monitor.autonomous_record(50).map(|record| record.phase),
             Some(AutonomousPhase::NeedsHuman),
         );
+        // Issue #3873 AC-6: the reason names the fix and the operation that
+        // re-evaluates the Issue, because a body edit alone never does.
+        assert!(
+            reason.contains("no machine-checkable acceptance criteria block"),
+            "reason = {reason}"
+        );
+        assert!(
+            reason.contains("受け入れ基準") && reason.contains("issue.monitor.requeue"),
+            "reason must carry the next action, got: {reason}"
+        );
+        // Issue #3873 AC-7: both status projections carry the row and its
+        // reason, so the backlog can be enumerated in one call.
+        let agent_status = monitor.agent_status_at("2026-06-29T00:01:00Z");
+        assert_eq!(agent_status.needs_human, vec![50]);
+        let row = monitor
+            .status_view()
+            .autonomous_issues
+            .into_iter()
+            .find(|row| row.issue_number == 50)
+            .expect("needs_human row is projected");
+        assert!(row.needs_human);
+        assert_eq!(row.needs_human_reason.as_deref(), Some(reason.as_str()));
     }
 
     #[test]

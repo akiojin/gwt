@@ -164,11 +164,12 @@
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
 - SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は 1 release cycle の alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
-- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 7 セクション）:
+- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 8 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
   - 機能要件（FR-\*）
-  - 成功基準
+  - 成功基準（検証コマンドと期待結果。Issue Monitor は読まない）
+  - 受け入れ基準（`- [ ] AC-N:` 形式のチェックリスト。Issue Monitor の autonomous gate が読む唯一の場所。`auto-merge` ラベル付きで欠けていると `issue.create` / `issue.spec.create` / `issue.spec.edit` が拒否する）
   - Out of Scope / Related Artifacts
 - `gwt-plan-spec` で `plan` / `tasks` section も策定してから実装に入る
 - 新規 SPEC を作成した場合でも、エージェントは自分で新規ブランチや Worktree を作成しない。実装に進む場合は、承認済み SPEC と `gwt-plan-spec` の成果物に基づき、現在起動されている branch/worktree で作業する。

@@ -329,7 +329,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
         wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
         wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
@@ -462,7 +462,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
         wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
         wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
@@ -1501,7 +1501,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
         wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
         wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
@@ -1907,7 +1907,7 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_launch_choices(gwt_skills::hermes_launch_choices_global());
         wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
         wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
@@ -2022,8 +2022,19 @@ impl AppRuntime {
                     started_at,
                 }) => {
                     let window_exists = self.tracked_window_exists(&window_id);
+                    // Issue #3851: the TTL bounds pre-PTY materialization only.
+                    // Once a runtime exists, SessionStart may legitimately wait
+                    // for terminal input; runtime status owns exit recovery.
+                    let live_runtime = self.runtimes.contains_key(&window_id)
+                        && self.window_status(&window_id).is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        });
                     if window_exists
-                        && started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL
+                        && (live_runtime
+                            || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         return Vec::new();
                     }

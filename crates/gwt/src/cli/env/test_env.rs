@@ -61,6 +61,10 @@ pub struct TestEnv {
     pub pr_current_call_count: usize,
     pub pr_list: Vec<gwt_git::PrInventoryItem>,
     pub pr_list_call_count: usize,
+    pub pr_list_options: Option<gwt_git::PrInventoryOptions>,
+    /// Issue #3891: the `gh api rate_limit` payload `github.budget` reads.
+    pub github_rate_limit_payload: Option<String>,
+    pub github_rate_limit_probe_count: usize,
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
@@ -114,6 +118,9 @@ impl TestEnv {
             pr_current_call_count: 0,
             pr_list: Vec::new(),
             pr_list_call_count: 0,
+            pr_list_options: None,
+            github_rate_limit_payload: None,
+            github_rate_limit_probe_count: 0,
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
@@ -385,9 +392,26 @@ impl CliEnv for TestEnv {
                 )
             })
     }
-    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<gwt_git::PrInventoryRead> {
         self.pr_list_call_count += 1;
-        Ok(self.pr_list.clone())
+        self.pr_list_options = Some(*options);
+        Ok(gwt_git::PrInventoryRead {
+            items: self.pr_list.clone(),
+            source: "github",
+            fetched_at: None,
+            cache_age_secs: Some(0),
+            throttled: None,
+            github_calls: 1,
+        })
+    }
+    fn probe_github_rate_limit(&mut self) -> io::Result<String> {
+        self.github_rate_limit_probe_count += 1;
+        self.github_rate_limit_payload.clone().ok_or_else(|| {
+            io::Error::other("gh api rate_limit: no payload seeded in TestEnv".to_string())
+        })
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);
