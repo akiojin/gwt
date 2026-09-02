@@ -1225,8 +1225,11 @@ impl Drop for PtyHandle {
 mod tests {
     use std::{
         sync::{Arc, Mutex},
-        time::{Duration, Instant},
+        time::Duration,
     };
+
+    #[cfg(unix)]
+    use std::time::Instant;
 
     use super::*;
     use crate::test_util::{
