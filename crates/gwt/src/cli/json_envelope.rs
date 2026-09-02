@@ -375,7 +375,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
-        "pr.list" => CliCommand::Pr(PrCommand::List),
+        "pr.list" => CliCommand::Pr(PrCommand::List {
+            stale_after_hours: optional_u64(params, "stale_after_hours")?
+                .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
+            escalate_after_cycles: optional_u64(params, "escalate_after_cycles")?
+                .map(|cycles| u32::try_from(cycles).unwrap_or(u32::MAX)),
+        }),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -2905,7 +2910,20 @@ mod tests {
         ));
         assert!(matches!(
             ok("pr.list", json!({})),
-            CliCommand::Pr(PrCommand::List)
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"stale_after_hours": 24, "escalate_after_cycles": 2})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: Some(24),
+                escalate_after_cycles: Some(2),
+            })
         ));
         assert!(matches!(
             ok(

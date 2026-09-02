@@ -3148,6 +3148,116 @@ pub fn recovery_projection_owner_hint(worktree: &Path) -> io::Result<Option<Exec
     }))
 }
 
+/// Outcome of [`heal_missing_generation_publication`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPublicationHeal {
+    /// No owner ledger exists for this repository/owner; nothing to publish.
+    NoLedger,
+    /// The worktree pointer/projection already agree with the owner ledger.
+    AlreadyPublished,
+    /// The worktree pointer/projection were rebuilt from the owner ledger.
+    Republished,
+    /// A pointer is present but the strict view is invalid for another
+    /// reason (stale/mismatched writer). That is the fail-closed case the
+    /// strict view exists for; it is left untouched.
+    NotApplicable,
+    /// The current generation is bound to a different worktree. This
+    /// worktree never owned the lost publication, so nothing is written.
+    ForeignWorktree,
+}
+
+/// Issue #3759: rebuild a lost worktree-scoped publication from the owner
+/// ledger.
+///
+/// The owner ledger is the durable commit and is written first
+/// (`write_activated_generation`); the projection and pointer that the strict
+/// view requires are derived from it. Two routes leave the ledger in place
+/// without them: a crash between the ledger commit and the pointer write, and
+/// trusted-store GC of a removed worktree directory (the owner ledger lives in
+/// a marker-less sibling and survives). Both used to make every later launch
+/// on the same worktree fail before the PTY with
+/// "execution generation pointer is missing after ledger ownership was
+/// established", burning the Issue Monitor retry budget on a state that only
+/// a rewrite could fix.
+///
+/// The repair is limited to the exact invariant violation: the trusted
+/// pointer file is missing and the ledger's current generation is bound to
+/// this worktree. It republishes the current effective projection and the
+/// pointer derived from it under the global -> owner leases and never touches
+/// the owner ledger. A present-but-stale pointer stays fail-closed.
+pub fn heal_missing_generation_publication(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<GenerationPublicationHeal> {
+    let context = match GenerationTransactionContext::resolve(worktree, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {
+            return Ok(GenerationPublicationHeal::NoLedger)
+        }
+        Err(error) => return Err(error),
+    };
+    // Lease-free probe: the common healthy case must not take write leases.
+    if read_owner_ledger_from_dir(&context.owner_dir)?.is_none() {
+        return Ok(GenerationPublicationHeal::NoLedger);
+    }
+    if crate::cli::trusted_store::read_from_resolved_dir(
+        &context.worktree_trusted_dir,
+        GENERATION_POINTER_FILE,
+    )?
+    .is_some()
+    {
+        return Ok(match load_generation_ledger_from_context(&context) {
+            Ok(Some(_)) => GenerationPublicationHeal::AlreadyPublished,
+            Ok(None) => GenerationPublicationHeal::NoLedger,
+            Err(_) => GenerationPublicationHeal::NotApplicable,
+        });
+    }
+    with_generation_activation_leases(worktree, owner, |context| {
+        let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+            return Ok(GenerationPublicationHeal::NoLedger);
+        };
+        if crate::cli::trusted_store::read_from_resolved_dir(
+            &context.worktree_trusted_dir,
+            GENERATION_POINTER_FILE,
+        )?
+        .is_some()
+        {
+            // Another writer published while we waited for the leases.
+            return Ok(match load_generation_ledger_from_context(context) {
+                Ok(Some(_)) => GenerationPublicationHeal::AlreadyPublished,
+                Ok(None) => GenerationPublicationHeal::NoLedger,
+                Err(_) => GenerationPublicationHeal::NotApplicable,
+            });
+        }
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        if current.identity.worktree_binding_hash != context.worktree_binding_hash {
+            return Ok(GenerationPublicationHeal::ForeignWorktree);
+        }
+        validate_generation_activation_owner(context, true)?;
+        let projection = ledger.effective_projection_for(current).to_string();
+        write_execution_projection(context, &projection)?;
+        write_generation_pointer(context, &ledger, &projection)?;
+        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation publication heal lost the owner ledger")
+        })?;
+        if readback != ledger {
+            return Err(invalid_generation_data(
+                "generation publication heal readback does not match the owner ledger",
+            ));
+        }
+        tracing::info!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            generation_id = %current.identity.generation_id,
+            worktree = %context.worktree.display(),
+            "republished lost execution generation pointer/projection from the owner ledger"
+        );
+        Ok(GenerationPublicationHeal::Republished)
+    })
+}
+
 pub fn current_generation_identity(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -25207,5 +25317,235 @@ exit 1
                 .expect_err("missing GWT_SESSION_ID must fail");
             assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
         }
+    }
+
+    /// Issue #3759 fixture: an owner ledger that committed for this worktree
+    /// whose worktree-scoped publication (pointer + projection, trusted and
+    /// mirror copies) was lost afterwards — the state left behind by a
+    /// ledger-first crash or by trusted-store GC of a removed worktree.
+    fn genesis_with_lost_publication(
+        worktree: &Path,
+        owner: ExecutionOwnerKey,
+        remove_projection: bool,
+    ) -> (ExecutionGenerationLedger, Vec<u8>, Vec<u8>) {
+        let mut record = active_record("session-holder");
+        record.owner_number = owner.number;
+        save(worktree, &record).unwrap();
+        ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+        let published = load_generation_ledger(worktree, owner).unwrap().unwrap();
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(worktree).unwrap();
+        let pointer_bytes = fs::read(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap();
+        let projection_bytes = fs::read(trusted_dir.join("execution-control.json")).unwrap();
+        fs::remove_file(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap();
+        fs::remove_file(generation_pointer_path(worktree)).unwrap();
+        if remove_projection {
+            fs::remove_file(trusted_dir.join("execution-control.json")).unwrap();
+            fs::remove_file(state_path(worktree)).unwrap();
+        }
+        let error = load_generation_ledger(worktree, owner).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains(
+                "execution generation pointer is missing after ledger ownership was established"
+            ),
+            "fixture must reproduce the Issue #3759 launch failure: {error}"
+        );
+        (published, pointer_bytes, projection_bytes)
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_republishes_after_worktree_authority_loss() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let (published, pointer_bytes, projection_bytes) =
+            genesis_with_lost_publication(dir.path(), owner, true);
+        let owner_ledger_path = generation_owner_dir(dir.path(), owner)
+            .unwrap()
+            .join(GENERATION_LEDGER_FILE);
+        let owner_ledger_before = fs::read(&owner_ledger_path).unwrap();
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::Republished
+        );
+
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        assert_eq!(
+            fs::read(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap(),
+            pointer_bytes,
+            "the pointer is a pure function of the ledger and must be rebuilt byte-identical"
+        );
+        assert_eq!(
+            fs::read(trusted_dir.join("execution-control.json")).unwrap(),
+            projection_bytes
+        );
+        assert!(generation_pointer_path(dir.path()).exists());
+        assert!(state_path(dir.path()).exists());
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner).unwrap().unwrap(),
+            published,
+            "the strict view must agree with the owner ledger again"
+        );
+        assert_eq!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(execution_binding_for_generation(
+                &published,
+                published.current_generation().unwrap()
+            ))
+        );
+        assert_eq!(
+            fs::read(&owner_ledger_path).unwrap(),
+            owner_ledger_before,
+            "healing publication must never rewrite the owner ledger"
+        );
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::AlreadyPublished,
+            "a healthy strict view is a byte-preserving no-op"
+        );
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_republishes_after_pointer_only_loss() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        // Ledger and projection committed, pointer write interrupted.
+        let (published, pointer_bytes, _) = genesis_with_lost_publication(dir.path(), owner, false);
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::Republished
+        );
+
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        assert_eq!(
+            fs::read(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap(),
+            pointer_bytes
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner).unwrap().unwrap(),
+            published
+        );
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_is_a_no_op_without_an_owner_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::NoLedger
+        );
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        assert!(!trusted_dir.join(GENERATION_POINTER_FILE).exists());
+        assert!(!trusted_dir.join("execution-control.json").exists());
+        assert!(load_generation_ledger(dir.path(), owner).unwrap().is_none());
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_leaves_a_present_but_stale_pointer_fail_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut record = active_record("session-holder");
+        record.owner_number = owner.number;
+        save(dir.path(), &record).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        let pointer_path = trusted_dir.join(GENERATION_POINTER_FILE);
+        let mut pointer =
+            serde_json::from_slice::<ExecutionGenerationPointer>(&fs::read(&pointer_path).unwrap())
+                .unwrap();
+        pointer.current_generation_content_hash = "stale".to_string();
+        let stale_bytes = serde_json::to_vec_pretty(&pointer).unwrap();
+        fs::write(&pointer_path, &stale_bytes).unwrap();
+        assert!(load_generation_ledger(dir.path(), owner).is_err());
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::NotApplicable,
+            "a present pointer is the stale-worktree fail-closed case, not a lost publication"
+        );
+        assert_eq!(fs::read(&pointer_path).unwrap(), stale_bytes);
+        assert!(load_generation_ledger(dir.path(), owner).is_err());
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_never_publishes_into_a_foreign_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let origin_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(origin_worktree.path());
+        let other_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(other_worktree.path());
+        let owner = generation_owner();
+        let mut record = active_record("session-holder");
+        record.owner_number = owner.number;
+        save(origin_worktree.path(), &record).unwrap();
+        ensure_generation_ledger(origin_worktree.path(), owner, LegacyActiveDisposition::Live)
+            .unwrap();
+        let published = load_generation_ledger(origin_worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert!(
+            load_owner_generation_ledger(other_worktree.path(), owner)
+                .unwrap()
+                .is_some(),
+            "both worktrees must share the repository-scoped owner ledger"
+        );
+
+        assert_eq!(
+            heal_missing_generation_publication(other_worktree.path(), owner).unwrap(),
+            GenerationPublicationHeal::ForeignWorktree
+        );
+
+        let other_trusted_dir =
+            crate::cli::trusted_store::trusted_dir_for_worktree(other_worktree.path()).unwrap();
+        assert!(!other_trusted_dir.join(GENERATION_POINTER_FILE).exists());
+        assert!(!other_trusted_dir.join("execution-control.json").exists());
+        assert!(load_generation_ledger(other_worktree.path(), owner).is_err());
+        assert_eq!(
+            load_generation_ledger(origin_worktree.path(), owner)
+                .unwrap()
+                .unwrap(),
+            published
+        );
     }
 }
