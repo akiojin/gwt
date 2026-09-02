@@ -1170,6 +1170,7 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             docker_service: profile.docker_service,
             docker_lifecycle_intent: profile.docker_lifecycle_intent,
             windows_shell: profile.windows_shell,
+            hermes: Default::default(),
         }
     }
 }

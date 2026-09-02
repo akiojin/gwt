@@ -62,6 +62,20 @@ const ISSUE_PREVIEW_STATUS_VIEWS = Object.freeze({
   error: Object.freeze({ label: "Error", tone: "blocked" }),
 });
 
+// Issue #3884: compact elapsed-time label for the Issue row status row
+// ("<1m", "7m", "1h 05m", "1d 2h"); empty when the duration is unknown.
+export function formatAgentElapsed(ms) {
+  if (ms === null || ms === undefined || ms === "") return "";
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value < 0) return "";
+  const minutes = Math.floor(value / 60000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
 export function issuePreviewStatusView(windowData) {
   const status = String(windowData?.status || "").trim().toLowerCase();
   const known = ISSUE_PREVIEW_STATUS_VIEWS[status];
@@ -140,6 +154,11 @@ export function createKnowledgeKanbanSurface({
   windowDisplayTitle,
   windowRoleBadgeLabel,
   windowizeIssuePreviewWindow,
+  // Issue #3884: the Issue row status row reads the agent's live activity line
+  // (backend dynamic title detail / status detail) and the instant its runtime
+  // state was last observed to change.
+  windowActivityDetail,
+  windowRuntimeStateSince,
   // SPEC-3671 FR-012 / FR-013: Work state and Work actions on the Issue row. The
   // projection and the derivation helpers are the Work surface's own — the Issue
   // surface never re-derives lifecycle or attention rules.
@@ -2085,6 +2104,84 @@ export function createKnowledgeKanbanSurface({
         return section;
       }
 
+      // Issue #3884 AC-6 (PM ruling 2026-09-02): the read-only status row an
+      // Issue row carries for its auto-launched agent — name, state, last activity
+      // line, elapsed time — shown whether or not the row is selected. It mounts no
+      // terminal; Windowize stays the only hand-off (FR-010), and an errored /
+      // waiting agent is badged here, never auto-opened (FR-011).
+      function renderIssueAgentStatusRow(windowId, entry) {
+        const targets = issuePreviewWindowsForIssue(
+          typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
+          windowId,
+          entry.number,
+        );
+        if (targets.length === 0) {
+          return null;
+        }
+        const target = targets[0];
+        const row = createNode("div", "issue-agent-status");
+        row.dataset.windowId = target.id;
+        // Not `data-issue-number`: that attribute identifies the Issue row / card
+        // itself for selection lookups, and the status row must not alias it.
+        row.dataset.agentIssue = String(entry.number);
+        row.setAttribute("aria-label", `Agent status for Issue #${entry.number}`);
+
+        const titleWrap = createNode("div", "issue-agent-status-title-wrap");
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-agent-status-title",
+            windowDisplayTitle?.(target) || target.title || target.id,
+          ),
+        );
+        titleWrap.appendChild(
+          createNode(
+            "div",
+            "issue-agent-status-meta",
+            windowRoleBadgeLabel?.(target) || target.agent_id || "Agent",
+          ),
+        );
+        row.appendChild(titleWrap);
+
+        const statusView = issuePreviewStatusView(target);
+        const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
+        badge.dataset.tone = statusView.tone;
+        badge.dataset.status = statusView.status;
+        row.appendChild(badge);
+
+        const since = windowRuntimeStateSince?.(target.id);
+        const elapsed = createNode(
+          "span",
+          "issue-agent-status-elapsed",
+          Number.isFinite(since) ? formatAgentElapsed(Date.now() - since) : "",
+        );
+        elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
+        row.appendChild(elapsed);
+
+        const windowize = createNode("button", "wizard-button", "Windowize");
+        windowize.type = "button";
+        windowize.dataset.action = "windowize-issue-preview";
+        windowize.setAttribute("aria-label", "Open this agent as a canvas window");
+        windowize.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          windowizeIssuePreviewWindow?.(target.id);
+        });
+        row.appendChild(windowize);
+
+        // Last in DOM order: the activity line spans the full width on its own
+        // grid row, so it must follow every first-row cell (title / state /
+        // elapsed / Windowize) or auto-placement pushes Windowize below it.
+        const output = createNode(
+          "div",
+          "issue-agent-status-output",
+          String(windowActivityDetail?.(target) || "").trim(),
+        );
+        output.title = output.textContent;
+        row.appendChild(output);
+        return row;
+      }
+
       function renderKnowledgeDetailPane(windowId, state, detailPane) {
         detailPane.innerHTML = "";
         const preview = renderIssueAgentPreview(windowId, state);
@@ -2495,6 +2592,8 @@ export function createKnowledgeKanbanSurface({
           // SPEC-3671 FR-013: the Work actions live on the row but are not a
           // selection gesture.
           if (event.target?.closest?.(".knowledge-work-actions")) return;
+          // Issue #3884: neither is the agent status row (its Windowize button).
+          if (event.target?.closest?.(".issue-agent-status")) return;
           requestKnowledgeDetail(windowId, state.kind, entry.number);
         });
         row.appendChild(select);
@@ -2563,6 +2662,12 @@ export function createKnowledgeKanbanSurface({
         const workBlock = renderIssueRowWork(windowId, entry);
         if (workBlock) {
           row.appendChild(workBlock);
+        }
+        // Issue #3884 AC-6: the agent's read-only status row, shown whether or not
+        // the row is selected, likewise outside the select button.
+        const agentStatus = renderIssueAgentStatusRow(windowId, entry);
+        if (agentStatus) {
+          row.appendChild(agentStatus);
         }
         return row;
       }
