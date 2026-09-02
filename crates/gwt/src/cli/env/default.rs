@@ -484,8 +484,16 @@ impl CliEnv for DefaultCliEnv {
             number,
         )
     }
-    fn list_open_prs(&mut self) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
-        gwt_git::fetch_pr_inventory(&self.repo_path)
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+        // Issue #3868: the per-PR history lives in the machine-local project
+        // dir so `unchanged_cycles` and held classes survive between resident
+        // PM cycles, whichever worktree the PM reads from.
+        let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path)
+            .join(gwt_git::PR_INVENTORY_HISTORY_FILE);
+        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, options)
             .map_err(|err| io::Error::other(err.to_string()))
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {

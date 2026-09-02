@@ -38,9 +38,12 @@ use sha2::{Digest, Sha256};
 /// `pm-loop.json`'s `last_wake_at`, which is how a silent-but-alive loop stays
 /// distinguishable from a dead one without a keepalive line in the
 /// conversation (FR-4).
+/// Issue #3868 AC-3: a red, conflicted, or escalation-due open PR is never a
+/// no-change cycle. Kept terse on purpose — this clause rides the PTY wake
+/// prompts, which must stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
-    "Report a digest only if this cycle produced a milestone or an escalation; if nothing \
-     changed, end the cycle with no user-facing output.";
+    "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
+     output only if nothing changed and no open PR is CI-RED, CONFLICTED, or escalation_due.";
 
 /// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
 /// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm

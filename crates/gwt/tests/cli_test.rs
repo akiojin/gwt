@@ -430,7 +430,13 @@ fn red_104_parse_pr_view() {
 #[test]
 fn parse_pr_list() {
     let cmd = parse_pr_args(&[s("list")]).unwrap();
-    assert_eq!(cmd, CliCommand::Pr(PrCommand::List));
+    assert_eq!(
+        cmd,
+        CliCommand::Pr(PrCommand::List {
+            stale_after_hours: None,
+            escalate_after_cycles: None,
+        })
+    );
 }
 
 #[test]

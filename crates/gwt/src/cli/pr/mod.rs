@@ -50,10 +50,7 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Current)
         }
-        Some("list") => {
-            super::ensure_no_remaining_args(it)?;
-            Ok(PrCommand::List)
-        }
+        Some("list") => parse_pr_list_args(it.collect::<Vec<_>>().as_slice()),
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
         Some("view") => {
@@ -431,8 +428,19 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        PrCommand::List => {
-            let items = env.list_open_prs().map_err(super::io_as_api_error)?;
+        PrCommand::List {
+            stale_after_hours,
+            escalate_after_cycles,
+        } => {
+            let defaults = gwt_git::PrInventoryOptions::default();
+            let options = gwt_git::PrInventoryOptions {
+                stale_after_hours: stale_after_hours.unwrap_or(defaults.stale_after_hours),
+                escalate_after_cycles: escalate_after_cycles
+                    .unwrap_or(defaults.escalate_after_cycles),
+            };
+            let items = env
+                .list_open_prs(&options)
+                .map_err(super::io_as_api_error)?;
             render_pr_inventory(out, &items);
             0
         }
@@ -804,6 +812,42 @@ fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     })
 }
 
+fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
+    let mut stale_after_hours: Option<i64> = None;
+    let mut escalate_after_cycles: Option<u32> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--stale-after-hours" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or(CliParseError::MissingFlag("--stale-after-hours"))?;
+                stale_after_hours = Some(
+                    raw.parse()
+                        .map_err(|_| CliParseError::InvalidNumber((*raw).clone()))?,
+                );
+            }
+            "--escalate-after-cycles" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or(CliParseError::MissingFlag("--escalate-after-cycles"))?;
+                escalate_after_cycles = Some(
+                    raw.parse()
+                        .map_err(|_| CliParseError::InvalidNumber((*raw).clone()))?,
+                );
+            }
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+        i += 1;
+    }
+    Ok(PrCommand::List {
+        stale_after_hours,
+        escalate_after_cycles,
+    })
+}
+
 fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let Some(number_arg) = args.first() else {
         return Err(CliParseError::Usage);
@@ -868,10 +912,21 @@ pub(super) fn render_pr_inventory(out: &mut String, items: &[gwt_git::PrInventor
                 "ci_status": item.ci_status,
                 "review_status": item.review_status,
                 "closing_issues": item.closing_issues,
+                "head_ref_name": item.head_ref_name,
                 "lifecycle": item.lifecycle,
+                "lifecycle_source": item.lifecycle_source,
                 "stale": item.stale,
+                "stale_after_hours": item.stale_after_hours,
+                "dwell_hours": item.dwell_hours,
                 "owner_issue_closed": item.owner_issue_closed,
+                "owner_issue": item.owner_issue,
                 "default_action": item.default_action,
+                "default_action_executable": item.default_action_executable,
+                "blocker": item.blocker,
+                "fallback": item.fallback,
+                "unchanged_cycles": item.unchanged_cycles,
+                "escalate_after_cycles": item.escalate_after_cycles,
+                "escalation_due": item.escalation_due,
             })
         })
         .collect();
@@ -987,10 +1042,21 @@ mod tests {
             review_status: "APPROVED".to_string(),
             body: String::new(),
             closing_issues: vec![],
+            head_ref_name: "work/issue-7".to_string(),
             lifecycle: "MERGE-CANDIDATE".to_string(),
+            lifecycle_source: "observed".to_string(),
             stale: false,
             owner_issue_closed: false,
+            owner_issue: Some(7),
             default_action: "propose merge".to_string(),
+            dwell_hours: Some(5),
+            stale_after_hours: 72,
+            default_action_executable: false,
+            blocker: Some("owner_relaunch_refused_unique_commits".to_string()),
+            fallback: Some(gwt_git::PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string()),
+            unchanged_cycles: 2,
+            escalate_after_cycles: 3,
+            escalation_due: false,
         }
     }
 
@@ -2184,7 +2250,15 @@ mod tests {
         env.seed_pr_inventory(vec![seeded_inventory_item()]);
 
         let mut out = String::new();
-        let code = run(&mut env, PrCommand::List, &mut out).expect("run pr list");
+        let code = run(
+            &mut env,
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+            },
+            &mut out,
+        )
+        .expect("run pr list");
 
         assert_eq!(code, 0);
         assert_eq!(env.pr_list_call_count, 1);
@@ -2195,6 +2269,81 @@ mod tests {
         );
         assert!(out.contains("\"count\": 1"), "{out}");
         assert!(!out.contains("CLI family split body"), "{out}");
+        // Issue #3868: dwell time, executability, and no-progress counting are
+        // part of every row, and the thresholds the PM passed reach the env.
+        for field in [
+            "\"dwell_hours\": 5",
+            "\"stale_after_hours\": 72",
+            "\"lifecycle_source\": \"observed\"",
+            "\"default_action_executable\": false",
+            "\"blocker\": \"owner_relaunch_refused_unique_commits\"",
+            "\"fallback\": \"PM triages",
+            "\"unchanged_cycles\": 2",
+            "\"escalate_after_cycles\": 3",
+            "\"escalation_due\": false",
+            "\"head_ref_name\": \"work/issue-7\"",
+            "\"owner_issue\": 7",
+        ] {
+            assert!(out.contains(field), "missing {field}: {out}");
+        }
+        assert_eq!(
+            env.pr_list_options,
+            Some(gwt_git::PrInventoryOptions::default())
+        );
+    }
+
+    #[test]
+    fn pr_list_parses_optional_thresholds() {
+        let args: Vec<String> = [
+            "list",
+            "--stale-after-hours",
+            "24",
+            "--escalate-after-cycles",
+            "2",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            parse(&args).expect("parse list"),
+            PrCommand::List {
+                stale_after_hours: Some(24),
+                escalate_after_cycles: Some(2),
+            }
+        );
+        let bare: Vec<String> = vec!["list".to_string()];
+        assert_eq!(
+            parse(&bare).expect("parse bare list"),
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+            }
+        );
+    }
+
+    #[test]
+    fn pr_list_forwards_thresholds_to_the_env() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr_inventory(vec![]);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::List {
+                stale_after_hours: Some(24),
+                escalate_after_cycles: Some(2),
+            },
+            &mut out,
+        )
+        .expect("run pr list");
+        assert_eq!(code, 0);
+        assert_eq!(
+            env.pr_list_options,
+            Some(gwt_git::PrInventoryOptions {
+                stale_after_hours: 24,
+                escalate_after_cycles: 2,
+            })
+        );
     }
 
     #[test]
