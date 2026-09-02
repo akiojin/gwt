@@ -18,7 +18,12 @@
         findTitlebarDockTarget,
         resolveDragReleasePoint,
       } from "/window-docking.js";
-      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import {
+        attentionForWorkspace,
+        createWorkspaceKanbanSurface as createWorkspaceOverviewSurface,
+        formatLifecycleStateLabel,
+        mergeActiveWorkProjectionPatch,
+      } from "/workspace-kanban-surface.js";
       import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -26,7 +31,9 @@
         findAgentKanbanDropTargetAtPoint,
         isAgentKanbanEligible,
         isAgentKanbanPlacement,
+        isOffCanvasPlacement,
         placeAgentWindowMessage,
+        undockAgentWindowMessage,
         updateTerminalGridMessage,
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
@@ -275,6 +282,7 @@
       const renderedWindowElementKeys = new Map();
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
+      const renderedIssuePreviewBodyKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
       // window-cleanup call site keeps its text).
@@ -688,6 +696,33 @@
           appendRenderKeyPart(parts, "tab_group_active");
           appendRenderKeyPart(parts, Boolean(tab.tab_group_active));
           appendWindowPlacementRenderKey(parts, tab);
+        }
+        return parts.join("");
+      }
+
+      // SPEC-3671 FR-007 / FR-011: the Issue preview pane is driven by workspace
+      // state (which agents exist, what they are doing), not by knowledge events, so
+      // it needs its own render key to stay live.
+      function issuePreviewBodyRenderKey(issueWindow) {
+        const parts = [];
+        appendRenderKeyPart(parts, "issue_window_id");
+        appendRenderKeyPart(parts, issueWindow?.id || "");
+        for (const windowData of activeWorkspace().windows || []) {
+          if (windowData?.placement?.kind !== "issue_preview") {
+            continue;
+          }
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, windowData.id || "");
+          appendRenderKeyPart(parts, "issue_number");
+          appendRenderKeyPart(parts, windowData.placement.issue_number ?? "");
+          appendRenderKeyPart(parts, "host");
+          appendRenderKeyPart(parts, windowData.placement.issue_window_id || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
+          appendRenderKeyPart(parts, "role");
+          appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
         }
         return parts.join("");
       }
@@ -1376,7 +1411,7 @@
       }
 
       function visibleWindowData(windowData) {
-        if (isAgentKanbanPlacement(windowData)) {
+        if (isOffCanvasPlacement(windowData)) {
           return false;
         }
         if (!windowData?.tab_group_id) {
@@ -1490,9 +1525,15 @@
           profile: "Profile",
           logs: "Logs",
           agent_kanban: "Agent Kanban",
+          // SPEC-3671 FR-014: these three presets share the Knowledge surface but
+          // are different faces. Collapsing them to one "Issue" label made an open
+          // window's title unable to say which face it was.
           issue: "Issue",
-          issue_monitor: "Issue",
-          spec: "Issue",
+          issue_monitor: "Issue Monitor",
+          spec: "SPEC",
+          // SPEC-3671 FR-015: the wire preset is `work` (`workspace` is only a
+          // legacy deserialization alias), and the surface lists Works.
+          work: "Work",
           workspace: "Work",
           board: "Board",
           pr: "PR",
@@ -2483,7 +2524,7 @@
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
         const workspaceWindow = workspaceWindowById(windowId);
-        if (isAgentKanbanPlacement(workspaceWindow)) {
+        if (isOffCanvasPlacement(workspaceWindow)) {
           const terminalHost = terminalMap.get(windowId)?.terminal?.element?.parentElement;
           return elementHasLayoutBox(terminalHost);
         }
@@ -3021,7 +3062,7 @@
         ),
       ) {
         const windowData = workspaceWindowById(windowId);
-        if (isAgentKanbanPlacement(windowData)) {
+        if (isOffCanvasPlacement(windowData)) {
           send(updateTerminalGridMessage(windowId, cols, rows));
           return;
         }
@@ -3864,23 +3905,29 @@
         );
       }
 
-      function attachTerminalContainerBindings(windowId, terminalContainer, terminal) {
+      // SPEC-3671 FR-008: an Issue-preview mirror is read-only. Every binding that
+      // can reach the PTY — paste, file drop, context menu, wheel-driven input — is
+      // left unattached; only selection/copy and the resize reflow remain, and
+      // neither writes to the agent.
+      const noopCleanup = () => {};
+
+      function attachTerminalContainerBindings(
+        windowId,
+        terminalContainer,
+        terminal,
+        options = {},
+      ) {
+        const readOnly = options.readOnly === true;
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
-        const imagePasteCleanup = installTerminalImagePasteHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
-        const fileDropCleanup = installTerminalFileDropHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
-        const contextMenuCleanup = installTerminalContextMenuHandlers(
-          windowId,
-          terminalContainer,
-          terminal,
-        );
+        const imagePasteCleanup = readOnly
+          ? noopCleanup
+          : installTerminalImagePasteHandlers(windowId, terminalContainer, terminal);
+        const fileDropCleanup = readOnly
+          ? noopCleanup
+          : installTerminalFileDropHandlers(windowId, terminalContainer, terminal);
+        const contextMenuCleanup = readOnly
+          ? noopCleanup
+          : installTerminalContextMenuHandlers(windowId, terminalContainer, terminal);
         const wheelScrollCleanup = createTerminalWheelScrollController({
           terminalRoot: terminalContainer,
           terminal,
@@ -3888,7 +3935,7 @@
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
           sendTerminalInput: (data) => {
-            if (terminalMap.get(windowId)?.isReady !== true) {
+            if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
             }
             terminal.focus();
@@ -3911,10 +3958,25 @@
         };
       }
 
-      function reparentTerminalRuntime(windowId, runtime, terminalContainer) {
-        if (!runtime || runtime.terminalContainer === terminalContainer) {
+      // SPEC-3671 FR-008: the single place that flips a runtime between the
+      // interactive canvas terminal and the read-only Issue preview mirror.
+      function applyTerminalReadOnly(runtime, readOnly) {
+        if (!runtime) return;
+        runtime.readOnly = readOnly === true;
+        if (runtime.terminal?.options) {
+          runtime.terminal.options.disableStdin = runtime.readOnly;
+        }
+      }
+
+      function reparentTerminalRuntime(windowId, runtime, terminalContainer, options = {}) {
+        const readOnly = options.readOnly === true;
+        if (!runtime) {
           return runtime;
         }
+        if (runtime.terminalContainer === terminalContainer && runtime.readOnly === readOnly) {
+          return runtime;
+        }
+        applyTerminalReadOnly(runtime, readOnly);
         const terminalElement = runtime.terminal?.element;
         if (terminalElement && terminalElement.parentElement !== terminalContainer) {
           terminalContainer.appendChild(terminalElement);
@@ -3925,19 +3987,26 @@
           windowId,
           terminalContainer,
           runtime.terminal,
+          { readOnly },
         );
         requestAnimationFrame(() => {
+          // SPEC-3671: a runtime created inside a hidden host never completed its
+          // initial fit handshake, and nothing else retries it for a window that is
+          // never revealed on the canvas. Reparenting into a laid-out container IS
+          // the reveal, so retry the handshake here; it is idempotent once ready.
+          completeInitialFitHandshake(windowId);
           scheduleTerminalFit(windowId, true);
         });
         return runtime;
       }
 
-      function createTerminalRuntime(windowId, terminalContainer) {
+      function createTerminalRuntime(windowId, terminalContainer, options = {}) {
         if (terminalMap.has(windowId)) {
           return reparentTerminalRuntime(
             windowId,
             terminalMap.get(windowId),
             terminalContainer,
+            options,
           );
         }
         const terminal = new Terminal({
@@ -3948,6 +4017,8 @@
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
+          // SPEC-3671 FR-008.
+          disableStdin: options.readOnly === true,
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -3957,6 +4028,7 @@
           windowId,
           terminalContainer,
           terminal,
+          { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
@@ -3965,6 +4037,11 @@
         terminal.onData((data) => {
           inputTraceSeq += 1;
           const wsState = socket ? socket.readyState : -1;
+          // SPEC-3671 FR-008: a read-only mirror never forwards data to the PTY,
+          // whatever produced it.
+          if (terminalMap.get(windowId)?.readOnly === true) {
+            return;
+          }
           // Issue #2924: drop pre-ready onData firings — see
           // gateTerminalInputForReadiness in terminal-viewport-reflow.js
           // for the contract. The runtime is fetched fresh each firing so
@@ -4019,6 +4096,8 @@
           handshakeAttempts: 0,
           terminalContainer,
           containerBindingsCleanup,
+          // SPEC-3671 FR-008.
+          readOnly: options.readOnly === true,
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
@@ -4385,6 +4464,11 @@
           } catch {
             // Picker may not be mounted yet during bootstrap.
           }
+          try {
+            renderAllKnowledgeBridgeWindows();
+          } catch {
+            // Knowledge surfaces may not be mounted yet during bootstrap.
+          }
           const notice = launchPending.consumeTimeoutNotice();
           if (notice) {
             console.warn("[launch-pending]", notice);
@@ -4405,6 +4489,28 @@
         send,
       });
 
+      // SPEC-3671 FR-010: where a Windowized Issue preview lands. The window keeps
+      // its own persisted geometry when it has one; otherwise it opens inside the
+      // current view like any freshly placed window.
+      function issuePreviewWindowizeGeometry(windowData) {
+        const geometry = windowData?.geometry;
+        if (geometry && Number.isFinite(Number(geometry.width)) && Number(geometry.width) > 0) {
+          return {
+            x: Number(geometry.x) || 0,
+            y: Number(geometry.y) || 0,
+            width: Number(geometry.width) || 1280,
+            height: Number(geometry.height) || 800,
+          };
+        }
+        const bounds = visibleBounds() || { x: 0, y: 0, width: 1280, height: 800 };
+        return {
+          x: (Number(bounds.x) || 0) + 48,
+          y: (Number(bounds.y) || 0) + 48,
+          width: 1280,
+          height: 800,
+        };
+      }
+
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window
       // surface (knowledge bridge state map, semantic search coalescing,
       // Kanban rendering, Kanban Drawer, Knowledge window mount, and the
@@ -4421,6 +4527,7 @@
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
         renderKnowledgeBridge,
+        renderAllKnowledgeBridgeWindows,
         writeKanbanHideDonePreference,
         closeKanbanDrawer,
         mountKnowledgeWindow,
@@ -4447,6 +4554,32 @@
         openIssueLaunchWizard,
         visibleBounds,
         launchPending,
+        // SPEC-3671 FR-007 / FR-008: the Issue preview mounts the shared terminal
+        // runtime read-only, so the live output streams but no input path exists.
+        createTerminalRuntime: (id, terminalRoot, options) =>
+          createTerminalRuntime(id, terminalRoot, options),
+        windowDisplayTitle,
+        windowRoleBadgeLabel,
+        // SPEC-3671 FR-010: Windowize is the same Canvas handoff the Agent Kanban
+        // undock control performs, plus focus.
+        windowizeIssuePreviewWindow: (id) => {
+          const windowData = workspaceWindowById(id);
+          send(undockAgentWindowMessage(id, issuePreviewWindowizeGeometry(windowData)));
+          focusWindowLocally(id);
+          socketTransport.send({ kind: "focus_window", id });
+        },
+        // SPEC-3671 FR-012 / FR-013: the Issue row reads the active Work
+        // projection that is already broadcast, and reuses the Work surface's own
+        // derivations and action paths rather than re-deriving them.
+        getActiveWorkProjection: () => activeWorkProjection,
+        workAttentionFor: attentionForWorkspace,
+        formatWorkLifecycleLabel: formatLifecycleStateLabel,
+        continueWork: (workId, bounds) => continueWorkDispatcher.dispatch(workId, bounds),
+        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        // Lazy: the Branches & cleanup surface is constructed after this factory.
+        openWorkspaceCleanup: (candidate, sourceWindowId) =>
+          openWorkspaceCleanup(candidate, sourceWindowId),
+        getResumeBounds: () => visibleBounds(),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
@@ -4923,7 +5056,13 @@
             const runtime = terminalMap.get(windowData.id);
             runtime?.terminal.focus();
           });
-          frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
+          // SPEC-3671 FR-004: an off-canvas window's terminal belongs to the
+          // surface that hosts it (Agent Kanban card / Issue preview pane), not to
+          // this hidden canvas body. Mounting it here would steal the live terminal
+          // away from the visible host.
+          if (!isOffCanvasPlacement(windowData)) {
+            frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
+          }
           return;
         }
 
@@ -5314,6 +5453,28 @@
             renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
           }
         }
+        // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
+        // to the canvas without changing its preset, so `mountWindowBody` does not
+        // run again. Reclaim the live terminal into this window's own body.
+        if (surface === "terminal" && !isOffCanvasPlacement(windowData)) {
+          const terminalRoot = element.querySelector(".window-body .terminal-root");
+          if (
+            terminalRoot &&
+            terminalMap.get(windowData.id)?.terminalContainer !== terminalRoot
+          ) {
+            frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
+          }
+        }
+        // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
+        // state. Re-render the bridge (not the whole body) so list state, scroll,
+        // and the mounted terminal survive.
+        if (surface === "knowledge") {
+          const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
+          if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
+            renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
+            renderKnowledgeBridge(windowData.id);
+          }
+        }
 
         const nextWindowElementKey = windowElementRenderKey(windowData);
         if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey) {
@@ -5468,6 +5629,7 @@
                   renderedWindowElementKeys.delete(windowId);
                   renderedRuntimeStatusKeys.delete(windowId);
                   renderedAgentKanbanBodyKeys.delete(windowId);
+                  renderedIssuePreviewBodyKeys.delete(windowId);
                   pendingOutputMap.delete(windowId);
                   pendingSnapshotMap.delete(windowId);
                   terminalOutputBatcher.clear(windowId);
@@ -5753,6 +5915,24 @@
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
+          case "active_work_projection_patch":
+            activeWorkProjection = mergeActiveWorkProjectionPatch(
+              activeWorkProjection,
+              event.projection || null,
+            );
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+            );
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
+            workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
+            recomputeOperatorTelemetry();
+            break;
           // SPEC-3064 Phase 3 (E7): window list entries and rendering live
           // in the project shell surface.
           case "window_list":
@@ -5996,7 +6176,20 @@
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);
-            launchPending.settleAck(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh();
+              }
+            }
             break;
           // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
           // accepted — settle pending UI and dismiss the picker.

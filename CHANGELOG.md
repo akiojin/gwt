@@ -1,6 +1,185 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.85.0] - 2026-09-01
+
+### Bug Fixes
+
+- **test:** LaunchFeedbackContext 初期化子に autonomous handoff フィールドを補完 (#3671)
+- **test:** Data URL ロードで launch-pending-controller の相対 import を差し替える
+- **issue-monitor:** JSON からの自動運転再有効化を拒否する
+- **test:** Direct Stop の settlement fixture を安定化する
+- **verify:** Honor Board decisions at pr.ready
+- Requeue open issues after merged work
+
+### Documentation
+
+- **test:** Clarify settlement reserve assertion
+
+### Features
+
+- **window:** Issue Monitor 自動起動をキャンバス外プレビューにする
+- **window:** Issue 行に Work 情報と Work 操作を移設し面の命名を揃える
+- **pm:** 常駐報告と周回駆動規範を恒久化する
+- **verify:** Add typed failure quarantine gate
+- **perf:** Add performance record persistence foundation
+
+### Miscellaneous Tasks
+
+- **ci:** Migration_e2e t107 の単発 flake を再トリガー — ローカル 10/10 PASS (#3612)
+- **coordination:** Issue 3814 の検証経過を記録する
+- **coordination:** Issue 3814 の配送状態を記録する
+- **coordination:** PR 3831 の監視状態を記録する
+- **work:** Issue 3791 の配送状態を記録する
+- **work:** Issue 3848 の配送状態を記録する
+- **work:** Record Issue #3832 completion
+- **work:** Record issue 3841 terminal receipt
+
+### Testing
+
+- **pr:** Isolate verification guard home
+
+
+## [9.84.0] - 2026-08-31
+
+### Bug Fixes
+
+- **issue-monitor:** Gate launches on provider quota holds
+- **test:** Managed hook の Windows 回帰を CI で固定する
+- **daemon:** Unix 専用 subscribe scope を Windows から除外する
+- **clippy:** Windows ターゲットの unused_mut / dead_code を cfg_attr で許容 (#3534)
+- **test:** Ci_apt_lock_contract_test を unix 限定に gate する (#3534)
+- **clippy:** Windows で未使用の window_id を cfg_attr で許容する (#3534)
+- **issue:** Enforce per-resource cache freshness
+- **test:** LinkedPrSummary 初期化子に merged_at を補完 (#3391)
+- **issue-monitor:** 期限切れ stale claim による blocked_by_claim 恒久化と起動飢餓を解消する
+- **issue-monitor:** Claim block release を attempts 監査付き release 契約へ追随させる (#3683)
+- **test:** Requeued パターンを attempts フィールド追加へ追随させる (#3683)
+- **clippy:** Windows で未使用の claim probe helper を cfg_attr で許容する (#3683)
+- **deps:** Update whoami and auto-launch compatibility (#3782)
+- **clippy:** Windows autostart 経路の needless_return を除去する (#3782)
+- **launch:** Fresh launch の branch materialization 競合を防ぐ (#3774)
+- **launch:** Issue Resume の相関と失敗回復を修正
+- **test:** Continue_work 系 2 テストに ScopedGwtHome を追加する (#3471)
+- **execution:** Adopt 後の Session authority を復元する
+- **pm:** 入力中の supervision tick 混入を防ぐ
+- Pane close 後の bridge deadlock を解消
+- **index:** 不健全な Issue 検索を修復前に遮断する
+
+### Documentation
+
+- **issue-monitor:** Add quota hold screenshots
+- **agents:** 最小十分アプローチの実行規範と gwt 専用機能の恒久実装方針を追記
+- **agents:** 最小十分アプローチにモデル配分の節を追加する
+
+### Features
+
+- **gui:** USAGE ステータス表示を再設計する
+- **observability:** Persist gwt/gwtd errors in a host-wide ledger
+- **pm:** 依頼インテイクをサブエージェントへ委任する
+- **pm:** Isolate gwtd execution from resident PM turns
+- **pm:** Inventory open PRs in the resident PM loop
+
+### Miscellaneous Tasks
+
+- **work:** Record autonomous verification handoff
+- **work:** Draft PR handoff を記録する
+- **work:** Settle issue 3391 Work event
+- **work:** #3683 の Work イベントを記録する
+- **work:** #3683 の Work イベントを記録する
+- **ci:** E2E ランナーの apt 障害で失敗した CI を再実行する
+- **ci:** App_runtime テストの並列 flake で失敗した CI を再実行する
+- **work:** Issue 3782 の最終検証ハンドオフを記録する
+- **work:** Issue 3782 の Draft PR handoff を記録する
+- **ci:** Windows scheduled tick timing flake の再トリガー (#3612)
+- **ci:** Durable delivery timing flake の再トリガー — 毎回別の単発 timing test (#3612)
+- **ci:** 変更外 managed_assets 単発 flake の再トリガー — 毎回別テスト・diff は deps/autostart のみ (#3612)
+- **ci:** 4連続の変更外単発 timing flake を再トリガー — 該当4テストはローカル直列で全PASS実測 (#3612)
+- **work:** Issue 3471 の検証待機状態を更新
+- **work:** Issue 3471 の依存待ち状態を更新
+- **work:** Issue 3471 の検証準備を更新
+- **work:** Issue 3471 の delivery 記録を更新
+- **work:** Issue 3471 の Draft 準備を更新
+- **work:** Issue 3471 の終端記録を更新
+- **ci:** PTY teardown timing flake の再トリガー — #3798 でローカル直列 PASS 実測済みの既知単発 (#3612)
+- **work:** Issue 3458 の再開記録を反映する
+- **ci:** Pane_sync timing flake の再トリガー — #3792 と同一の負荷起因単発 (#3612)
+- **work:** Record PR inventory verification handoff
+- **work:** Record issue 3781 Draft PR handoff
+- **work:** Issue #3702 の検証待ち Work event を記録する
+- **ci:** PTY teardown timing flake の再トリガー — #3798/#3800 と同一の既知単発 (#3612)
+
+### Testing
+
+- **issue-monitor:** Initialize quota hold after develop merge
+- **app-runtime:** Stabilize approval settle timer (#3782)
+
+### Ci
+
+- **test:** Timeout の孤児 apt-get が dpkg lock で後続 attempt を全滅させる問題を解消する
+- **test:** GTK 依存インストールの apt を硬化して Test (Rust) ジョブの無限ハングを防ぐ
+
+## [9.83.6] - 2026-08-29
+
+### Bug Fixes
+
+- **pm:** Refresh resident worktree at safe boundaries
+- **pm:** Preserve fresh spawn without remote evidence
+- **pm:** Preserve caller head during degraded spawn
+- **issue-monitor:** Retry tracking ref CAS conflicts
+- **test:** Pm_launch_config テストに env_test_lock を追加 (#3572)
+- **board:** Close overflowed blocked escalations via params.resolves
+- **pane:** Finalize close teardown off the GUI thread
+- **pane:** PR #3787 レビュー指摘3件を修正 (#3783)
+- Deliver Grok handoffs through semantic receipts
+- **test:** PM close fixture で queued finalizer を drain する (#3572)
+- **issue-monitor:** Converge closed issue state
+- **issue-monitor:** Issue_updated_at 欠落時の live Open 行を fail-open にする (#3602)
+- **launch:** Readiness 上限で生存 pane を kill しない
+
+### Miscellaneous Tasks
+
+- **work:** Settle issue 3783 delivery events
+- **ci:** Daemon subscribe_resolver flake (2738 pass / 1 fail) の再トリガー (#3612)
+- **ci:** Timing flake 再トリガー2回目 — 各回別テスト（subscribe_resolver→pane_sync bounded）のCI負荷起因 (#3612)
+- Satisfy latest stable clippy slice fill lint
+- **ci:** Durable delivery 3テスト同時flakeの再トリガー — 直列x4/並列x3 全PASS実測 (#3612)
+- **ci:** Timing flake 再トリガー — 3件クラスタは再発せず毎回別の単発 timing test のみ (#3612)
+- **ci:** Daemon server flake の再トリガー (#3612)
+- **ci:** Daemon zombie-marker flake の再トリガー (#3612)
+- **ci:** Daemon zombie-marker flake の再トリガー (#3612)
+
+### Testing
+
+- **pm:** Materialize canonical restore fixture
+- **pm:** Isolate generated config fixture home
+- **pane:** Stabilize close verification contracts
+- **daemon:** Isolate deadline-sensitive contracts
+
+
+## [9.83.5] - 2026-08-27
+
+### Bug Fixes
+
+- **workspace:** 同一 container duplicate Work への二重 attach を遮断し ensure を self-heal 化 (#3684)
+- **daemon:** Respect subscribed project scope
+- Requeue 後の stale retry 復活を防止
+- **verify:** Persist bounded failure output tails
+- **pane:** GUIイベントループのPTY待機を解消する
+- **daemon:** Fence保持デーモンのendpoint descriptor消失をself-healで復旧 (#3766)
+- **daemon:** Descriptor self-healの同期I/Oをspawn_blockingへ退避 (#3766)
+
+### Miscellaneous Tasks
+
+- **ci:** Base 誤り PR #3687 close 後の CI 再実行トリガー (#3684)
+- **ci:** Test (Rust) の 105 分ハングを再トリガーで解消する (#3684)
+- **ci:** Build job の 60 分ハングを再トリガーで解消する (#3684)
+- **work:** Issue 3757 の完了状態を記録
+- **work:** Issue 3757 の開始記録を補完
+- **work:** Record issue 3596 delivery state
+- **work:** Settle issue 3596 delivery
+- **work:** Issue 3765 の実行イベント記録を追加 (#3765)
+
 
 ## [9.83.4] - 2026-08-25
 

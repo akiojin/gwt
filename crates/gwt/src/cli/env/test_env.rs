@@ -46,9 +46,11 @@ pub struct TestEnv {
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
+    pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
     pub prs: HashMap<u64, PrStatus>,
+    pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
     pub pr_comments: Vec<(u64, String)>,
     pub pr_create_call_log: Vec<PrCreateCall>,
@@ -57,6 +59,9 @@ pub struct TestEnv {
     pub pr_review_threads: HashMap<u64, Vec<PrReviewThread>>,
     pub pr_checks: HashMap<u64, PrChecksSummary>,
     pub pr_current_call_count: usize,
+    pub pr_list: Vec<gwt_git::PrInventoryItem>,
+    pub pr_list_call_count: usize,
+    pub pr_list_options: Option<gwt_git::PrInventoryOptions>,
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
@@ -95,9 +100,11 @@ impl TestEnv {
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
             linked_prs: HashMap::new(),
+            linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
             prs: HashMap::new(),
+            pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
             pr_comments: Vec::new(),
             pr_create_call_log: Vec::new(),
@@ -106,6 +113,9 @@ impl TestEnv {
             pr_review_threads: HashMap::new(),
             pr_checks: HashMap::new(),
             pr_current_call_count: 0,
+            pr_list: Vec::new(),
+            pr_list_call_count: 0,
+            pr_list_options: None,
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
@@ -164,6 +174,10 @@ impl TestEnv {
         self.linked_prs.insert(number, linked_prs);
     }
 
+    pub fn seed_linked_pr_error(&mut self, number: u64, message: impl Into<String>) {
+        self.linked_pr_errors.insert(number, message.into());
+    }
+
     pub fn linked_pr_calls(&self) -> Vec<u64> {
         self.linked_pr_call_log.clone()
     }
@@ -178,6 +192,10 @@ impl TestEnv {
 
     pub fn seed_pr(&mut self, number: u64, pr: PrStatus) {
         self.prs.insert(number, pr);
+    }
+
+    pub fn seed_pr_inventory(&mut self, items: Vec<gwt_git::PrInventoryItem>) {
+        self.pr_list = items;
     }
 
     pub fn seed_created_pr(&mut self, pr: PrStatus) {
@@ -300,6 +318,9 @@ impl CliEnv for TestEnv {
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
         self.linked_pr_call_log.push(number.0);
+        if let Some(message) = self.linked_pr_errors.get(&number.0) {
+            return Err(io::Error::other(message.clone()));
+        }
         Ok(self.linked_prs.get(&number.0).cloned().unwrap_or_default())
     }
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
@@ -351,6 +372,28 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext> {
+        self.pr_quarantine_contexts
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no PR quarantine context: {number}"),
+                )
+            })
+    }
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<Vec<gwt_git::PrInventoryItem>> {
+        self.pr_list_call_count += 1;
+        self.pr_list_options = Some(*options);
+        Ok(self.pr_list.clone())
     }
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_ready_call_log.push(number);

@@ -1,5 +1,6 @@
 //! Pull Request status tracking via GitHub CLI
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -51,6 +52,679 @@ impl PrStatus {
     pub fn requires_update_branch(&self) -> bool {
         self.merge_state_status == "BEHIND"
     }
+}
+
+/// Hours without an `updatedAt` bump after which an open PR is stale for the
+/// PM inventory (Issue #3781 AC-2). Overridable per call through
+/// [`PrInventoryOptions::stale_after_hours`] (Issue #3868 AC-5).
+pub const PR_STALE_AFTER_HOURS: i64 = 72;
+
+/// Consecutive `pr.list` observations with identical real data after which a
+/// row is `escalation_due` (Issue #3868 AC-6). Counted from the second
+/// observation, so the default flags a PR on its fourth unchanged cycle. One
+/// `pr.list` read is one observation, so the PM reads the inventory once per
+/// resident cycle.
+pub const PR_ESCALATE_AFTER_UNCHANGED_CYCLES: u32 = 3;
+
+/// The PM fallback attached to rows whose `default_action` cannot be executed
+/// through the Issue Monitor (Issue #3868 AC-2). The order is fixed: triage
+/// first, rerun a flake, fresh-launch a regression, escalate when neither
+/// is possible.
+pub const PR_FALLBACK_WHEN_NOT_EXECUTABLE: &str = "PM triages the failure (#3790) → flake: \
+arrange a rerun → regression: arrange a fresh launch → neither possible: escalate to a human now";
+
+/// Thresholds that shape the PM inventory (Issue #3868 AC-5 / AC-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrInventoryOptions {
+    /// Hours without an `updated_at` bump before a row is `stale`.
+    pub stale_after_hours: i64,
+    /// Unchanged consecutive observations before a row is `escalation_due`.
+    pub escalate_after_cycles: u32,
+}
+
+impl Default for PrInventoryOptions {
+    fn default() -> Self {
+        Self {
+            stale_after_hours: PR_STALE_AFTER_HOURS,
+            escalate_after_cycles: PR_ESCALATE_AFTER_UNCHANGED_CYCLES,
+        }
+    }
+}
+
+/// Lifecycle class the PM uses to pick a default action (Issue #3781 AC-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrLifecycleClass {
+    MergeCandidate,
+    Conflicted,
+    Behind,
+    CiRed,
+    Superseded,
+    InProgress,
+    /// GitHub has not computed mergeability (`UNKNOWN`), so no definite class
+    /// can be claimed. `pr.list` holds the previous class when the PR's real
+    /// data has not changed (Issue #3868 lifecycle stability).
+    Undetermined,
+}
+
+impl PrLifecycleClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MergeCandidate => "MERGE-CANDIDATE",
+            Self::Conflicted => "CONFLICTED",
+            Self::Behind => "BEHIND",
+            Self::CiRed => "CI-RED",
+            Self::Superseded => "SUPERSEDED",
+            Self::InProgress => "IN-PROGRESS",
+            Self::Undetermined => "UNDETERMINED",
+        }
+    }
+
+    fn parse(label: &str) -> Option<Self> {
+        [
+            Self::MergeCandidate,
+            Self::Conflicted,
+            Self::Behind,
+            Self::CiRed,
+            Self::Superseded,
+            Self::InProgress,
+            Self::Undetermined,
+        ]
+        .into_iter()
+        .find(|class| class.as_str() == label)
+    }
+
+    /// Whether the default action relaunches the owner Issue.
+    fn relaunches_owner(self) -> bool {
+        matches!(self, Self::Conflicted | Self::CiRed)
+    }
+}
+
+/// Closing Issue referenced by an open PR, when `gh pr list` exposes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrClosingIssue {
+    pub number: u64,
+    pub state: Option<String>,
+}
+
+/// Fields needed to classify one open PR without the derived lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrInventoryFields {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub is_draft: bool,
+    /// PR head branch (`headRefName`). A head sitting on the owner's launch
+    /// ref (`work/issue-<owner>`) is exactly what the Issue Monitor refuses
+    /// to fresh-launch over (unique commits), so it decides executability.
+    pub head_ref_name: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub mergeable: String,
+    pub merge_state_status: String,
+    pub ci_status: String,
+    pub review_status: String,
+    pub body: String,
+    pub closing_issues: Vec<PrClosingIssue>,
+}
+
+/// Result of classifying one open PR for the PM inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrLifecycleDecision {
+    pub class: PrLifecycleClass,
+    pub stale: bool,
+    pub owner_issue_closed: bool,
+    /// The Issue the PM would relaunch or triage for: the first closing
+    /// Issue, else the Issue named by the launch ref the head sits on.
+    pub owner_issue: Option<u64>,
+    pub default_action: String,
+    /// Hours since `updated_at` (Issue #3868 AC-4); `None` without a timestamp.
+    pub dwell_hours: Option<i64>,
+    /// Whether the PM can execute `default_action` through JSON operations.
+    pub default_action_executable: bool,
+    /// Why the owner cannot be relaunched, when known (Issue #3868 AC-1).
+    pub blocker: Option<String>,
+    /// The fallback order to apply when `default_action` is not executable.
+    pub fallback: Option<String>,
+}
+
+/// One open-PR inventory row returned by `pr.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrInventoryItem {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub is_draft: bool,
+    #[serde(default)]
+    pub head_ref_name: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub mergeable: String,
+    pub merge_state_status: String,
+    pub ci_status: String,
+    pub review_status: String,
+    pub body: String,
+    pub closing_issues: Vec<PrClosingIssue>,
+    pub lifecycle: String,
+    /// `observed` (classified from this read), `held` (previous class kept
+    /// while mergeability is `UNKNOWN` and the real data is unchanged), or
+    /// `undetermined` (unknown mergeability with no usable history).
+    #[serde(default = "lifecycle_source_observed")]
+    pub lifecycle_source: String,
+    pub stale: bool,
+    pub owner_issue_closed: bool,
+    #[serde(default)]
+    pub owner_issue: Option<u64>,
+    pub default_action: String,
+    #[serde(default)]
+    pub dwell_hours: Option<i64>,
+    #[serde(default = "default_stale_after_hours")]
+    pub stale_after_hours: i64,
+    #[serde(default = "default_true")]
+    pub default_action_executable: bool,
+    #[serde(default)]
+    pub blocker: Option<String>,
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// Consecutive `pr.list` observations whose real data did not change.
+    #[serde(default)]
+    pub unchanged_cycles: u32,
+    #[serde(default = "default_escalate_after_cycles")]
+    pub escalate_after_cycles: u32,
+    /// `stale` or `unchanged_cycles >= escalate_after_cycles`: the row must
+    /// reach the human with what was done or why nothing could be done.
+    #[serde(default)]
+    pub escalation_due: bool,
+}
+
+fn lifecycle_source_observed() -> String {
+    "observed".to_string()
+}
+
+fn default_stale_after_hours() -> i64 {
+    PR_STALE_AFTER_HOURS
+}
+
+fn default_escalate_after_cycles() -> u32 {
+    PR_ESCALATE_AFTER_UNCHANGED_CYCLES
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Per-PR memory between `pr.list` calls (Issue #3868 AC-6 and lifecycle
+/// stability). Lives in the machine-local project dir, never in the repo.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrInventoryHistory {
+    #[serde(default)]
+    pub entries: BTreeMap<u64, PrInventoryHistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrInventoryHistoryEntry {
+    pub updated_at: Option<DateTime<Utc>>,
+    pub lifecycle: String,
+    pub default_action: String,
+    pub unchanged_cycles: u32,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+impl PrInventoryHistory {
+    /// Read the history; a missing or corrupt file is an empty history so an
+    /// inventory read never fails because of its own bookkeeping.
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let rendered = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, rendered)?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Fold this read into the history: hold a previous class while GitHub
+    /// reports `UNKNOWN` mergeability for unchanged real data, count
+    /// unchanged cycles, and forget PRs that left the inventory.
+    pub fn observe(
+        &mut self,
+        items: &mut [PrInventoryItem],
+        now: DateTime<Utc>,
+        options: &PrInventoryOptions,
+    ) {
+        let mut next: BTreeMap<u64, PrInventoryHistoryEntry> = BTreeMap::new();
+        for item in items.iter_mut() {
+            let previous = self.entries.get(&item.number);
+            let same_real_data = previous.is_some_and(|entry| entry.updated_at == item.updated_at);
+            if item.lifecycle_source == "undetermined" && same_real_data {
+                if let Some(entry) = previous {
+                    if let Some(class) = PrLifecycleClass::parse(&entry.lifecycle) {
+                        if class != PrLifecycleClass::Undetermined {
+                            item.apply_held_class(class);
+                        }
+                    }
+                }
+            }
+            item.unchanged_cycles = if same_real_data {
+                previous.map_or(0, |entry| entry.unchanged_cycles.saturating_add(1))
+            } else {
+                0
+            };
+            item.escalate_after_cycles = options.escalate_after_cycles;
+            item.escalation_due =
+                item.stale || item.unchanged_cycles >= options.escalate_after_cycles;
+            next.insert(
+                item.number,
+                PrInventoryHistoryEntry {
+                    updated_at: item.updated_at,
+                    lifecycle: item.lifecycle.clone(),
+                    default_action: item.default_action.clone(),
+                    unchanged_cycles: item.unchanged_cycles,
+                    last_seen_at: now,
+                },
+            );
+        }
+        self.entries = next;
+    }
+}
+
+impl PrInventoryItem {
+    fn fields(&self) -> PrInventoryFields {
+        PrInventoryFields {
+            number: self.number,
+            title: self.title.clone(),
+            url: self.url.clone(),
+            is_draft: self.is_draft,
+            head_ref_name: self.head_ref_name.clone(),
+            updated_at: self.updated_at,
+            mergeable: self.mergeable.clone(),
+            merge_state_status: self.merge_state_status.clone(),
+            ci_status: self.ci_status.clone(),
+            review_status: self.review_status.clone(),
+            body: self.body.clone(),
+            closing_issues: self.closing_issues.clone(),
+        }
+    }
+
+    fn apply_held_class(&mut self, class: PrLifecycleClass) {
+        let decision = decide_for_class(&self.fields(), class);
+        self.lifecycle = class.as_str().to_string();
+        self.lifecycle_source = "held".to_string();
+        self.default_action = decision.default_action;
+        self.default_action_executable = decision.default_action_executable;
+        self.blocker = decision.blocker;
+        self.fallback = decision.fallback;
+    }
+}
+
+fn looks_superseded(title: &str, body: &str) -> bool {
+    let mut haystack = String::with_capacity(title.len() + body.len() + 1);
+    haystack.push_str(title);
+    haystack.push('\n');
+    haystack.push_str(body);
+    haystack.to_ascii_lowercase().contains("superseded")
+}
+
+fn owner_issue_is_closed(issues: &[PrClosingIssue]) -> bool {
+    if issues.is_empty() {
+        return false;
+    }
+    issues.iter().all(|issue| {
+        issue
+            .state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("CLOSED"))
+    })
+}
+
+fn pr_dwell_hours(updated_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<i64> {
+    updated_at.map(|updated| (now - updated).num_hours().max(0))
+}
+
+fn mergeability_unknown(fields: &PrInventoryFields) -> bool {
+    fields.mergeable.eq_ignore_ascii_case("UNKNOWN")
+        || fields.merge_state_status.eq_ignore_ascii_case("UNKNOWN")
+}
+
+/// Issue number encoded in a gwt launch ref (`work/issue-<n>` or `issue-<n>`).
+fn launch_ref_issue(head_ref_name: &str) -> Option<u64> {
+    let tail = head_ref_name
+        .strip_prefix("work/issue-")
+        .or_else(|| head_ref_name.strip_prefix("issue-"))?;
+    (!tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())).then(|| tail.parse().ok())?
+}
+
+/// The Issue the PM would relaunch: the first closing Issue, else the Issue
+/// named by the launch ref the PR head sits on.
+fn owner_issue(fields: &PrInventoryFields) -> Option<u64> {
+    fields
+        .closing_issues
+        .first()
+        .map(|issue| issue.number)
+        .or_else(|| launch_ref_issue(&fields.head_ref_name))
+}
+
+/// Whether the PR head is the launch ref the Issue Monitor would fresh-launch
+/// the owner from — the exact case its unique-commits guard refuses.
+fn head_is_owner_launch_ref(fields: &PrInventoryFields) -> bool {
+    launch_ref_issue(&fields.head_ref_name).is_some_and(|head_issue| {
+        fields.closing_issues.is_empty()
+            || fields
+                .closing_issues
+                .iter()
+                .any(|issue| issue.number == head_issue)
+    })
+}
+
+/// Classify one open PR into the PM inventory taxonomy with default thresholds.
+pub fn classify_pr_lifecycle(
+    fields: &PrInventoryFields,
+    now: DateTime<Utc>,
+) -> PrLifecycleDecision {
+    classify_pr_lifecycle_with(fields, now, &PrInventoryOptions::default())
+}
+
+/// Classify one open PR into the PM inventory taxonomy.
+pub fn classify_pr_lifecycle_with(
+    fields: &PrInventoryFields,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+) -> PrLifecycleDecision {
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let class = if looks_superseded(&fields.title, &fields.body) || owner_issue_closed {
+        PrLifecycleClass::Superseded
+    } else if mergeability_unknown(fields) {
+        PrLifecycleClass::Undetermined
+    } else if fields.mergeable.eq_ignore_ascii_case("CONFLICTING")
+        || fields.merge_state_status.eq_ignore_ascii_case("DIRTY")
+    {
+        PrLifecycleClass::Conflicted
+    } else if fields.merge_state_status.eq_ignore_ascii_case("BEHIND") {
+        PrLifecycleClass::Behind
+    } else if fields.ci_status.eq_ignore_ascii_case("FAILURE") {
+        PrLifecycleClass::CiRed
+    } else if fields.mergeable.eq_ignore_ascii_case("MERGEABLE")
+        && fields.ci_status.eq_ignore_ascii_case("SUCCESS")
+        && (fields.merge_state_status.eq_ignore_ascii_case("CLEAN")
+            || fields.merge_state_status.is_empty())
+    {
+        PrLifecycleClass::MergeCandidate
+    } else {
+        PrLifecycleClass::InProgress
+    };
+    let mut decision = decide_for_class(fields, class);
+    decision.dwell_hours = pr_dwell_hours(fields.updated_at, now);
+    decision.stale = decision
+        .dwell_hours
+        .is_some_and(|hours| hours >= options.stale_after_hours);
+    if class == PrLifecycleClass::InProgress && decision.stale {
+        decision.default_action = format!("escalate: no update for {}h", options.stale_after_hours);
+    }
+    decision
+}
+
+/// Default action and executability for an already-decided class. `stale`
+/// and `dwell_hours` are filled by the caller, which owns the clock.
+fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLifecycleDecision {
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let default_action = match (class, fields.is_draft) {
+        (PrLifecycleClass::MergeCandidate, true) => "mark ready".to_string(),
+        (PrLifecycleClass::MergeCandidate, false) => "propose merge".to_string(),
+        (PrLifecycleClass::Conflicted, _) => "relaunch owner to resolve conflict".to_string(),
+        (PrLifecycleClass::Behind, _) => "update-branch".to_string(),
+        (PrLifecycleClass::CiRed, _) => "relaunch owner to fix CI".to_string(),
+        (PrLifecycleClass::Superseded, _) => {
+            "propose close in digest (never auto-close)".to_string()
+        }
+        (PrLifecycleClass::InProgress, _) => "leave in progress".to_string(),
+        (PrLifecycleClass::Undetermined, _) => {
+            "hold: mergeability not computed yet, re-read next cycle".to_string()
+        }
+    };
+    let owner = owner_issue(fields);
+    let blocker = if owner_issue_closed {
+        Some("owner_issue_closed")
+    } else if class.relaunches_owner() {
+        if owner.is_none() {
+            Some("owner_unknown")
+        } else if head_is_owner_launch_ref(fields) {
+            Some("owner_relaunch_refused_unique_commits")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let default_action_executable = !(class.relaunches_owner() && blocker.is_some());
+    let fallback =
+        (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string());
+    PrLifecycleDecision {
+        class,
+        stale: false,
+        owner_issue_closed,
+        owner_issue: owner,
+        default_action,
+        dwell_hours: None,
+        default_action_executable,
+        blocker: blocker.map(str::to_string),
+        fallback,
+    }
+}
+
+fn inventory_item_from_fields(
+    fields: PrInventoryFields,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+) -> PrInventoryItem {
+    let decision = classify_pr_lifecycle_with(&fields, now, options);
+    let lifecycle_source = if decision.class == PrLifecycleClass::Undetermined {
+        "undetermined"
+    } else {
+        "observed"
+    };
+    PrInventoryItem {
+        number: fields.number,
+        title: fields.title,
+        url: fields.url,
+        is_draft: fields.is_draft,
+        head_ref_name: fields.head_ref_name,
+        updated_at: fields.updated_at,
+        mergeable: fields.mergeable,
+        merge_state_status: fields.merge_state_status,
+        ci_status: fields.ci_status,
+        review_status: fields.review_status,
+        body: fields.body,
+        closing_issues: fields.closing_issues,
+        lifecycle: decision.class.as_str().to_string(),
+        lifecycle_source: lifecycle_source.to_string(),
+        stale: decision.stale,
+        owner_issue_closed: decision.owner_issue_closed,
+        owner_issue: decision.owner_issue,
+        default_action: decision.default_action,
+        dwell_hours: decision.dwell_hours,
+        stale_after_hours: options.stale_after_hours,
+        default_action_executable: decision.default_action_executable,
+        blocker: decision.blocker,
+        fallback: decision.fallback,
+        unchanged_cycles: 0,
+        escalate_after_cycles: options.escalate_after_cycles,
+        escalation_due: decision.stale,
+    }
+}
+
+fn parse_closing_issues(value: &serde_json::Value) -> Vec<PrClosingIssue> {
+    let nodes = match value {
+        serde_json::Value::Array(items) => items.as_slice(),
+        serde_json::Value::Object(map) => match map.get("nodes").and_then(|nodes| nodes.as_array())
+        {
+            Some(items) => items.as_slice(),
+            None => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let number = node.get("number").and_then(serde_json::Value::as_u64)?;
+            let state = node
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some(PrClosingIssue { number, state })
+        })
+        .collect()
+}
+
+fn inventory_item_from_value(
+    value: &serde_json::Value,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+) -> Result<PrInventoryItem> {
+    let single_json = serde_json::to_string(value).map_err(|e| GwtError::Other(e.to_string()))?;
+    let status = parse_pr_status_json(&single_json)?;
+    let fields = PrInventoryFields {
+        number: status.number,
+        title: status.title,
+        url: status.url,
+        is_draft: value
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        head_ref_name: value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: parse_github_timestamp(
+            value.get("updatedAt").and_then(serde_json::Value::as_str),
+        )
+        .or(status.created_at),
+        mergeable: status.mergeable,
+        merge_state_status: status.merge_state_status,
+        ci_status: status.ci_status,
+        review_status: status.review_status,
+        body: value
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        closing_issues: value
+            .get("closingIssuesReferences")
+            .map(parse_closing_issues)
+            .unwrap_or_default(),
+    };
+    Ok(inventory_item_from_fields(fields, now, options))
+}
+
+/// Parse `gh pr list --json` output into classified inventory rows.
+pub fn parse_pr_inventory_json(json: &str, now: DateTime<Utc>) -> Result<Vec<PrInventoryItem>> {
+    parse_pr_inventory_json_with(json, now, &PrInventoryOptions::default())
+}
+
+/// Parse `gh pr list --json` output with explicit thresholds.
+pub fn parse_pr_inventory_json_with(
+    json: &str,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+) -> Result<Vec<PrInventoryItem>> {
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+    arr.iter()
+        .map(|value| inventory_item_from_value(value, now, options))
+        .collect()
+}
+
+const INVENTORY_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,closingIssuesReferences";
+const INVENTORY_JSON_FIELDS_WITHOUT_CLOSING: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body";
+
+/// File under the machine-local project dir that remembers the previous
+/// `pr.list` observation per PR (Issue #3868 AC-6).
+pub const PR_INVENTORY_HISTORY_FILE: &str = "pr-inventory-history.json";
+
+/// Fetch open PRs and classify them for the PM inventory (`pr.list`) with
+/// default thresholds and no cross-call memory.
+pub fn fetch_pr_inventory(repo_path: &Path) -> Result<Vec<PrInventoryItem>> {
+    fetch_pr_inventory_with(
+        repo_path,
+        Utc::now(),
+        &PrInventoryOptions::default(),
+        run_gh_command,
+    )
+}
+
+/// Fetch open PRs, classify them, and fold the read into the per-project
+/// history so `unchanged_cycles`, `escalation_due`, and held classes are
+/// meaningful across resident PM cycles.
+pub fn fetch_pr_inventory_tracked(
+    repo_path: &Path,
+    history_path: &Path,
+    options: &PrInventoryOptions,
+) -> Result<Vec<PrInventoryItem>> {
+    let now = Utc::now();
+    let mut items = fetch_pr_inventory_with(repo_path, now, options, run_gh_command)?;
+    let mut history = PrInventoryHistory::load(history_path);
+    history.observe(&mut items, now, options);
+    if let Err(error) = history.save(history_path) {
+        // Bookkeeping never fails the read; the next call simply starts the
+        // counters over. gwt-git has no tracing sink, so stderr is the
+        // channel envelope callers already collect.
+        eprintln!(
+            "warning: pr inventory history at {} could not be saved: {error}",
+            history_path.display()
+        );
+    }
+    Ok(items)
+}
+
+fn fetch_pr_inventory_with<F>(
+    repo_path: &Path,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+    mut run_gh: F,
+) -> Result<Vec<PrInventoryItem>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let primary = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            INVENTORY_JSON_FIELDS,
+        ],
+    )?;
+    if primary.success {
+        return parse_pr_inventory_json_with(&primary.stdout, now, options);
+    }
+    let fallback = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            INVENTORY_JSON_FIELDS_WITHOUT_CLOSING,
+        ],
+    )?;
+    if !fallback.success {
+        return Err(GwtError::Git(format!(
+            "gh pr list inventory: {}",
+            fallback.stderr.trim()
+        )));
+    }
+    parse_pr_inventory_json_with(&fallback.stdout, now, options)
 }
 
 /// Fetch the status of a PR by number using `gh pr view --json`.
@@ -2207,5 +2881,606 @@ mod tests {
             })
         });
         assert_eq!(failed, None, "gh failure → None");
+    }
+
+    fn sample_inventory_fields() -> PrInventoryFields {
+        PrInventoryFields {
+            number: 1,
+            title: "feat: example".to_string(),
+            url: "https://github.com/o/r/pull/1".to_string(),
+            is_draft: false,
+            head_ref_name: "work/issue-10".to_string(),
+            updated_at: Some("2026-08-30T00:00:00Z".parse().expect("now")),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
+            ci_status: "SUCCESS".to_string(),
+            review_status: "APPROVED".to_string(),
+            body: "Closes #10".to_string(),
+            closing_issues: vec![],
+        }
+    }
+
+    #[test]
+    fn classifies_merge_candidate_when_clean_and_green() {
+        let decision = classify_pr_lifecycle(
+            &sample_inventory_fields(),
+            "2026-08-30T00:00:00Z".parse().expect("now"),
+        );
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert!(!decision.stale);
+        assert!(!decision.owner_issue_closed);
+        assert_eq!(decision.default_action, "propose merge");
+    }
+
+    #[test]
+    fn classifies_draft_merge_candidate_as_mark_ready() {
+        let mut fields = sample_inventory_fields();
+        fields.is_draft = true;
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert_eq!(decision.default_action, "mark ready");
+    }
+
+    #[test]
+    fn classifies_conflicted_ahead_of_ci_red() {
+        let mut fields = sample_inventory_fields();
+        fields.mergeable = "CONFLICTING".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Conflicted);
+        assert_eq!(
+            decision.default_action,
+            "relaunch owner to resolve conflict"
+        );
+    }
+
+    #[test]
+    fn classifies_behind_from_merge_state() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Behind);
+        assert_eq!(decision.default_action, "update-branch");
+    }
+
+    #[test]
+    fn classifies_ci_red() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "FAILURE".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::CiRed);
+        assert_eq!(decision.default_action, "relaunch owner to fix CI");
+    }
+
+    #[test]
+    fn classifies_superseded_from_title_or_body_ahead_of_conflict() {
+        let mut fields = sample_inventory_fields();
+        fields.title = "feat: old path (superseded by #99)".to_string();
+        fields.mergeable = "CONFLICTING".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+        assert_eq!(
+            decision.default_action,
+            "propose close in digest (never auto-close)"
+        );
+
+        fields.title = "feat: example".to_string();
+        fields.body = "This PR is superseded by #100".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+    }
+
+    #[test]
+    fn classifies_owner_issue_closed_as_superseded_close_proposal() {
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("CLOSED".to_string()),
+        }];
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+        assert!(decision.owner_issue_closed);
+        assert_eq!(
+            decision.default_action,
+            "propose close in digest (never auto-close)"
+        );
+    }
+
+    #[test]
+    fn owner_issue_stays_open_when_any_closing_issue_is_open() {
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![
+            PrClosingIssue {
+                number: 10,
+                state: Some("CLOSED".to_string()),
+            },
+            PrClosingIssue {
+                number: 11,
+                state: Some("OPEN".to_string()),
+            },
+        ];
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert!(!decision.owner_issue_closed);
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+    }
+
+    #[test]
+    fn classifies_in_progress_for_pending_ci_or_unknown_merge() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "PENDING".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert_eq!(decision.class, PrLifecycleClass::InProgress);
+        assert_eq!(decision.default_action, "leave in progress");
+    }
+
+    #[test]
+    fn marks_pr_stale_after_72_hours_without_update() {
+        let mut fields = sample_inventory_fields();
+        fields.updated_at = Some("2026-08-26T23:59:59Z".parse().expect("old"));
+        fields.ci_status = "PENDING".to_string();
+        let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
+        assert!(decision.stale);
+        assert_eq!(decision.class, PrLifecycleClass::InProgress);
+        assert_eq!(decision.default_action, "escalate: no update for 72h");
+    }
+
+    #[test]
+    fn parse_pr_inventory_json_classifies_rows() {
+        let json = r#"[
+            {
+                "number": 42,
+                "title": "feat: ready",
+                "url": "https://github.com/o/r/pull/42",
+                "isDraft": false,
+                "updatedAt": "2026-08-30T00:00:00Z",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+                "reviewDecision": "APPROVED",
+                "body": "Closes #7",
+                "closingIssuesReferences": [{"number": 7, "state": "OPEN"}]
+            }
+        ]"#;
+        let items = parse_pr_inventory_json(json, "2026-08-30T00:00:00Z".parse().expect("now"))
+            .expect("parse inventory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].number, 42);
+        assert_eq!(items[0].lifecycle, "MERGE-CANDIDATE");
+        assert_eq!(items[0].default_action, "propose merge");
+        assert!(!items[0].stale);
+        assert_eq!(items[0].closing_issues[0].number, 7);
+    }
+
+    #[test]
+    fn parse_pr_inventory_json_accepts_nested_closing_issue_nodes() {
+        let json = r#"[
+            {
+                "number": 8,
+                "title": "fix: leftover",
+                "url": "https://github.com/o/r/pull/8",
+                "isDraft": true,
+                "updatedAt": "2026-08-01T00:00:00Z",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [],
+                "body": "superseded by #9",
+                "closingIssuesReferences": {"nodes": [{"number": 3, "state": "CLOSED"}]}
+            }
+        ]"#;
+        let items = parse_pr_inventory_json(json, "2026-08-30T00:00:00Z".parse().expect("now"))
+            .expect("parse nested closing issues");
+        assert_eq!(items[0].lifecycle, "SUPERSEDED");
+        assert!(items[0].owner_issue_closed);
+        assert!(items[0].stale);
+        assert!(items[0].is_draft);
+    }
+
+    #[test]
+    fn fetch_pr_inventory_with_lists_open_prs_and_classifies() {
+        let repo_path = Path::new("/tmp/repo");
+        let mut calls = Vec::new();
+        let items = fetch_pr_inventory_with(
+            repo_path,
+            "2026-08-30T00:00:00Z".parse().expect("now"),
+            &PrInventoryOptions::default(),
+            |path, args| {
+                assert_eq!(path, repo_path);
+                calls.push(args.join(" "));
+                match args {
+                    ["pr", "list", ..] => {
+                        assert!(args.contains(&"--state"));
+                        assert!(args.contains(&"open"));
+                        Ok(GhCliOutput {
+                            success: true,
+                            stdout: r#"[{
+                                "number": 3,
+                                "title": "feat: behind",
+                                "url": "https://github.com/o/r/pull/3",
+                                "isDraft": false,
+                                "updatedAt": "2026-08-30T00:00:00Z",
+                                "mergeable": "MERGEABLE",
+                                "mergeStateStatus": "BEHIND",
+                                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+                                "body": ""
+                            }]"#
+                            .to_string(),
+                            stderr: String::new(),
+                        })
+                    }
+                    other => panic!("unexpected gh invocation: {other:?}"),
+                }
+            },
+        )
+        .expect("inventory");
+        assert!(calls[0].starts_with("pr list"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].lifecycle, "BEHIND");
+        assert_eq!(items[0].default_action, "update-branch");
+    }
+
+    // ---- Issue #3868: fallback detection, dwell time, no-progress counting ----
+
+    fn now_3868() -> DateTime<Utc> {
+        "2026-09-01T12:00:00Z".parse().expect("now")
+    }
+
+    #[test]
+    fn inventory_row_reports_dwell_hours_from_updated_at() {
+        let mut fields = sample_inventory_fields();
+        fields.updated_at = Some("2026-08-29T12:00:00Z".parse().expect("updated"));
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.dwell_hours, Some(72));
+        assert!(decision.stale);
+
+        fields.updated_at = None;
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.dwell_hours, None);
+    }
+
+    #[test]
+    fn stale_threshold_is_configurable_with_a_default_of_72_hours() {
+        let options = PrInventoryOptions::default();
+        assert_eq!(options.stale_after_hours, PR_STALE_AFTER_HOURS);
+        assert_eq!(
+            options.escalate_after_cycles,
+            PR_ESCALATE_AFTER_UNCHANGED_CYCLES
+        );
+
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "PENDING".to_string();
+        fields.updated_at = Some("2026-08-31T11:00:00Z".parse().expect("updated"));
+        let default = classify_pr_lifecycle(&fields, now_3868());
+        assert!(!default.stale, "25h is under the 72h default");
+
+        let tight = PrInventoryOptions {
+            stale_after_hours: 24,
+            ..PrInventoryOptions::default()
+        };
+        let decision = classify_pr_lifecycle_with(&fields, now_3868(), &tight);
+        assert!(decision.stale, "25h exceeds a 24h threshold");
+        assert_eq!(decision.default_action, "escalate: no update for 24h");
+    }
+
+    #[test]
+    fn relaunch_actions_on_the_owner_launch_ref_are_not_executable() {
+        let mut fields = sample_inventory_fields();
+        fields.mergeable = "CONFLICTING".to_string();
+        fields.head_ref_name = "work/issue-10".to_string();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("OPEN".to_string()),
+        }];
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Conflicted);
+        assert!(!decision.default_action_executable);
+        assert_eq!(
+            decision.blocker.as_deref(),
+            Some("owner_relaunch_refused_unique_commits")
+        );
+        assert_eq!(
+            decision.fallback.as_deref(),
+            Some(PR_FALLBACK_WHEN_NOT_EXECUTABLE)
+        );
+
+        fields.mergeable = "MERGEABLE".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::CiRed);
+        assert!(!decision.default_action_executable);
+        assert_eq!(
+            decision.blocker.as_deref(),
+            Some("owner_relaunch_refused_unique_commits")
+        );
+    }
+
+    #[test]
+    fn relaunch_actions_on_a_launch_ref_without_closing_issues_name_the_owner_from_the_head() {
+        // #3726 / #3598 / #3593 in the wild: no `Closes #N`, head on
+        // `work/issue-<n>`. The launch ref itself names the owner and is what
+        // the Monitor's unique-commits guard refuses.
+        let mut fields = sample_inventory_fields();
+        fields.mergeable = "CONFLICTING".to_string();
+        fields.head_ref_name = "work/issue-3712".to_string();
+        fields.closing_issues = vec![];
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.owner_issue, Some(3712));
+        assert!(!decision.default_action_executable);
+        assert_eq!(
+            decision.blocker.as_deref(),
+            Some("owner_relaunch_refused_unique_commits")
+        );
+    }
+
+    #[test]
+    fn relaunch_actions_without_a_known_owner_are_not_executable() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "FAILURE".to_string();
+        fields.head_ref_name = "feature/manual".to_string();
+        fields.closing_issues = vec![];
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::CiRed);
+        assert_eq!(decision.owner_issue, None);
+        assert!(!decision.default_action_executable);
+        assert_eq!(decision.blocker.as_deref(), Some("owner_unknown"));
+        assert!(decision.fallback.is_some());
+    }
+
+    #[test]
+    fn relaunch_actions_stay_executable_off_the_owner_launch_ref() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "FAILURE".to_string();
+        fields.head_ref_name = "feature/other-branch".to_string();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("OPEN".to_string()),
+        }];
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+        assert_eq!(decision.fallback, None);
+    }
+
+    #[test]
+    fn executable_actions_carry_no_blocker() {
+        let decision = classify_pr_lifecycle(&sample_inventory_fields(), now_3868());
+        assert!(decision.default_action_executable);
+        assert_eq!(decision.blocker, None);
+        assert_eq!(decision.fallback, None);
+
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("CLOSED".to_string()),
+        }];
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Superseded);
+        assert!(
+            decision.default_action_executable,
+            "a close proposal is something the PM can do"
+        );
+        assert_eq!(decision.blocker.as_deref(), Some("owner_issue_closed"));
+    }
+
+    #[test]
+    fn unknown_mergeability_is_undetermined_instead_of_a_fake_class() {
+        let mut fields = sample_inventory_fields();
+        fields.mergeable = "UNKNOWN".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Undetermined);
+        assert_eq!(decision.class.as_str(), "UNDETERMINED");
+        assert_eq!(
+            decision.default_action,
+            "hold: mergeability not computed yet, re-read next cycle"
+        );
+
+        fields.mergeable = "MERGEABLE".to_string();
+        fields.merge_state_status = "UNKNOWN".to_string();
+        fields.ci_status = "SUCCESS".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Undetermined);
+
+        fields.title = "superseded by #99".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(
+            decision.class,
+            PrLifecycleClass::Superseded,
+            "supersession does not depend on mergeability"
+        );
+    }
+
+    fn sample_item(number: u64, updated_at: &str, mergeable: &str, ci: &str) -> PrInventoryItem {
+        let mut fields = sample_inventory_fields();
+        fields.number = number;
+        fields.updated_at = Some(updated_at.parse().expect("updated"));
+        fields.mergeable = mergeable.to_string();
+        fields.ci_status = ci.to_string();
+        inventory_item_from_fields(fields, now_3868(), &PrInventoryOptions::default())
+    }
+
+    #[test]
+    fn history_holds_the_previous_lifecycle_while_mergeability_is_unknown() {
+        let mut history = PrInventoryHistory::default();
+        let options = PrInventoryOptions::default();
+
+        let mut first = vec![sample_item(
+            3726,
+            "2026-08-21T04:01:24Z",
+            "CONFLICTING",
+            "FAILURE",
+        )];
+        history.observe(&mut first, now_3868(), &options);
+        assert_eq!(first[0].lifecycle, "CONFLICTED");
+        assert_eq!(first[0].lifecycle_source, "observed");
+
+        let mut second = vec![sample_item(
+            3726,
+            "2026-08-21T04:01:24Z",
+            "UNKNOWN",
+            "FAILURE",
+        )];
+        assert_eq!(second[0].lifecycle, "UNDETERMINED");
+        history.observe(&mut second, now_3868(), &options);
+        assert_eq!(
+            second[0].lifecycle, "CONFLICTED",
+            "same real data → held class"
+        );
+        assert_eq!(second[0].lifecycle_source, "held");
+        assert_eq!(
+            second[0].default_action,
+            "relaunch owner to resolve conflict"
+        );
+
+        let mut moved = vec![sample_item(
+            3726,
+            "2026-09-01T00:00:00Z",
+            "UNKNOWN",
+            "FAILURE",
+        )];
+        history.observe(&mut moved, now_3868(), &options);
+        assert_eq!(
+            moved[0].lifecycle, "UNDETERMINED",
+            "real data changed → previous class is not reused"
+        );
+        assert_eq!(moved[0].lifecycle_source, "undetermined");
+    }
+
+    #[test]
+    fn history_counts_unchanged_cycles_and_flags_escalation_at_the_threshold() {
+        let mut history = PrInventoryHistory::default();
+        let options = PrInventoryOptions {
+            escalate_after_cycles: 2,
+            ..PrInventoryOptions::default()
+        };
+        let mut items = vec![sample_item(
+            3847,
+            "2026-09-01T10:15:00Z",
+            "MERGEABLE",
+            "FAILURE",
+        )];
+        history.observe(&mut items, now_3868(), &options);
+        assert_eq!(items[0].unchanged_cycles, 0);
+        assert!(!items[0].escalation_due);
+        assert_eq!(items[0].escalate_after_cycles, 2);
+
+        let mut items = vec![sample_item(
+            3847,
+            "2026-09-01T10:15:00Z",
+            "MERGEABLE",
+            "FAILURE",
+        )];
+        history.observe(&mut items, now_3868(), &options);
+        assert_eq!(items[0].unchanged_cycles, 1);
+        assert!(!items[0].escalation_due);
+
+        let mut items = vec![sample_item(
+            3847,
+            "2026-09-01T10:15:00Z",
+            "MERGEABLE",
+            "FAILURE",
+        )];
+        history.observe(&mut items, now_3868(), &options);
+        assert_eq!(items[0].unchanged_cycles, 2);
+        assert!(
+            items[0].escalation_due,
+            "threshold reached → immediate escalation"
+        );
+
+        let mut items = vec![sample_item(
+            3847,
+            "2026-09-01T11:00:00Z",
+            "MERGEABLE",
+            "FAILURE",
+        )];
+        history.observe(&mut items, now_3868(), &options);
+        assert_eq!(items[0].unchanged_cycles, 0, "an update resets the counter");
+        assert!(!items[0].escalation_due);
+    }
+
+    #[test]
+    fn stale_rows_are_escalation_due_regardless_of_the_cycle_counter() {
+        let mut history = PrInventoryHistory::default();
+        let mut items = vec![sample_item(
+            3598,
+            "2026-08-15T13:15:05Z",
+            "CONFLICTING",
+            "FAILURE",
+        )];
+        history.observe(&mut items, now_3868(), &PrInventoryOptions::default());
+        assert!(items[0].stale);
+        assert_eq!(items[0].unchanged_cycles, 0);
+        assert!(items[0].escalation_due);
+    }
+
+    #[test]
+    fn history_forgets_prs_that_left_the_inventory_and_round_trips_through_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("pr-inventory-history.json");
+        let options = PrInventoryOptions::default();
+
+        let mut history = PrInventoryHistory::load(&path);
+        let mut items = vec![
+            sample_item(1, "2026-09-01T00:00:00Z", "MERGEABLE", "SUCCESS"),
+            sample_item(2, "2026-09-01T00:00:00Z", "MERGEABLE", "SUCCESS"),
+        ];
+        history.observe(&mut items, now_3868(), &options);
+        history.save(&path).expect("save history");
+
+        let mut reloaded = PrInventoryHistory::load(&path);
+        let mut items = vec![sample_item(
+            2,
+            "2026-09-01T00:00:00Z",
+            "MERGEABLE",
+            "SUCCESS",
+        )];
+        reloaded.observe(&mut items, now_3868(), &options);
+        assert_eq!(
+            items[0].unchanged_cycles, 1,
+            "counter survived the disk round trip"
+        );
+        assert!(
+            !reloaded.entries.contains_key(&1),
+            "a PR that left the inventory is forgotten"
+        );
+
+        std::fs::write(&path, "not json").expect("corrupt");
+        let recovered = PrInventoryHistory::load(&path);
+        assert!(
+            recovered.entries.is_empty(),
+            "corrupt history is treated as empty"
+        );
+    }
+
+    #[test]
+    fn parse_pr_inventory_json_reads_head_ref_and_dwell_fields() {
+        let json = r#"[
+            {
+                "number": 3847,
+                "title": "fix(pane): scope operations",
+                "url": "https://github.com/o/r/pull/3847",
+                "isDraft": true,
+                "headRefName": "work/issue-3830",
+                "updatedAt": "2026-09-01T10:15:00Z",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BLOCKED",
+                "statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}],
+                "body": "",
+                "closingIssuesReferences": [{"number": 3830, "state": "OPEN"}]
+            }
+        ]"#;
+        let items = parse_pr_inventory_json_with(json, now_3868(), &PrInventoryOptions::default())
+            .expect("parse inventory");
+        assert_eq!(items[0].head_ref_name, "work/issue-3830");
+        assert_eq!(items[0].owner_issue, Some(3830));
+        assert_eq!(items[0].lifecycle, "CI-RED");
+        assert_eq!(items[0].dwell_hours, Some(1));
+        assert_eq!(items[0].stale_after_hours, 72);
+        assert!(!items[0].default_action_executable);
+        assert_eq!(
+            items[0].blocker.as_deref(),
+            Some("owner_relaunch_refused_unique_commits")
+        );
+        assert_eq!(items[0].lifecycle_source, "observed");
+        assert_eq!(items[0].unchanged_cycles, 0);
     }
 }

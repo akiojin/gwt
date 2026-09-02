@@ -172,6 +172,7 @@ fn inject_repair_binding_authority_race_if_requested(worktree: &Path) -> io::Res
         missing_verification: None,
         launched_at: now,
         settled_at: None,
+        completion_evidence: None,
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
@@ -483,6 +484,14 @@ pub struct ExecutionRecovery {
 
 /// The Execution Control Record (T-106).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionCompletionEvidence {
+    pub verification_record_id: String,
+    pub verification_run_hash: String,
+    pub verification_plan_hash: String,
+    pub used_typed_quarantine: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionControlRecord {
     pub owner_kind: ExecutionOwnerKind,
     pub owner_number: u64,
@@ -503,6 +512,12 @@ pub struct ExecutionControlRecord {
     pub launched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,
+    /// Exact integrity-protected verification snapshot that authorized a
+    /// Completed transition. Ready handoff must consume this same snapshot;
+    /// replacing or deleting the run after completion cannot erase a typed
+    /// quarantine disposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_evidence: Option<ExecutionCompletionEvidence>,
     /// Audited ownership transfer chain (P9a, T-117/T-123): every takeover —
     /// `execution.adopt`, launch takeover, resume takeover — appends here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4536,6 +4551,130 @@ pub(crate) fn with_blocked_build_abort_session_execution_identity_global_lease<T
     )
 }
 
+/// Variant for callers that already hold the exact worktree-global trusted
+/// write lease. It acquires only owner -> Session beneath that lease, avoiding
+/// a nested attempt on the non-reentrant global lock.
+pub(crate) fn with_current_active_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_held_global_lease(
+        sessions_dir,
+        expected,
+        held_trusted_dir,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+pub(crate) fn with_blocked_build_abort_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_held_global_lease(
+        sessions_dir,
+        expected,
+        held_trusted_dir,
+        CurrentExecutionBindingAuthority::BlockedBuildAbort,
+        operation,
+    )
+}
+
+fn with_current_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    authority: CurrentExecutionBindingAuthority,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "owner lease must be acquired before the Session lease; retry outside the nested Session operation",
+        ));
+    }
+    let binding = &expected.execution_binding;
+    if expected.session_id != binding.session_id
+        || gwt_agent::validate_session_id_path_component(&expected.session_id).is_err()
+    {
+        return Ok(None);
+    }
+    let owner = match binding.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: binding.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let session_path = sessions_dir.join(format!("{}.toml", expected.session_id));
+    let route_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => session,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if gwt_agent::SessionExecutionIdentity::from_session(&route_session)
+        .ok()
+        .flatten()
+        .as_ref()
+        != Some(expected)
+    {
+        return Ok(None);
+    }
+    let context = match GenerationTransactionContext::resolve(&expected.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if context.worktree_trusted_dir != held_trusted_dir {
+        return Ok(None);
+    }
+    context.validate_unchanged()?;
+    with_resolved_generation_owner_lease(&context, |context| {
+        gwt_agent::with_session_lease(sessions_dir, &expected.session_id, |session| {
+            let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
+                Ok(path) => path,
+                Err(_) => return Ok(None),
+            };
+            let execution_binding_matches = match authority {
+                CurrentExecutionBindingAuthority::ActiveMutation => {
+                    current_active_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &binding.identity,
+                    )?
+                }
+                CurrentExecutionBindingAuthority::BlockedBuildAbort => {
+                    blocked_build_abort_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &binding.identity,
+                    )?
+                }
+                CurrentExecutionBindingAuthority::PrMutation => false,
+            };
+            if gwt_agent::SessionExecutionIdentity::from_session(session)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(expected)
+                || canonical_worktree != context.worktree
+                || !execution_binding_matches
+            {
+                return Ok(None);
+            }
+            Ok(Some(operation(held_trusted_dir)))
+        })
+    })
+}
+
 fn with_current_session_execution_identity_global_lease<T>(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
@@ -4790,6 +4929,7 @@ fn invalid_generation_authority_record(hint: &GenerationAuthorityHint) -> Execut
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -5734,6 +5874,7 @@ fn build_successor_generation(
         missing_verification: None,
         launched_at: request.requested_at,
         settled_at: None,
+        completion_evidence: None,
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
@@ -8361,6 +8502,35 @@ fn with_exact_recovery_session_lease<T>(
     )
 }
 
+fn update_exact_recovery_session<T>(
+    expected_session: &gwt_agent::Session,
+    mutate: impl FnOnce(&mut gwt_agent::Session) -> io::Result<T>,
+) -> io::Result<T> {
+    match gwt_agent::update_session_if_unchanged_with(
+        &gwt_core::paths::gwt_sessions_dir(),
+        expected_session,
+        mutate,
+    ) {
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated(value)) => Ok(value),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
+            ),
+        )),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotUnreadable(error)) => {
+            Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
+                ),
+            ))
+        }
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::MutationFailed(error)) => Err(error),
+        Err(error) => Err(error),
+    }
+}
+
 fn ensure_recovery_session_snapshot_unchanged(
     state: &gwt_agent::SessionPathState,
     expected_session: &gwt_agent::Session,
@@ -8625,6 +8795,49 @@ fn persist_generation_takeover_if_owned(
     persist_generation_takeover_if_owned_with_session(worktree, record, transfer, None)
 }
 
+fn bind_recovery_session_to_generation(
+    session: &mut gwt_agent::Session,
+    owner: ExecutionOwnerKey,
+    identity: gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<()> {
+    let repo_hash = session.repo_hash.clone().ok_or_else(|| {
+        invalid_generation_data("recovery Session repository identity is unavailable")
+    })?;
+    let capability_generation = match session.execution_binding.as_ref() {
+        Some(current)
+            if current.schema_version
+                == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+                && current.session_id == session.id
+                && current.repo_hash == repo_hash
+                && current.owner_kind == owner.kind.as_str()
+                && current.owner_number == owner.number
+                && current.identity == identity =>
+        {
+            current.capability_generation
+        }
+        Some(current) => current
+            .capability_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid_generation_data("Session capability generation overflow"))?,
+        None => 1,
+    };
+    session
+        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash,
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity,
+            capability_generation,
+        }))
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "adopting Session execution binding is invalid: {error}"
+            ))
+        })
+}
+
 fn persist_generation_takeover_if_owned_for_recovery(
     worktree: &Path,
     record: &ExecutionControlRecord,
@@ -8689,12 +8902,12 @@ fn persist_generation_takeover_if_owned_with_session(
                 "generation takeover CAS does not match the current Active worktree/session/projection",
             ));
         }
-        let commit = || {
+        let mut commit = |session: Option<&mut gwt_agent::Session>| {
             append_takeover_event(
                 &mut ledger,
                 GenerationTakeoverAudit {
                     sequence: 0,
-                    generation_id: current.identity.generation_id,
+                    generation_id: current.identity.generation_id.clone(),
                     from_session_id: transfer.from_session_id.clone(),
                     to_session_id: transfer.to_session_id.clone(),
                     reason: transfer.reason.clone(),
@@ -8705,13 +8918,193 @@ fn persist_generation_takeover_if_owned_with_session(
                 },
             );
             stamp_generation_ledger(&mut ledger);
+            if let Some(session) = session {
+                bind_recovery_session_to_generation(
+                    session,
+                    owner,
+                    execution_binding_for_generation(&ledger, &current),
+                )?;
+            }
             write_activated_generation(context, &ledger, &projection)?;
             Ok(true)
         };
         match expected_session {
-            Some(expected_session) => with_exact_recovery_session_lease(expected_session, commit),
-            None => commit(),
+            Some(expected_session) => {
+                update_exact_recovery_session(expected_session, |session| commit(Some(session)))
+            }
+            None => commit(None),
         }
+    })
+}
+
+fn persist_current_generation_binding_if_owned_for_recovery(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+    expected_session: &gwt_agent::Session,
+) -> io::Result<()> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during ownership recovery")
+        })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let current_projection = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "current generation recovery projection is malformed: {error}"
+            ))
+        })?;
+        if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+            || current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || current_projection != *record
+            || current_projection.primary_session_id != expected_session.id
+        {
+            return Err(generation_conflict(
+                "generation recovery binding CAS does not match the current Active worktree/session/projection",
+            ));
+        }
+        let identity = execution_binding_for_generation(&ledger, current);
+        update_exact_recovery_session(expected_session, |session| {
+            bind_recovery_session_to_generation(session, owner, identity)
+        })
+    })
+}
+
+fn active_generation_owner_for_recovery_session(
+    worktree: &Path,
+    session: &gwt_agent::Session,
+) -> io::Result<Option<ExecutionOwnerKey>> {
+    let Some(number) = session.linked_issue_number else {
+        return Ok(None);
+    };
+    let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+        .ok_or_else(|| invalid_generation_data("trusted generation store path is unavailable"))?;
+    let owner = match discover_repair_owner(worktree, &session.id, &trusted_dir) {
+        Ok(owner) if owner.number == number => owner,
+        Ok(_) => {
+            return Err(invalid_generation_data(
+                "generation owner does not match the adopting Session recovery scope",
+            ))
+        }
+        Err(error)
+            if error
+                .to_string()
+                .starts_with("execution_repair_owner_unknown:") =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let context = GenerationTransactionContext::resolve(worktree, owner)?;
+    match load_owner_generation_ledger_from_context(&context) {
+        Ok(Some(ledger))
+            if ledger.current_generation().is_some_and(|generation| {
+                generation.identity.worktree_binding_hash == context.worktree_binding_hash
+                    && ledger.effective_status_for(generation) == ExecutionControlStatus::Active
+            }) =>
+        {
+            Ok(Some(owner))
+        }
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
+/// Re-publish one already-committed same-generation takeover after a
+/// ledger-first partial write. The owner ledger is authoritative, so the
+/// retry derives both the flat projection/pointer and Session binding from
+/// its exact current head without appending a second transfer.
+fn reconcile_committed_generation_takeover_for_recovery(
+    worktree: &Path,
+    expected_session: &gwt_agent::Session,
+) -> io::Result<bool> {
+    let Some(owner) = active_generation_owner_for_recovery_session(worktree, expected_session)?
+    else {
+        return Ok(false);
+    };
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during adopt reconciliation")
+        })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let projection_json = ledger.effective_projection_for(current).to_string();
+        let projection = serde_json::from_str::<ExecutionControlRecord>(&projection_json)
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "committed takeover projection is malformed: {error}"
+                ))
+            })?;
+        let takeover = ledger
+            .takeovers
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.generation_id == current.identity.generation_id)
+            .max_by_key(|(_, event)| event.sequence);
+        let latest_event_sequence = ledger
+            .takeovers
+            .iter()
+            .map(|event| event.sequence)
+            .chain(ledger.lifecycle_events.iter().map(|event| event.sequence))
+            .max();
+        if current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || ledger.effective_status_for(current) != ExecutionControlStatus::Active
+            || projection.owner_kind != owner.kind
+            || projection.owner_number != owner.number
+            || projection.primary_session_id != expected_session.id
+            || takeover.is_none_or(|(_, event)| {
+                event.to_session_id != expected_session.id
+                    || Some(event.sequence) != latest_event_sequence
+            })
+        {
+            return Ok(false);
+        }
+        let (takeover_index, _) = takeover.expect("validated latest takeover");
+        let mut prefix = ledger.clone();
+        prefix.takeovers.remove(takeover_index);
+        let prefix_current = prefix.current_generation().ok_or_else(|| {
+            invalid_generation_data("takeover prefix lost the current generation")
+        })?;
+        let prior_projection = prefix.effective_projection_for(prefix_current);
+        let prior_pointer = generation_pointer(&ledger, prior_projection)?;
+        let prior_pointer_bytes = serde_json::to_vec_pretty(&prior_pointer).map_err(|error| {
+            invalid_generation_data(format!(
+                "serialize pre-takeover generation pointer: {error}"
+            ))
+        })?;
+        let Some(actual_projection) = read_optional_authority_bytes(
+            &context.worktree_trusted_dir.join("execution-control.json"),
+        )?
+        else {
+            return Ok(false);
+        };
+        let Some(actual_pointer) = read_optional_authority_bytes(
+            &context.worktree_trusted_dir.join(GENERATION_POINTER_FILE),
+        )?
+        else {
+            return Ok(false);
+        };
+        if actual_pointer != prior_pointer_bytes
+            || (actual_projection.as_slice() != prior_projection.as_bytes()
+                && actual_projection.as_slice() != projection_json.as_bytes())
+        {
+            return Ok(false);
+        }
+        let identity = execution_binding_for_generation(&ledger, current);
+        update_exact_recovery_session(expected_session, |session| {
+            bind_recovery_session_to_generation(session, owner, identity)?;
+            write_activated_generation(context, &ledger, &projection_json)
+        })?;
+        Ok(true)
     })
 }
 
@@ -8812,6 +9205,7 @@ fn materialize_at_launch_locked(
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers,
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -8873,6 +9267,9 @@ pub fn entrypoint_from_launch(args: &[String], resume: bool) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionSettlement {
     Completed,
+    CompletedWithEvidence {
+        evidence: ExecutionCompletionEvidence,
+    },
     Blocked {
         reason: String,
         missing_verification: Option<String>,
@@ -8935,6 +9332,11 @@ fn settle_locked(
             record.status = ExecutionControlStatus::Completed;
             "completed".to_string()
         }
+        ExecutionSettlement::CompletedWithEvidence { evidence } => {
+            record.status = ExecutionControlStatus::Completed;
+            record.completion_evidence = Some(evidence);
+            "completed with verification evidence".to_string()
+        }
         ExecutionSettlement::Blocked {
             reason,
             missing_verification,
@@ -8976,43 +9378,72 @@ fn settle_completed_with_evidence(
     worktree: &Path,
     session_id: &str,
     expected_owner_number: Option<u64>,
+    expected_verification_hash: Option<&str>,
 ) -> io::Result<Result<SettleResult, crate::cli::verification_record::EvidenceStatus>> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
-        let Some(record) = load(worktree)? else {
-            return Ok(Ok(SettleResult::NoRecord));
-        };
-        if expected_owner_number.is_some_and(|expected| record.owner_number != expected) {
-            return Ok(Ok(SettleResult::NoRecord));
-        }
-        if !integrity_ok(&record)
-            || record.primary_session_id != session_id
-            || record.status != ExecutionControlStatus::Active
-        {
-            return settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok);
-        }
-
-        use crate::cli::verification_record as vr;
-        let verification = match vr::load(worktree) {
-            Ok(Some(verification)) => verification,
-            Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
-            Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
-        };
-        let plan = match vr::load_plan(worktree) {
-            Ok(plan) => plan,
-            Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
-        };
-        let status = vr::evaluate_evidence_snapshot(
+        settle_completed_with_evidence_locked(
             worktree,
             session_id,
-            Some(record.owner_number),
-            plan.as_ref(),
-            &verification,
-        );
-        if status != vr::EvidenceStatus::Fresh {
-            return Ok(Err(status));
-        }
-        settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok)
+            expected_owner_number,
+            expected_verification_hash,
+        )
     })
+}
+
+pub(crate) fn settle_completed_with_evidence_locked(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+    expected_verification_hash: Option<&str>,
+) -> io::Result<Result<SettleResult, crate::cli::verification_record::EvidenceStatus>> {
+    let Some(record) = load(worktree)? else {
+        return Ok(Ok(SettleResult::NoRecord));
+    };
+    if expected_owner_number.is_some_and(|expected| record.owner_number != expected) {
+        return Ok(Ok(SettleResult::NoRecord));
+    }
+    if !integrity_ok(&record)
+        || record.primary_session_id != session_id
+        || record.status != ExecutionControlStatus::Active
+    {
+        return settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok);
+    }
+
+    use crate::cli::verification_record as vr;
+    let verification = match vr::load(worktree) {
+        Ok(Some(verification)) => verification,
+        Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
+        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+    };
+    if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
+        return Ok(Err(vr::EvidenceStatus::PlanChanged));
+    }
+    let plan = match vr::load_plan(worktree) {
+        Ok(plan) => plan,
+        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+    };
+    let status = vr::evaluate_evidence_snapshot(
+        worktree,
+        session_id,
+        Some(record.owner_number),
+        plan.as_ref(),
+        &verification,
+    );
+    if !status.is_delivery_acceptable() {
+        return Ok(Err(status));
+    }
+    let evidence = ExecutionCompletionEvidence {
+        verification_record_id: verification.record_id.clone(),
+        verification_run_hash: verification.content_hash.clone(),
+        verification_plan_hash: verification.verification_plan_hash.clone(),
+        used_typed_quarantine: status == vr::EvidenceStatus::FreshWithQuarantine,
+    };
+    settle_locked(
+        worktree,
+        session_id,
+        ExecutionSettlement::CompletedWithEvidence { evidence },
+    )
+    .map(Ok)
 }
 
 /// Best-effort settlement used by sibling flows (`build.complete`): settles
@@ -9025,21 +9456,38 @@ pub(crate) fn settle_completed_best_effort(
     session_id: &str,
     expected_owner_number: u64,
 ) {
+    let _ = settle_completed_best_effort_guarded(worktree, session_id, expected_owner_number, None);
+}
+
+pub(crate) fn settle_completed_best_effort_guarded(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: u64,
+    expected_verification_hash: Option<&str>,
+) -> bool {
     // T-247: build.complete settlement also skips while obligations stay
     // open — the ECR stays active and the Stop gate keeps holding.
     if let Some(refusal) =
         crate::cli::action_obligation::open_obligation_refusal(worktree, session_id, &[])
     {
         tracing::warn!(%refusal, "execution control settlement skipped");
-        return;
+        return false;
     }
-    match settle_completed_with_evidence(worktree, session_id, Some(expected_owner_number)) {
-        Ok(Ok(_)) => {}
+    match settle_completed_with_evidence(
+        worktree,
+        session_id,
+        Some(expected_owner_number),
+        expected_verification_hash,
+    ) {
+        Ok(Ok(SettleResult::Settled(_) | SettleResult::AlreadySettled(_))) => true,
+        Ok(Ok(_)) => false,
         Ok(Err(status)) => {
             tracing::warn!(?status, "execution control settlement evidence refused");
+            false
         }
         Err(error) => {
             tracing::warn!(?error, "execution control settlement failed");
+            false
         }
     }
 }
@@ -9050,14 +9498,19 @@ pub(crate) fn settle_completed_best_effort(
 /// - A terminally **blocked** execution refuses every PR mutation (create —
 ///   draft included —, edit, ready): a blocked execution cannot hand off.
 /// - An **active** execution gates only Ready handoffs (`ready_handoff` =
-///   non-draft create or `pr.ready`) on fresh, all-passing verification
-///   evidence. Draft creation and `pr.edit` stay available as the
-///   sanctioned mid-work sharing path (AGENTS Draft policy); the full PR
-///   lifecycle matrix (Draft conversion, head/base drift) is T-199+.
+///   non-draft create or `pr.ready`) on fresh verification evidence. An exact
+///   typed quarantine or Board decision may classify failures for `pr.ready`
+///   only; non-draft create still requires all-pass because no durable PR
+///   marker exists before creation. Draft creation and `pr.edit` stay
+///   available as the sanctioned mid-work sharing path (AGENTS Draft policy).
 /// - When owner generation authority exists, every mutation first authenticates
 ///   the ambient caller against the exact durable Session/binding. Legacy flat
 ///   ECRs and unmanaged repositories preserve their compatibility behavior.
-pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Option<String> {
+fn evaluate_pr_handoff(
+    repo_path: &Path,
+    ready_handoff: bool,
+    allow_ready_adjudication: bool,
+) -> Result<Vec<crate::cli::verification_record::VerificationAdjudicationRef>, String> {
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -9065,9 +9518,9 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
     let worktree = gwt_core::paths::resolve_current_worktree_root(repo_path);
     let record = match load(&worktree) {
         Ok(Some(record)) => record,
-        Ok(None) => return None,
+        Ok(None) => return Ok(Vec::new()),
         Err(_) => {
-            return Some(
+            return Err(
                 "PR mutation refused: current execution authority could not be read safely; repair or relaunch the owning execution before retrying."
                     .to_string(),
             )
@@ -9076,7 +9529,7 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
     // P9a (T-122): a tampered record refuses every PR mutation for everyone.
     // The repair path depends on lifecycle status because adopt is Active-only.
     if !integrity_ok(&record) {
-        return Some(format!(
+        return Err(format!(
             "PR handoff refused: the execution control record failed integrity validation (edited outside the canonical operations). {}",
             integrity_repair_guidance(record.status),
         ));
@@ -9093,18 +9546,20 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
         }
     };
     if caller_authenticated.is_err() {
-        return Some(
+        return Err(
             "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying."
                 .to_string(),
         );
     }
-    let session_id = session_id?;
+    let Some(session_id) = session_id else {
+        return Ok(Vec::new());
+    };
     if record.primary_session_id != session_id {
-        return None;
+        return Ok(Vec::new());
     }
     match record.status {
-        ExecutionControlStatus::Completed => None,
-        ExecutionControlStatus::Blocked => Some(format!(
+        ExecutionControlStatus::Completed => Ok(Vec::new()),
+        ExecutionControlStatus::Blocked => Err(format!(
             "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. In the same owning session, resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run it through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
             kind = record.owner_kind.as_str(),
             number = record.owner_number,
@@ -9114,19 +9569,40 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
                 .unwrap_or("no reason recorded"),
         )),
         ExecutionControlStatus::Active if ready_handoff => {
-            let status = crate::cli::verification_record::evaluate_evidence(
-                &worktree,
-                &session_id,
-                Some(record.owner_number),
-            );
-            if status == crate::cli::verification_record::EvidenceStatus::Fresh {
-                None
+            if allow_ready_adjudication {
+                crate::cli::verification_record::evaluate_pr_ready_evidence(
+                    &worktree,
+                    &session_id,
+                    Some(record.owner_number),
+                )
+                .map_err(|status| format!("PR handoff refused: {}", status.describe()))
             } else {
-                Some(format!("PR handoff refused: {}", status.describe()))
+                let status = crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    &session_id,
+                    Some(record.owner_number),
+                );
+                if status == crate::cli::verification_record::EvidenceStatus::Fresh {
+                    Ok(Vec::new())
+                } else {
+                    Err(format!("PR handoff refused: {}", status.describe()))
+                }
             }
         }
-        ExecutionControlStatus::Active => None,
+        ExecutionControlStatus::Active => Ok(Vec::new()),
     }
+}
+
+pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Option<String> {
+    evaluate_pr_handoff(repo_path, ready_handoff, false).err()
+}
+
+/// Evaluate the exact `pr.ready` path and return the durable Board references
+/// that must be copied into the PR delivery audit when raw evidence is failing.
+pub(crate) fn pr_ready_adjudications(
+    repo_path: &Path,
+) -> Result<Vec<crate::cli::verification_record::VerificationAdjudicationRef>, String> {
+    evaluate_pr_handoff(repo_path, true, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -9507,6 +9983,7 @@ fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus)
     use crate::cli::verification_record::EvidenceStatus;
     match status {
         EvidenceStatus::Fresh => "fresh",
+        EvidenceStatus::FreshWithQuarantine => "fresh_with_quarantine",
         EvidenceStatus::MissingRecord => "missing_record",
         EvidenceStatus::WrongSession => "wrong_session",
         EvidenceStatus::WrongOwner => "wrong_owner",
@@ -10683,6 +11160,7 @@ enum ExecutionReopenPrerequisites {
 fn evaluate_execution_reopen_prerequisites(
     worktree: &Path,
     session_id: &str,
+    allow_current_typed_quarantine: bool,
 ) -> Result<ExecutionReopenPrerequisites, RecoveryPrerequisiteRefusal> {
     use crate::cli::governance::GovernanceCause;
     if session_id.trim().is_empty() {
@@ -10818,7 +11296,10 @@ fn evaluate_execution_reopen_prerequisites(
         Some(&plan),
         &verification,
     );
-    if evidence_status != vr::EvidenceStatus::Fresh {
+    if evidence_status != vr::EvidenceStatus::Fresh
+        && !(allow_current_typed_quarantine
+            && evidence_status == vr::EvidenceStatus::FreshWithQuarantine)
+    {
         return Err(unavailable_recovery_prerequisite(
             GovernanceCause::NotReady,
             evidence_status.describe(),
@@ -10876,7 +11357,10 @@ fn probe_execution_reopen(
     session_id: &str,
 ) -> crate::cli::governance::RecoveryProbe {
     use crate::cli::governance::{GovernanceMetadata, RecoveryProbe};
-    match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+    // The probe reports the local typed evidence as conditionally available;
+    // the mutating operation still re-reads the live PR marker and pins the
+    // exact verification hash before reopening.
+    match evaluate_execution_reopen_prerequisites(worktree, session_id, true) {
         Ok(ExecutionReopenPrerequisites::Satisfied { binding, .. }) => RecoveryProbe::satisfied(
             "execution.reopen",
             GovernanceMetadata {
@@ -11609,6 +12093,7 @@ fn repair_corrupt_execution_impl(
                 missing_verification: None,
                 launched_at: now,
                 settled_at: None,
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
@@ -12042,10 +12527,47 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
+        let allow_current_typed_quarantine = crate::cli::verification_record::evaluate_evidence(
+            recovery_worktree,
+            &session_id,
+            load(recovery_worktree)
+                .ok()
+                .flatten()
+                .map(|record| record.owner_number),
+        )
+            == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine;
+        let mut expected_verification_hash = None;
+        if allow_current_typed_quarantine {
+            let verification = crate::cli::verification_record::load(recovery_worktree)
+                .map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load typed quarantine evidence: {error}"
+                    )))
+                })?
+                .ok_or_else(|| {
+                    SpecOpsError::from(ApiError::Unexpected(
+                        "typed quarantine verification record disappeared".to_string(),
+                    ))
+                })?;
+            if let Err(refusal) =
+                crate::cli::verification_record::validate_current_quarantine_references(
+                    env,
+                    &verification,
+                    None,
+                )
+            {
+                out.push_str(&format!(
+                    "execution: reopen refused — typed quarantine evidence is not current: {refusal}\n"
+                ));
+                return Ok(2);
+            }
+            expected_verification_hash = Some(verification.content_hash);
+        }
         return run_reopen_with_session_snapshot(
             recovery_worktree,
             &session_id,
             expected_session,
+            expected_verification_hash.as_deref(),
             reason,
             out,
         );
@@ -12080,7 +12602,48 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&format!("execution: completion refused — {refusal}\n"));
                 return Ok(2);
             }
-            match settle_completed_with_evidence(&worktree, &session_id, None).map_err(|err| {
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                &session_id,
+                load(&worktree)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.owner_number),
+            );
+            let mut expected_verification_hash = None;
+            if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                let verification = crate::cli::verification_record::load(&worktree)
+                    .map_err(|error| {
+                        SpecOpsError::from(ApiError::Unexpected(format!(
+                            "failed to load typed quarantine evidence: {error}"
+                        )))
+                    })?
+                    .ok_or_else(|| {
+                        SpecOpsError::from(ApiError::Unexpected(
+                            "typed quarantine verification record disappeared".to_string(),
+                        ))
+                    })?;
+                if let Err(refusal) =
+                    crate::cli::verification_record::validate_current_quarantine_references(
+                        env,
+                        &verification,
+                        None,
+                    )
+                {
+                    out.push_str(&format!(
+                        "execution: completion refused — typed quarantine evidence is not current: {refusal}\n"
+                    ));
+                    return Ok(2);
+                }
+                expected_verification_hash = Some(verification.content_hash);
+            }
+            match settle_completed_with_evidence(
+                &worktree,
+                &session_id,
+                None,
+                expected_verification_hash.as_deref(),
+            )
+            .map_err(|err| {
                 SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
                 ))
@@ -12275,10 +12838,18 @@ fn run_reopen_with_session_snapshot(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, Some(expected_session), reason, out)
+    run_reopen_impl(
+        worktree,
+        session_id,
+        Some(expected_session),
+        expected_verification_hash,
+        reason,
+        out,
+    )
 }
 
 #[cfg(test)]
@@ -12288,13 +12859,14 @@ fn run_reopen(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, None, reason, out)
+    run_reopen_impl(worktree, session_id, None, None, reason, out)
 }
 
 fn run_reopen_impl(
     worktree: &Path,
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -12308,6 +12880,7 @@ fn run_reopen_impl(
             worktree,
             session_id,
             expected_session,
+            expected_verification_hash,
             reason,
             out,
         ))
@@ -12346,10 +12919,15 @@ fn run_reopen_locked(
     worktree: &Path,
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let prerequisites = match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+    let prerequisites = match evaluate_execution_reopen_prerequisites(
+        worktree,
+        session_id,
+        expected_verification_hash.is_some(),
+    ) {
         Ok(prerequisites) => prerequisites,
         Err(refusal) => {
             out.push_str(&format!("execution: reopen refused — {}\n", refusal.reason));
@@ -12415,6 +12993,12 @@ fn run_reopen_locked(
             verification_started_at,
         ),
     };
+    if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
+        out.push_str(
+            "execution: reopen refused — typed quarantine verification evidence changed after live PR validation\n",
+        );
+        return Ok(2);
+    }
 
     let reopened_at = Utc::now();
     record.recoveries.push(ExecutionRecovery {
@@ -12552,7 +13136,30 @@ fn run_adopt_locked(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let prerequisites = match evaluate_execution_adopt_prerequisites(worktree, session_id) {
+    let mut prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
+    let mut reconciled = false;
+    if prerequisites.is_err() {
+        match reconcile_committed_generation_takeover_for_recovery(worktree, expected_session) {
+            Ok(true) => {
+                reconciled = true;
+                prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
+            }
+            Ok(false) => {}
+            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+                out.push_str(&format!("execution: adopt refused — {err}\n"));
+                return Ok(2);
+            }
+            Err(err) => {
+                return Err(SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error(
+                        "reconciling adopted execution authority",
+                        &err,
+                    ),
+                )))
+            }
+        }
+    }
+    let prerequisites = match prerequisites {
         Ok(prerequisites) => prerequisites,
         Err(refusal) => {
             out.push_str(&format!("execution: adopt refused — {}\n", refusal.reason));
@@ -12560,10 +13167,24 @@ fn run_adopt_locked(
         }
     };
     let mut record = match prerequisites {
-        ExecutionAdoptPrerequisites::Satisfied { record, .. } => {
-            match with_satisfied_recovery_session_lease(worktree, &record, expected_session, || {
+        ExecutionAdoptPrerequisites::Satisfied { record, binding } => {
+            let session_result = if reconciled {
                 Ok(())
-            }) {
+            } else if binding.is_some() {
+                persist_current_generation_binding_if_owned_for_recovery(
+                    worktree,
+                    &record,
+                    expected_session,
+                )
+            } else {
+                with_satisfied_recovery_session_lease(
+                    worktree,
+                    &record,
+                    expected_session,
+                    || Ok(()),
+                )
+            };
+            match session_result {
                 Ok(()) => {}
                 Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
                     out.push_str(&format!("execution: adopt refused — {err}\n"));
@@ -12578,6 +13199,18 @@ fn run_adopt_locked(
                     )))
                 }
             }
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                worktree,
+                Some(session_id),
+            )
+            .map_err(|err| {
+                SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error(
+                        "authenticating adopted execution authority",
+                        &err,
+                    ),
+                ))
+            })?;
             out.push_str("execution: the current session already owns this record\n");
             return Ok(0);
         }
@@ -12631,6 +13264,18 @@ fn run_adopt_locked(
             }
         }
     }
+    crate::cli::verification_record::authenticate_current_generation_caller(
+        worktree,
+        Some(session_id),
+    )
+    .map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error(
+                "authenticating adopted execution authority",
+                &err,
+            ),
+        ))
+    })?;
     out.push_str(&format!(
         "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record)\n",
         kind = record.owner_kind.as_str(),
@@ -12756,6 +13401,7 @@ mod tests {
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -18837,6 +19483,15 @@ mod tests {
             "gwt-execute"
         );
         assert_eq!(
+            entrypoint_from_launch(
+                &args(&[
+                    "$gwt-execute #3832\n\nBefore changing code, evaluate every remaining acceptance criterion."
+                ]),
+                false,
+            ),
+            "gwt-execute"
+        );
+        assert_eq!(
             entrypoint_from_launch(&args(&["$gwt-build-spec SPEC-3248"]), false),
             "gwt-build-spec"
         );
@@ -20542,6 +21197,7 @@ exit 1
                     derived: true,
                     surfaces: vec!["rust".to_string()],
                     generated_outputs: vec!["projection-artifact.json".to_string()],
+                    quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
@@ -22324,6 +22980,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -22531,6 +23188,7 @@ exit 1
                     derived: true,
                     surfaces: vec!["rust(gwt)".to_string()],
                     generated_outputs: vec!["artifacts/report.json".to_string()],
+                    quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
@@ -22923,6 +23581,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -22952,6 +23611,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23297,6 +23957,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23328,6 +23989,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23776,6 +24438,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23830,6 +24493,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23844,9 +24508,68 @@ exit 1
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("completed"), "{out}");
+            let completed = load(dir.path()).unwrap().unwrap();
+            assert_eq!(completed.status, ExecutionControlStatus::Completed);
+            let verification = crate::cli::verification_record::load(dir.path())
+                .unwrap()
+                .unwrap();
+            let receipt = completed
+                .completion_evidence
+                .expect("completion must pin its verification snapshot");
+            assert_eq!(receipt.verification_record_id, verification.record_id);
+            assert_eq!(receipt.verification_run_hash, verification.content_hash);
+            assert_eq!(
+                receipt.verification_plan_hash,
+                verification.verification_plan_hash
+            );
+            assert!(!receipt.used_typed_quarantine);
+        }
+
+        #[test]
+        fn completion_rejects_verification_record_substitution_after_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            crate::cli::verification_record::save_plan(
+                dir.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "sess-op".to_string(),
+                    owner_number: Some(3248),
+                    execution_binding: None,
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            let (original, _) = crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-op",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            let mut replacement = original.clone();
+            replacement.record_id = "vrr-substituted".to_string();
+            crate::cli::verification_record::save(dir.path(), &replacement).unwrap();
+
+            let outcome = settle_completed_with_evidence(
+                dir.path(),
+                "sess-op",
+                Some(3248),
+                Some(&original.content_hash),
+            )
+            .unwrap();
+            assert_eq!(
+                outcome,
+                Err(crate::cli::verification_record::EvidenceStatus::PlanChanged)
+            );
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
-                ExecutionControlStatus::Completed
+                ExecutionControlStatus::Active
             );
         }
 
@@ -24069,6 +24792,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -24144,6 +24868,369 @@ exit 1
         // P9a (T-117): execution.adopt takes over with an audited reason and
         // then allows same-session settlement.
         #[test]
+        fn adopt_installs_durable_binding_for_current_generation_caller() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-old")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let original_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("active generation must expose its binding");
+            persist_generation_session_binding(dir.path(), owner, "sess-old", original_binding);
+            let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
+            assert!(recovery_session.execution_binding.is_none());
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "crash recovery of the implementing window".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+
+            let current = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("adopted generation must retain current authority");
+            let durable = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
+            )
+            .unwrap();
+            let binding = durable
+                .execution_binding
+                .expect("adopting Session must receive the transferred execution binding");
+            assert_eq!(binding.session_id, "sess-new");
+            assert_eq!(binding.owner_kind, owner.kind.as_str());
+            assert_eq!(binding.owner_number, owner.number);
+            assert_eq!(binding.identity, current);
+            assert_eq!(binding.capability_generation, 1);
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                dir.path(),
+                Some("sess-new"),
+            )
+            .expect("adopting Session must authenticate immediately after transfer");
+        }
+
+        #[test]
+        fn adopt_production_dispatch_unlocks_verify_and_ready_pr_handoff() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-handoff");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-crashed")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let original_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("original generation binding");
+            persist_generation_session_binding(dir.path(), owner, "sess-crashed", original_binding);
+            persist_recovery_session_snapshot(dir.path(), owner, "sess-handoff");
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let (adopt_code, adopt_out) = run_collect(
+                &mut env,
+                CliCommand::Execution(ExecutionCommand::Adopt {
+                    reason: "recover the crashed implementation Session".to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(adopt_code, 0, "{adopt_out}");
+
+            let commands = vec!["git --version".to_string()];
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: commands.clone(),
+                    derive: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+
+            env.seed_created_pr(gwt_git::PrStatus {
+                number: 7,
+                title: "Adopted execution handoff".to_string(),
+                state: gwt_git::pr_status::PrState::Open,
+                url: "https://example.invalid/pr/7".to_string(),
+                created_at: None,
+                ci_status: "PENDING".to_string(),
+                mergeable: "UNKNOWN".to_string(),
+                merge_state_status: "UNKNOWN".to_string(),
+                review_status: "REVIEW_REQUIRED".to_string(),
+            });
+            let (pr_code, pr_out) = run_collect(
+                &mut env,
+                CliCommand::Pr(crate::cli::PrCommand::CreateBody {
+                    base: "develop".to_string(),
+                    head: None,
+                    title: "fix: restore adopted authority".to_string(),
+                    body: "production-path authority acceptance".to_string(),
+                    labels: Vec::new(),
+                    draft: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(pr_code, 0, "{pr_out}");
+            assert_eq!(env.pr_create_call_log.len(), 1);
+            assert!(!env.pr_create_call_log[0].draft);
+        }
+
+        #[test]
+        fn adopt_retry_repairs_binding_after_takeover_response_loss() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-old")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
+
+            let mut record = load(dir.path()).unwrap().unwrap();
+            let transfer = OwnershipTransfer {
+                from_session_id: "sess-old".to_string(),
+                to_session_id: "sess-new".to_string(),
+                reason: "crash recovery of the implementing window".to_string(),
+                transferred_at: Utc::now(),
+            };
+            record.transfers.push(transfer.clone());
+            record.primary_session_id = "sess-new".to_string();
+            assert!(
+                persist_generation_takeover_if_owned(dir.path(), &record, &transfer).unwrap(),
+                "fixture must commit the takeover before losing the Session publication response"
+            );
+            assert!(
+                gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml")
+                )
+                .unwrap()
+                .execution_binding
+                .is_none(),
+                "fixture must reproduce the interrupted post-takeover publication"
+            );
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "retry crash recovery".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let current = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("takeover generation must remain current");
+            let durable = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
+            )
+            .unwrap();
+            assert_eq!(
+                durable
+                    .execution_binding
+                    .as_ref()
+                    .map(|binding| &binding.identity),
+                Some(&current)
+            );
+            assert_eq!(load(dir.path()).unwrap().unwrap().transfers.len(), 1);
+            assert!(recovery_session.execution_binding.is_none());
+        }
+
+        #[test]
+        fn adopt_retry_repairs_partial_generation_publication_and_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+
+            for (index, failure_point) in [
+                GenerationWriteFailurePoint::AfterLedger,
+                GenerationWriteFailurePoint::AfterProjection,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let old_session_id = format!("sess-old-partial-{index}");
+                let new_session_id = format!("sess-new-partial-{index}");
+                let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &new_session_id);
+                let dir = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+                let owner = ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3258 + index as u64,
+                };
+                let mut record = active_record(&old_session_id);
+                record.owner_number = owner.number;
+                save(dir.path(), &record).unwrap();
+                ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+                persist_recovery_session_snapshot(dir.path(), owner, &new_session_id);
+
+                set_generation_write_failure(failure_point);
+                let error = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "recover across partial generation publication".to_string(),
+                    },
+                )
+                .expect_err("the injected first publication must fail");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("injected generation write failure"),
+                    "{error}"
+                );
+                assert!(
+                    gwt_agent::Session::load(
+                        &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml"))
+                    )
+                    .unwrap()
+                    .execution_binding
+                    .is_none(),
+                    "a failed generation publication must not publish Session authority"
+                );
+
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "retry partial generation publication".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+                let current = current_execution_binding(dir.path(), owner)
+                    .unwrap()
+                    .expect("the retry must restore strict generation authority");
+                let durable = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml")),
+                )
+                .unwrap();
+                assert_eq!(
+                    durable
+                        .execution_binding
+                        .as_ref()
+                        .map(|binding| &binding.identity),
+                    Some(&current)
+                );
+                assert_eq!(load(dir.path()).unwrap().unwrap().transfers.len(), 1);
+                crate::cli::verification_record::authenticate_current_generation_caller(
+                    dir.path(),
+                    Some(&new_session_id),
+                )
+                .expect("the repaired Session must authenticate without another operation");
+            }
+        }
+
+        #[test]
+        fn adopt_refuses_to_repair_authority_tampered_after_successful_takeover() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+
+            for (index, authority_file) in ["execution-control.json", GENERATION_POINTER_FILE]
+                .into_iter()
+                .enumerate()
+            {
+                let old_session_id = format!("sess-old-tamper-{index}");
+                let new_session_id = format!("sess-new-tamper-{index}");
+                let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &new_session_id);
+                let dir = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+                let owner = ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3268 + index as u64,
+                };
+                let mut record = active_record(&old_session_id);
+                record.owner_number = owner.number;
+                save(dir.path(), &record).unwrap();
+                ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+                persist_recovery_session_snapshot(dir.path(), owner, &new_session_id);
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "complete one valid takeover".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+                let binding_before = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml")),
+                )
+                .unwrap()
+                .execution_binding;
+                let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
+                let tampered_path = context.worktree_trusted_dir.join(authority_file);
+                fs::write(&tampered_path, b"{tampered").unwrap();
+
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "must not launder later authority corruption".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(
+                    out.contains("refused") && out.contains("unreadable"),
+                    "{out}"
+                );
+                assert_eq!(fs::read(&tampered_path).unwrap(), b"{tampered");
+                assert_eq!(
+                    gwt_agent::Session::load(
+                        &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml"))
+                    )
+                    .unwrap()
+                    .execution_binding,
+                    binding_before,
+                    "adopt refusal must not rotate Session authority"
+                );
+            }
+        }
+
+        #[test]
         fn adopt_op_transfers_ownership_with_reason() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -24203,6 +25290,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },

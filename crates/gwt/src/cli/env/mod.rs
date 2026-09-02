@@ -66,6 +66,10 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn list_open_prs(
+        &mut self,
+        options: &gwt_git::PrInventoryOptions,
+    ) -> io::Result<Vec<gwt_git::PrInventoryItem>>;
     fn create_pr(
         &mut self,
         base: &str,
@@ -83,6 +87,10 @@ pub trait CliEnv {
         add_labels: &[String],
     ) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
+    fn fetch_pr_quarantine_context(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::PrQuarantineContext>;
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus>;
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus>;
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;

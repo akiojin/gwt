@@ -77,7 +77,7 @@ pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
     OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress,
+    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -778,6 +778,43 @@ impl WorkspaceProjectionWatcherRegistry {
     }
 }
 
+fn load_workspace_projection_user_event(project_root: &Path) -> Option<UserEvent> {
+    match gwt_core::workspace_projection::load_workspace_projection(project_root) {
+        Ok(Some(mut projection)) => {
+            // This helper runs on the watcher thread or a blocking runtime
+            // worker. Materialize the linked-Issue fallback here so the Tao
+            // handler never reopens issue-cache files while applying the
+            // already-loaded Workspace snapshot.
+            if let Some(issue) = projection.linked_issues.first_mut() {
+                let has_title = issue
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|title| !title.is_empty());
+                if !has_title {
+                    let cache_root =
+                        gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+                    issue.title =
+                        gwt::issue_cache::load_issue_title_from_cache(&cache_root, issue.number);
+                }
+            }
+            Some(UserEvent::WorkspaceProjectionLoaded {
+                project_root: project_root.to_path_buf(),
+                projection: Box::new(projection),
+            })
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                error = %error,
+                "workspace projection snapshot load failed"
+            );
+            None
+        }
+    }
+}
+
 fn spawn_workspace_projection_watcher(
     project_root: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
@@ -862,9 +899,9 @@ fn spawn_workspace_projection_watcher(
                             project_root = %project_root.display(),
                             "workspace projection watcher detected current.json change"
                         );
-                        let _ = proxy.send_event(UserEvent::WorkspaceProjectionChanged {
-                            project_root: project_root.clone(),
-                        });
+                        if let Some(event) = load_workspace_projection_user_event(&project_root) {
+                            let _ = proxy.send_event(event);
+                        }
                     }
                 }
                 WorkspaceProjectionWatcherMessage::Stop => break,
@@ -1017,9 +1054,7 @@ fn daemon_broadcast_user_event(
         });
     }
     if channel == "workspace" {
-        return Some(UserEvent::WorkspaceProjectionChanged {
-            project_root: project_root.to_path_buf(),
-        });
+        return load_workspace_projection_user_event(project_root);
     }
 
     match gwt::runtime_daemon_events::decode_runtime_daemon_event(channel, payload, current_pid)? {
@@ -1229,6 +1264,11 @@ enum UserEvent {
     RuntimeApprovalResolutionCancelled {
         id: String,
     },
+    /// Issue #3702: the fast-path just submitted or cleared a composer that
+    /// had unsent keystrokes. Deliver one coalesced PM wake if one was held.
+    FlushPendingPmWake {
+        id: String,
+    },
     RuntimeApprovalSettle {
         id: String,
         token: u64,
@@ -1301,6 +1341,19 @@ enum UserEvent {
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
+    WorkspaceProjectionLoaded {
+        project_root: PathBuf,
+        projection: Box<gwt_core::workspace_projection::WorkspaceProjection>,
+    },
+    WindowCloseFinalized {
+        window_id: String,
+        project_root: Option<PathBuf>,
+        closing_session_id: Option<String>,
+        pm_close: bool,
+        pm_deregistered: bool,
+        pm_status: Option<BackendEvent>,
+        monitor_result: WindowCloseMonitorResult,
+    },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
@@ -1335,7 +1388,14 @@ enum UserEvent {
         prefs_path: PathBuf,
         now: String,
         outcome: Result<ScheduledIssueMonitorScanOutcome, String>,
+        /// Materialized worker failures from vanished-window exact release.
+        /// Tao turns these strings into toasts without entering prefs or
+        /// daemon I/O.
+        vanished_window_failures: Vec<String>,
     },
+    /// Completion of an off-event-loop physical answer submit to an exact
+    /// live pane. Durable delivery acknowledgment begins only on this event.
+    IssueMonitorAnswerDeliveryComplete(app_runtime::IssueMonitorAnswerDelivery),
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -1717,6 +1777,49 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn workspace_projection_event_carries_the_snapshot_loaded_off_the_event_loop() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+        projection.title = "snapshot from watcher thread".to_string();
+        projection
+            .linked_issues
+            .push(gwt_core::workspace_projection::WorkspaceIssueLink {
+                number: 3783,
+                title: None,
+                url: None,
+            });
+        let issue_cache_root =
+            gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
+        fs::create_dir_all(issue_cache_root.join("3783")).expect("create issue cache entry");
+        fs::write(
+            issue_cache_root.join("3783/meta.json"),
+            serde_json::json!({ "title": "Materialized outside Tao" }).to_string(),
+        )
+        .expect("write issue cache title");
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save projection");
+
+        match super::load_workspace_projection_user_event(&project_root) {
+            Some(UserEvent::WorkspaceProjectionLoaded {
+                project_root: actual_root,
+                projection: actual_projection,
+            }) => {
+                assert_eq!(actual_root, project_root);
+                assert_eq!(actual_projection.title, "snapshot from watcher thread");
+                assert_eq!(
+                    actual_projection.linked_issues[0].title.as_deref(),
+                    Some("Materialized outside Tao")
+                );
+            }
+            other => panic!("unexpected workspace projection event: {other:?}"),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
@@ -1846,6 +1949,7 @@ mod tests {
             launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            quota_hold: None,
         };
         let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "status",
@@ -3021,6 +3125,7 @@ mod tests {
             window_details: HashMap::new(),
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
+            window_lifecycle_generations: Arc::new(Mutex::new(HashMap::new())),
             board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
@@ -3046,8 +3151,10 @@ mod tests {
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
+            pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -8741,6 +8848,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionCancelled { id }) => {
                 app.cancel_runtime_approval_resolution(&id);
             }
+            Event::UserEvent(UserEvent::FlushPendingPmWake { id }) => {
+                app.flush_pending_pm_wake(&id);
+            }
             Event::UserEvent(UserEvent::RuntimeApprovalSettle { id, token }) => {
                 clients.dispatch(app.handle_runtime_approval_settle(&id, token));
             }
@@ -8822,8 +8932,39 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
-                let events = app.handle_workspace_projection_changed_events(&project_root);
+                let apply_proxy = proxy.clone();
+                drop(runtime.handle().spawn_blocking(move || {
+                    if let Some(event) = load_workspace_projection_user_event(&project_root) {
+                        let _ = apply_proxy.send_event(event);
+                    }
+                }));
+            }
+            Event::UserEvent(UserEvent::WorkspaceProjectionLoaded {
+                project_root,
+                projection,
+            }) => {
+                let events =
+                    app.handle_workspace_projection_changed_events(&project_root, &projection);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WindowCloseFinalized {
+                window_id,
+                project_root,
+                closing_session_id,
+                pm_close,
+                pm_deregistered,
+                pm_status,
+                monitor_result,
+            }) => {
+                clients.dispatch(app.handle_window_close_finalized(
+                    &window_id,
+                    project_root.as_deref(),
+                    closing_session_id.as_deref(),
+                    pm_close,
+                    pm_deregistered,
+                    pm_status,
+                    monitor_result,
+                ));
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let events = app.handle_runtime_hook_event(event);
@@ -8861,13 +9002,24 @@ fn main() -> std::io::Result<()> {
                 prefs_path,
                 now,
                 outcome,
+                vanished_window_failures,
             }) => {
-                let events = app.issue_monitor_scheduled_scan_complete_events(
+                let mut events = vanished_window_failures
+                    .into_iter()
+                    .map(|message| {
+                        OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                            level: "error".to_string(),
+                            message,
+                            issue_number: None,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                events.extend(app.issue_monitor_scheduled_scan_complete_events(
                     &project_root,
                     &prefs_path,
                     &now,
                     outcome,
-                );
+                ));
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
@@ -8964,6 +9116,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {
+                clients.dispatch(app.handle_issue_monitor_answer_delivery_complete(delivery));
             }
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
                 let events = app.handle_shell_launch_complete(window_id, *result);

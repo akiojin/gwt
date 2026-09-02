@@ -90,6 +90,7 @@ fn print_help() {
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
+    println!("  errors      List host-wide persistent error ledger rows");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -116,6 +117,7 @@ fn family_help(family: &str) -> Option<String> {
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
+        "errors" => Some(format_errors_help()),
         _ => None,
     }
 }
@@ -138,6 +140,29 @@ fn format_workspace_help() -> String {
         "  purpose                                Short Agent/window title purpose",
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_errors_help() -> String {
+    [
+        "errors.* — Host-wide persistent error ledger via JSON envelope.",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"errors.list\",\"params\":{\"since\":\"2026-08-30T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  errors.list                             List errors recorded at or after `since`",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 timestamp; omitted lists all",
+        "",
+        "Notes:",
+        "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
+        "  - Live rows are also published on the daemon `errors` channel.",
         "",
     ]
     .join("\n")
@@ -208,7 +233,8 @@ fn format_issue_help() -> String {
         "  number, position                      Move one priority (head or numeric index)",
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
         "  number, reason                        issue.monitor.requeue releases a dead",
-        "                                        agent_failed / launch_failed hold",
+        "                                        agent_failed / launch_failed hold, or a",
+        "                                        daemon-reported blocked_by_claim hold",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -229,7 +255,7 @@ fn format_pr_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  pr.current | pr.view | pr.checks | pr.reviews | pr.review_threads",
+        "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
         "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
         "  pr.review_threads.reply_and_resolve",
         "",
@@ -471,9 +497,12 @@ fn format_verify_help() -> String {
         "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
         "  JSON",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"verify.adjudicate\",\"params\":{\"record_id\":\"vrr-...\",\"command\":\"cargo test -p gwt --all-features\",\"board_entry_id\":\"...\"}}",
+        "  JSON",
         "",
         "Operations:",
-        "  verify.plan | verify.run",
+        "  verify.plan | verify.run | verify.adjudicate",
         "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
         "  verify.lease.status",
         "",
@@ -481,8 +510,15 @@ fn format_verify_help() -> String {
         "  Register the derived matrix with verify.plan first; a run must cover it.",
         "  gwtd executes each command itself (one plain command per entry, no",
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
-        "  evidence. execution.complete and Ready PR handoffs require a fresh,",
-        "  all-passing record.",
+        "  evidence. execution.complete and non-adjudicated Ready PR handoffs",
+        "  require a fresh, all-passing record. verify.adjudicate attaches one",
+        "  exact Board decision to one exact failing command for pr.ready only;",
+        "  raw completion and obligation evidence remains failing.",
+        "  The referenced kind=decision Board body must contain these exact",
+        "  non-empty lines:",
+        "    Verification record: <id>",
+        "    Failing command: <command>",
+        "    Reason: <reason>",
         "",
         "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
         "  take the lease before cargo test --all-features / cargo llvm-cov /",
@@ -900,6 +936,14 @@ mod tests {
     }
 
     #[test]
+    fn family_help_resolves_errors_and_documents_list() {
+        let help = family_help("errors").expect("errors help");
+        assert!(help.contains("errors.list"));
+        assert!(help.contains("since"));
+        assert!(help.contains("errors"));
+    }
+
+    #[test]
     fn format_daemon_help_documents_project_root_authority_contract() {
         let help = format_daemon_help();
         for expected in [
@@ -937,6 +981,25 @@ mod tests {
         assert!(!help.contains("integrity repair"), "{help}");
         assert!(!help.contains("cannot be repaired in the same"), "{help}");
         assert!(!help.contains("fresh linked-owner launch"), "{help}");
+    }
+
+    #[test]
+    fn format_verify_help_documents_pr_ready_adjudication_contract() {
+        let help = format_verify_help();
+        for expected in [
+            "verify.adjudicate",
+            "pr.ready only",
+            "kind=decision",
+            "Verification record: <id>",
+            "Failing command:",
+            "Reason: <reason>",
+            "raw completion and obligation evidence remains failing",
+        ] {
+            assert!(
+                help.contains(expected),
+                "verify help must document adjudication contract {expected}. help:\n{help}",
+            );
+        }
     }
 
     #[test]
@@ -997,6 +1060,9 @@ mod tests {
             "project_root",
             "enabled=false",
             "autonomous_mode=false",
+            "enabled=true",
+            "autonomous_mode=true",
+            "explicit GUI action",
         ] {
             assert!(
                 help.contains(expected),

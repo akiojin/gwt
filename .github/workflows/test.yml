@@ -92,6 +92,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
+      - name: Run managed hook self-heal regressions
+        shell: bash
+        run: |
+          cargo test -p gwt --bin gwt app_runtime::tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
+          cargo test -p gwt --test hook_health_test codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
+        timeout-minutes: 15
       - name: Run shared Windows process resolver tests
         run: cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity
         timeout-minutes: 15
