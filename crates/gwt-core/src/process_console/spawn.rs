@@ -241,6 +241,13 @@ async fn spawn_logged_inner(
             );
             return Err(std::io::Error::other(detail));
         }
+        // Issue #3891 AC-3: count the spend in the machine-local ledger so
+        // the per-minute (secondary) limit can be approximated across the
+        // short-lived gwtd processes that share this account.
+        crate::github_budget::BudgetLedger::global().record_spawn(
+            crate::github_quota::classify_gh_args(args),
+            chrono::Utc::now(),
+        );
     }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
@@ -538,6 +545,9 @@ async fn reconcile_github_quota(
     let probe = probe_rate_limit(hub, program, options, quota, deadline).await;
     let block = github_quota::block_from_probe(quota, probe, now);
     let annotated = github_quota::annotate_rate_limited_stderr(&block, &stderr, now);
+    // Issue #3891: the refusal is also visible to the next process, which can
+    // then throttle its non-essential reads instead of re-discovering it.
+    crate::github_budget::BudgetLedger::global().record_block(&block, now);
     github_quota::global().record_exhaustion(block);
     annotated
 }
@@ -568,6 +578,10 @@ async fn probe_rate_limit(
     .ok()?;
     if !output.success() {
         return None;
+    }
+    let now = chrono::Utc::now();
+    if let Some(snapshot) = crate::github_budget::parse_rate_limit_probe_all(&output.stdout, now) {
+        crate::github_budget::BudgetLedger::global().record_probe(&snapshot);
     }
     crate::github_quota::parse_rate_limit_probe(&output.stdout, quota)
 }

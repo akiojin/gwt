@@ -87,6 +87,7 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
   const sent = [];
   const terminalMounts = [];
   const windowized = [];
+  const stateSince = new Map();
   let windows = [issueWindow, ...workspaceWindows];
   const surface = mod.createKnowledgeKanbanSurface({
     send: (message) => sent.push(message),
@@ -114,6 +115,10 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
     windowDisplayTitle: (windowData) => windowData?.title || windowData?.id,
     windowRoleBadgeLabel: (windowData) => windowData?.agent_id || "Agent",
     windowizeIssuePreviewWindow: (id) => windowized.push(id),
+    // Issue #3884: the Issue row status row reads the live activity line and
+    // the moment the runtime state was last observed to change.
+    windowActivityDetail: (windowData) => windowData?.dynamic_title_detail || "",
+    windowRuntimeStateSince: (id) => stateSince.get(id) ?? null,
   });
   surface.mountKnowledgeWindow(issueWindow, body);
   const load = sent.find((message) => message.kind === "load_knowledge_bridge");
@@ -128,6 +133,7 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
     terminalMounts,
     window,
     windowized,
+    stateSince,
     setWindows: (next) => {
       windows = [issueWindow, ...next];
     },
@@ -373,3 +379,102 @@ function extractFunctionBody(source, name) {
   }
   assert.fail(`expected function ${name} body`);
 }
+
+// Issue #3884 AC-6 (PM ruling 2026-09-02): every launched Issue row carries a
+// read-only status row — agent name, state, last activity line, elapsed time —
+// whether or not the row is selected. It mounts no terminal; the interactive
+// terminal is SPEC #3885's concern.
+test("Issue #3884: every launched Issue row shows a read-only agent status row without selection", async (t) => {
+  const fixture = await makeFixture({
+    workspaceWindows: [
+      previewWindow("agent-1", 3671, { dynamic_title_detail: "Running cargo test" }),
+      previewWindow("agent-2", 3672, { status: "waiting" }),
+    ],
+  });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  fixture.stateSince.set("agent-1", Date.now() - 7 * 60 * 1000);
+  applyEntries(
+    fixture.surface,
+    fixture.load,
+    [knowledgeEntry(3671), knowledgeEntry(3672), knowledgeEntry(3673)],
+    null,
+  );
+
+  const rows = [...fixture.body.querySelectorAll(".issue-agent-status")];
+  assert.deepEqual(
+    rows.map((row) => row.dataset.windowId),
+    ["agent-1", "agent-2"],
+    "one status row per running agent, none for the Issue without an agent",
+  );
+  for (const row of rows) {
+    const issueRow = row.closest(".knowledge-row");
+    assert.ok(issueRow, "the status row lives inside its Issue row");
+    assert.equal(issueRow.dataset.issueNumber, row.dataset.agentIssue);
+    assert.equal(row.dataset.issueNumber, undefined, "the status row never aliases the row's id");
+    assert.equal(row.closest(".knowledge-row-select"), null, "outside the select button");
+    assert.equal(row.querySelector(".terminal-root"), null, "a status row mounts no terminal");
+  }
+  assert.equal(fixture.terminalMounts.length, 0, "no terminal is mounted while nothing is selected");
+
+  const first = rows[0];
+  assert.equal(first.querySelector(".issue-agent-status-title").textContent, "Agent agent-1");
+  assert.equal(first.querySelector(".issue-agent-status-meta").textContent, "codex");
+  const chip = first.querySelector(".knowledge-monitor-chip");
+  assert.equal(chip.textContent, "Running");
+  assert.equal(chip.dataset.tone, "active");
+  assert.equal(first.querySelector(".issue-agent-status-output").textContent, "Running cargo test");
+  assert.equal(first.querySelector(".issue-agent-status-elapsed").textContent, "7m");
+
+  const second = rows[1];
+  assert.equal(second.querySelector(".knowledge-monitor-chip").textContent, "Needs input");
+  assert.equal(
+    second.querySelector(".issue-agent-status-output").textContent,
+    "",
+    "no activity line is rendered when the backend has none",
+  );
+  assert.equal(
+    second.querySelector(".issue-agent-status-elapsed").textContent,
+    "",
+    "elapsed is blank until a state change has been observed",
+  );
+  assert.doesNotMatch(first.textContent, /preview/i, "UI copy never says preview");
+
+  const windowize = first.querySelector('[data-action="windowize-issue-preview"]');
+  assert.ok(windowize, "the status row offers Windowize as its hand-off");
+  windowize.click();
+  assert.deepEqual(fixture.windowized, ["agent-1"]);
+});
+
+test("Issue #3884: clicking the status row is not a selection gesture, selecting keeps it", async (t) => {
+  const fixture = await makeFixture({ workspaceWindows: [previewWindow("agent-1", 3671)] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
+
+  fixture.body
+    .querySelector(".issue-agent-status-output")
+    .dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+  assert.equal(
+    fixture.sent.some((message) => message.kind === "select_knowledge_bridge_entry"),
+    false,
+  );
+
+  fixture.body.querySelector('[data-issue-number="3671"] .knowledge-row-select').click();
+  assert.equal(
+    fixture.sent.filter((message) => message.kind === "select_knowledge_bridge_entry").length,
+    1,
+  );
+  assert.equal(fixture.body.querySelectorAll(".issue-agent-status").length, 1);
+  // FR-007 still holds: the selected Issue's agent is mirrored read-only.
+  assert.equal(fixture.body.querySelectorAll(".issue-preview").length, 1);
+  assert.deepEqual(fixture.terminalMounts[0].options, { readOnly: true });
+});
+
+test("Issue #3884: formatAgentElapsed renders compact durations", async () => {
+  const { formatAgentElapsed } = await importSurfaceModule();
+  assert.equal(formatAgentElapsed(null), "");
+  assert.equal(formatAgentElapsed(-5), "");
+  assert.equal(formatAgentElapsed(20 * 1000), "<1m");
+  assert.equal(formatAgentElapsed(7 * 60 * 1000), "7m");
+  assert.equal(formatAgentElapsed(65 * 60 * 1000), "1h 05m");
+  assert.equal(formatAgentElapsed(26 * 60 * 60 * 1000), "1d 2h");
+});
