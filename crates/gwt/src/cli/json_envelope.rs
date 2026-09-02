@@ -380,6 +380,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
             escalate_after_cycles: optional_u64(params, "escalate_after_cycles")?
                 .map(|cycles| u32::try_from(cycles).unwrap_or(u32::MAX)),
+            refresh: optional_bool(params, "refresh")?.unwrap_or(false),
+            include: params
+                .contains_key("include")
+                .then(|| parse_pr_inventory_include(&optional_string_vec(params, "include")?))
+                .transpose()?,
+        }),
+        // Issue #3891 AC-3: GitHub API budget observation.
+        "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
+            refresh: optional_bool(params, "refresh")?.unwrap_or(false),
         }),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
@@ -1464,6 +1473,30 @@ fn optional_bool(
         Value::Null => Ok(None),
         _ => Err(CliParseError::InvalidJson(format!("{key} must be a bool"))),
     }
+}
+
+/// Issue #3891 AC-2: `params.include` names the heavy `pr.list` fields to
+/// hydrate. An empty list is the bare light inventory.
+fn parse_pr_inventory_include(
+    names: &[String],
+) -> Result<gwt_git::PrInventoryInclude, CliParseError> {
+    let mut include = gwt_git::PrInventoryInclude {
+        checks: false,
+        body: false,
+    };
+    for name in names {
+        match name.as_str() {
+            "checks" => include.checks = true,
+            "body" => include.body = true,
+            _ => {
+                return Err(CliParseError::InvalidValue {
+                    flag: "include",
+                    reason: "expected \"checks\" and/or \"body\"",
+                })
+            }
+        }
+    }
+    Ok(include)
 }
 
 fn optional_string_vec(
@@ -2913,6 +2946,8 @@ mod tests {
             CliCommand::Pr(PrCommand::List {
                 stale_after_hours: None,
                 escalate_after_cycles: None,
+                refresh: false,
+                include: None,
             })
         ));
         assert!(matches!(
@@ -2923,6 +2958,54 @@ mod tests {
             CliCommand::Pr(PrCommand::List {
                 stale_after_hours: Some(24),
                 escalate_after_cycles: Some(2),
+                refresh: false,
+                include: None,
+            })
+        ));
+        // Issue #3891: refresh bypasses the TTL cache / throttle; include
+        // names the heavy fields to hydrate.
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"refresh": true, "include": ["checks", "body"]})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                refresh: true,
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: true,
+                    body: true
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            ok("pr.list", json!({"include": []})),
+            CliCommand::Pr(PrCommand::List {
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: false,
+                    body: false
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            err("pr.list", json!({"include": ["reviews"]})),
+            CliParseError::InvalidValue {
+                flag: "include",
+                ..
+            }
+        ));
+        // Issue #3891 AC-3: budget observation.
+        assert!(matches!(
+            ok("github.budget", json!({})),
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: false
+            })
+        ));
+        assert!(matches!(
+            ok("github.budget", json!({"refresh": true})),
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: true
             })
         ));
         assert!(matches!(

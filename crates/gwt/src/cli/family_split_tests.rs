@@ -47,6 +47,8 @@ fn cli_command_family_split_round_trip_parses() {
         CliCommand::Pr(PrCommand::List {
             stale_after_hours: None,
             escalate_after_cycles: None,
+            refresh: false,
+            include: None,
         })
     );
 

@@ -19,8 +19,9 @@ pub(super) use gh::{
     fetch_pr_quarantine_context_via_gh, fetch_pr_review_thread_state_via_gh,
     fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh, mark_pr_ready_via_gh,
     parse_available_fields, parse_pr_checks_items_json, parse_pr_checks_items_response,
-    parse_pr_number_from_url, reply_and_resolve_pr_review_threads_via_gh,
-    review_thread_has_comment_body, should_reply_to_review_thread, should_resolve_review_thread,
+    parse_pr_number_from_url, probe_github_rate_limit_via_gh,
+    reply_and_resolve_pr_review_threads_via_gh, review_thread_has_comment_body,
+    should_reply_to_review_thread, should_resolve_review_thread,
 };
 
 use gwt_git::PrStatus;
@@ -431,17 +432,21 @@ pub(super) fn run<E: CliEnv>(
         PrCommand::List {
             stale_after_hours,
             escalate_after_cycles,
+            refresh,
+            include,
         } => {
             let defaults = gwt_git::PrInventoryOptions::default();
             let options = gwt_git::PrInventoryOptions {
                 stale_after_hours: stale_after_hours.unwrap_or(defaults.stale_after_hours),
                 escalate_after_cycles: escalate_after_cycles
                     .unwrap_or(defaults.escalate_after_cycles),
+                refresh,
+                include: include.unwrap_or(defaults.include),
             };
-            let items = env
+            let read = env
                 .list_open_prs(&options)
                 .map_err(super::io_as_api_error)?;
-            render_pr_inventory(out, &items);
+            render_pr_inventory(out, &read);
             0
         }
         PrCommand::Create {
@@ -815,9 +820,37 @@ fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
 fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let mut stale_after_hours: Option<i64> = None;
     let mut escalate_after_cycles: Option<u32> = None;
+    let mut refresh = false;
+    let mut include: Option<gwt_git::PrInventoryInclude> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--refresh" => refresh = true,
+            "--include" => {
+                i += 1;
+                let raw = args.get(i).ok_or(CliParseError::MissingFlag("--include"))?;
+                let mut parsed = gwt_git::PrInventoryInclude {
+                    checks: false,
+                    body: false,
+                };
+                for name in raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                {
+                    match name {
+                        "checks" => parsed.checks = true,
+                        "body" => parsed.body = true,
+                        _ => {
+                            return Err(CliParseError::InvalidValue {
+                                flag: "--include",
+                                reason: "expected checks and/or body",
+                            })
+                        }
+                    }
+                }
+                include = Some(parsed);
+            }
             "--stale-after-hours" => {
                 i += 1;
                 let raw = args
@@ -845,6 +878,8 @@ fn parse_pr_list_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     Ok(PrCommand::List {
         stale_after_hours,
         escalate_after_cycles,
+        refresh,
+        include,
     })
 }
 
@@ -897,8 +932,9 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     })
 }
 
-pub(super) fn render_pr_inventory(out: &mut String, items: &[gwt_git::PrInventoryItem]) {
-    let rows: Vec<serde_json::Value> = items
+pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryRead) {
+    let rows: Vec<serde_json::Value> = read
+        .items
         .iter()
         .map(|item| {
             serde_json::json!({
@@ -930,8 +966,15 @@ pub(super) fn render_pr_inventory(out: &mut String, items: &[gwt_git::PrInventor
             })
         })
         .collect();
+    // Issue #3891: provenance and cost of the read travel with the rows so a
+    // cached or throttled inventory is never mistaken for a live one.
     let payload = serde_json::json!({
         "count": rows.len(),
+        "source": read.source,
+        "fetched_at": read.fetched_at,
+        "cache_age_secs": read.cache_age_secs,
+        "throttled": read.throttled,
+        "github_calls": read.github_calls,
         "pull_requests": rows,
     });
     match serde_json::to_string_pretty(&payload) {
@@ -2255,6 +2298,8 @@ mod tests {
             PrCommand::List {
                 stale_after_hours: None,
                 escalate_after_cycles: None,
+                refresh: false,
+                include: None,
             },
             &mut out,
         )
@@ -2269,6 +2314,17 @@ mod tests {
         );
         assert!(out.contains("\"count\": 1"), "{out}");
         assert!(!out.contains("CLI family split body"), "{out}");
+        // Issue #3891 AC-1 / AC-4: where the rows came from and what the read
+        // cost are part of every answer, so a throttled or cached read is
+        // observable by the PM.
+        for field in [
+            "\"source\": \"github\"",
+            "\"cache_age_secs\": 0",
+            "\"throttled\": null",
+            "\"github_calls\": 1",
+        ] {
+            assert!(out.contains(field), "missing {field}: {out}");
+        }
         // Issue #3868: dwell time, executability, and no-progress counting are
         // part of every row, and the thresholds the PM passed reach the env.
         for field in [
@@ -2309,6 +2365,8 @@ mod tests {
             PrCommand::List {
                 stale_after_hours: Some(24),
                 escalate_after_cycles: Some(2),
+                refresh: false,
+                include: None,
             }
         );
         let bare: Vec<String> = vec!["list".to_string()];
@@ -2317,6 +2375,24 @@ mod tests {
             PrCommand::List {
                 stale_after_hours: None,
                 escalate_after_cycles: None,
+                refresh: false,
+                include: None,
+            }
+        );
+        let budgeted: Vec<String> = ["list", "--refresh", "--include", "checks,body"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            parse(&budgeted).expect("parse budgeted list"),
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: true,
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: true,
+                    body: true
+                }),
             }
         );
     }
@@ -2332,6 +2408,8 @@ mod tests {
             PrCommand::List {
                 stale_after_hours: Some(24),
                 escalate_after_cycles: Some(2),
+                refresh: false,
+                include: None,
             },
             &mut out,
         )
@@ -2342,6 +2420,7 @@ mod tests {
             Some(gwt_git::PrInventoryOptions {
                 stale_after_hours: 24,
                 escalate_after_cycles: 2,
+                ..gwt_git::PrInventoryOptions::default()
             })
         );
     }
