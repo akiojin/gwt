@@ -571,3 +571,71 @@ async function importOperatorShell() {
   writeFileSync(tmpModule, source);
   return import(pathToFileURL(tmpModule).href);
 }
+
+test("Usage popover labels unknown windows by their reported length (Issue #3860)", async () => {
+  const { createProviderUsageSurface } = await import(
+    resolve(here, "../provider-usage-surface.js")
+  );
+  const { document, window } = parseHTML(
+    "<html><body><div id='usage-anchor'></div></body></html>",
+  );
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+  globalThis.document = document;
+  globalThis.window = window;
+  globalThis.CustomEvent = window.CustomEvent;
+  globalThis.requestAnimationFrame = (cb) => cb();
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+
+  try {
+    const surface = createProviderUsageSurface({
+      send: () => {},
+      renderWorkspaceWindows: () => {},
+    });
+    surface.applyProviderUsageUi({
+      accounts: [
+        {
+          provider: "codex",
+          windows: [
+            { kind: "weekly", used_percent: 5, window_minutes: 10080 },
+            { kind: "unknown", used_percent: 40, window_minutes: 1440 },
+            { kind: "unknown", used_percent: 12 },
+          ],
+          state: { kind: "ok" },
+        },
+      ],
+      consumption: [],
+      sessions: [],
+    });
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+
+    const labels = [...document.querySelectorAll(".op-usage-win__lbl")];
+    assert.deepEqual(
+      labels.map((label) => label.textContent),
+      ["Weekly", "Unknown (1-day)", "Unknown"],
+    );
+    // AC-4: the real window length is exposed on every row that has one.
+    assert.deepEqual(
+      labels.map((label) => label.dataset.windowMinutes),
+      ["10080", "1440", undefined],
+    );
+    assert.equal(labels[0].title, "Window length: 7 days");
+    assert.equal(labels[1].title, "Window length: 1 day");
+    assert.equal(labels[2].title, "");
+    // AC-5: the unknown window's value is still rendered, not dropped.
+    assert.deepEqual(
+      [...document.querySelectorAll(".op-usage-win__pct")].map((pct) => pct.textContent),
+      ["5%", "40%", "12%"],
+    );
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.window = previousWindow;
+    globalThis.CustomEvent = previousCustomEvent;
+    globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+  }
+});
