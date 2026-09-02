@@ -61406,3 +61406,46 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
         "a stale PM registration must not deliver"
     );
 }
+
+/// SPEC-3864 T-006: install detection must not sit on the startup critical
+/// path. `LaunchWizardMemoryCache::load` returns before the version probes
+/// finish, and the first wizard access joins the background detection so the
+/// options still reflect the host.
+#[cfg(unix)]
+#[test]
+fn launch_wizard_memory_cache_load_does_not_block_on_agent_detection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create bin");
+    let slow_agy = bin.join("agy");
+    fs::write(&slow_agy, "#!/bin/sh\nsleep 2\nprintf '9.9.9\\n'\n").expect("write slow agy");
+    fs::set_permissions(&slow_agy, fs::Permissions::from_mode(0o755)).expect("chmod slow agy");
+    let _path = prepend_tool_parent_to_path(&slow_agy);
+    let _no_custom = ScopedEnvVar::set(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV, "1");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let started = Instant::now();
+    let cache = LaunchWizardMemoryCache::load(&sessions_dir);
+    let load_elapsed = started.elapsed();
+    assert!(
+        load_elapsed < Duration::from_millis(1_500),
+        "cache load must not wait for the 2s version probe, took {load_elapsed:?}"
+    );
+
+    let options = cache.agent_options();
+    let agy = options
+        .iter()
+        .find(|option| option.id == "agy")
+        .expect("Antigravity option");
+    assert!(
+        agy.available,
+        "background detection must still feed availability"
+    );
+    assert_eq!(agy.installed_version.as_deref(), Some("9.9.9"));
+}

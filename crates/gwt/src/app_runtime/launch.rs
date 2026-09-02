@@ -1877,11 +1877,20 @@ struct AgentWindowSpawnOptions {
     continuation: Option<PendingContinueWork>,
 }
 
+/// SPEC-3864 T-006: install detection runs off the startup critical path.
+/// The slot starts as a background thread and is joined on first wizard
+/// access; clones share the same slot so a joined result is reused.
+#[derive(Debug)]
+enum AgentOptionsSlot {
+    Loading(Option<std::thread::JoinHandle<Vec<gwt::AgentOption>>>),
+    Ready(Vec<gwt::AgentOption>),
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchWizardMemoryCache {
     sessions_dir: PathBuf,
     sessions: Vec<gwt_agent::Session>,
-    agent_options: Vec<gwt::AgentOption>,
+    agent_options: Arc<Mutex<AgentOptionsSlot>>,
     // SPEC-3170 FR-001: Claude capability detection may read settings and run
     // `claude --version` once per process. The wizard stores the booleans at
     // cache load time and reuses them on every open.
@@ -1895,7 +1904,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options: Self::load_agent_options(),
+            agent_options: Self::spawn_agent_options_detection(),
             claude_ultracode_supported: claude_capabilities.ultracode_supported,
             claude_workflows_enabled: claude_capabilities.workflows_enabled,
         }
@@ -1919,7 +1928,7 @@ impl LaunchWizardMemoryCache {
         Self {
             sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
-            agent_options,
+            agent_options: Arc::new(Mutex::new(AgentOptionsSlot::Ready(agent_options))),
             claude_ultracode_supported,
             claude_workflows_enabled,
         }
@@ -1946,12 +1955,44 @@ impl LaunchWizardMemoryCache {
         ))
     }
 
+    /// Start install detection on a background thread so `load` (and thus
+    /// app startup / settings updates) never waits on `<agent> --version`
+    /// probes. A thread that cannot be spawned falls back to synchronous
+    /// detection so the options are never silently empty.
+    fn spawn_agent_options_detection() -> Arc<Mutex<AgentOptionsSlot>> {
+        let slot = match std::thread::Builder::new()
+            .name("gwt-agent-detect".to_string())
+            .spawn(Self::load_agent_options)
+        {
+            Ok(handle) => AgentOptionsSlot::Loading(Some(handle)),
+            Err(error) => {
+                tracing::warn!(error = %error, "agent detection thread unavailable; detecting inline");
+                AgentOptionsSlot::Ready(Self::load_agent_options())
+            }
+        };
+        Arc::new(Mutex::new(slot))
+    }
+
     pub(super) fn refresh_agent_options(&mut self) {
-        self.agent_options = Self::load_agent_options();
+        self.agent_options = Self::spawn_agent_options_detection();
     }
 
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
-        self.agent_options.clone()
+        let mut slot = self
+            .agent_options
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let AgentOptionsSlot::Loading(handle) = &mut *slot {
+            let options = handle
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_else(Self::load_agent_options);
+            *slot = AgentOptionsSlot::Ready(options);
+        }
+        match &*slot {
+            AgentOptionsSlot::Ready(options) => options.clone(),
+            AgentOptionsSlot::Loading(_) => unreachable!("slot joined above"),
+        }
     }
 
     /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
