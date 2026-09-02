@@ -2,9 +2,9 @@
 //
 // Every Issue row carries exactly one primary state badge, at most two pieces of
 // secondary information, and at most two visible action buttons that depend on
-// that state. Anything else moves into the row's overflow menu. The inline
-// terminal can be expanded in place and, once Windowized, the row shows a
-// "Shown on canvas" face instead of a second input face for the same PTY.
+// that state. Anything else moves into the row's overflow menu. Once the agent
+// is Windowized, the row shows a "Shown on canvas" face instead of a second
+// input face for the same PTY.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -690,56 +690,6 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
   );
 });
 
-// T-005 / FR-003: the inline terminal expands in place without remounting the
-// runtime, and the expansion survives a re-render.
-test("the inline terminal expands to full size in place and keeps its runtime", async (t) => {
-  const fixture = await makeFixture({
-    workspaceWindows: [agentWindow("agent-1", 3671), agentWindow("agent-2", 3672)],
-  });
-  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  const entries = [
-    knowledgeEntry(3671, { monitor_state: "launched" }),
-    knowledgeEntry(3672, { monitor_state: "launched" }),
-  ];
-  applyEntries(fixture.surface, fixture.load, entries);
-
-  const section = fixture.body.querySelector('[data-issue-number="3671"] .issue-inline-terminal');
-  const toggle = section.querySelector('[data-toggle="inline-terminal-expand"]');
-  assert.ok(toggle, "the header carries the expand toggle");
-  assert.equal(toggle.tagName, "BUTTON");
-  assert.equal(toggle.getAttribute("aria-expanded"), "false");
-  assert.equal(toggle.dataset.action, undefined, "the view toggle is not an Issue action");
-  assert.match(toggle.getAttribute("aria-label"), /Expand/);
-  assert.equal(section.querySelector(".issue-inline-terminal-title").textContent, "Agent agent-1");
-  assert.equal(section.querySelector(".knowledge-monitor-chip"), null, "the status lives on the row badge");
-
-  const mountsBefore = fixture.calls.terminalMounts.length;
-  toggle.click();
-  assert.equal(section.classList.contains("is-expanded"), true);
-  assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  assert.match(toggle.getAttribute("aria-label"), /Collapse/);
-  assert.equal(fixture.calls.terminalMounts.length, mountsBefore, "expanding does not remount");
-  assert.equal(
-    fixture.sent.some((message) => message.kind === "select_knowledge_bridge_entry"),
-    false,
-    "expanding is not a selection gesture",
-  );
-
-  fixture.surface.renderKnowledgeBridge("win-1");
-  const rerendered = fixture.body.querySelector('[data-issue-number="3671"] .issue-inline-terminal');
-  assert.equal(rerendered.classList.contains("is-expanded"), true, "expansion survives re-render");
-  assert.equal(
-    fixture.body
-      .querySelector('[data-issue-number="3672"] .issue-inline-terminal')
-      .classList.contains("is-expanded"),
-    false,
-    "expansion is per Issue",
-  );
-
-  rerendered.querySelector('[data-toggle="inline-terminal-expand"]').click();
-  assert.equal(rerendered.classList.contains("is-expanded"), false);
-});
-
 // T-005 / US-4 / AC-2a: after Windowize the row keeps the Issue ↔ agent link as a
 // "Shown on canvas" face with no second input face for the PTY.
 test("after Windowize the row shows the agent as on the canvas and offers focus, not a second terminal", async (t) => {
@@ -763,7 +713,6 @@ test("after Windowize the row shows the agent as on the canvas and offers focus,
   assert.equal(face.querySelector(".terminal-root"), null, "no second input face for the PTY");
   assert.equal(fixture.calls.terminalMounts.length, mountsBefore, "nothing is remounted");
   assert.match(face.textContent, /Shown on canvas/);
-  assert.equal(face.querySelector('[data-toggle="inline-terminal-expand"]'), null);
   assert.equal(face.querySelector('[data-action="windowize-inline-terminal"]'), null);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
   assert.deepEqual(visibleActions(row), ["focus-canvas-window"]);
@@ -794,9 +743,7 @@ test("Issue row state CSS uses Operator tokens only", () => {
     ".knowledge-row-menu",
     ".knowledge-row-menu-list",
     ".knowledge-row-menu-item",
-    ".issue-inline-terminal.is-expanded",
     ".issue-inline-terminal.is-on-canvas",
-    ".issue-inline-terminal-toggle",
     ".issue-inline-terminal-placeholder",
   ];
   const defined = new Set();

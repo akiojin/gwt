@@ -739,7 +739,6 @@ export function createKnowledgeKanbanSurface({
             hideDone: readKanbanHideDonePreference(),
             issueStateFilter: "open",
             dndSnapshot: null,
-            expandedInlineTerminals: new Set(),
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
           });
@@ -2212,11 +2211,11 @@ export function createKnowledgeKanbanSurface({
       // in one container, so Windowize (the only hand-off) moves the runtime to
       // the canvas and the row releases it — the same PTY never has two input
       // faces. An errored / waiting agent is badged here, never auto-opened.
-      // SPEC #3885 T-005 (FR-002 / FR-003 / FR-003a): the agent's face on the Issue
-      // row. While the agent is an `issue_preview` placement the row hosts the
-      // shared interactive runtime and can expand it in place; after Windowize the
-      // same row shows a "Shown on canvas" face so the Issue ↔ agent link stays
-      // visible without a second input face for the PTY.
+      // SPEC #3885 T-005 (FR-003a / FR-012): the agent's face on the Issue row.
+      // While the agent is an `issue_preview` placement the row hosts the shared
+      // interactive runtime (Issue #3884); after Windowize the same row shows a
+      // "Shown on canvas" face so the Issue ↔ agent link stays visible without a
+      // second input face for the PTY.
       function renderIssueInlineTerminal(windowId, state, entry, faces) {
         const target = faces.inlineWindow || faces.canvasWindow;
         if (!target) {
@@ -2253,36 +2252,10 @@ export function createKnowledgeKanbanSurface({
           return section;
         }
 
-        const expanded = state.expandedInlineTerminals.has(entry.number);
-        if (expanded) {
-          section.classList.add("is-expanded");
-        }
-        const toggle = createNode("button", "issue-inline-terminal-toggle");
-        toggle.type = "button";
-        toggle.dataset.toggle = "inline-terminal-expand";
-        const syncToggle = (isExpanded) => {
-          toggle.setAttribute("aria-expanded", String(isExpanded));
-          toggle.setAttribute(
-            "aria-label",
-            `${isExpanded ? "Collapse" : "Expand"} the agent terminal for Issue #${entry.number}`,
-          );
-        };
-        syncToggle(expanded);
-        toggle.appendChild(createNode("div", "issue-inline-terminal-title", title));
-        toggle.appendChild(createNode("div", "issue-inline-terminal-meta", meta));
-        toggle.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          const next = !state.expandedInlineTerminals.has(entry.number);
-          if (next) {
-            state.expandedInlineTerminals.add(entry.number);
-          } else {
-            state.expandedInlineTerminals.delete(entry.number);
-          }
-          section.classList.toggle("is-expanded", next);
-          syncToggle(next);
-        });
-        header.appendChild(toggle);
+        const titleWrap = createNode("div", "issue-inline-terminal-title-wrap");
+        titleWrap.appendChild(createNode("div", "issue-inline-terminal-title", title));
+        titleWrap.appendChild(createNode("div", "issue-inline-terminal-meta", meta));
+        header.appendChild(titleWrap);
         header.appendChild(
           issueRowActionButton("windowize-inline-terminal", { windowId, state, entry, target }),
         );

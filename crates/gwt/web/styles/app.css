@@ -3513,31 +3513,8 @@ body {
   inset: 0;
 }
 
-/* SPEC #3885 T-005 (FR-003 / FR-003a): the header title is the expand toggle;
- * the expanded body takes the full height the list can give it. After Windowize
- * the row keeps a "Shown on canvas" face with no second input face. */
-.issue-inline-terminal-toggle {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.issue-inline-terminal-toggle:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
-}
-
-.issue-inline-terminal.is-expanded .issue-inline-terminal-body {
-  height: clamp(320px, 64vh, 900px);
-}
-
+/* SPEC #3885 T-005 (FR-003a / FR-012): after Windowize the row keeps a
+ * "Shown on canvas" face with no second input face. */
 .issue-inline-terminal.is-on-canvas {
   grid-template-rows: auto auto;
 }
