@@ -27,6 +27,10 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/knowledge-kanban-load-recovery.test.mjs \
   crates/gwt/web/__tests__/knowledge-issue-monitor.test.mjs \
   crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
+  crates/gwt/web/__tests__/issue-preview-placement.test.mjs \
+  crates/gwt/web/__tests__/issue-preview-pane.test.mjs \
+  crates/gwt/web/__tests__/issue-row-work-info.test.mjs \
+  crates/gwt/web/__tests__/surface-naming.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
   crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \
@@ -47,6 +51,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/settings-system-tab.test.mjs \
   crates/gwt/web/__tests__/settings-agent-backends-tab.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-backend-picker.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-hermes-options.test.mjs \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/workspace-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \

@@ -16,7 +16,7 @@ use crate::cli::{
     },
     improvement_owner::{
         owner_resolution_failure_from_error, repair_source_success_snapshots,
-        resolve_candidate_owner_with_operation_deadline,
+        resolve_candidate_owner_with_operation_deadline_observed,
         retry_pending_owner_status_with_operation_deadline, OwnerResolutionFailure,
     },
     improvement_store, CliEnv,
@@ -65,6 +65,27 @@ pub fn evaluate_with_deadline_and_reserve<E: CliEnv>(
     deadline: &ResolutionDeadline,
     settlement_reserve: Duration,
 ) -> HookOutput {
+    evaluate_with_deadline_and_reserve_observed(
+        env,
+        stop_hook_active,
+        deadline,
+        settlement_reserve,
+        || {},
+    )
+}
+
+/// Evaluate Stop and report the first fallback-settlement store contention.
+///
+/// The callback is a causal test boundary only; production callers use
+/// [`evaluate_with_deadline_and_reserve`] and retain identical deadline behavior.
+#[doc(hidden)]
+pub fn evaluate_with_deadline_and_reserve_observed<E: CliEnv>(
+    env: &mut E,
+    stop_hook_active: bool,
+    deadline: &ResolutionDeadline,
+    settlement_reserve: Duration,
+    on_fallback_store_contention: impl FnMut(),
+) -> HookOutput {
     let worktree_root = env.repo_path().to_path_buf();
     if stop_hook_active {
         return HookOutput::Silent;
@@ -92,12 +113,13 @@ pub fn evaluate_with_deadline_and_reserve<E: CliEnv>(
         );
     } else if let Some(candidate_id) = select_attempt_candidate(&candidates) {
         let resolution_deadline = deadline.reserving(settlement_reserve);
-        if let Err(error) = resolve_candidate_owner_with_operation_deadline(
+        if let Err(error) = resolve_candidate_owner_with_operation_deadline_observed(
             env,
             &candidate_id,
             CaptureBudgetProfile::StrictStop,
             &resolution_deadline,
             deadline.expires_at(),
+            on_fallback_store_contention,
         ) {
             let failure = if resolution_deadline
                 .remaining("strict Stop Owner Resolution")

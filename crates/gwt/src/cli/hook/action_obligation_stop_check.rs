@@ -79,8 +79,8 @@ pub fn handle_with_input(
          Settle them with the canonical operations before stopping:\n\
          - issue_update: JSON operations `issue.comment` / `issue.spec.edit`\n\
          - implementation / verification: an all-passing JSON operation `verify.run` (register the matrix with `verify.plan` first)\n\
-         - pr: JSON operations `pr.create` / `pr.edit` / `pr.ready`\n\
-         Blocked instead? Run JSON operation `execution.blocked` with a non-empty `params.reason` — it defers the open obligations with the blocker on record.\n\
+         - pr: JSON operation `pr.edit` (any PR state, including MERGED), `pr.ready` (open draft only), or `pr.create` (only while no PR exists); a PR readied or merged on your behalf is settled by `pr.edit` on it\n\
+         Genuinely blocked? JSON operation `execution.blocked` with a non-empty `params.reason` defers the open obligations with the blocker on record — but it is terminal, and recovery costs `execution.reopen` plus a fresh derived-plan `verify.run`, so it is never the easy way out.\n\
          Prose, Board posts, and PR body text do not settle obligations."
     ))
 }

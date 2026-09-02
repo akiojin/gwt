@@ -576,11 +576,11 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     summary
 }
 
-/// Issue #3225: GitHub-derived completion probe for the claim loop — "does
-/// this current Issue generation have fresh, Issue-wide merged PR evidence?".
-/// Ordinary Issues require a merge at or after the Issue revision; SPECs
-/// require every structured task to be checked. Fails open (false) on remote
-/// errors so a transient gh failure never blocks real work.
+/// Issue #3225 / #3832: GitHub-derived completion probe for the claim loop.
+/// Ordinary Issues are terminal only when GitHub reports `Closed`; linked PR
+/// evidence remains delivery evidence and cannot suppress an Open Issue.
+/// SPECs retain their structured-task plus merged-PR gate. Fails open (false)
+/// on remote errors so a transient gh failure never blocks real work.
 pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue: &IssueMonitorIssue) -> bool {
     match try_issue_completed_by_merged_pr(owner, repo, issue) {
         Ok(completed) => completed,
@@ -601,6 +601,13 @@ pub fn try_issue_completed_by_merged_pr(
     repo: &str,
     issue: &IssueMonitorIssue,
 ) -> Result<bool, IssueMonitorScanFailure> {
+    let is_spec = issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    if !is_spec {
+        return Ok(issue.state == IssueMonitorIssueState::Closed);
+    }
     let prs = run_scan_stage(IssueMonitorScanStage::ClaimCompletionReadback, || {
         crate::cli::issue::fetch_linked_prs_via_gh(
             owner,
@@ -615,32 +622,26 @@ pub fn linked_pr_completion_is_fresh_for_issue(
     issue: &IssueMonitorIssue,
     prs: &[crate::cli::LinkedPrSummary],
 ) -> bool {
-    let Some(issue_updated_at) = issue
-        .updated_at
-        .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-    else {
-        return false;
-    };
     let is_spec = issue
         .labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
-    if is_spec && issue.readiness != IssueMonitorReadiness::ReadyWithCompletedTasks {
+    if !is_spec {
+        return issue.state == IssueMonitorIssueState::Closed;
+    }
+    if issue
+        .updated_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_none()
+        || issue.readiness != IssueMonitorReadiness::ReadyWithCompletedTasks
+    {
         return false;
     }
     let closing_merged = prs
         .iter()
         .filter(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged"));
-    if is_spec {
-        return closing_merged.into_iter().next().is_some();
-    }
-    closing_merged.into_iter().any(|pr| {
-        pr.merged_at
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .is_some_and(|merged_at| merged_at >= issue_updated_at)
-    })
+    closing_merged.into_iter().next().is_some()
 }
 
 /// Reconcile work branches that have merged, freeing the slot and delegating
@@ -653,10 +654,9 @@ pub fn linked_pr_completion_is_fresh_for_issue(
 /// required — makes every launch that was in flight invisible to the first: the
 /// work merges, nothing records it, and the Issue stays a relaunch candidate
 /// forever. Candidates there are nominated locally from the merged-branch list
-/// and confirmed by [`try_issue_completed_by_merged_pr`], whose
-/// `merged_at >= issue_updated_at` rule is what stops a branch merged for an
-/// earlier generation from parking work that was reopened after it. Bounding
-/// the probe to branch matches keeps it off the whole queue.
+/// and confirmed by [`try_issue_completed_by_merged_pr`]. Ordinary Open rows
+/// never become terminal through this path; complete SPECs retain their linked
+/// PR gate. Bounding the probe to branch matches keeps it off the whole queue.
 pub fn reconcile_issue_monitor_merges(
     monitor: &mut IssueMonitorState,
     repo_path: &Path,
@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_pr_completion_requires_current_issue_evidence() {
+    fn linked_pr_completion_only_short_circuits_closed_ordinary_issues() {
         let ordinary = IssueMonitorIssue {
             updated_at: Some("2026-08-10T00:00:00Z".to_string()),
             ..issue(42)
@@ -1428,7 +1428,7 @@ mod tests {
             merged_at: merged_at.map(str::to_string),
         };
 
-        assert!(linked_pr_completion_is_fresh_for_issue(
+        assert!(!linked_pr_completion_is_fresh_for_issue(
             &ordinary,
             &[merged(Some("2026-08-11T00:00:00Z"))]
         ));
@@ -1439,6 +1439,14 @@ mod tests {
         assert!(!linked_pr_completion_is_fresh_for_issue(
             &ordinary,
             &[merged(None)]
+        ));
+        let closed_ordinary = IssueMonitorIssue {
+            state: IssueMonitorIssueState::Closed,
+            ..ordinary.clone()
+        };
+        assert!(linked_pr_completion_is_fresh_for_issue(
+            &closed_ordinary,
+            &[]
         ));
 
         let complete_spec = IssueMonitorIssue {
@@ -1846,53 +1854,48 @@ mod tests {
     }
 
     #[test]
-    fn claim_skips_and_marks_issues_already_completed_by_a_merged_pr() {
-        // Issue #3225: an issue whose fix is already merged (a linked PR in
-        // MERGED state) must not be re-launched by a fresh monitor — the
-        // completion signal must come from GitHub, not instance-local prefs.
-        // The claim loop probes right before claiming; positives are recorded
-        // Merged (persisted) and the slot goes to the next queued candidate.
+    fn claim_skips_closed_issue_but_keeps_open_issue_launchable_despite_merged_pr_evidence() {
+        // Issue #3225 negative control, replaced by Issue #3832: GitHub Closed
+        // is terminal, while an ordinary Open issue remains launchable even
+        // when the linked-PR probe reports closing merged evidence.
         let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..crate::IssueMonitorConfig::default()
         });
         monitor.set_gui_connected(true);
+        let closed = IssueMonitorIssue {
+            state: IssueMonitorIssueState::Closed,
+            ..issue(42)
+        };
         crate::scan_issue_monitor_candidates(
             &mut monitor,
-            &[issue(42), issue(43)],
+            &[closed, issue(43)],
             "2026-07-02T00:00:00Z",
         );
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
         client.seed(github_issue(43));
 
-        // #42 is already completed by a merged PR; #43 is genuinely open work.
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,
             "host:1",
             "2026-07-02T00:00:10Z",
             1,
-            |issue_number| issue_number == 42,
+            |_| true,
         );
 
         assert_eq!(
             launches.iter().map(|l| l.issue_number).collect::<Vec<_>>(),
             vec![43],
-            "the completed issue is skipped; the slot goes to real work"
+            "Closed is terminal, but Open merged evidence must not consume the slot"
         );
-        assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(crate::MonitorInboxState::Merged),
-            "completed issue is recorded Merged (persisted, never relaunched)"
-        );
-        assert!(monitor.prefs().merged_issues.contains(&42));
-        // Idempotent on later scans: stays Merged, never re-queued.
-        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:01:00Z");
-        assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(crate::MonitorInboxState::Merged)
-        );
+        assert!(monitor.inbox_item(42).is_none());
+        assert!(monitor.prefs().closure_records.iter().any(|record| {
+            record.issue_number == 42
+                && record.state == crate::issue_monitor::IssueClosureState::Closed
+        }));
+        assert!(!monitor.prefs().merged_issues.contains(&43));
     }
 
     #[test]
@@ -2795,9 +2798,10 @@ exit 0
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::Merged),
-            "a merged PR observed through the normalized gh path frees the slot",
+            Some(MonitorInboxState::Queued),
+            "a merged PR observed through the normalized gh path frees the slot without terminalizing an Open Issue",
         );
         assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
     }
 }

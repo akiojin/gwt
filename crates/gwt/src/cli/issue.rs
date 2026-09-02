@@ -18,6 +18,35 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
 }
 
+/// Issue #3873: refuse to write an autonomous-candidate body the Issue Monitor
+/// cannot read.
+///
+/// An Issue carrying the `auto-merge` label opts into autonomous execution, and
+/// the Monitor only admits it when `classify_acceptance_criteria` finds a
+/// machine-checkable block. Without this guard the write succeeds and the Issue
+/// silently lands in `needs_human` on the next scan. The guard reuses the
+/// Monitor's classifier verbatim so the two can never disagree (AC-3); an Issue
+/// without the label keeps today's behaviour.
+pub(crate) fn guard_autonomous_acceptance_block(
+    labels: &[String],
+    body: &str,
+) -> Result<(), SpecOpsError> {
+    let opted_in = labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(crate::issue_monitor::AUTO_MERGE_LABEL));
+    if !opted_in || crate::issue_monitor_gate::classify_acceptance_criteria(body).machine_checkable
+    {
+        return Ok(());
+    }
+    Err(SpecOpsError::Validation(format!(
+        "the `{}` label opts this Issue into autonomous execution, but the body has no \
+         machine-checkable acceptance criteria block; add a `## 受け入れ基準` (or \
+         `## Acceptance Criteria`) heading followed by `- [ ] AC-1: ...` checklist items \
+         (`## 成功基準` is not scanned), or drop the label",
+        crate::issue_monitor::AUTO_MERGE_LABEL
+    )))
+}
+
 pub(super) fn parse(args: &[String]) -> Result<IssueCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
@@ -101,6 +130,7 @@ pub(super) fn run<E: CliEnv>(
             body,
             labels,
         } => {
+            guard_autonomous_acceptance_block(&labels, &body)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
                 env.repo_path(),
@@ -115,6 +145,12 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
+        IssueCommand::Edit {
+            number,
+            title,
+            body,
+            labels,
+        } => run_issue_edit(env, number, title, body, labels, out)?,
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
@@ -589,8 +625,12 @@ fn run_monitor_launch_now<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        let hold_cleared = monitor.clear_retry_hold(number);
-        if hold_cleared {
+        let retry_hold_cleared = monitor.clear_retry_hold(number);
+        let completion_hold_cleared = monitor.clear_completion_hold(number);
+        let hold_cleared = retry_hold_cleared || completion_hold_cleared;
+        if completion_hold_cleared {
+            *prefs = monitor.prefs();
+        } else if retry_hold_cleared {
             prefs.autonomous_records = monitor.prefs().autonomous_records;
         }
         Ok(hold_cleared)
@@ -808,18 +848,24 @@ fn run_monitor_requeue<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
-        let outcome = monitor.requeue_failed_issue(number, reason, &now);
-        if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
-            *prefs = monitor.prefs();
-        }
-        Ok(outcome)
-    })
-    .map_err(io_as_api_error)?;
+    let (prefs, (outcome, completion_hold_cleared)) =
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let outcome = monitor.requeue_failed_issue(number, reason, &now);
+            let completion_hold_cleared =
+                matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld)
+                    && monitor.clear_completion_hold(number);
+            if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. })
+                || completion_hold_cleared
+            {
+                *prefs = monitor.prefs();
+            }
+            Ok((outcome, completion_hold_cleared))
+        })
+        .map_err(io_as_api_error)?;
 
     let (stale_window_id, attempts_before, attempts_after) = match outcome {
         crate::IssueMonitorRequeueOutcome::Requeued {
@@ -844,6 +890,26 @@ fn run_monitor_requeue<E: CliEnv>(
             return Ok(1);
         }
         crate::IssueMonitorRequeueOutcome::NotHeld => {
+            if completion_hold_cleared {
+                let delivery =
+                    issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+                out.push_str(
+                    &serde_json::json!({
+                        "number": number,
+                        "status": "requeued",
+                        "reason": reason,
+                        "released_hold": "completion",
+                        "released_at": now,
+                        "scan_requested": delivery.scan_requested,
+                        "scan_delivery": delivery.scan_delivery,
+                        "scan_error": delivery.scan_error,
+                        "pane_teardown": "none",
+                    })
+                    .to_string(),
+                );
+                out.push('\n');
+                return Ok(0);
+            }
             // Issue #3683 (AC-3): a `BlockedByClaim` hold lives only in the
             // driving process's inbox, never in the prefs this process reads,
             // so the failure gate above cannot see it. Ask the live daemon's
@@ -1088,9 +1154,8 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
-    pm_privileged: bool,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1114,7 +1179,6 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
-    pm_privileged: bool,
 ) -> io::Result<()> {
     if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
         return Err(io::Error::new(
@@ -1122,12 +1186,12 @@ fn validate_monitor_config_set(
             "at least one Issue Monitor config field is required",
         ));
     }
-    // SPEC-3431 FR-008/FR-009: same rule as the parse layer — the registered
-    // PM may raise the switches; every other session must use the GUI.
-    if !pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
+    // Issue #3814: policy lives in the command handler so both JSON dispatch
+    // and direct callers receive the same effect-free GUI-only ON refusal.
+    if enabled == Some(true) || autonomous_mode == Some(true) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "enabling Issue Monitor or autonomous mode requires an explicit GUI action              (only the project's registered PM agent may raise it from the CLI;              run `pm.status` to see the current PM)",
+            "enabling Issue Monitor or autonomous mode requires an explicit GUI action",
         ));
     }
     if max_active == Some(0) {
@@ -1139,23 +1203,6 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
-/// SPEC-3431 FR-008/FR-009: the asymmetric boundary from Issue #3357 stays in
-/// force for every agent session — only the project's registered PM may raise
-/// `enabled` / `autonomous_mode`. The privileged subject is resolved from the
-/// ambient `GWT_SESSION_ID` (the caller cannot claim someone else's id through
-/// params) matched against the durable PM registration. Raising the switch
-/// changes nothing about merges: SPEC #3200's fail-closed merge gate still
-/// decides every merge on its own.
-fn caller_is_registered_pm(project_root: &std::path::Path) -> bool {
-    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
-        return false;
-    };
-    crate::pm_registry::session_is_registered_pm(
-        &crate::pm_registry::pm_prefs_path_for_repo_path(project_root),
-        session_id.trim(),
-    )
-}
-
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -1165,40 +1212,7 @@ fn run_monitor_config_set<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let pm_privileged = caller_is_registered_pm(&project_root);
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)
-        .map_err(io_as_api_error)?;
-
-    // SPEC-3431 FR-008: a PM raising a switch writes the prefs SOT directly
-    // and asks for an immediate rescan. The daemon control lane refuses ON in
-    // its own decoder (it cannot see who sent a frame), and prefs is the
-    // source the scan driver re-reads every pass — so this is the honest path
-    // rather than a second authority channel.
-    if pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
-        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, true)
-        })
-        .map_err(io_as_api_error)?;
-        let scan_now = crate::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            serde_json::json!({ "scan_now": {} }),
-            std::process::id(),
-        );
-        let _ = publish_monitor_config_set(&project_root, scan_now);
-        let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-        out.push_str(
-            &serde_json::json!({
-                "enabled": prefs.enabled,
-                "autonomous_mode": prefs.autonomous_mode,
-                "max_active": prefs.max_active_agents.max(1),
-                "applied_by": "pm",
-            })
-            .to_string(),
-        );
-        out.push('\n');
-        return Ok(0);
-    }
+    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1218,7 +1232,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, pm_privileged)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
         })
         .map_err(io_as_api_error)?;
     }
@@ -1396,6 +1410,97 @@ pub(super) fn issue_state_label(state: IssueState) -> &'static str {
         IssueState::Open => "OPEN",
         IssueState::Closed => "CLOSED",
     }
+}
+
+/// Issue #3865: update a plain Issue's title / body / labels in place.
+///
+/// Only the supplied fields are sent. A body update on a `gwt-spec` Issue is
+/// refused before any write because that body is section-managed by
+/// `issue.spec.edit`; title and labels are not section-managed and stay
+/// editable. API failures pass through untouched so the caller can tell a
+/// missing Issue, a permission failure, and a network failure apart.
+fn run_issue_edit<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    title: Option<String>,
+    body: Option<String>,
+    labels: Option<Vec<String>>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    if title.is_none() && body.is_none() && labels.is_none() {
+        return Ok(write_issue_edit_refusal(
+            out,
+            number,
+            "nothing to update: pass at least one of params.title, params.body, params.labels",
+        ));
+    }
+    let issue = IssueNumber(number);
+    let current = load_or_refresh_issue(env, issue, true)?.snapshot;
+    if body.is_some()
+        && current
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    {
+        return Ok(write_issue_edit_refusal(
+            out,
+            number,
+            &format!(
+                "issue #{number} carries the gwt-spec label and its body is section-managed;                  use issue.spec.edit per section instead of issue.edit (title and labels                  remain editable here)"
+            ),
+        ));
+    }
+
+    // Issue #3873 guard, applied to the post-edit state: replacing the body
+    // or the labels must not leave an `auto-merge` Issue without the
+    // machine-checkable acceptance block that `issue.create` requires.
+    if body.is_some() || labels.is_some() {
+        let effective_labels = labels.as_deref().unwrap_or(&current.labels);
+        let effective_body = body.as_deref().unwrap_or(&current.body);
+        guard_autonomous_acceptance_block(effective_labels, effective_body)?;
+    }
+
+    let fields = gwt_github::client::IssueFieldsPatch {
+        title,
+        body,
+        labels,
+    };
+    let updated: Vec<&str> = [
+        fields.title.as_ref().map(|_| "title"),
+        fields.body.as_ref().map(|_| "body"),
+        fields.labels.as_ref().map(|_| "labels"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // One remote request: a failure leaves the Issue exactly as it was, so
+    // the guard above cannot be defeated by a half-applied edit.
+    env.client().patch_issue_fields(issue, &fields)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.edit",
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    let _ = refresh_issue_cache(env, issue)?;
+    out.push_str(&format!(
+        "updated issue #{number} ({})\n",
+        updated.join(", ")
+    ));
+    Ok(0)
+}
+
+fn write_issue_edit_refusal(out: &mut String, number: u64, reason: &str) -> i32 {
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "refused",
+            "reason": reason,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    1
 }
 
 pub(super) fn render_issue(out: &mut String, snapshot: &IssueSnapshot) {
@@ -2140,6 +2245,256 @@ mod tests {
         assert!(out.contains("#42 [OPEN] Issue family direct run"));
     }
 
+    fn seeded_edit_env(labels: &[&str]) -> (TempDir, crate::cli::TestEnv) {
+        let tmp = TempDir::new().expect("tempdir");
+        let env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.client.seed(IssueSnapshot {
+            number: IssueNumber(7),
+            title: "Original title".to_string(),
+            body: "Original body".to_string(),
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: vec![],
+        });
+        (tmp, env)
+    }
+
+    fn fetched(env: &crate::cli::TestEnv, number: u64) -> IssueSnapshot {
+        match env
+            .client
+            .fetch(IssueNumber(number), None)
+            .expect("fresh fetch")
+        {
+            gwt_github::client::FetchResult::Updated(snapshot) => snapshot,
+            gwt_github::client::FetchResult::NotModified => panic!("fresh fetch should update"),
+        }
+    }
+
+    fn edit_body(number: u64, body: &str) -> IssueCommand {
+        IssueCommand::Edit {
+            number,
+            title: None,
+            body: Some(body.to_string()),
+            labels: None,
+        }
+    }
+
+    /// Issue #3865 AC-2: title / body / labels are each optional and only the
+    /// supplied fields change; the local cache reflects the write.
+    #[test]
+    fn issue_edit_updates_only_the_supplied_fields() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: Some("Renamed title".to_string()),
+                body: None,
+                labels: None,
+            },
+            &mut out,
+        )
+        .expect("title-only edit");
+        assert_eq!(code, 0, "{out}");
+        let snapshot = fetched(&env, 7);
+        assert_eq!(snapshot.title, "Renamed title");
+        assert_eq!(snapshot.body, "Original body");
+        assert_eq!(snapshot.labels, vec!["bug"]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: Some("Corrected body".to_string()),
+                labels: Some(vec!["bug".to_string(), "enhancement".to_string()]),
+            },
+            &mut out,
+        )
+        .expect("body+labels edit");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("updated issue #7"), "{out}");
+        let snapshot = fetched(&env, 7);
+        assert_eq!(snapshot.title, "Renamed title");
+        assert_eq!(snapshot.body, "Corrected body");
+        assert_eq!(snapshot.labels, vec!["bug", "enhancement"]);
+        // Both fields travel in one remote request; no single-field patch
+        // is issued, so a failure cannot leave the Issue half-applied.
+        let mutations: Vec<String> = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("patch_") || call.starts_with("set_labels"))
+            .collect();
+        assert_eq!(
+            mutations,
+            vec!["patch_issue_fields:#7".to_string(); 2],
+            "one combined patch per edit"
+        );
+
+        let cached = Cache::new(env.cache_root())
+            .load_entry(IssueNumber(7))
+            .expect("cache entry after edit");
+        assert_eq!(cached.snapshot.body, "Corrected body");
+        assert_eq!(cached.snapshot.title, "Renamed title");
+    }
+
+    /// Issue #3865 AC-3: a `gwt-spec` body is section-managed, so the plain
+    /// editor refuses it, writes nothing, and points at `issue.spec.edit`.
+    #[test]
+    fn issue_edit_refuses_body_updates_on_gwt_spec_issues() {
+        let (_tmp, mut env) = seeded_edit_env(&["GWT-Spec", "phase/draft"]);
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, "rewritten"), &mut out).expect("refusal is a result");
+        assert_eq!(code, 1, "{out}");
+        let refusal: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refusal["status"], "refused");
+        let reason = refusal["reason"].as_str().expect("reason");
+        assert!(reason.contains("gwt-spec"), "{reason}");
+        assert!(reason.contains("issue.spec.edit"), "{reason}");
+        assert_eq!(fetched(&env, 7).body, "Original body");
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("patch_body")),
+            "refusal must not reach the API"
+        );
+
+        // Title and labels are not section-managed: they stay editable.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: Some("Renamed spec".to_string()),
+                body: None,
+                labels: None,
+            },
+            &mut out,
+        )
+        .expect("title edit on spec");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).title, "Renamed spec");
+    }
+
+    /// Issue #3865 AC-5: a missing Issue, a permission failure, and a network
+    /// failure each surface their own cause, and none of them writes anything.
+    #[test]
+    fn issue_edit_reports_distinguishable_failures() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+
+        let missing = run(&mut env, edit_body(999, "x"), &mut out).expect_err("missing issue");
+        assert!(missing.to_string().contains("#999 not found"), "{missing}");
+
+        env.client
+            .fail_next_issue_patch(ApiError::PermissionDenied {
+                message: "Resource not accessible by integration".to_string(),
+            });
+        let denied = run(&mut env, edit_body(7, "x"), &mut out).expect_err("permission");
+        assert!(
+            denied.to_string().starts_with("permission denied:"),
+            "{denied}"
+        );
+
+        env.client
+            .fail_next_issue_patch(ApiError::Network("connection reset".to_string()));
+        let network = run(&mut env, edit_body(7, "x"), &mut out).expect_err("network");
+        assert!(
+            network.to_string().starts_with("network error:"),
+            "{network}"
+        );
+
+        assert_eq!(fetched(&env, 7).body, "Original body");
+    }
+
+    /// Issue #3865 x #3873: `issue.edit` cannot bypass the autonomous
+    /// acceptance-block guard — neither by replacing the body of an
+    /// `auto-merge` Issue with one the Monitor cannot read, nor by adding the
+    /// label to an Issue whose body has no block. A compliant body still goes
+    /// through.
+    #[test]
+    fn issue_edit_keeps_the_autonomous_acceptance_block_guard() {
+        let (_tmp, mut env) = seeded_edit_env(&["auto-merge"]);
+        let mut out = String::new();
+
+        let stripped = run(
+            &mut env,
+            edit_body(7, "## 成功基準\n- [ ] AC-1: wrong heading\n"),
+            &mut out,
+        )
+        .expect_err("auto-merge body without a readable AC block must be refused");
+        let message = stripped.to_string();
+        assert!(
+            message.contains("受け入れ基準") && message.contains("AC-"),
+            "{message}"
+        );
+
+        let (_tmp2, mut plain) = seeded_edit_env(&["bug"]);
+        let labelled = run(
+            &mut plain,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: Some(vec!["bug".to_string(), "auto-merge".to_string()]),
+            },
+            &mut out,
+        )
+        .expect_err("adding auto-merge to a body without an AC block must be refused");
+        assert!(labelled.to_string().contains("受け入れ基準"), "{labelled}");
+        for env in [&env, &plain] {
+            assert!(
+                !env.client
+                    .call_log()
+                    .iter()
+                    .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")),
+                "refused edits must not reach the API"
+            );
+        }
+
+        let code = run(
+            &mut env,
+            edit_body(7, "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n"),
+            &mut out,
+        )
+        .expect("compliant body is accepted");
+        assert_eq!(code, 0, "{out}");
+        assert!(fetched(&env, 7).body.contains("AC-1"));
+    }
+
+    #[test]
+    fn issue_edit_refuses_an_empty_update() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: None,
+            },
+            &mut out,
+        )
+        .expect("refusal is a result");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("refused"), "{out}");
+        assert!(out.contains("params.title"), "{out}");
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")),
+            "nothing may reach the API"
+        );
+    }
+
     #[test]
     fn immediate_scan_delivery_never_claims_an_unacknowledged_schedule() {
         let immediate = issue_monitor_scan_delivery(Ok(()));
@@ -2449,6 +2804,58 @@ mod tests {
         assert_eq!(record.retry_not_before, None);
         assert_eq!(record.retry_hold_reason, None);
         assert_eq!(record.retry_hold_provider, None);
+    }
+
+    #[test]
+    fn launch_now_clears_a_stale_completion_hold_and_requires_a_fresh_session() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version:
+                    crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+                completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                    issue_number: 42,
+                    generation: 1,
+                    state: crate::issue_monitor::IssueCompletionState::Completed,
+                    issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                    evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+
+        let _ = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now result");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+
+        assert_eq!(result["hold_cleared"], true);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.merged_issues.is_empty());
+        assert_eq!(
+            persisted.completion_records[0].state,
+            crate::issue_monitor::IssueCompletionState::Reopened
+        );
+        assert_eq!(
+            persisted.queued_launch_session_strategies.get(&42),
+            Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
     }
 
     /// Issue #3655 AC-4: an open unblock request has to be visible in the one
@@ -3280,6 +3687,90 @@ mod tests {
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
     }
 
+    /// Issue #3814 AC-2/AC-3: registered PM identity must not open a hidden
+    /// JSON path around the GUI-only ON boundary, and rejection is effect-free.
+    #[test]
+    fn issue_monitor_config_set_rejects_pm_on_direction_without_changing_status() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: false,
+                autonomous_mode: false,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        crate::pm_registry::try_register_pm(
+            &pm_prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        assert!(crate::pm_registry::session_is_registered_pm(
+            &pm_prefs_path,
+            "pm-session"
+        ));
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        for (enabled, autonomous_mode) in [(Some(true), None), (None, Some(true))] {
+            let mut out = String::new();
+            let result = run(
+                &mut env,
+                IssueCommand::MonitorConfigSet {
+                    project_root: Some(repo.clone()),
+                    enabled,
+                    autonomous_mode,
+                    max_active: None,
+                },
+                &mut out,
+            );
+            assert!(result.is_err(), "PM JSON ON request must be refused");
+            assert!(out.is_empty(), "a refusal must not report applied state");
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs bytes after refusal"),
+                before,
+                "a refused ON request must not change persisted state"
+            );
+        }
+
+        let mut status_out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus {
+                project_root: Some(repo),
+            },
+            &mut status_out,
+        )
+        .expect("status after refusal");
+        let status: serde_json::Value =
+            serde_json::from_str(status_out.trim()).expect("status JSON");
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["autonomous_mode"], false);
+        assert_eq!(status["max_active"], 3);
+    }
+
     /// SPEC-3431 FR-033 / T-087b: the operation the PM actually calls.
     ///
     /// Drives the whole path a `gwtd` invocation takes — load prefs, evaluate
@@ -3585,6 +4076,59 @@ mod tests {
         .expect("requeue runs");
         assert_eq!(code, 1);
         assert!(out.contains("not_held"), "{out}");
+    }
+
+    #[test]
+    fn monitor_requeue_releases_a_stale_completion_hold_instead_of_refusing_not_held() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                merged_issues: vec![42],
+                issue_completion_migration_version:
+                    crate::issue_monitor::ISSUE_COMPLETION_MIGRATION_VERSION,
+                completion_records: vec![crate::issue_monitor::IssueCompletionRecord {
+                    issue_number: 42,
+                    generation: 7,
+                    state: crate::issue_monitor::IssueCompletionState::Completed,
+                    issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+                    evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+
+        assert_eq!(code, 0);
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("requeue response is JSON");
+        assert_eq!(response["status"], "requeued");
+        assert_eq!(response["released_hold"], "completion");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.merged_issues.is_empty());
+        assert_eq!(persisted.completion_records[0].generation, 8);
+        assert_eq!(
+            persisted.completion_records[0].state,
+            crate::issue_monitor::IssueCompletionState::Reopened
+        );
     }
 
     // -------------------------------------------------------------------
@@ -4099,5 +4643,75 @@ mod tests {
         assert_eq!(persisted.updated_at, remote.updated_at);
         assert_eq!(persisted.comments[0].body, remote.comments[0].body);
         assert!(!cache.validation_receipt_path(remote.number).exists());
+    }
+
+    // Issue #3873 AC-1: `issue.create` with the auto-merge label refuses a
+    // body the Monitor's classifier cannot read, instead of creating an Issue
+    // that silently lands in needs_human.
+    #[test]
+    fn issue_create_with_auto_merge_refuses_body_without_acceptance_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let err = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "fix: something".to_string(),
+                body: "## 成功基準\n- [ ] AC-1: hidden under the wrong heading\n".to_string(),
+                labels: vec!["auto-merge".to_string()],
+            },
+            &mut out,
+        )
+        .expect_err("auto-merge without a machine-checkable AC block must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("受け入れ基準") && message.contains("AC-"),
+            "error must tell the author the required block shape, got: {message}"
+        );
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|c| c.contains("create_issue")),
+            "no Issue may be created when validation fails: {:?}",
+            env.client.call_log()
+        );
+    }
+
+    #[test]
+    fn issue_create_with_auto_merge_accepts_classifier_readable_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "fix: something".to_string(),
+                body: "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n".to_string(),
+                labels: vec!["Auto-Merge".to_string()],
+            },
+            &mut out,
+        )
+        .expect("well-formed AC block is accepted");
+        assert_eq!(code, 0);
+        assert!(out.contains("created issue #"), "out = {out}");
+    }
+
+    #[test]
+    fn issue_create_without_auto_merge_does_not_require_acceptance_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "docs: typo".to_string(),
+                body: "free text, no criteria".to_string(),
+                labels: vec!["documentation".to_string()],
+            },
+            &mut out,
+        )
+        .expect("plain issues keep today's behaviour");
+        assert_eq!(code, 0);
     }
 }

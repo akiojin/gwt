@@ -10,7 +10,15 @@ use std::{
 };
 
 use fs2::FileExt;
+use futures_util::{SinkExt, Stream, StreamExt};
 use tempfile::tempdir;
+use tokio::runtime::Runtime as TokioRuntime;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest, Error as WebSocketError, Message as WebSocketMessage,
+    },
+};
 
 use base64::Engine;
 use chrono::{TimeZone, Utc};
@@ -5322,6 +5330,639 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+/// Issue #3816: the Tao dispatch path must release the caller capability
+/// registry read lock before close teardown fences the target capability.
+/// Otherwise `pane.close` self-deadlocks before its acknowledgement and every
+/// later request on the same event loop stalls behind it.
+#[test]
+fn current_peer_pane_close_releases_caller_grant_lock_before_target_handoff() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-target",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let target_session_id = "session-close-target";
+    assert!(tab
+        .workspace
+        .set_session_id("agent-target", Some(target_session_id.to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-target");
+    let holder = install_manual_launch_holder(
+        &mut runtime,
+        &project,
+        target_session_id,
+        gwt_agent::AgentStatus::Running,
+        Some(&window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let issuer = install_manual_holder_capability(&mut runtime, &project, &window_id, &holder);
+    let stale_caller = issuer
+        .issue(&project, "session-close-caller")
+        .expect("issue stale peer caller capability");
+    let stale_caller_grant = issuer
+        .grant_for_test(&stale_caller.token)
+        .expect("authenticate stale peer caller capability");
+    let caller = issuer
+        .issue(&project, "session-close-caller")
+        .expect("issue peer caller capability");
+    let caller_grant = issuer
+        .grant_for_test(&caller.token)
+        .expect("authenticate peer caller capability");
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let stale_close = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        stale_caller_grant,
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(matches!(
+        stale_close,
+        super::AgentFrontendDispatchOutcome::StaleCapability
+    ));
+    assert!(
+        runtime.tracked_window_exists(&window_id),
+        "rotation before acceptance must reject the close without touching its target"
+    );
+    assert!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a close rejected before acceptance must not queue teardown"
+    );
+
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let thread_home = temp.path().to_path_buf();
+    let worker_window_id = window_id.clone();
+    let worker = thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(&thread_home);
+        let started = Instant::now();
+        let close = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant.clone(),
+            AgentFrontendRequest::CloseWindow {
+                id: worker_window_id.clone(),
+                request_id: None,
+                responder: None,
+            },
+        );
+        let close_elapsed = started.elapsed();
+        let reclose = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant.clone(),
+            AgentFrontendRequest::CloseWindow {
+                id: worker_window_id,
+                request_id: None,
+                responder: None,
+            },
+        );
+        let list_started = Instant::now();
+        let listed = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant,
+            AgentFrontendRequest::ListWindows,
+        );
+        result_tx
+            .send((
+                close,
+                reclose,
+                listed,
+                close_elapsed,
+                list_started.elapsed(),
+            ))
+            .expect("report peer close outcomes");
+    });
+
+    let (close, reclose, listed, close_elapsed, list_elapsed) = result_rx
+        .recv_timeout(Duration::from_millis(400))
+        .expect("peer close and the following bridge requests must not deadlock");
+    worker.join().expect("join peer close dispatch");
+    assert!(matches!(
+        close,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: true, .. },
+                    ..
+                })
+            )
+    ));
+    assert!(matches!(
+        reclose,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: false, .. },
+                    ..
+                })
+            )
+    ));
+    assert!(matches!(
+        listed,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events) if !events.is_empty()
+    ));
+    assert!(
+        close_elapsed < Duration::from_millis(400),
+        "peer close acknowledgement took {close_elapsed:?}"
+    );
+    assert!(
+        list_elapsed < Duration::from_secs(1),
+        "pane.list after a failed re-close took {list_elapsed:?}"
+    );
+    assert_eq!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "only the accepted close may queue background teardown"
+    );
+    let queued = {
+        let mut finalizers = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalizers.drain(..).collect::<Vec<_>>()
+    };
+    for finalizer in queued {
+        finalizer();
+    }
+}
+
+/// Issue #3816: once the caller grant has crossed the acceptance snapshot,
+/// rotating that caller must not cancel the already accepted peer operation.
+#[test]
+fn accepted_peer_close_snapshot_survives_caller_rotation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-target",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-target");
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let caller = issuer
+        .issue(&project, "session-close-caller")
+        .expect("issue peer caller capability");
+    let caller_grant = issuer
+        .grant_for_test(&caller.token)
+        .expect("authenticate peer caller capability");
+    let asserted_grant = caller_grant.clone();
+    let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let thread_home = temp.path().to_path_buf();
+    let worker_window_id = window_id.clone();
+    let worker = thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(&thread_home);
+        super::set_agent_peer_close_after_acceptance_test_hook(move || {
+            accepted_tx
+                .send(())
+                .expect("signal peer close acceptance snapshot");
+            resume_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("resume accepted peer close");
+        });
+        let outcome = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            caller_grant,
+            AgentFrontendRequest::CloseWindow {
+                id: worker_window_id,
+                request_id: None,
+                responder: None,
+            },
+        );
+        (runtime, outcome)
+    });
+
+    accepted_rx
+        .recv_timeout(Duration::from_millis(400))
+        .expect("production dispatch reached the post-acceptance barrier");
+    let rotation_issuer = issuer.clone();
+    let rotation_project = project.clone();
+    let (rotation_tx, rotation_rx) = mpsc::sync_channel(1);
+    let rotation = thread::spawn(move || {
+        rotation_tx
+            .send(rotation_issuer.issue(&rotation_project, "session-close-caller"))
+            .expect("report caller rotation");
+    });
+    rotation_rx
+        .recv_timeout(Duration::from_millis(400))
+        .expect("caller rotation must not wait on the accepted dispatch")
+        .expect("rotate caller after acceptance");
+    rotation.join().expect("join caller rotation");
+    assert!(
+        !issuer.grant_is_current(&asserted_grant),
+        "the accepted grant must now be stale in the registry"
+    );
+    resume_tx.send(()).expect("resume accepted peer close");
+    let (runtime, outcome) = worker.join().expect("join accepted peer close dispatch");
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.first(),
+                Some(OutboundEvent {
+                    event: BackendEvent::PaneCloseResult { ok: true, .. },
+                    ..
+                })
+            )
+    ));
+    assert!(
+        !runtime.tracked_window_exists(&window_id),
+        "rotation after acceptance must not cancel the accepted close"
+    );
+    let queued = {
+        let mut finalizers = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalizers.drain(..).collect::<Vec<_>>()
+    };
+    for finalizer in queued {
+        finalizer();
+    }
+}
+
+async fn next_test_agent_websocket_event<S>(
+    socket: &mut S,
+    expected_kind: &str,
+    deadline: Duration,
+) -> serde_json::Value
+where
+    S: Stream<Item = Result<WebSocketMessage, WebSocketError>> + Unpin,
+{
+    tokio::time::timeout(deadline, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WebSocketMessage::Text(payload))) => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(payload.as_ref()).expect("agent WebSocket JSON");
+                    if value.get("kind").and_then(serde_json::Value::as_str) == Some(expected_kind)
+                    {
+                        return value;
+                    }
+                }
+                Some(Ok(
+                    WebSocketMessage::Ping(_)
+                    | WebSocketMessage::Pong(_)
+                    | WebSocketMessage::Binary(_)
+                    | WebSocketMessage::Frame(_),
+                )) => {}
+                Some(Ok(WebSocketMessage::Close(frame))) => {
+                    panic!("agent WebSocket closed before {expected_kind}: {frame:?}")
+                }
+                Some(Err(error)) => {
+                    panic!("agent WebSocket failed before {expected_kind}: {error}")
+                }
+                None => panic!("agent WebSocket ended before {expected_kind}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("agent WebSocket did not return {expected_kind} within {deadline:?}")
+    })
+}
+
+/// Issue #3816 AC-3/AC-5/AC-6: exercise the real TCP WebSocket bridge, its
+/// capability gate, the Tao-shaped UserEvent queue, and AppRuntime dispatch as
+/// one loop. Wire-level close (also used by the parser-proven `pane.stop`
+/// alias), list/read, and self pane send must remain responsive on the same
+/// authenticated connection.
+#[test]
+fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated HOME");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    let caller_session_id = "session-ws-caller";
+    let target_session_id = "session-ws-target";
+    let caller_binding = materialize_active_agent_pane_binding(&project, caller_session_id);
+
+    let mut tab = sample_project_tab(
+        "tab-project",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent, WindowPreset::Agent],
+    );
+    let raw_window_ids = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect::<Vec<_>>();
+    let caller_window_id = combined_window_id("tab-project", &raw_window_ids[0]);
+    let target_window_id = combined_window_id("tab-project", &raw_window_ids[1]);
+    assert!(tab
+        .workspace
+        .set_session_id(&raw_window_ids[0], Some(caller_session_id.to_string())));
+    assert!(tab
+        .workspace
+        .set_session_id(&raw_window_ids[1], Some(target_session_id.to_string())));
+
+    let (mut app, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    for window_id in [&caller_window_id, &target_window_id] {
+        insert_test_pane_runtime(&mut app, window_id);
+    }
+    let caller_pane = app
+        .runtimes
+        .get(&caller_window_id)
+        .expect("caller runtime")
+        .pane
+        .clone();
+    let mut caller_reader = caller_pane
+        .lock()
+        .expect("caller pane")
+        .reader()
+        .expect("caller PTY reader");
+    let caller_output_thread = thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while std::io::Read::read(&mut caller_reader, &mut buffer).is_ok_and(|read| read > 0) {}
+    });
+    caller_pane
+        .lock()
+        .expect("caller pane")
+        .process_bytes(b"caller snapshot remains readable after peer close\n");
+    let caller_child_pid = caller_pane
+        .lock()
+        .expect("caller pane")
+        .pty()
+        .process_id()
+        .expect("caller child pid");
+    let caller_child_started_at = gwt::process::host_process_start_time(caller_child_pid)
+        .expect("caller child process start time");
+    app.register_pty_writer(&caller_window_id, &caller_pane);
+
+    let mut caller_session = sample_active_agent_session("tab-project", &caller_window_id);
+    caller_session.session_id = caller_session_id.to_string();
+    caller_session.worktree_path = project.clone();
+    caller_session.agent_project_root = project.display().to_string();
+    let mut target_session = sample_active_agent_session("tab-project", &target_window_id);
+    target_session.session_id = target_session_id.to_string();
+    target_session.worktree_path = project.clone();
+    target_session.agent_project_root = project.display().to_string();
+    app.active_agent_sessions
+        .insert(caller_window_id.clone(), caller_session);
+    app.active_agent_sessions
+        .insert(target_window_id.clone(), target_session);
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    app.blocking_tasks = spawner;
+
+    let tokio = TokioRuntime::new().expect("Tokio runtime");
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    app.proxy = proxy.clone();
+    let clients = crate::embedded_server::ClientHub::default();
+    let mut server = crate::embedded_server::EmbeddedServer::start(
+        &tokio,
+        proxy,
+        clients.clone(),
+        Arc::clone(&app.pty_writers),
+        AttachmentUploadStore::in_system_temp(),
+    )
+    .expect("embedded server");
+    let issuer = server.agent_capability_issuer();
+    let caller = issuer
+        .issue_bound(&project, caller_session_id, caller_binding)
+        .expect("active caller capability");
+    let target = issuer
+        .issue(&project, target_session_id)
+        .expect("peer target capability");
+    app.agent_capability_issuer = Some(issuer.clone());
+    app.agent_capability_tokens
+        .insert(caller_window_id.clone(), caller.token.clone());
+    app.agent_capability_tokens
+        .insert(target_window_id.clone(), target.token);
+
+    let (stop_tx, stop_rx) = mpsc::sync_channel(1);
+    let driver_home = temp.path().to_path_buf();
+    let driver_events = Arc::clone(&recorded_events);
+    let driver_clients = clients.clone();
+    let driver = thread::spawn(move || {
+        let _gwt_home = ScopedGwtHome::set(&driver_home);
+        loop {
+            match stop_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let event = {
+                let mut events = driver_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                events
+                    .iter()
+                    .position(|event| matches!(event, UserEvent::AgentFrontend { .. }))
+                    .map(|position| events.remove(position))
+            };
+            let Some(UserEvent::AgentFrontend {
+                client_id,
+                grant,
+                request,
+            }) = event
+            else {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            let outcome =
+                app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
+            crate::apply_agent_frontend_dispatch_outcome(&driver_clients, &client_id, outcome);
+        }
+        app
+    });
+
+    let pane_url = issuer.agent_pane_websocket_url().to_string();
+    tokio.block_on(async {
+        let mut request = pane_url
+            .as_str()
+            .into_client_request()
+            .expect("agent pane WebSocket request");
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", caller.token)
+                .parse()
+                .expect("bearer header"),
+        );
+        let (mut socket, _) = connect_async(request)
+            .await
+            .expect("real agent pane WebSocket");
+
+        socket
+            .send(WebSocketMessage::Text(
+                r#"{"kind":"list_windows"}"#.to_string().into(),
+            ))
+            .await
+            .expect("seed authenticated pane scope");
+        let _ =
+            next_test_agent_websocket_event(&mut socket, "workspace_state", Duration::from_secs(1))
+                .await;
+
+        let close_started = Instant::now();
+        socket
+            .send(WebSocketMessage::Text(
+                serde_json::json!({"kind": "close_window", "id": target_window_id})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send peer close");
+        let close = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_close_result",
+            Duration::from_millis(400),
+        )
+        .await;
+        assert_eq!(close["ok"], true);
+        assert_eq!(close["window_id"], target_window_id);
+        assert!(
+            close_started.elapsed() < Duration::from_millis(400),
+            "real WebSocket peer close exceeded the bridge budget"
+        );
+
+        let reclose_started = Instant::now();
+        socket
+            .send(WebSocketMessage::Text(
+                serde_json::json!({"kind": "close_window", "id": target_window_id})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send failed peer re-close");
+        let reclose = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_close_result",
+            Duration::from_millis(400),
+        )
+        .await;
+        assert_eq!(reclose["ok"], false);
+        assert!(
+            reclose_started.elapsed() < Duration::from_millis(400),
+            "real WebSocket failed peer re-close exceeded the bridge budget"
+        );
+
+        socket
+            .send(WebSocketMessage::Text(
+                r#"{"kind":"list_windows"}"#.to_string().into(),
+            ))
+            .await
+            .expect("send list after failed close");
+        let listed =
+            next_test_agent_websocket_event(&mut socket, "workspace_state", Duration::from_secs(1))
+                .await;
+        let listed_windows = listed["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .expect("listed windows");
+        assert!(listed_windows
+            .iter()
+            .any(|window| window["id"] == caller_window_id));
+        assert!(listed_windows
+            .iter()
+            .all(|window| window["id"] != target_window_id));
+
+        socket
+            .send(WebSocketMessage::Text(
+                r#"{"kind":"frontend_ready"}"#.to_string().into(),
+            ))
+            .await
+            .expect("send read sync after peer close");
+        let snapshot = next_test_agent_websocket_event(
+            &mut socket,
+            "terminal_snapshot",
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(snapshot["id"], caller_window_id);
+        let snapshot_bytes = base64::engine::general_purpose::STANDARD
+            .decode(snapshot["data_base64"].as_str().expect("snapshot base64"))
+            .expect("decode caller snapshot");
+        assert!(String::from_utf8_lossy(&snapshot_bytes)
+            .contains("caller snapshot remains readable after peer close"));
+
+        socket
+            .send(WebSocketMessage::Text(
+                serde_json::json!({
+                    "kind": "pane_send_input",
+                    "session_id": caller_session_id,
+                    "text": "status after peer close"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send caller pane input after peer close");
+        let sent = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_send_result",
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(sent["ok"], true);
+        assert_eq!(sent["window_id"], caller_window_id);
+        socket.close(None).await.expect("close test WebSocket");
+    });
+
+    stop_tx.send(()).expect("stop Tao-shaped event driver");
+    let mut app = driver.join().expect("join Tao-shaped event driver");
+    server.shutdown();
+    assert_eq!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "the accepted peer close owns one background finalizer"
+    );
+    let queued = {
+        let mut finalizers = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalizers.drain(..).collect::<Vec<_>>()
+    };
+    for finalizer in queued {
+        finalizer();
+    }
+    app.stop_window_runtime_without_session_projection(&caller_window_id);
+    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    while gwt::process::exact_pty_process_tree_is_alive(caller_child_pid, caller_child_started_at) {
+        assert!(
+            Instant::now() < cleanup_deadline,
+            "caller PTY process tree survived explicit test cleanup"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    caller_output_thread
+        .join()
+        .expect("join caller PTY output drain");
+}
+
 /// Issue #3667 AC-1/AC-3 at the runtime dispatch layer: a settled grant (an
 /// in-memory Active binding whose durable record is stale) still observes its
 /// scoped state while producing mutation stays refused.
@@ -9753,6 +10394,263 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_boar
     assert_eq!(agent.placement, WindowPlacement::Canvas);
 }
 
+fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
+    LaunchFeedbackContext {
+        client_id: "__issue_monitor__".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(issue_number),
+        issue_monitor_delivery_id: None,
+        issue_monitor_project_root: None,
+        issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
+    }
+}
+
+fn spawned_agent_placement(runtime: &AppRuntime, tab_id: &str) -> WindowPlacement {
+    runtime
+        .tab(tab_id)
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window")
+        .placement
+        .clone()
+}
+
+// SPEC-3671 FR-002 / T-007: an Issue Monitor auto-launch is mirrored inside the Issue
+// window instead of opening a canvas window.
+#[test]
+fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Issue],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let issue_window_id = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Issue)
+        .expect("issue window")
+        .id
+        .clone();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-3671")
+        .build();
+
+    runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            issue_monitor_feedback(3671),
+        )
+        .expect("issue monitor launch");
+
+    assert_eq!(
+        spawned_agent_placement(&runtime, "tab-1"),
+        WindowPlacement::IssuePreview {
+            issue_window_id,
+            issue_number: 3671,
+        }
+    );
+}
+
+// SPEC-3671 FR-002: without an Issue window there is nothing to mirror into, so the
+// launch keeps the canvas placement rather than becoming invisible.
+#[test]
+fn app_runtime_issue_monitor_launch_falls_back_to_canvas_without_issue_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Board],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-3671-fallback")
+        .build();
+
+    runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            issue_monitor_feedback(3671),
+        )
+        .expect("issue monitor launch without issue window");
+
+    assert_eq!(
+        spawned_agent_placement(&runtime, "tab-1"),
+        WindowPlacement::Canvas
+    );
+}
+
+// SPEC-3671 FR-003 / T-009: Start Work and Launch Agent keep opening canvas windows.
+#[test]
+fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Issue],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .spawn_agent_window(
+            "tab-1",
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .branch("work/manual-launch")
+                .build(),
+            canvas_bounds(),
+            None,
+        )
+        .expect("manual launch");
+
+    assert_eq!(
+        spawned_agent_placement(&runtime, "tab-1"),
+        WindowPlacement::Canvas
+    );
+
+    // A Launch Agent launch carries feedback but no Issue Monitor issue number.
+    runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .branch("work/manual-launch-feedback")
+                .build(),
+            canvas_bounds(),
+            None,
+            LaunchFeedbackContext {
+                client_id: "client-1".to_string(),
+                title: "Launch Agent".to_string(),
+                issue_monitor_issue_number: None,
+                issue_monitor_delivery_id: None,
+                issue_monitor_project_root: None,
+                issue_monitor_session_mode: None,
+                issue_monitor_autonomous_handoff: None,
+                issue_monitor_autonomous_submit_started: false,
+            },
+        )
+        .expect("manual launch with feedback");
+
+    for window in &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+    {
+        if window.preset == WindowPreset::Agent {
+            assert_eq!(
+                window.placement,
+                WindowPlacement::Canvas,
+                "manual launches must stay on the canvas"
+            );
+        }
+    }
+}
+
+// SPEC-3671 FR-006 / T-013: Issue Monitor delivery tracking keys off the window id, not
+// the placement, so an off-canvas preview stays fully tracked.
+#[test]
+fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Issue],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let delivery_id = "launch:issue-preview-tracking".to_string();
+    let mut feedback = issue_monitor_feedback(3671);
+    feedback.issue_monitor_delivery_id = Some(delivery_id.clone());
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/issue-3671-tracking")
+        .build();
+
+    runtime
+        .spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback)
+        .expect("issue monitor launch");
+
+    let raw_id = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window")
+        .id
+        .clone();
+    let window_id = super::combined_window_id("tab-1", &raw_id);
+
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id: tracked, .. })
+            if tracked == &window_id
+    ));
+    assert_eq!(
+        runtime.issue_monitor_issue_number_for_window(&repo, &window_id),
+        Some(3671),
+        "an off-canvas preview must still resolve back to its Issue number"
+    );
+}
+
 #[test]
 fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast() {
     let temp = tempdir().expect("tempdir");
@@ -11887,6 +12785,100 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
     assert!(
         diagnostic.contains("launch failed before process spawn"),
         "diagnostic must include the launch error detail: {diagnostic:?}"
+    );
+}
+
+#[test]
+fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let delivery_id = "launch:stale-pre-pty";
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(3851),
+            issue_monitor_delivery_id: Some(delivery_id.to_string()),
+            issue_monitor_project_root: Some(temp.path().to_path_buf()),
+            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
+        },
+    );
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: window_id.clone(),
+            started_at: Instant::now(),
+        },
+    );
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Err("stale preparation failure".to_string()),
+    );
+
+    let feedback_retained = runtime
+        .pending_launch_feedback_contexts
+        .contains_key(&window_id);
+    let delivery_retained = matches!(
+        runtime.issue_monitor_launch_deliveries.get(delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: delivery_window_id,
+            ..
+        }) if delivery_window_id == &window_id
+    );
+    let runtime_retained = runtime.runtimes.contains_key(&window_id);
+    let active_session_retained = runtime.active_agent_sessions.contains_key(&window_id);
+    let status = runtime.window_status(&window_id);
+    let diagnostic_retained = runtime
+        .launch_error_terminal_details
+        .contains_key(&window_id);
+    runtime.active_agent_sessions.remove(&window_id);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+
+    assert!(
+        events.is_empty(),
+        "a stale pre-PTY result must not emit launch failure events: {events:#?}"
+    );
+    assert!(
+        feedback_retained,
+        "the current launch feedback must survive"
+    );
+    assert!(
+        delivery_retained,
+        "the current Monitor delivery must survive"
+    );
+    assert!(runtime_retained, "the live PTY runtime must survive");
+    assert!(active_session_retained, "the active Session must survive");
+    assert!(
+        status.is_some_and(|status| !matches!(
+            status,
+            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+        )),
+        "the composed live-agent status must remain non-terminal: {status:?}"
+    );
+    assert!(
+        !diagnostic_retained,
+        "a stale result must not append the pre-PTY diagnostic"
     );
 }
 
@@ -43278,7 +44270,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
 }
 
 #[test]
-fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears() {
+fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -43354,19 +44346,43 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         1,
     );
 
-    match runtime
+    let live_window_id = match runtime
         .issue_monitor_launch_deliveries
         .get_mut("launch:effect-3165")
         .expect("replayed delivery is materializing")
     {
         super::IssueMonitorLaunchDeliveryState::Materializing {
-            window_id: _,
+            window_id,
             started_at,
         } => {
             *started_at = Instant::now() - Duration::from_secs(61);
+            window_id.clone()
         }
         state => panic!("expected materializing delivery, got {state:?}"),
-    }
+    };
+    insert_test_pane_runtime(&mut runtime, &live_window_id);
+
+    let waiting_replay = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+
+    assert!(
+        waiting_replay.is_empty(),
+        "a materializer with a live PTY must keep its delivery slot while awaiting input",
+    );
+    assert!(runtime.runtimes.contains_key(&live_window_id));
+    assert!(matches!(
+        runtime
+            .issue_monitor_launch_deliveries
+            .get("launch:effect-3165"),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &live_window_id
+    ));
+
+    runtime.stop_window_runtime_without_session_projection(&live_window_id);
 
     let expired_replay = runtime.auto_launch_issue_monitor_delivery_events(
         3165,
@@ -58233,6 +59249,19 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         prompt.contains("never auto-close"),
         "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
     );
+    // Issue #3868 / #3825: both prompts are written into the PM pane's PTY,
+    // whose canonical queue is 1024 bytes on macOS. A longer prompt does not
+    // fail — the writer blocks forever and the whole suite hangs with it.
+    // Keep a margin for the composer line the wake can be submitted behind.
+    const PTY_CANONICAL_QUEUE_BYTES: usize = 1024;
+    const COMPOSER_LINE_MARGIN_BYTES: usize = 64;
+    assert!(
+        prompt.len() + COMPOSER_LINE_MARGIN_BYTES <= PTY_CANONICAL_QUEUE_BYTES,
+        "{label} is {} bytes; it must stay at or under {} bytes so the PTY write cannot block \
+         (#3825); got: {prompt}",
+        prompt.len(),
+        PTY_CANONICAL_QUEUE_BYTES - COMPOSER_LINE_MARGIN_BYTES
+    );
 }
 
 /// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
@@ -60445,4 +61474,165 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
         refusal_of(&events).contains("no live pane"),
         "a stale PM registration must not deliver"
     );
+}
+
+// Issue #3863 AC-6: every wizard-open path must inject the Hermes launch
+// choices enumerated from the user's global Hermes home. Missing one path
+// would leave that entry point with empty candidates only.
+fn seed_hermes_home_with_profile(root: &Path) -> PathBuf {
+    let hermes_home = root.join("hermes-home");
+    fs::create_dir_all(&hermes_home).expect("hermes home");
+    fs::write(
+        hermes_home.join("config.yaml"),
+        "model:\n  provider: zai\n  default: glm-5.2\nagent:\n  personalities:\n    concise: Be brief.\n",
+    )
+    .expect("hermes config");
+    hermes_home
+}
+
+fn assert_hermes_choices_injected(view: &gwt::LaunchWizardView, path: &str) {
+    assert_eq!(
+        view.hermes_profile_options,
+        vec!["concise".to_string()],
+        "{path}: Hermes profile choices must come from HERMES_HOME config"
+    );
+    assert_eq!(
+        view.hermes_model_options,
+        vec!["glm-5.2".to_string()],
+        "{path}: Hermes model choices must follow the config default provider"
+    );
+}
+
+#[test]
+fn app_runtime_manual_launch_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
+        .expect("open launch wizard");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_launch_wizard_for_branch");
+}
+
+#[test]
+fn app_runtime_knowledge_launch_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3863,
+            "Hermes launch choices",
+            &["enhancement"],
+            "body",
+            "2026-09-02T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            3863,
+            LinkedIssueKind::Issue,
+        )
+        .expect("open issue launch wizard");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_knowledge_launch_wizard_for_base_branch");
+}
+
+#[test]
+fn app_runtime_start_work_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let workspace_home = temp.path().join("workspace");
+    let _ = init_managed_workspace_with_develop_worktree(&workspace_home);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        workspace_home.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Branches],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_start_work_for_project("tab-1", &workspace_home)
+        .expect("open start work");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_start_work_for_project");
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    assert_hermes_choices_injected(view, "open_issue_monitor_configure_profile_wizard_events");
 }

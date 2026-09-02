@@ -270,6 +270,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             body: required_string(params, "body")?,
             labels: optional_string_vec(params, "labels")?,
         }),
+        "issue.edit" => CliCommand::Issue(IssueCommand::Edit {
+            number: required_u64(params, "number")?,
+            title: optional_string(params, "title")?,
+            body: optional_string(params, "body")?,
+            // Absent or `null` means "leave labels alone"; only an explicit
+            // empty array clears them.
+            labels: params
+                .get("labels")
+                .filter(|value| !value.is_null())
+                .map(|_| optional_string_vec(params, "labels"))
+                .transpose()?,
+        }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -347,24 +359,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "enabled|autonomous_mode|max_active",
                 ));
             }
-            // SPEC-3431 FR-008/FR-009: Issue #3357's asymmetric boundary keeps
-            // applying to every agent session — raising a switch stays a GUI
-            // action — except for the project's registered PM, which the SPEC
-            // grants full authority. Merges are unaffected either way: SPEC
-            // #3200's fail-closed merge gate still decides every merge.
-            let pm_privileged = params_caller_is_registered_pm(params);
-            if !pm_privileged {
-                if enabled == Some(true) {
-                    return Err(CliParseError::InvalidJson(
-                        "enabled=true requires an explicit GUI action".to_string(),
-                    ));
-                }
-                if autonomous_mode == Some(true) {
-                    return Err(CliParseError::InvalidJson(
-                        "autonomous_mode=true requires an explicit GUI action".to_string(),
-                    ));
-                }
-            }
+            // The handler owns the GUI-only ON policy so dispatch can return
+            // the normal structured `ok:false` operation envelope. This layer
+            // only rejects malformed config values.
             if max_active == Some(0) {
                 return Err(CliParseError::InvalidJson(
                     "max_active must be greater than zero".to_string(),
@@ -378,7 +375,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
-        "pr.list" => CliCommand::Pr(PrCommand::List),
+        "pr.list" => CliCommand::Pr(PrCommand::List {
+            stale_after_hours: optional_u64(params, "stale_after_hours")?
+                .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
+            escalate_after_cycles: optional_u64(params, "escalate_after_cycles")?
+                .map(|cycles| u32::try_from(cycles).unwrap_or(u32::MAX)),
+            refresh: optional_bool(params, "refresh")?.unwrap_or(false),
+            include: params
+                .contains_key("include")
+                .then(|| parse_pr_inventory_include(&optional_string_vec(params, "include")?))
+                .transpose()?,
+        }),
+        // Issue #3891 AC-3: GitHub API budget observation.
+        "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
+            refresh: optional_bool(params, "refresh")?.unwrap_or(false),
+        }),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -479,14 +490,34 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let commands = optional_string_vec(params, "commands")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
         }
+        "verify.adjudicate" => {
+            reject_unknown_params(
+                params,
+                &["record_id", "command", "board_entry_id"],
+                "verify.adjudicate",
+            )?;
+            let command = required_string(params, "command")?;
+            if command == "*" {
+                return Err(CliParseError::InvalidValue {
+                    flag: "command",
+                    reason: "must identify one exact command, not the whole record",
+                });
+            }
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Adjudicate {
+                record_id: required_string(params, "record_id")?,
+                command,
+                board_entry_id: required_string(params, "board_entry_id")?,
+            })
+        }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
+            let quarantines = verification_quarantine_requests(params)?;
             if commands.is_empty() && !derive {
                 return Err(CliParseError::MissingFlag("commands"));
             }
-            if generated_outputs.is_empty() {
+            if generated_outputs.is_empty() && quarantines.is_empty() {
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
                     commands,
                     derive,
@@ -497,6 +528,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                         commands,
                         derive,
                         generated_outputs,
+                        quarantines,
                     },
                 )
             }
@@ -1406,34 +1438,6 @@ fn required_u64_vec(
     optional_u64_vec(params, key)
 }
 
-/// SPEC-3431 FR-009: is this caller the project's registered PM?
-///
-/// The identity comes from the ambient `GWT_SESSION_ID` only — params may
-/// name the project, never the subject — so no caller can claim PM authority
-/// it does not hold. The project is the explicit `project_root` when given,
-/// otherwise the current directory, matching how the handler resolves it.
-/// Anything unresolvable is not privileged (fail-closed).
-fn params_caller_is_registered_pm(params: &Map<String, Value>) -> bool {
-    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
-        return false;
-    };
-    let session_id = session_id.trim().to_string();
-    if session_id.is_empty() {
-        return false;
-    }
-    let project_root = match params.get("project_root").and_then(Value::as_str) {
-        Some(path) => std::path::PathBuf::from(path),
-        None => match std::env::current_dir() {
-            Ok(cwd) => cwd,
-            Err(_) => return false,
-        },
-    };
-    crate::pm_registry::session_is_registered_pm(
-        &crate::pm_registry::pm_prefs_path_for_repo_path(&project_root),
-        &session_id,
-    )
-}
-
 fn issue_monitor_priority_position(
     params: &Map<String, Value>,
 ) -> Result<super::IssueMonitorPriorityPosition, CliParseError> {
@@ -1469,6 +1473,30 @@ fn optional_bool(
         Value::Null => Ok(None),
         _ => Err(CliParseError::InvalidJson(format!("{key} must be a bool"))),
     }
+}
+
+/// Issue #3891 AC-2: `params.include` names the heavy `pr.list` fields to
+/// hydrate. An empty list is the bare light inventory.
+fn parse_pr_inventory_include(
+    names: &[String],
+) -> Result<gwt_git::PrInventoryInclude, CliParseError> {
+    let mut include = gwt_git::PrInventoryInclude {
+        checks: false,
+        body: false,
+    };
+    for name in names {
+        match name.as_str() {
+            "checks" => include.checks = true,
+            "body" => include.body = true,
+            _ => {
+                return Err(CliParseError::InvalidValue {
+                    flag: "include",
+                    reason: "expected \"checks\" and/or \"body\"",
+                })
+            }
+        }
+    }
+    Ok(include)
 }
 
 fn optional_string_vec(
@@ -1527,6 +1555,38 @@ fn optional_json_array(
             "{key} must be an array"
         ))),
     }
+}
+
+fn verification_quarantine_requests(
+    params: &Map<String, Value>,
+) -> Result<Vec<crate::cli::verification_record::VerificationQuarantineRequest>, CliParseError> {
+    let requests = optional_json_array(params, "quarantines")?
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value::<
+                crate::cli::verification_record::VerificationQuarantineRequest,
+            >(value)
+            .map_err(|error| {
+                CliParseError::InvalidJson(format!(
+                    "quarantines must contain typed quarantine requests: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut identities = std::collections::HashSet::new();
+    for request in &requests {
+        request.validate().map_err(CliParseError::InvalidJson)?;
+        if !identities.insert((
+            request.failed_command.as_str(),
+            request.test_identity.as_str(),
+        )) {
+            return Err(CliParseError::InvalidJson(
+                "quarantines must not contain duplicate failed_command/test_identity pairs"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(requests)
 }
 
 #[cfg(test)]
@@ -1607,6 +1667,86 @@ mod tests {
             }),
             "operation refusal must land in the error ledger: {listed:?}"
         );
+    }
+
+    /// Issue #3814 AC-2/AC-3: the JSON surface must return a structured
+    /// refusal for a registered PM and reject a mixed request atomically.
+    #[test]
+    fn issue_monitor_pm_on_refusal_answers_ok_false_and_preserves_prefs() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: false,
+                autonomous_mode: false,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        crate::pm_registry::try_register_pm(
+            &pm_prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: project_root.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        assert!(crate::pm_registry::session_is_registered_pm(
+            &pm_prefs_path,
+            "pm-session"
+        ));
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        for params in [
+            json!({
+                "project_root": project_root.to_string_lossy(),
+                "enabled": true,
+                "max_active": 7,
+            }),
+            json!({
+                "project_root": project_root.to_string_lossy(),
+                "autonomous_mode": true,
+                "max_active": 9,
+            }),
+        ] {
+            let mut env = TestEnv::new(project_root.clone());
+            env.stdin = envelope("issue.monitor.config.set", params);
+
+            let code = super::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 1);
+            let stdout = String::from_utf8(env.stdout).expect("stdout utf8");
+            let payload: Value = serde_json::from_str(stdout.trim()).expect("error envelope JSON");
+            assert_eq!(payload["ok"], json!(false));
+            assert_eq!(payload["operation"], json!("issue.monitor.config.set"));
+            assert_eq!(payload["exit_code"], json!(1));
+            assert!(payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("requires an explicit GUI action")));
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs after refusal"),
+                before,
+                "a mixed ON request must not partially apply allowed fields"
+            );
+        }
     }
 
     #[test]
@@ -2057,81 +2197,31 @@ mod tests {
         ));
     }
 
-    // SPEC-3431 T-030 (FR-008/FR-009): the #3357 asymmetric boundary keeps
-    // applying to every agent session; only the project's registered PM may
-    // raise the switches. The privileged subject comes from the ambient
-    // session id, never from params, so a caller cannot claim it.
+    // Issue #3814 AC-2: semantic policy belongs to the handler so dispatch can
+    // report a structured operation refusal instead of a parse-only stderr.
     #[test]
-    fn issue_monitor_config_set_on_direction_is_pm_only() {
-        let _guard = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project_root = temp.path().join("repo");
-        std::fs::create_dir_all(&project_root).expect("repo dir");
-        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
-
-        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
-        crate::pm_registry::try_register_pm(
-            &prefs_path,
-            crate::pm_registry::PmRegistration {
-                session_id: "pm-session".to_string(),
-                agent_id: "claude".to_string(),
-                worktree_path: project_root.to_string_lossy().into_owned(),
-                created_at: None,
-                consecutive_crashes: 0,
-                next_not_before: None,
-            },
-            |_| false,
-        )
-        .expect("register PM");
-
-        let params = json!({
-            "project_root": project_root.to_string_lossy(),
-            "autonomous_mode": true,
-        });
-
-        // positive: a non-PM session is still refused, with the GUI guidance.
-        let _other = gwt_core::test_support::ScopedEnvVar::set(
-            gwt_agent::GWT_SESSION_ID_ENV,
-            "other-session",
-        );
-        assert!(matches!(
-            err("issue.monitor.config.set", params.clone()),
-            CliParseError::InvalidJson(message) if message.contains("requires an explicit GUI action")
-        ));
-        drop(_other);
-
-        // ...and so is a session with no ambient identity at all.
-        let _unset = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
-        assert!(matches!(
-            err("issue.monitor.config.set", params.clone()),
-            CliParseError::InvalidJson(_)
-        ));
-        drop(_unset);
-
-        // false-positive negative: the registered PM is allowed through.
-        let _pm =
-            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+    fn issue_monitor_config_set_on_direction_reaches_handler_validation() {
         assert_eq!(
-            ok("issue.monitor.config.set", params),
+            ok(
+                "issue.monitor.config.set",
+                json!({"enabled": true, "max_active": 7})
+            ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
-                project_root: Some(project_root.clone()),
+                project_root: None,
+                enabled: Some(true),
+                autonomous_mode: None,
+                max_active: Some(7),
+            })
+        );
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
             })
         );
-
-        // OFF direction stays open to everyone, PM or not.
-        assert!(matches!(
-            ok(
-                "issue.monitor.config.set",
-                json!({"project_root": project_root.to_string_lossy(), "autonomous_mode": false})
-            ),
-            CliCommand::Issue(IssueCommand::MonitorConfigSet { .. })
-        ));
     }
 
     // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
@@ -2432,20 +2522,12 @@ mod tests {
 
     #[test]
     fn issue_monitor_queue_operations_reject_unsafe_or_incomplete_params() {
-        for params in [
-            json!({}),
-            json!({"enabled": true}),
-            json!({"max_active": 0}),
-        ] {
+        for params in [json!({}), json!({"max_active": 0})] {
             assert!(matches!(
                 err("issue.monitor.config.set", params),
                 CliParseError::InvalidJson(_) | CliParseError::MissingFlag(_)
             ));
         }
-        assert!(matches!(
-            err("issue.monitor.config.set", json!({"autonomous_mode": true})),
-            CliParseError::InvalidJson(_)
-        ));
         assert!(matches!(
             err(
                 "issue.monitor.priority.move",
@@ -2501,6 +2583,28 @@ mod tests {
                 flag: "title_summary",
                 ..
             }
+        ));
+    }
+
+    /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
+    /// while an explicit empty array clears them.
+    #[test]
+    fn issue_edit_labels_null_means_omitted_and_empty_array_clears() {
+        let absent = ok("issue.edit", json!({"number": 7, "body": "b"}));
+        let null = ok(
+            "issue.edit",
+            json!({"number": 7, "body": "b", "labels": null}),
+        );
+        let cleared = ok("issue.edit", json!({"number": 7, "labels": []}));
+        for command in [absent, null] {
+            assert!(matches!(
+                command,
+                CliCommand::Issue(IssueCommand::Edit { labels: None, .. })
+            ));
+        }
+        assert!(matches!(
+            cleared,
+            CliCommand::Issue(IssueCommand::Edit { labels: Some(ref labels), .. }) if labels.is_empty()
         ));
     }
 
@@ -2735,6 +2839,37 @@ mod tests {
         ));
     }
 
+    // Issue #3841 / SPEC #3248 AS-48: quarantine is plan-bound typed input,
+    // not prose that verify.run may invent after observing a failure.
+    #[test]
+    fn verification_plan_preserves_typed_quarantine_request() {
+        let command = ok(
+            "verify.plan",
+            json!({
+                "derive": true,
+                "quarantines": [{
+                    "failed_command": "cargo test -p gwt --all-features --lib",
+                    "test_identity": "app_runtime::tests::bounded_sync",
+                    "baseline_command": "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact",
+                    "owner_issue": 3755,
+                    "pr_number": 3854
+                }]
+            }),
+        );
+
+        let typed = format!("{command:?}");
+        for expected in [
+            "app_runtime::tests::bounded_sync",
+            "owner_issue: 3755",
+            "pr_number: 3854",
+        ] {
+            assert!(
+                typed.contains(expected),
+                "typed quarantine field was discarded: {typed}"
+            );
+        }
+    }
+
     // SPEC #3576 T-007: verification lease operation parsing.
     #[test]
     fn verification_lease_operations_are_typed() {
@@ -2808,7 +2943,70 @@ mod tests {
         ));
         assert!(matches!(
             ok("pr.list", json!({})),
-            CliCommand::Pr(PrCommand::List)
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: false,
+                include: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"stale_after_hours": 24, "escalate_after_cycles": 2})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: Some(24),
+                escalate_after_cycles: Some(2),
+                refresh: false,
+                include: None,
+            })
+        ));
+        // Issue #3891: refresh bypasses the TTL cache / throttle; include
+        // names the heavy fields to hydrate.
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"refresh": true, "include": ["checks", "body"]})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                refresh: true,
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: true,
+                    body: true
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            ok("pr.list", json!({"include": []})),
+            CliCommand::Pr(PrCommand::List {
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: false,
+                    body: false
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            err("pr.list", json!({"include": ["reviews"]})),
+            CliParseError::InvalidValue {
+                flag: "include",
+                ..
+            }
+        ));
+        // Issue #3891 AC-3: budget observation.
+        assert!(matches!(
+            ok("github.budget", json!({})),
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: false
+            })
+        ));
+        assert!(matches!(
+            ok("github.budget", json!({"refresh": true})),
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: true
+            })
         ));
         assert!(matches!(
             ok(
@@ -3115,6 +3313,50 @@ mod tests {
             ),
             CliCommand::Discussion(_)
         ));
+    }
+
+    #[test]
+    fn verification_adjudication_requires_exact_board_decision_reference() {
+        assert!(parse(&envelope(
+            "verify.adjudicate",
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+        ))
+        .is_ok());
+
+        for params in [
+            json!({
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "*",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+                "waive_record": true,
+            }),
+        ] {
+            assert!(
+                parse(&envelope("verify.adjudicate", params)).is_err(),
+                "invalid adjudication input must fail closed"
+            );
+        }
     }
 
     #[test]

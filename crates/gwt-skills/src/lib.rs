@@ -40,8 +40,9 @@ pub use hooks::{
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
-    hermes_is_configured_global, hermes_provider_choices, hermes_provider_choices_global,
-    hermes_source_home, opencode_is_configured, opencode_is_configured_global,
+    hermes_is_configured_global, hermes_launch_choices, hermes_launch_choices_global,
+    hermes_provider_choices, hermes_source_home, opencode_is_configured,
+    opencode_is_configured_global, HermesLaunchChoices,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
@@ -1608,6 +1609,7 @@ mod tests {
                     && content.contains("\"operation\":\"issue.monitor.config.set\"")
                     && content.contains("enabled=true")
                     && content.contains("autonomous_mode=true")
+                    && content.contains("including the registered PM")
                     && content.contains("next scan")
                     && content.contains("params.targets")
                     && content.contains("handoff")
@@ -1623,6 +1625,11 @@ mod tests {
                     && !content.contains("<pane-id> <message>")
                     && !content.contains("broadcast <message>"),
                 "unexpected bare pane or direct communication contract in {relative}"
+            );
+            assert!(
+                !content.contains("one exception is the project's resident PM")
+                    && !content.contains("caller_is_registered_pm"),
+                "obsolete PM ON exception remains in {relative}"
             );
         }
 

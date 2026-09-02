@@ -1358,8 +1358,11 @@ mod tests {
     #[cfg_attr(windows, allow(unused_imports))]
     use std::{
         sync::{Arc, Mutex},
-        time::{Duration, Instant},
+        time::Duration,
     };
+
+    #[cfg(unix)]
+    use std::time::Instant;
 
     use super::*;
     use crate::test_util::{

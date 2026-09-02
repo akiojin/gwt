@@ -411,6 +411,8 @@ std::thread_local! {
         const { AgentDispatchTestHook::new(None) };
     static AGENT_LEASED_MUTATION_TEST_HOOK: AgentDispatchTestHook =
         const { AgentDispatchTestHook::new(None) };
+    static AGENT_PEER_CLOSE_AFTER_ACCEPTANCE_TEST_HOOK: AgentDispatchTestHook =
+        const { AgentDispatchTestHook::new(None) };
 }
 
 #[cfg(test)]
@@ -423,6 +425,13 @@ fn set_agent_after_durable_check_test_hook(hook: impl FnOnce() + 'static) {
 #[cfg(test)]
 fn set_agent_leased_mutation_test_hook(hook: impl FnOnce() + 'static) {
     AGENT_LEASED_MUTATION_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+#[cfg(test)]
+fn set_agent_peer_close_after_acceptance_test_hook(hook: impl FnOnce() + 'static) {
+    AGENT_PEER_CLOSE_AFTER_ACCEPTANCE_TEST_HOOK.with(|slot| {
         assert!(slot.replace(Some(Box::new(hook))).is_none());
     });
 }
@@ -6596,6 +6605,36 @@ impl AppRuntime {
                     },
                 )])
             }
+            AgentFrontendRequest::CloseWindow {
+                id,
+                request_id: None,
+                responder: None,
+            } => {
+                // Issue #3816: peer close may fence the target capability in
+                // `queue_window_close_finalizer`. Accept the caller generation
+                // first, then release the registry read lock before target
+                // teardown needs the same registry's write lock.
+                let Some(principal) = issuer.accept_current_grant(&grant) else {
+                    return AgentFrontendDispatchOutcome::StaleCapability;
+                };
+                #[cfg(test)]
+                run_agent_dispatch_test_hook(&AGENT_PEER_CLOSE_AFTER_ACCEPTANCE_TEST_HOOK);
+                tracing::debug!(
+                    target: "gwt.pane.teardown",
+                    stage = "peer_close_grant_accepted",
+                    window_id = %id,
+                    "accepted peer pane close before target capability handoff"
+                );
+                AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
+                    client_id,
+                    principal,
+                    AgentFrontendRequest::CloseWindow {
+                        id,
+                        request_id: None,
+                        responder: None,
+                    },
+                ))
+            }
             AgentFrontendRequest::PmSendInput {
                 operation_id,
                 window_id,
@@ -7228,19 +7267,34 @@ impl AppRuntime {
                             })
                             .unwrap_or(gwt::WindowWorktreeForm::Unknown);
                     }
-                    if let gwt::WindowPlacement::AgentKanban {
-                        board_id,
-                        lane_id,
-                        order,
-                        collapsed,
-                    } = window.placement
-                    {
-                        window.placement = gwt::WindowPlacement::AgentKanban {
-                            board_id: combined_window_id(&tab.id, &board_id),
+                    // Placements reference sibling windows by raw id on disk; the
+                    // frontend only ever sees combined ids, so every window
+                    // reference inside a placement is combined here too.
+                    match window.placement {
+                        gwt::WindowPlacement::AgentKanban {
+                            board_id,
                             lane_id,
                             order,
                             collapsed,
-                        };
+                        } => {
+                            window.placement = gwt::WindowPlacement::AgentKanban {
+                                board_id: combined_window_id(&tab.id, &board_id),
+                                lane_id,
+                                order,
+                                collapsed,
+                            };
+                        }
+                        // SPEC-3671 FR-007.
+                        gwt::WindowPlacement::IssuePreview {
+                            issue_window_id,
+                            issue_number,
+                        } => {
+                            window.placement = gwt::WindowPlacement::IssuePreview {
+                                issue_window_id: combined_window_id(&tab.id, &issue_window_id),
+                                issue_number,
+                            };
+                        }
+                        gwt::WindowPlacement::Canvas => {}
                     }
                     if let Some(status) = self.window_status(&window.id) {
                         window.status = status;

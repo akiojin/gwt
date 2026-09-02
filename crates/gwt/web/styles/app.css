@@ -3224,6 +3224,72 @@ body {
   opacity: 0.45;
 }
 
+/* SPEC-3671 FR-012 / FR-013: the Work block on an Issue row. It spans both row
+ * columns so the Work state and its actions read as one band under the Issue. */
+.knowledge-row-work {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border);
+}
+
+.knowledge-work-summary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-work-lifecycle {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.knowledge-work-lifecycle[data-lifecycle="active"] {
+  border-color: var(--color-state-active);
+  color: var(--color-state-active);
+}
+
+.knowledge-work-attention {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-xs);
+  color: var(--color-state-blocked);
+}
+
+.knowledge-work-pr {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.knowledge-work-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.knowledge-work-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .knowledge-row:hover {
   background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
 }
@@ -3348,6 +3414,132 @@ body {
   font-family: var(--font-body);
   font-size: var(--type-sm);
   color: var(--color-text-muted);
+}
+
+/* Issue #3884 AC-6: the read-only agent status row on an Issue row — name,
+ * state, last activity line, elapsed time, Windowize. Spans both row columns
+ * under the Issue / Work bands so every running agent is visible from the list. */
+.issue-agent-status {
+  grid-column: 1 / -1;
+  display: grid;
+  /* Row 1: title · state · elapsed · Windowize. Row 2: the activity line spans
+     the full width so a long agent title is not squeezed by it. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.issue-agent-status-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.issue-agent-status-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.issue-agent-status-meta,
+.issue-agent-status-elapsed {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-agent-status-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-agent-status-output {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-agent-status-output:empty {
+  display: none;
+}
+
+/* SPEC-3671 FR-007: the Issue window's read-only agent mirror. It sits above the
+ * Issue detail so an auto-launched agent is visible without opening a window. */
+.issue-preview {
+  display: grid;
+  grid-template-rows: auto minmax(160px, 1fr);
+  min-height: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.issue-preview-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.issue-preview-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.issue-preview-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.issue-preview-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.issue-preview-terminal {
+  position: relative;
+  min-height: 160px;
+  height: clamp(160px, 32vh, 340px);
+  overflow: hidden;
+}
+
+.issue-preview-terminal .terminal-root {
+  position: absolute;
+  inset: 0;
 }
 
 .knowledge-detail-header {
@@ -6392,6 +6584,13 @@ body {
 
 .launch-inline-check input {
   margin: 0;
+}
+
+/* Issue #3863 — Hermes Toolsets / Skills multi-choice group. */
+.launch-multi-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
 }
 
 /* SPEC-2014 2026-05-29 amendment — operation-appropriate launch controls.

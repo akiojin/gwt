@@ -1087,13 +1087,14 @@ struct ResolutionAttemptToken {
     ttl: chrono::Duration,
 }
 
-struct UnhandledResolutionSettlement {
+struct UnhandledResolutionSettlement<'a> {
     repo_root: PathBuf,
     token: ResolutionAttemptToken,
     resolution_deadline: ResolutionDeadline,
+    on_first_contention: Option<&'a mut dyn FnMut()>,
 }
 
-impl Drop for UnhandledResolutionSettlement {
+impl Drop for UnhandledResolutionSettlement<'_> {
     fn drop(&mut self) {
         let failure = if self
             .resolution_deadline
@@ -1112,7 +1113,16 @@ impl Drop for UnhandledResolutionSettlement {
                 remediation: "RELOAD_CANDIDATE_STORE",
             }
         };
-        let _ = settle_unhandled_resolution_failure(&self.repo_root, &self.token, failure);
+        if let Some(on_first_contention) = self.on_first_contention.as_deref_mut() {
+            let _ = settle_unhandled_resolution_failure_observed(
+                &self.repo_root,
+                &self.token,
+                failure,
+                on_first_contention,
+            );
+        } else {
+            let _ = settle_unhandled_resolution_failure(&self.repo_root, &self.token, failure);
+        }
     }
 }
 
@@ -3626,6 +3636,7 @@ pub(super) fn resolve_candidate_owner_with_expected_revision<E: CliEnv>(
         &deadline,
         deadline.expires_at(),
         expected_resolver_revision,
+        None,
     )
 }
 
@@ -3636,6 +3647,24 @@ pub(super) fn resolve_candidate_owner_with_operation_deadline<E: CliEnv>(
     deadline: &ResolutionDeadline,
     operation_expires_at: Instant,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    resolve_candidate_owner_with_operation_deadline_observed(
+        env,
+        candidate_id,
+        budget_profile,
+        deadline,
+        operation_expires_at,
+        || {},
+    )
+}
+
+pub(super) fn resolve_candidate_owner_with_operation_deadline_observed<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    budget_profile: CaptureBudgetProfile,
+    deadline: &ResolutionDeadline,
+    operation_expires_at: Instant,
+    mut on_fallback_store_contention: impl FnMut(),
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
     resolve_candidate_owner_with_operation_deadline_and_expected_revision(
         env,
         candidate_id,
@@ -3643,6 +3672,7 @@ pub(super) fn resolve_candidate_owner_with_operation_deadline<E: CliEnv>(
         deadline,
         operation_expires_at,
         None,
+        Some(&mut on_fallback_store_contention),
     )
 }
 
@@ -3653,6 +3683,7 @@ fn resolve_candidate_owner_with_operation_deadline_and_expected_revision<E: CliE
     deadline: &ResolutionDeadline,
     operation_expires_at: Instant,
     expected_resolver_revision: Option<&str>,
+    on_fallback_store_contention: Option<&mut dyn FnMut()>,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
     let _operation_deadline =
         gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_expires_at);
@@ -3708,6 +3739,7 @@ fn resolve_candidate_owner_with_operation_deadline_and_expected_revision<E: CliE
                 repo_root: repo_root.clone(),
                 token: attempt_token.clone(),
                 resolution_deadline: *deadline,
+                on_first_contention: on_fallback_store_contention,
             })
             .is_ok(),
         "owner resolution settlement guard must be installed exactly once"
@@ -4380,6 +4412,7 @@ pub(super) fn select_candidate_owner<E: CliEnv>(
                 repo_root: repo_root.clone(),
                 token: token.clone(),
                 resolution_deadline: deadline,
+                on_first_contention: None,
             })
             .is_ok(),
         "manual owner resolution settlement guard must be installed exactly once"
@@ -6790,6 +6823,13 @@ pub(super) fn owner_resolution_failure_from_error(
             failure_subcode: None,
             remediation: "REFRESH_OWNER_CORPUS",
         },
+        // Issue #3873: a pre-write content guard refused the body. Nothing was
+        // created or updated; the candidate body itself needs fixing.
+        gwt_github::SpecOpsError::Validation(_) => OwnerResolutionFailure {
+            reason: BlockedReason::Create,
+            failure_subcode: None,
+            remediation: "FIX_CANDIDATE_BODY",
+        },
     }
 }
 
@@ -6798,7 +6838,16 @@ fn settle_unhandled_resolution_failure(
     token: &ResolutionAttemptToken,
     failure: OwnerResolutionFailure,
 ) -> Result<bool, gwt_github::SpecOpsError> {
-    super::improvement_store::update(repo_root, |store| {
+    settle_unhandled_resolution_failure_observed(repo_root, token, failure, || {})
+}
+
+fn settle_unhandled_resolution_failure_observed(
+    repo_root: &Path,
+    token: &ResolutionAttemptToken,
+    failure: OwnerResolutionFailure,
+    on_first_contention: impl FnMut(),
+) -> Result<bool, gwt_github::SpecOpsError> {
+    super::improvement_store::update_observed(repo_root, on_first_contention, |store| {
         let candidate = store
             .candidates
             .iter_mut()

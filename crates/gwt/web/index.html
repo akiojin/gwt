@@ -348,6 +348,14 @@
           <div class="op-status-strip__cell op-status-strip__cell--running">
             <span class="op-status-strip__label">RUNNING</span>
             <span class="op-status-strip__value" id="op-strip-running" aria-label="Running agents">0</span>
+            <!-- Issue #3884 AC-3: how many of the running agents live as inline
+                 terminals in the Issue window instead of on the canvas. -->
+            <span
+              class="op-status-strip__sub"
+              id="op-strip-running-inline"
+              aria-label="Running agents shown as inline terminals in the Issue window"
+              hidden
+            >0 inline</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--idle">
             <span class="op-status-strip__label">IDLE</span>
@@ -586,8 +594,8 @@
               <button class="preset-button" data-preset="work" data-category="surface">
                 <span class="preset-button__icon" aria-hidden="true">◆</span>
                 <span class="preset-button__text">
-                  <strong>Workspace</strong>
-                  <span>Open the Workspace overview</span>
+                  <strong>Work</strong>
+                  <span>Open the Work overview</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="improvement" data-category="surface">

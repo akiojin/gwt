@@ -90,11 +90,7 @@ impl FrontendUserActionLog {
 }
 
 fn sanitize_ui_action_field(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(160)
-        .collect()
+    gwt::perf::sanitize_ui_action_field(value)
 }
 
 fn sanitize_ui_action_url(value: &str) -> String {

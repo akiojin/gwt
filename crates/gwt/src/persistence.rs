@@ -55,11 +55,33 @@ pub enum WindowPlacement {
         order: u32,
         collapsed: bool,
     },
+    /// SPEC-3671 FR-001: the window exists (and stays fully observable through
+    /// `pane.list` / `pane.read` / `pm.message.send`) but is not drawn on the
+    /// canvas. It is mirrored read-only in the owning Issue window's preview
+    /// pane instead, so an Issue Monitor auto-launch never steals the screen.
+    IssuePreview {
+        issue_window_id: String,
+        issue_number: u64,
+    },
 }
 
 impl WindowPlacement {
     pub fn is_canvas(&self) -> bool {
         matches!(self, Self::Canvas)
+    }
+
+    /// SPEC-3671 FR-004: the Rust-side counterpart of the frontend
+    /// `isOffCanvasPlacement()` seam — true for every placement that must not be
+    /// rendered as a top-level canvas window.
+    pub fn is_off_canvas(&self) -> bool {
+        matches!(self, Self::AgentKanban { .. } | Self::IssuePreview { .. })
+    }
+
+    pub fn issue_preview_issue_number(&self) -> Option<u64> {
+        match self {
+            Self::IssuePreview { issue_number, .. } => Some(*issue_number),
+            _ => None,
+        }
     }
 }
 
@@ -872,6 +894,133 @@ mod tests {
         assert_eq!(loaded.windows[0].id, "shell-1");
         assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
         assert_eq!(loaded.next_z_index, 2);
+    }
+
+    // SPEC-3671 T-005: adding a third `WindowPlacement` variant must not change how
+    // already-persisted workspaces read. Untagged windows stay `Canvas` and existing
+    // `agent_kanban` blobs keep their lane data.
+    #[test]
+    fn load_workspace_state_reads_placements_written_before_issue_preview() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "shell-1",
+      "title": "Shell",
+      "preset": "shell",
+      "geometry": { "x": 20.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true
+    },
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "ready",
+      "persist": true,
+      "placement": {
+        "kind": "agent_kanban",
+        "board_id": "agent-kanban-1",
+        "lane_id": "active",
+        "order": 2,
+        "collapsed": false
+      }
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("pre-IssuePreview placements must load");
+        assert_eq!(loaded.windows.len(), 2);
+        assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+        assert_eq!(
+            loaded.windows[1].placement,
+            WindowPlacement::AgentKanban {
+                board_id: "agent-kanban-1".to_string(),
+                lane_id: AgentKanbanLane::Active,
+                order: 2,
+                collapsed: false,
+            }
+        );
+    }
+
+    // SPEC-3671 FR-001 / T-006.
+    #[test]
+    fn persisted_window_state_round_trips_issue_preview_placement() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.preset = WindowPreset::Agent;
+        window.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "issue-1".to_string(),
+            issue_number: 3671,
+        };
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"issue_preview\""),
+            "placement kind must be explicit: {json}"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed.placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
+        assert!(!parsed.placement.is_canvas());
+        assert!(parsed.placement.is_off_canvas());
+        assert_eq!(parsed.placement.issue_preview_issue_number(), Some(3671));
+    }
+
+    // SPEC-3671 T-014: a restored `issue_preview` window must not silently degrade to
+    // `Canvas`; that regression is exactly the "12 windows opened at once" incident the
+    // SPEC was filed for.
+    #[test]
+    fn load_workspace_state_restores_issue_preview_without_canvas_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "error",
+      "persist": true,
+      "placement": {
+        "kind": "issue_preview",
+        "issue_window_id": "issue-1",
+        "issue_number": 3671
+      }
+    }
+  ],
+  "next_z_index": 2
+}"#,
+        )
+        .expect("issue preview workspace write");
+
+        let loaded = load_workspace_state(&path).expect("issue_preview placement must load");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(
+            loaded.windows[0].placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
     }
 
     #[test]

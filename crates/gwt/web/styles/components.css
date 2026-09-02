@@ -873,6 +873,15 @@ button.op-status-strip__cell {
   color: var(--color-state-active);
 }
 
+/* Issue #3884 AC-3 — RUNNING breakdown: "N inline" names the running agents
+   that live as inline terminals in the Issue window rather than on the canvas.
+   Quieter than the value so the total still reads first. */
+.op-status-strip__sub {
+  margin-left: var(--space-1);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--color-state-active) 72%, var(--color-status-strip-fg));
+}
+
 .op-status-strip__cell--idle .op-status-strip__value {
   color: var(--color-state-idle);
 }

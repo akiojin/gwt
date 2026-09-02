@@ -4539,9 +4539,21 @@ def _issue_status_v2(
         healthy = False
         repair_required = True
     else:
+        indexed_document_count = meta.get("document_count")
+        current_source_document_count = source.get("document_count")
         indexed_fingerprint = meta.get("source_cache_fingerprint")
         current_fingerprint = source.get("fingerprint")
-        if current_fingerprint and indexed_fingerprint != current_fingerprint:
+        if (
+            indexed_document_count is not None
+            and document_count != indexed_document_count
+        ) or (
+            current_source_document_count is not None
+            and document_count != current_source_document_count
+        ):
+            reason = "count_mismatch"
+            healthy = False
+            repair_required = True
+        elif current_fingerprint and indexed_fingerprint != current_fingerprint:
             reason = "source_cache_changed"
             healthy = False
             repair_required = True
@@ -4568,7 +4580,7 @@ def _issue_status_v2(
             status["source_document_count"] = meta.get("source_document_count")
         if meta.get("source_cache_refresh_at"):
             status["source_cache_refresh_at"] = meta.get("source_cache_refresh_at")
-        if reason == "source_cache_changed":
+        if reason in ("source_cache_changed", "count_mismatch"):
             status["current_source_cache_fingerprint"] = source.get("fingerprint")
             status["current_source_document_count"] = source.get("document_count")
         last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
@@ -5191,8 +5203,8 @@ def _classify_scope_for_search(
 
     - ``missing``: store was never built.
     - ``corrupt``: store exists but needs repair before it can be trusted.
-    - ``stale``: verified store is intact but its source moved on (TTL
-      expiry or source cache drift) — serve it and queue a refresh.
+    - ``stale``: verified store is intact but its TTL expired — serve it and
+      queue a refresh.
     - ``fresh``: healthy and current.
     """
     if scope == "issues":
@@ -5203,8 +5215,6 @@ def _classify_scope_for_search(
             if health.get("ttl_remaining_seconds") == 0:
                 return "stale", health
             return "fresh", health
-        if health.get("reason") == "source_cache_changed":
-            return "stale", health
         return "corrupt", health
     health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
     if not health.get("exists"):

@@ -274,8 +274,22 @@ fn handle_at(
          mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
          `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
          running agents' `last_activity_at`. Inventory open PRs with `pr.list` and act on each \
-         row's `lifecycle` and `default_action`; stale (no update for 72h), SUPERSEDED, and \
-         owner-Issue-closed rows are digest escalations — never auto-close them. \
+         row's `lifecycle` and `default_action`; a row with `default_action_executable` false \
+         follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
+         stale (no update for `stale_after_hours`), SUPERSEDED, owner-Issue-closed, and \
+         `escalation_due` rows are digest escalations — never auto-close them. \
+         A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change \
+         cycle: advance one or escalate with the reason. \
+         Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, \
+         red or escalation-due PRs, and quiet agents; advance at least one item with a concrete \
+         action or user handoff. \
+         Treat that required advance or handoff as a reportable milestone or escalation under \
+         the shared conditional-reporting clause below. \
+         Re-report every unresolved wait in every cycle using the window title and required user \
+         action; if the window title is unavailable, identify the owning Issue and say `title \
+         unavailable`; do not promote a pane or window ID to the primary identity. For a decision \
+         include the question, your recommendation and rationale, and a copy-paste answer \
+         example. Only an empty stalled-item inventory may end silently. \
          {execution_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
@@ -602,6 +616,48 @@ mod tests {
             reason.contains("never auto-close"),
             "Issue #3781: close proposals stay in the digest; got: {reason}"
         );
+    }
+
+    /// Issue #3791 / SPEC-3431 FR-151/154: a forced cycle is a driver,
+    /// not a passive snapshot. The compact reminder keeps the full policy in
+    /// gwt-pm while making recurring waits and one concrete advance impossible
+    /// to omit from the highest-frequency injected prompt.
+    #[test]
+    fn forced_continuation_inventories_and_advances_stalled_work() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        let output = handle_at(
+            &worktree,
+            "2026-09-01T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected the loop to continue, got {output:?}");
+        };
+        for phrase in [
+            "Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, red or escalation-due PRs, and quiet agents",
+            "advance at least one item",
+            // Issue #3868 AC-2 / AC-3: the fallback order and the red-PR
+            // exception to the silent cycle are in the Stop hook itself.
+            "a row with `default_action_executable` false follows its `fallback`",
+            "A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change cycle",
+            "Treat that required advance or handoff as a reportable milestone or escalation",
+            "Re-report every unresolved wait in every cycle using the window title and required user action",
+            "identify the owning Issue and say `title unavailable`",
+            "do not promote a pane or window ID to the primary identity",
+            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "Only an empty stalled-item inventory may end silently",
+        ] {
+            assert!(
+                reason.contains(phrase),
+                "forced continuation is missing `{phrase}`; got: {reason}"
+            );
+        }
+        assert!(reason.contains(pm_registry::PM_CYCLE_REPORTING_CLAUSE));
+        assert!(reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE));
     }
 
     #[test]
