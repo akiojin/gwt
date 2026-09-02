@@ -389,6 +389,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn register_spec_body_template_is_autonomy_eligible() {
+        // Issue #3873 AC-4: writing a SPEC exactly as the canonical template
+        // dictates must already satisfy the Monitor's eligibility classifier.
+        // The template used to lack `## 受け入れ基準`, so every template-shaped
+        // SPEC fell to needs_human.
+        let template =
+            include_str!("../../../.claude/skills/gwt-register-spec/references/body-template.md");
+        let c = classify_acceptance_criteria(template);
+        assert!(
+            c.machine_checkable,
+            "body-template.md must carry a `## 受け入れ基準` block with `- [ ] AC-N:` items"
+        );
+        assert!(c.ids.iter().any(|id| id == "AC-1"), "ids = {:?}", c.ids);
+    }
+
+    #[test]
     fn well_formed_block_is_machine_checkable() {
         let body = "## Background\nsome text\n\n## Acceptance Criteria\n- [ ] AC-1: the API returns 200\n- [ ] AC-2: the list is sorted\n\n## Notes\n";
         let c = classify_acceptance_criteria(body);
