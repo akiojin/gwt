@@ -6402,6 +6402,26 @@ body {
   color: var(--color-text-strong);
 }
 
+/* SPEC-3864 — agent-independent setup affordance (install / configure). */
+.launch-agent-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-raised, var(--color-surface));
+}
+
+.launch-agent-setup__title {
+  color: var(--color-text-strong);
+}
+
+.launch-agent-setup__action {
+  align-self: flex-start;
+}
+
 /* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */
 .launch-intake-input {
   width: 100%;

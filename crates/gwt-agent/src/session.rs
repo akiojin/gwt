@@ -317,7 +317,7 @@ pub fn durable_session_launch_command(config: &LaunchConfig) -> String {
     let Some(provenance) = config.tool_runtime_provenance.as_ref() else {
         return config.command.clone();
     };
-    if config.agent_id.package_name() != Some(provenance.official_package.as_str()) {
+    if config.agent_id.npm_package() != Some(provenance.official_package.as_str()) {
         return config.command.clone();
     }
 

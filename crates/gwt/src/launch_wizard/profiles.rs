@@ -133,7 +133,7 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         version: session.tool_version.or_else(|| {
             session
                 .agent_id
-                .package_name()
+                .npm_package()
                 .map(|_| "installed".to_string())
         }),
         session_mode: session.session_mode,
