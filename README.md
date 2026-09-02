@@ -834,6 +834,33 @@ automatically, and a holder that is killed releases immediately. Lease
 transitions are recorded in
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
+### GitHub API budget
+
+Every `gh` call gwt makes shares one GitHub account budget across all
+machines, worktrees, and agents. The `pr.list` inventory is cache-first: a
+snapshot under `~/.gwt/projects/<hash>/pr-inventory-cache.json` answers
+repeated reads for 5 minutes without touching GitHub, the bulk query stays
+light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
+changed. Pass `params.refresh:true` when a decision needs the live state and
+`params.include` (`["checks","body"]`, default `["checks"]`) to choose the
+heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
+and `github_calls`; when the budget is below its reserve the last snapshot is
+served and `throttled` says why.
+
+Observe the budget with a free endpoint:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+The answer lists the primary windows GitHub reports (`graphql` / `core`),
+a local estimate of the per-minute secondary limit (GitHub does not expose
+it; the estimate comes from this machine's spawn ledger under
+`~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
+decision a periodic read would get right now.
+
 ### Releasing
 
 To cut a release, trigger the **Prepare Release** workflow from GitHub
