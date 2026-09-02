@@ -9,13 +9,16 @@ use std::{
 };
 
 use gwt_terminal::{
-    pty::{run_start_gate_from_env, SpawnConfig},
+    pty::{run_start_gate_from_env, ProcessPolicy, ProcessPriority, SpawnConfig},
     Pane, PaneStatus, PtyHandle,
 };
 
 const HELPER_ROLE_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_HELPER";
 const TARGET_SENTINEL_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_TARGET_SENTINEL";
 const CRASH_PARENT_READY_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_CRASH_READY";
+const PRIORITY_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_REPORT";
+const SLOW_HELLO_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_SLOW_HELLO";
+const PRIORITY_GRANDCHILD_REPORT_ENV: &str = "GWT_TERMINAL_TEST_START_GATE_PRIORITY_GRANDCHILD";
 
 fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -225,4 +228,196 @@ fn pending_pane_materializes_only_after_release() {
     assert_eq!(pane.status(), &PaneStatus::Running);
     assert!(wait_for_path(&sentinel, Duration::from_secs(5)));
     drop(pane);
+}
+
+/// Report the scheduling priority of the current process in the platform's
+/// native unit: the Unix nice value, or the Windows priority class name.
+fn current_priority_report() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpriority has no memory-safety preconditions.
+        let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+        nice.to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!(
+            "{:?}",
+            gwt_core::process_tree::process_priority_class(std::process::id())
+                .expect("query current process priority class")
+        )
+    }
+}
+
+fn expected_priority_report(priority: ProcessPriority) -> String {
+    #[cfg(unix)]
+    {
+        priority.unix_nice().to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!("{:?}", priority.windows_priority_class())
+    }
+}
+
+/// Target role: record this process' priority, then spawn a grandchild with
+/// the same role so descendant inheritance is observable from the test.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the grandchild must be this exact integration-test binary"
+)]
+fn start_gate_priority_target_process() {
+    let Some(report) = std::env::var_os(PRIORITY_REPORT_ENV) else {
+        return;
+    };
+    fs::write(&report, current_priority_report()).expect("write priority report");
+    if let Some(grandchild_report) = std::env::var_os(PRIORITY_GRANDCHILD_REPORT_ENV) {
+        let status = Command::new(current_test_exe())
+            .args(exact_test_args("start_gate_priority_target_process"))
+            .env(PRIORITY_REPORT_ENV, grandchild_report)
+            .env_remove(PRIORITY_GRANDCHILD_REPORT_ENV)
+            .status()
+            .expect("spawn grandchild priority reporter");
+        assert!(status.success(), "grandchild priority reporter failed");
+    }
+}
+
+#[test]
+fn process_priority_maps_to_platform_scheduling_values() {
+    assert_eq!(ProcessPriority::Normal.unix_nice(), 0);
+    assert_eq!(ProcessPriority::BelowNormal.unix_nice(), 10);
+    assert_eq!(ProcessPriority::Idle.unix_nice(), 19);
+    let policy = ProcessPolicy {
+        priority: ProcessPriority::BelowNormal,
+        cpu_limit_percent: Some(50),
+    };
+    assert_eq!(policy.priority, ProcessPriority::BelowNormal);
+    assert_eq!(policy.cpu_limit_percent, Some(50));
+}
+
+#[test]
+fn start_gate_policy_lowers_target_and_grandchild_priority() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target_report = temp.path().join("target-priority");
+    let grandchild_report = temp.path().join("grandchild-priority");
+
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config.args = exact_test_args("start_gate_priority_target_process");
+    config.env.insert(
+        PRIORITY_REPORT_ENV.to_string(),
+        target_report.display().to_string(),
+    );
+    config.env.insert(
+        PRIORITY_GRANDCHILD_REPORT_ENV.to_string(),
+        grandchild_report.display().to_string(),
+    );
+
+    let pending = PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        gate_args_prefix(),
+        "policy-nonce",
+    )
+    .expect("spawn pending PTY");
+    pending
+        .apply_policy(ProcessPolicy {
+            priority: ProcessPriority::BelowNormal,
+            cpu_limit_percent: Some(50),
+        })
+        .expect("apply resource policy before release");
+    assert!(!target_report.exists(), "target ran before release");
+
+    let handle = pending.release().expect("release pending PTY");
+    assert!(wait_for_path(&target_report, Duration::from_secs(10)));
+    assert!(wait_for_path(&grandchild_report, Duration::from_secs(10)));
+    let expected = expected_priority_report(ProcessPriority::BelowNormal);
+    // The report file may be observed between create and write; poll briefly.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let target = fs::read_to_string(&target_report).unwrap_or_default();
+        let grandchild = fs::read_to_string(&grandchild_report).unwrap_or_default();
+        if target.trim() == expected && grandchild.trim() == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "target priority {target:?} / grandchild priority {grandchild:?}, expected {expected:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(handle);
+}
+
+/// SPEC #1921 Phase 86 T518: a target that cannot exist must surface as a
+/// pre-spawn failure from `spawn_pending`, exactly like the direct PTY route,
+/// so launch retry bookkeeping never observes a released-then-dead target.
+#[test]
+fn pending_pty_reports_a_missing_target_before_release() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config.command = temp
+        .path()
+        .join("definitely-missing-target")
+        .display()
+        .to_string();
+
+    let error = match PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        gate_args_prefix(),
+        "missing-target-nonce",
+    ) {
+        Ok(_pending) => panic!("a missing target must fail before release"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("definitely-missing-target"),
+        "error must name the missing target: {error}"
+    );
+}
+
+/// Helper role that connects to the gate, then waits before sending HELLO.
+/// On Windows an accepted socket inherits the listener's non-blocking mode,
+/// so an owner that reads before the bytes arrive sees WSAEWOULDBLOCK
+/// (os error 10035) unless it switches the stream back to blocking first.
+#[test]
+fn start_gate_slow_hello_helper_process() {
+    if std::env::var_os(SLOW_HELLO_ENV).is_none() {
+        return;
+    }
+    use std::io::{Read as _, Write as _};
+    let endpoint = std::env::var("GWT_INTERNAL_PTY_GATE_ENDPOINT").expect("gate endpoint");
+    let nonce = std::env::var("GWT_INTERNAL_PTY_GATE_NONCE").expect("gate nonce");
+    let mut gate = std::net::TcpStream::connect(&endpoint).expect("connect gate");
+    thread::sleep(Duration::from_millis(400));
+    let mut hello = vec![1_u8];
+    hello.extend_from_slice(nonce.as_bytes());
+    gate.write_all(&hello).expect("send delayed hello");
+    gate.flush().expect("flush hello");
+    let mut release = [0_u8; 1];
+    let _ = gate.read_exact(&mut release);
+    std::process::exit(0);
+}
+
+#[test]
+fn pending_pty_waits_for_a_delayed_helper_hello() {
+    let _guard = pty_test_lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = target_config(&temp.path().join("unused-sentinel"));
+    config
+        .env
+        .insert(SLOW_HELLO_ENV.to_string(), "1".to_string());
+
+    let pending = PtyHandle::spawn_pending(
+        config,
+        current_test_exe(),
+        exact_test_args("start_gate_slow_hello_helper_process"),
+        "slow-hello-nonce",
+    )
+    .expect("a delayed HELLO must not be mistaken for a failed handshake");
+    assert!(pending.process_id().is_some());
+    pending.abort().expect("abort pending PTY");
 }

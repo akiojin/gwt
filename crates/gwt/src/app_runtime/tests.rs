@@ -95,6 +95,46 @@ fn pty_start_gate_helper() {
 }
 
 #[test]
+fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
+    let source = include_str!("launch.rs");
+    let direct = source
+        .split("pub(crate) fn spawn_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn spawn_bound_process_window_with_console_kind")
+                .next()
+        })
+        .expect("direct spawn route body");
+    assert!(
+        direct.contains("resource_policy"),
+        "direct AgentBootstrap route must consult the launch resource policy"
+    );
+    assert!(
+        direct.contains("new_pending_with_spawn_config"),
+        "policy-bearing direct launches must use the PTY start gate"
+    );
+    assert!(
+        direct.contains("new_with_spawn_config"),
+        "Shell launches must keep the direct PTY route"
+    );
+    let apply = direct.find("apply_policy(").expect("direct apply_policy");
+    let release = direct.find(".release()").expect("direct release");
+    assert!(apply < release, "policy must be applied before release");
+
+    let bound = source
+        .split("fn spawn_bound_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| tail.split("fn install_process_window").next())
+        .expect("bound spawn route body");
+    let apply = bound.find("apply_policy(").expect("bound apply_policy");
+    let release = bound.find(".release()").expect("bound release");
+    assert!(
+        apply < release,
+        "bound policy must be applied before release"
+    );
+}
+
+#[test]
 fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
     for (source_name, source) in [
         ("embedded_server.rs", include_str!("../embedded_server.rs")),
@@ -261,6 +301,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
         remove_env: Vec::new(),
         cwd: None,
         pending_tool_runtime_migration: None,
+        resource_policy: None,
     };
 
     let debug = format!("{launch:?}");
@@ -7281,6 +7322,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
             remove_env: Vec::new(),
             cwd: Some(temp.path().to_path_buf()),
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         },
         "session-1".to_string(),
         "feature/test".to_string(),
@@ -12927,6 +12969,7 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -13107,6 +13150,7 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -24629,6 +24673,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
                 remove_env: Vec::new(),
                 cwd: Some(fixture.repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             fixture.candidate_session_id.clone(),
             "work/issue-2359".to_string(),
@@ -25423,6 +25468,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -25562,6 +25608,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -26063,6 +26110,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-1".to_string(),
             "work/20260504-1234".to_string(),
@@ -26154,6 +26202,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-develop".to_string(),
             "develop".to_string(),
@@ -26256,6 +26305,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-projection-failure".to_string(),
             "work/issue-3412".to_string(),
@@ -26369,6 +26419,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-1".to_string(),
             "work/20260507-0001".to_string(),
@@ -26466,6 +26517,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-unlinked-resume".to_string(),
             "work/issue-2359".to_string(),
@@ -26573,6 +26625,7 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-stale-binding".to_string(),
             "work/stale-binding".to_string(),
@@ -26806,6 +26859,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-issue-3096".to_string(),
             "work/issue-3096".to_string(),
@@ -26902,6 +26956,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             remove_env: Vec::new(),
             cwd: Some(cwd),
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         }
     };
 
@@ -29602,6 +29657,7 @@ fn bound_runtime_launch_completion(
             remove_env: Vec::new(),
             cwd: Some(repo.to_path_buf()),
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         },
         session_id.to_string(),
         "feature/demo".to_string(),
