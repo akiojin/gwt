@@ -1631,6 +1631,14 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
         fh.close()
 
 
+def _file_index_v2_reader_state_exists(v2_root: Path, worktree_hash: str) -> bool:
+    """True when the worktree has any v2 head a reader could pin."""
+    worktree_root = v2_root / "worktrees" / worktree_hash
+    return (worktree_root / "head.json").is_file() or (
+        worktree_root / "head.previous.json"
+    ).is_file()
+
+
 @contextlib.contextmanager
 def _file_index_v2_pin(
     repo_hash: str,
@@ -1649,6 +1657,14 @@ def _file_index_v2_pin(
     safe_repo_hash = _safe_artifact_id(repo_hash)
     safe_worktree_hash = _safe_artifact_id(worktree_hash)
     v2_root = resolve_file_index_v2_root(safe_repo_hash, db_root=db_root)
+    if kind == "reader" and not _file_index_v2_reader_state_exists(
+        v2_root, safe_worktree_hash
+    ):
+        # AS-31: a reader that can only serve legacy (no v2 head or journal)
+        # has no closure to protect, and the read-only fallback must not
+        # create leases/ or any other byte below the v2 layout.
+        yield None
+        return
     leases_root = v2_root / "leases"
     pin_id = uuid.uuid4().hex
     pin_dir = leases_root / pin_id
