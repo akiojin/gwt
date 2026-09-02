@@ -579,7 +579,9 @@ mod tests {
 
     /// `(1-based line, pattern)` for every process-global PATH write in
     /// `region`. Whitespace is ignored so rustfmt line breaks cannot hide a
-    /// call; a hit is attributed to the line the call starts on.
+    /// call, and matching is ASCII-case-insensitive because Windows resolves
+    /// `Path` / `path` to the same variable; a hit is attributed to the line
+    /// the call starts on.
     fn process_path_mutations(region: &str) -> Vec<(usize, &'static str)> {
         const PATTERNS: [&str; 4] = [
             concat!("std::env::set_var(", "\"PATH\""),
@@ -587,8 +589,12 @@ mod tests {
             concat!("ScopedEnvVar::set(", "\"PATH\""),
             concat!("ScopedEnvVar::unset(", "\"PATH\""),
         ];
-        let compact =
-            |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+        let compact = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        };
         let lines: Vec<&str> = region.lines().collect();
         let mut hits = Vec::new();
         for index in 0..lines.len() {
@@ -596,7 +602,7 @@ mod tests {
             let window = compact(&lines[index..(index + 4).min(lines.len())].join(""));
             for pattern in PATTERNS {
                 if window
-                    .find(pattern)
+                    .find(&pattern.to_ascii_lowercase())
                     .is_some_and(|position| position < first.len())
                 {
                     hits.push((index + 1, pattern));
@@ -604,6 +610,28 @@ mod tests {
             }
         }
         hits
+    }
+
+    #[test]
+    fn process_path_mutation_scan_ignores_case_and_line_breaks() {
+        let region = concat!(
+            "let _a = ScopedEnvVar::set(\n",
+            "    \"Path\",\n",
+            "    temp.path(),\n",
+            ");\n",
+            "std::env::remove_var(\"path\");\n",
+            "let _ok = ScopedEnvVar::set(\"HOME\", temp.path());\n",
+        );
+
+        let hits = process_path_mutations(region);
+
+        assert_eq!(
+            hits,
+            vec![
+                (1, concat!("ScopedEnvVar::set(", "\"PATH\"")),
+                (5, concat!("std::env::remove_var(", "\"PATH\"")),
+            ]
+        );
     }
 
     #[cfg(unix)]
