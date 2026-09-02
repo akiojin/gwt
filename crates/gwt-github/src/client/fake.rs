@@ -16,10 +16,10 @@ use std::{
 
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
-    CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueNumber,
-    IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError, OwnerMutationResult,
-    OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment,
-    RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
+    CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueFieldsPatch,
+    IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
+    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
+    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
     ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
 };
 
@@ -528,6 +528,37 @@ impl IssueClient for FakeIssueClient {
             .get_mut(&number)
             .ok_or(ApiError::NotFound(number))?;
         issue.body = new_body.to_string();
+        issue.updated_at = self.tick();
+        Ok(issue.clone())
+    }
+
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
+        if fields.body.as_ref().is_some_and(|body| body.len() > 65_536) {
+            return Err(ApiError::BodyTooLarge);
+        }
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "patch_issue_fields", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(ApiError::NotFound(number))?;
+        if let Some(title) = &fields.title {
+            issue.title = title.clone();
+        }
+        if let Some(body) = &fields.body {
+            issue.body = body.clone();
+        }
+        if let Some(labels) = &fields.labels {
+            issue.labels = labels.clone();
+        }
         issue.updated_at = self.tick();
         Ok(issue.clone())
     }

@@ -1460,19 +1460,22 @@ fn run_issue_edit<E: CliEnv>(
         guard_autonomous_acceptance_block(effective_labels, effective_body)?;
     }
 
-    let mut updated = Vec::new();
-    if let Some(title) = title {
-        env.client().patch_title(issue, &title)?;
-        updated.push("title");
-    }
-    if let Some(body) = body {
-        env.client().patch_body(issue, &body)?;
-        updated.push("body");
-    }
-    if let Some(labels) = labels {
-        env.client().set_labels(issue, &labels)?;
-        updated.push("labels");
-    }
+    let fields = gwt_github::client::IssueFieldsPatch {
+        title,
+        body,
+        labels,
+    };
+    let updated: Vec<&str> = [
+        fields.title.as_ref().map(|_| "title"),
+        fields.body.as_ref().map(|_| "body"),
+        fields.labels.as_ref().map(|_| "labels"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // One remote request: a failure leaves the Issue exactly as it was, so
+    // the guard above cannot be defeated by a half-applied edit.
+    env.client().patch_issue_fields(issue, &fields)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
         "issue.edit",
@@ -2319,6 +2322,19 @@ mod tests {
         assert_eq!(snapshot.title, "Renamed title");
         assert_eq!(snapshot.body, "Corrected body");
         assert_eq!(snapshot.labels, vec!["bug", "enhancement"]);
+        // Both fields travel in one remote request; no single-field patch
+        // is issued, so a failure cannot leave the Issue half-applied.
+        let mutations: Vec<String> = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("patch_") || call.starts_with("set_labels"))
+            .collect();
+        assert_eq!(
+            mutations,
+            vec!["patch_issue_fields:#7".to_string(); 2],
+            "one combined patch per edit"
+        );
 
         let cached = Cache::new(env.cache_root())
             .load_entry(IssueNumber(7))
