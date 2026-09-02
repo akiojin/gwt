@@ -77,7 +77,7 @@ impl LaunchWizardState {
             hermes_skills: String::new(),
             hermes_max_turns: String::new(),
             hermes_safe_mode: false,
-            hermes_provider_choices: Vec::new(),
+            hermes_choices: Default::default(),
             hermes_needs_setup: false,
             opencode_needs_setup: false,
             branch_name: String::new(),
@@ -1133,6 +1133,14 @@ impl LaunchWizardState {
         self.resume_session_id = None;
         self.skip_permissions = profile.skip_permissions;
         self.codex_fast_mode = profile.codex_fast_mode && self.current_agent_supports_fast_mode();
+        // Issue #3863 AC-7: Hermes-specific values. `set_hermes_option` is
+        // agent-agnostic state, so these only carry values for Hermes profiles.
+        let hermes = profile.hermes;
+        self.hermes_provider = hermes.provider.unwrap_or_default();
+        self.hermes_profile = hermes.profile.unwrap_or_default();
+        self.hermes_toolsets = hermes.toolsets.unwrap_or_default();
+        self.hermes_skills = hermes.skills.unwrap_or_default();
+        self.hermes_max_turns = hermes.max_turns.unwrap_or_default();
     }
 
     fn focus_existing_session(&mut self, index: usize) {
@@ -1695,10 +1703,10 @@ impl LaunchWizardState {
             && agent_id_from_key(self.effective_agent_id()) == gwt_agent::AgentId::OpenCode
     }
 
-    /// SPEC-3152: provider choices enumerated from the user's Hermes config,
-    /// populated by the app runtime at wizard open.
-    pub fn set_hermes_provider_choices(&mut self, choices: Vec<String>) {
-        self.hermes_provider_choices = choices;
+    /// SPEC-3152 / Issue #3863: launch-option candidates enumerated from the
+    /// user's Hermes home, populated by the app runtime at wizard open.
+    pub fn set_hermes_launch_choices(&mut self, choices: gwt_skills::HermesLaunchChoices) {
+        self.hermes_choices = choices;
     }
 
     /// SPEC-3152 FR-005: whether the user's global Hermes home is unconfigured,
@@ -2656,6 +2664,65 @@ mod tests {
         }
     }
 
+    // Issue #3863 AC-7: selecting Hermes restores the Hermes-specific values
+    // from the previous Hermes profile alongside model / version / mode.
+    #[test]
+    fn previous_hermes_profile_restores_hermes_options_on_agent_select() {
+        let previous = LaunchWizardPreviousProfile {
+            agent_id: "hermes".to_string(),
+            model: Some("qwen3.5".to_string()),
+            reasoning: None,
+            version: Some("installed".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+            hermes: HermesLaunchPreferences {
+                provider: Some("ollama-launch".to_string()),
+                profile: Some("concise".to_string()),
+                toolsets: Some("terminal,web".to_string()),
+                skills: Some("github".to_string()),
+                max_turns: Some("40".to_string()),
+            },
+        };
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+            LaunchWizardPreviousProfiles::from_profile(Some(previous)),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+
+        let view = state.view();
+        assert_eq!(view.selected_model, "qwen3.5");
+        assert_eq!(view.hermes_provider, "ollama-launch");
+        assert_eq!(view.hermes_profile, "concise");
+        assert_eq!(view.hermes_toolsets, "terminal,web");
+        assert_eq!(view.hermes_skills, "github");
+        assert_eq!(view.hermes_max_turns, "40");
+        // Safe mode disables gwt hooks, so it is a deliberate per-launch
+        // choice and is never restored.
+        assert!(!view.hermes_safe_mode);
+    }
+
     // SPEC-1921 US-20 / FR-123 + SC-029: saved-profile restore uses the same
     // normalization, so Start with last settings never launches an invalid
     // model/effort pair.
@@ -2673,6 +2740,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             windows_shell: None,
+            hermes: Default::default(),
         };
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260710-0900"),
@@ -2852,6 +2920,7 @@ mod tests {
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -2908,6 +2977,7 @@ mod tests {
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
         assert_eq!(state.view().selected_runtime_target, "host");
@@ -2957,6 +3027,7 @@ mod tests {
                 docker_service: Some("missing".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -2990,6 +3061,7 @@ mod tests {
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -3026,6 +3098,7 @@ mod tests {
                 docker_service: Some("worker".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -3212,6 +3285,7 @@ mod tests {
                 docker_service: Some("missing".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -3238,6 +3312,7 @@ mod tests {
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -3271,6 +3346,7 @@ mod tests {
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -3301,6 +3377,7 @@ mod tests {
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
                 windows_shell: None,
+                hermes: Default::default(),
             }),
         );
 
@@ -3366,6 +3443,7 @@ mod tests {
                     docker_service: None,
                     docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::CreateAndStart,
                     windows_shell: None,
+                    hermes: Default::default(),
                 },
             ))),
             open_branch_candidates: Vec::new(),

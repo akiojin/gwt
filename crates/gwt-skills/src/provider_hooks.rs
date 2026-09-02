@@ -1,6 +1,7 @@
 //! Worktree-local hook bridge assets for providers without Claude/Codex-style hooks.
 
 use std::{
+    collections::BTreeMap,
     env, fs, io,
     path::{Path, PathBuf},
 };
@@ -161,15 +162,197 @@ pub fn hermes_provider_choices(source_home: &Path) -> Vec<String> {
     choices
 }
 
-/// Enumerate Hermes providers from the user's global HERMES_HOME
-/// (`$HERMES_HOME` or `~/.hermes`). Convenience wrapper over
-/// [`hermes_provider_choices`] for callers (e.g. the launch wizard) that only
-/// have the global home, not a worktree.
-pub fn hermes_provider_choices_global() -> Vec<String> {
-    match hermes_global_home() {
-        Some(home) => hermes_provider_choices(&home),
-        None => Vec::new(),
+/// Issue #3863: launch-option candidates enumerated from the user's real
+/// Hermes home, extending the provider picker pattern to every field with a
+/// finite candidate set. Every list is empty when the config is absent or
+/// unparseable; the wizard then degrades to "config default + Other".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HermesLaunchChoices {
+    /// `model.provider` first, then `providers:` keys (see
+    /// [`hermes_provider_choices`]).
+    pub providers: Vec<String>,
+    /// `model.provider`, when set. A blank provider selection in the wizard
+    /// resolves to this provider's models.
+    pub default_provider: Option<String>,
+    /// `providers.<id>.models` per provider, with `model.default` prepended
+    /// for the default provider (built-in providers have no `providers:`
+    /// entry, so the configured default is their only known model).
+    pub models_by_provider: BTreeMap<String, Vec<String>>,
+    /// `agent.personalities` keys.
+    pub profiles: Vec<String>,
+    /// Sorted union of `platform_toolsets.cli`, `known_plugin_toolsets.cli`,
+    /// top-level `toolsets` and `agent.disabled_toolsets`.
+    pub toolsets: Vec<String>,
+    /// Directory names under `<home>/skills/**` that contain a `SKILL.md`
+    /// (the names `hermes --skills` accepts), sorted.
+    pub skills: Vec<String>,
+}
+
+impl HermesLaunchChoices {
+    /// Model candidates for `provider`; a blank provider means the config
+    /// default provider. Unknown providers have no candidates.
+    pub fn models_for(&self, provider: &str) -> Vec<String> {
+        let provider = provider.trim();
+        let key = if provider.is_empty() {
+            self.default_provider.as_deref()
+        } else {
+            Some(provider)
+        };
+        key.and_then(|key| self.models_by_provider.get(key))
+            .cloned()
+            .unwrap_or_default()
     }
+}
+
+/// Enumerate every Hermes launch-option candidate set from `source_home`.
+/// See [`HermesLaunchChoices`] for the per-field sources.
+pub fn hermes_launch_choices(source_home: &Path) -> HermesLaunchChoices {
+    let mut choices = HermesLaunchChoices {
+        providers: hermes_provider_choices(source_home),
+        skills: hermes_skill_choices(&source_home.join("skills")),
+        ..HermesLaunchChoices::default()
+    };
+    let Ok(text) = fs::read_to_string(source_home.join("config.yaml")) else {
+        return choices;
+    };
+    let Ok(serde_yaml::Value::Mapping(root)) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+    else {
+        return choices;
+    };
+
+    let model = root.get("model").and_then(serde_yaml::Value::as_mapping);
+    choices.default_provider = model
+        .and_then(|model| model.get("provider"))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_string);
+    if let Some(default_provider) = choices.default_provider.clone() {
+        if let Some(default_model) = model
+            .and_then(|model| model.get("default"))
+            .and_then(serde_yaml::Value::as_str)
+        {
+            push_unique(
+                choices
+                    .models_by_provider
+                    .entry(default_provider)
+                    .or_default(),
+                default_model,
+            );
+        }
+    }
+    if let Some(providers) = root
+        .get("providers")
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        for (key, entry) in providers {
+            let Some(name) = key.as_str().map(str::trim).filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            let models = choices
+                .models_by_provider
+                .entry(name.to_string())
+                .or_default();
+            for model in yaml_string_list(entry.get("models")) {
+                push_unique(models, &model);
+            }
+        }
+    }
+
+    let agent = root.get("agent").and_then(serde_yaml::Value::as_mapping);
+    choices.profiles = agent
+        .and_then(|agent| agent.get("personalities"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .map(|personalities| {
+            personalities
+                .keys()
+                .filter_map(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let cli_toolsets = |section: &str| {
+        yaml_string_list(
+            root.get(section)
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(|platforms| platforms.get("cli")),
+        )
+    };
+    let mut toolsets: Vec<String> = cli_toolsets("platform_toolsets");
+    toolsets.extend(cli_toolsets("known_plugin_toolsets"));
+    toolsets.extend(yaml_string_list(root.get("toolsets")));
+    toolsets.extend(yaml_string_list(
+        agent.and_then(|agent| agent.get("disabled_toolsets")),
+    ));
+    toolsets.sort();
+    toolsets.dedup();
+    choices.toolsets = toolsets;
+    choices
+}
+
+/// Enumerate every Hermes launch-option candidate set from the user's global
+/// HERMES_HOME (`$HERMES_HOME` or `~/.hermes`). Convenience wrapper over
+/// [`hermes_launch_choices`] for the launch wizard, which only has the
+/// global home, not a worktree.
+pub fn hermes_launch_choices_global() -> HermesLaunchChoices {
+    match hermes_global_home() {
+        Some(home) => hermes_launch_choices(&home),
+        None => HermesLaunchChoices::default(),
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !list.iter().any(|existing| existing == value) {
+        list.push(value.to_string());
+    }
+}
+
+fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    value
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Skill names: directories holding a `SKILL.md`, at most two levels deep
+/// (`skills/<name>` or `skills/<category>/<name>`), mirroring
+/// `hermes skills list`.
+fn hermes_skill_choices(skills_root: &Path) -> Vec<String> {
+    fn collect(dir: &Path, depth: u8, out: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.join("SKILL.md").is_file() {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    out.push(name.to_string());
+                }
+            } else if depth > 0 {
+                collect(&path, depth - 1, out);
+            }
+        }
+    }
+    let mut skills = Vec::new();
+    collect(skills_root, 1, &mut skills);
+    skills.sort();
+    skills.dedup();
+    skills
 }
 
 /// `true` when the user's global Hermes home has resolvable credentials.
@@ -893,6 +1076,123 @@ mod hermes_tests {
     fn provider_choices_empty_without_config() {
         let src = tempfile::tempdir().unwrap();
         assert!(hermes_provider_choices(src.path()).is_empty());
+    }
+
+    // Issue #3863: launch choices (models / profiles / toolsets / skills)
+    // are enumerated from the user's real config, mirroring the provider
+    // picker. Absent / unparseable config degrades to empty choices.
+    const LAUNCH_CHOICES_CONFIG: &str = "\
+model:
+  provider: zai
+  default: glm-5.2
+providers:
+  ollama-launch:
+    api: http://127.0.0.1:11434/v1
+    models:
+    - qwen3.5
+    - gemma4:latest
+  myvault:
+    base_url: http://y
+toolsets:
+- hermes-cli
+- web
+agent:
+  disabled_toolsets:
+  - spotify
+  personalities:
+    concise: You are concise.
+    pirate: Arrr.
+platform_toolsets:
+  cli:
+  - browser
+  - terminal
+  - web
+  discord:
+  - hermes-discord
+known_plugin_toolsets:
+  cli:
+  - spotify
+";
+
+    #[test]
+    fn launch_choices_models_are_grouped_per_provider_with_config_default_first() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+
+        let choices = hermes_launch_choices(src.path());
+        assert_eq!(choices.providers, vec!["zai", "ollama-launch", "myvault"]);
+        assert_eq!(choices.default_provider.as_deref(), Some("zai"));
+        // The selected provider's `model.default` is its only known model
+        // when it has no `providers.<id>.models` entry.
+        assert_eq!(choices.models_for("zai"), vec!["glm-5.2"]);
+        assert_eq!(
+            choices.models_for("ollama-launch"),
+            vec!["qwen3.5", "gemma4:latest"]
+        );
+        assert!(choices.models_for("myvault").is_empty());
+        assert!(choices.models_for("unknown").is_empty());
+        // Blank provider means "use config default" → the default provider's models.
+        assert_eq!(choices.models_for(""), vec!["glm-5.2"]);
+    }
+
+    #[test]
+    fn launch_choices_profiles_come_from_agent_personalities() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+
+        let choices = hermes_launch_choices(src.path());
+        assert_eq!(choices.profiles, vec!["concise", "pirate"]);
+    }
+
+    #[test]
+    fn launch_choices_toolsets_union_cli_platform_enabled_and_disabled_sets() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+
+        let choices = hermes_launch_choices(src.path());
+        // Sorted, deduped union of platform_toolsets.cli, known_plugin_toolsets.cli,
+        // top-level toolsets and agent.disabled_toolsets. Non-cli platforms are
+        // not launch candidates.
+        assert_eq!(
+            choices.toolsets,
+            vec!["browser", "hermes-cli", "spotify", "terminal", "web"]
+        );
+    }
+
+    #[test]
+    fn launch_choices_skills_are_skill_md_directories_under_skills() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join("config.yaml"), LAUNCH_CHOICES_CONFIG);
+        write_file(&src.path().join("skills/github/SKILL.md"), "# gh\n");
+        write_file(
+            &src.path().join("skills/creative/pixel-art/SKILL.md"),
+            "# px\n",
+        );
+        write_file(
+            &src.path().join("skills/creative/ascii-art/SKILL.md"),
+            "# ascii\n",
+        );
+        // Not a skill: no SKILL.md.
+        write_file(&src.path().join("skills/creative/notes.txt"), "x\n");
+
+        let choices = hermes_launch_choices(src.path());
+        assert_eq!(choices.skills, vec!["ascii-art", "github", "pixel-art"]);
+    }
+
+    #[test]
+    fn launch_choices_are_empty_without_config_or_with_invalid_yaml() {
+        let src = tempfile::tempdir().unwrap();
+        assert_eq!(
+            hermes_launch_choices(src.path()),
+            HermesLaunchChoices::default()
+        );
+
+        write_file(&src.path().join("config.yaml"), "model: [unclosed\n");
+        let choices = hermes_launch_choices(src.path());
+        assert!(choices.providers.is_empty());
+        assert!(choices.profiles.is_empty());
+        assert!(choices.toolsets.is_empty());
+        assert!(choices.models_for("").is_empty());
     }
 
     #[test]
