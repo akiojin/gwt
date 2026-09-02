@@ -248,6 +248,21 @@ pub(super) fn run<E: CliEnv>(
             number,
             reason,
         } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, out)?,
+        IssueCommand::MonitorWait {
+            project_root,
+            number,
+            reason,
+            resume_condition,
+            clear,
+        } => run_monitor_wait(
+            env,
+            project_root.as_deref(),
+            number,
+            reason.as_deref(),
+            resume_condition.as_deref(),
+            clear,
+            out,
+        )?,
         IssueCommand::MonitorQuestions { project_root } => {
             run_monitor_questions(env, project_root.as_deref(), out)?
         }
@@ -1270,6 +1285,153 @@ fn publish_monitor_config_set(
             "Issue Monitor daemon control is unavailable on this platform".to_string(),
         ),
     )
+}
+
+/// Issue #3844: the Issue an agent's wait declaration is about. The launch
+/// context (`GWT_AUTONOMOUS_ISSUE`) names the owner, so a monitor-launched
+/// agent may omit `number`; an explicit `number` always wins.
+fn resolve_monitor_wait_issue_number(
+    explicit: Option<u64>,
+    launch_context: Option<&str>,
+) -> Option<u64> {
+    explicit.or_else(|| launch_context?.trim().parse::<u64>().ok())
+}
+
+/// Issue #3844: whether `number` has a live launch in the Issue Monitor that
+/// owns `project_root` — the daemon snapshot when one is running, the
+/// persisted prefs otherwise.
+fn monitor_launch_is_live(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Result<bool, SpecOpsError> {
+    #[cfg(unix)]
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    {
+        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        return Ok(status.active_launches.contains(&number));
+    }
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    Ok(monitor.launched_window_id(number).is_some())
+}
+
+#[cfg(unix)]
+fn publish_monitor_wait_control(
+    project_root: &std::path::Path,
+    wait: serde_json::Value,
+) -> Result<(), String> {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "wait": wait }),
+        std::process::id(),
+    );
+    crate::daemon_publisher::publish_event(
+        project_root,
+        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
+        payload,
+    )
+}
+
+#[cfg(not(unix))]
+fn publish_monitor_wait_control(
+    _project_root: &std::path::Path,
+    _wait: serde_json::Value,
+) -> Result<(), String> {
+    Err("wait declaration publish unavailable on this platform".to_string())
+}
+
+/// Issue #3844 AC-1/AC-2: tell the Issue Monitor that the current launch is
+/// waiting (`reason`, `resume_condition`) or has resumed (`clear`). The daemon
+/// records the declaration on the issue's autonomous record, where stuck
+/// detection honours it for at most [`crate::AUTONOMOUS_WAIT_MAX_SECS`] and the
+/// PM reads it back from `issue.monitor.status`.
+fn run_monitor_wait<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: Option<u64>,
+    reason: Option<&str>,
+    resume_condition: Option<&str>,
+    clear: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let launch_context = std::env::var(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV).ok();
+    let Some(number) = resolve_monitor_wait_issue_number(number, launch_context.as_deref()) else {
+        out.push_str(
+            &serde_json::json!({
+                "status": "refused",
+                "refusal": "issue_unknown",
+                "detail": "pass params.number, or run inside a monitor-launched session where GWT_AUTONOMOUS_ISSUE names the owner Issue",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    };
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    if !monitor_launch_is_live(&project_root, number)? {
+        // Fail closed: a wait only suspends stuck detection for a launch that
+        // exists, and accepting one for a queued or parked row would tell the
+        // caller it is protected when nothing is.
+        out.push_str(
+            &serde_json::json!({
+                "number": number,
+                "status": "refused",
+                "refusal": "not_launched",
+                "detail": "no live Issue Monitor launch owns this issue; only the running agent of a launched issue can declare a wait",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    }
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let wait = if clear {
+        serde_json::json!({ "issue_number": number, "clear": true, "at": now })
+    } else {
+        serde_json::json!({
+            "issue_number": number,
+            "reason": reason.unwrap_or_default(),
+            "resume_condition": resume_condition.unwrap_or_default(),
+            "at": now,
+        })
+    };
+    match publish_monitor_wait_control(&project_root, wait) {
+        Ok(()) => {
+            let mut response = serde_json::json!({
+                "number": number,
+                "status": if clear { "cleared" } else { "waiting" },
+                "at": now,
+            });
+            if !clear {
+                response["reason"] = serde_json::Value::from(reason.unwrap_or_default());
+                response["resume_condition"] =
+                    serde_json::Value::from(resume_condition.unwrap_or_default());
+                response["max_wait_secs"] =
+                    serde_json::Value::from(crate::AUTONOMOUS_WAIT_MAX_SECS);
+                response["detail"] = serde_json::Value::from(
+                    "stuck detection is suspended for this launch until the wait is cleared or max_wait_secs elapses; clear it with params.clear:true when you resume",
+                );
+            }
+            out.push_str(&response.to_string());
+            out.push('\n');
+            Ok(0)
+        }
+        Err(error) => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "failed",
+                    "detail": format!("wait declaration publish failed: {error}"),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            Ok(1)
+        }
+    }
 }
 
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
@@ -2973,6 +3135,7 @@ mod tests {
                 retry_hold_reason: None,
                 claim_id: None,
                 delivery_id: None,
+                waiting: None,
             }],
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
@@ -3060,6 +3223,7 @@ mod tests {
                     retry_hold_reason: None,
                     claim_id: None,
                     delivery_id: None,
+                    waiting: None,
                 }],
                 last_error: None,
                 last_scan_at: None,
@@ -3956,6 +4120,69 @@ mod tests {
             prefs.failed_issues.is_empty(),
             "a failover is not a failure and must not leave a hold behind"
         );
+    }
+
+    /// Issue #3844: a wait declaration is only meaningful for a launch that is
+    /// running right now, so a row without a live launch is refused with zero
+    /// mutation instead of being silently accepted.
+    #[test]
+    fn monitor_wait_refuses_an_issue_without_a_live_launch() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWait {
+                project_root: Some(repo.clone()),
+                number: Some(42),
+                reason: Some("順番待ち".to_string()),
+                resume_condition: Some("前の agent の完了".to_string()),
+                clear: false,
+            },
+            &mut out,
+        )
+        .expect("wait runs");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("\"status\":\"refused\""), "{out}");
+        assert!(out.contains("not_launched"), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused declaration must be zero-mutation"
+        );
+    }
+
+    /// Issue #3844: the launch context names the owner Issue, so an agent may
+    /// omit `number`; an explicit `number` still wins.
+    #[test]
+    fn monitor_wait_issue_number_falls_back_to_the_launch_context() {
+        assert_eq!(
+            resolve_monitor_wait_issue_number(Some(42), Some("3844")),
+            Some(42)
+        );
+        assert_eq!(
+            resolve_monitor_wait_issue_number(None, Some("3844")),
+            Some(3844)
+        );
+        assert_eq!(resolve_monitor_wait_issue_number(None, Some(" ")), None);
+        assert_eq!(resolve_monitor_wait_issue_number(None, None), None);
     }
 
     /// Issue #3645 AC-1 / #3628 AC-2: the recovery an operator reaches for when
