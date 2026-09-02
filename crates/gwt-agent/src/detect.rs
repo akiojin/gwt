@@ -223,7 +223,19 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .expect("make Grok Build fixture executable");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", temp.path());
+        // Prepend the fixture dir instead of replacing PATH: sibling tests
+        // that spawn `sh` / `git` without the env lock keep resolving them
+        // while this test holds the scoped PATH, and the fixture still wins
+        // the `grok` lookup because it comes first.
+        let scoped_path = std::env::join_paths(
+            std::iter::once(temp.path().to_path_buf()).chain(
+                std::env::var_os("PATH")
+                    .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+        )
+        .expect("join PATH");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &scoped_path);
 
         let detected =
             AgentDetector::detect_by_command("grok").expect("Grok Build fixture must be detected");
