@@ -314,6 +314,28 @@ supplied:
 If no selection UI exists in the current runtime, fall back to plain-text
 prompting but keep the same three-option discipline.
 
+## Heavy verification serialization (Issue #3868 AC-30)
+
+Heavy verification (`cargo test --all-features`, coverage, headed Playwright,
+`verify.run`) contends for host CPU with every other agent. Serialize it
+through JSON operation `verify.lease.acquire` (SPEC #3576). A contended
+acquire answers immediately with the current holder instead of queueing, so
+the wait loop is yours:
+
+1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
+   success run the matrix, then `verify.lease.release` with the lease id.
+2. On refusal, wait 3 minutes and retry. Before every retry run JSON
+   operation `workspace.update` with `current_focus` set to
+   `waiting for verification lease (attempt N/15, holder: <holder>)` so
+   `last_activity_at` advances and the Issue Monitor reads you as waiting,
+   not stuck.
+3. Stop after 15 attempts (about 45 minutes). Post `kind:"blocked"` to the
+   Board mentioning the PM with the holder from `verify.lease.status` and
+   the host-wide heavy process list, and wait for the PM's arbitration.
+   Never run the heavy matrix without the lease, and never go idle at the
+   prompt without the Board post — an idle agent with a stale
+   `last_activity_at` is terminated as stuck.
+
 ## Stop Conditions
 
 Stop and surface a blocker to the caller when:

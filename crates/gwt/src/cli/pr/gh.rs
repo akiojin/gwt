@@ -40,6 +40,23 @@ where
     spawn_logged_blocking(&hub, ProcessKind::Gh, "gh", &args_vec, options)
 }
 
+/// Issue #3891 AC-3: the raw `gh api rate_limit` payload. The endpoint is
+/// free (spends neither budget), so observing the budget never consumes it.
+pub fn probe_github_rate_limit_via_gh(repo_path: &Path) -> io::Result<String> {
+    let output = run_gh_in(
+        "gh api rate_limit",
+        Some(repo_path),
+        gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS,
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh api rate_limit: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
 fn run_gh<I, S>(label: &str, args: I) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,

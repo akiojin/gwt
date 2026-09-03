@@ -40,8 +40,9 @@ pub use hooks::{
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
-    hermes_is_configured_global, hermes_provider_choices, hermes_provider_choices_global,
-    hermes_source_home, opencode_is_configured, opencode_is_configured_global,
+    hermes_is_configured_global, hermes_launch_choices, hermes_launch_choices_global,
+    hermes_provider_choices, hermes_source_home, opencode_is_configured,
+    opencode_is_configured_global, HermesLaunchChoices,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{

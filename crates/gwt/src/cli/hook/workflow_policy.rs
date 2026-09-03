@@ -504,6 +504,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.monitor.status"
             | "pr.current"
             | "pr.list"
+            | "github.budget"
             | "pr.view"
             | "pr.checks"
             | "pr.reviews"
@@ -1041,6 +1042,7 @@ mod tests {
         let intake = tempfile::tempdir().expect("repo");
         for operation in [
             "issue.create",
+            "issue.edit",
             "issue.comment",
             "issue.spec.create",
             "issue.spec.edit",

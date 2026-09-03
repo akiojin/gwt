@@ -95,6 +95,46 @@ fn pty_start_gate_helper() {
 }
 
 #[test]
+fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
+    let source = include_str!("launch.rs");
+    let direct = source
+        .split("pub(crate) fn spawn_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn spawn_bound_process_window_with_console_kind")
+                .next()
+        })
+        .expect("direct spawn route body");
+    assert!(
+        direct.contains("resource_policy"),
+        "direct AgentBootstrap route must consult the launch resource policy"
+    );
+    assert!(
+        direct.contains("new_pending_with_spawn_config"),
+        "policy-bearing direct launches must use the PTY start gate"
+    );
+    assert!(
+        direct.contains("new_with_spawn_config"),
+        "Shell launches must keep the direct PTY route"
+    );
+    let apply = direct.find("apply_policy(").expect("direct apply_policy");
+    let release = direct.find(".release()").expect("direct release");
+    assert!(apply < release, "policy must be applied before release");
+
+    let bound = source
+        .split("fn spawn_bound_process_window_with_console_kind")
+        .nth(1)
+        .and_then(|tail| tail.split("fn install_process_window").next())
+        .expect("bound spawn route body");
+    let apply = bound.find("apply_policy(").expect("bound apply_policy");
+    let release = bound.find(".release()").expect("bound release");
+    assert!(
+        apply < release,
+        "bound policy must be applied before release"
+    );
+}
+
+#[test]
 fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
     for (source_name, source) in [
         ("embedded_server.rs", include_str!("../embedded_server.rs")),
@@ -261,6 +301,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
         remove_env: Vec::new(),
         cwd: None,
         pending_tool_runtime_migration: None,
+        resource_policy: None,
     };
 
     let debug = format!("{launch:?}");
@@ -7281,6 +7322,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
             remove_env: Vec::new(),
             cwd: Some(temp.path().to_path_buf()),
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         },
         "session-1".to_string(),
         "feature/test".to_string(),
@@ -12927,6 +12969,7 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -13107,6 +13150,7 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -24629,6 +24673,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
                 remove_env: Vec::new(),
                 cwd: Some(fixture.repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             fixture.candidate_session_id.clone(),
             "work/issue-2359".to_string(),
@@ -25423,6 +25468,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -25562,6 +25608,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -26063,6 +26110,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-1".to_string(),
             "work/20260504-1234".to_string(),
@@ -26154,6 +26202,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-develop".to_string(),
             "develop".to_string(),
@@ -26256,6 +26305,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-projection-failure".to_string(),
             "work/issue-3412".to_string(),
@@ -26369,6 +26419,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-1".to_string(),
             "work/20260507-0001".to_string(),
@@ -26466,6 +26517,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-unlinked-resume".to_string(),
             "work/issue-2359".to_string(),
@@ -26573,6 +26625,7 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-stale-binding".to_string(),
             "work/stale-binding".to_string(),
@@ -26806,6 +26859,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                resource_policy: None,
             },
             "session-issue-3096".to_string(),
             "work/issue-3096".to_string(),
@@ -26902,6 +26956,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             remove_env: Vec::new(),
             cwd: Some(cwd),
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         }
     };
 
@@ -29602,6 +29657,7 @@ fn bound_runtime_launch_completion(
             remove_env: Vec::new(),
             cwd: Some(repo.to_path_buf()),
             pending_tool_runtime_migration: None,
+            resource_policy: None,
         },
         session_id.to_string(),
         "feature/demo".to_string(),
@@ -59193,6 +59249,19 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         prompt.contains("never auto-close"),
         "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
     );
+    // Issue #3868 / #3825: both prompts are written into the PM pane's PTY,
+    // whose canonical queue is 1024 bytes on macOS. A longer prompt does not
+    // fail — the writer blocks forever and the whole suite hangs with it.
+    // Keep a margin for the composer line the wake can be submitted behind.
+    const PTY_CANONICAL_QUEUE_BYTES: usize = 1024;
+    const COMPOSER_LINE_MARGIN_BYTES: usize = 64;
+    assert!(
+        prompt.len() + COMPOSER_LINE_MARGIN_BYTES <= PTY_CANONICAL_QUEUE_BYTES,
+        "{label} is {} bytes; it must stay at or under {} bytes so the PTY write cannot block \
+         (#3825); got: {prompt}",
+        prompt.len(),
+        PTY_CANONICAL_QUEUE_BYTES - COMPOSER_LINE_MARGIN_BYTES
+    );
 }
 
 /// Issue #3655 AC-5 / AC-9: the blocker text has to travel with the wake.
@@ -61405,4 +61474,165 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
         refusal_of(&events).contains("no live pane"),
         "a stale PM registration must not deliver"
     );
+}
+
+// Issue #3863 AC-6: every wizard-open path must inject the Hermes launch
+// choices enumerated from the user's global Hermes home. Missing one path
+// would leave that entry point with empty candidates only.
+fn seed_hermes_home_with_profile(root: &Path) -> PathBuf {
+    let hermes_home = root.join("hermes-home");
+    fs::create_dir_all(&hermes_home).expect("hermes home");
+    fs::write(
+        hermes_home.join("config.yaml"),
+        "model:\n  provider: zai\n  default: glm-5.2\nagent:\n  personalities:\n    concise: Be brief.\n",
+    )
+    .expect("hermes config");
+    hermes_home
+}
+
+fn assert_hermes_choices_injected(view: &gwt::LaunchWizardView, path: &str) {
+    assert_eq!(
+        view.hermes_profile_options,
+        vec!["concise".to_string()],
+        "{path}: Hermes profile choices must come from HERMES_HOME config"
+    );
+    assert_eq!(
+        view.hermes_model_options,
+        vec!["glm-5.2".to_string()],
+        "{path}: Hermes model choices must follow the config default provider"
+    );
+}
+
+#[test]
+fn app_runtime_manual_launch_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
+        .expect("open launch wizard");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_launch_wizard_for_branch");
+}
+
+#[test]
+fn app_runtime_knowledge_launch_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3863,
+            "Hermes launch choices",
+            &["enhancement"],
+            "body",
+            "2026-09-02T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            3863,
+            LinkedIssueKind::Issue,
+        )
+        .expect("open issue launch wizard");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_knowledge_launch_wizard_for_base_branch");
+}
+
+#[test]
+fn app_runtime_start_work_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let workspace_home = temp.path().join("workspace");
+    let _ = init_managed_workspace_with_develop_worktree(&workspace_home);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        workspace_home.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Branches],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_start_work_for_project("tab-1", &workspace_home)
+        .expect("open start work");
+
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert_hermes_choices_injected(&view, "open_start_work_for_project");
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_wizard_injects_hermes_launch_choices() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", seed_hermes_home_with_profile(temp.path()));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    assert_hermes_choices_injected(view, "open_issue_monitor_configure_profile_wizard_events");
 }
