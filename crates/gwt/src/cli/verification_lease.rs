@@ -38,6 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::CliEnv;
 
+/// Issue #3913: `verify.run` host admission — the lease's in-process claimant.
+pub(crate) mod admission;
+
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
 /// Upper bound so a typo cannot park the host for a day.
@@ -539,7 +542,7 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
         .into())
 }
 
-fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
+pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
     IndexCoordinator::open_default()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
@@ -562,7 +565,7 @@ fn ensure_control_dir_is_ours(control: &Path) -> Result<(), SpecOpsError> {
     )))
 }
 
-fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
+pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
     let worktree = resolve_current_worktree_root(env.repo_path());
     let worktree_hash = compute_worktree_hash(&worktree)
         .map_err(|err| unexpected(format!("failed to identify the current worktree: {err}")))?;
