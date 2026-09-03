@@ -248,6 +248,28 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
+## Heavy commands
+
+`cargo test`, `cargo clippy`, `cargo build`, coverage, and headed browser
+runs compile on a host shared with every other agent worktree. Take the
+host-wide lease before any of them, even a single focused test, and
+release it afterwards:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
+    JSON
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
+    JSON
+
+A refused acquire names the current holder; declare the wait with
+`issue.monitor.wait` (see "Waiting is not a stall") and retry on the
+cadence the gwt-verify skill defines instead of running without it.
+`verify.run` admits itself: it honors a lease this worktree holds,
+otherwise claims one and waits for other worktrees' heavy processes to
+drain, and answers `deferred` when its bounded wait runs out — rerun it.
+
 ## Persisted Work files
 
 The tracked `.gwt/work/` directory is the persistent Work core
@@ -513,6 +535,27 @@ binary の `search` JSON operation で実行します:
 
 `gwt-search` という単体の実行ファイルは存在しません。
 
+## Heavy commands
+
+`cargo test`、`cargo clippy`、`cargo build`、coverage、headed browser 実行は、
+他のすべての agent worktree と共有する host 上でコンパイルします。単発の
+focused test でも、開始前に host 全体の lease を取り、終わったら解放します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
+    JSON
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
+    JSON
+
+拒否された acquire は現在の保持者を返します。lease 無しで実行せず、
+`issue.monitor.wait` で待機を申告して（「待機は停滞ではない」参照）、
+gwt-verify skill が定める間隔で再試行してください。`verify.run` は
+自分で admission を取ります: この worktree が保持する lease はそのまま使い、
+無ければ取得して他 worktree の heavy プロセスが捌けるまで待ち、bounded な
+待機を使い切ると `deferred` を返します。その場合は再実行してください。
+
 ## Persisted Work files
 
 追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
@@ -687,6 +730,33 @@ mod tests {
             "params.resolves",
             "needs_human",
             "issue.comment",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3913 AC-2: the hook-delivered guidance tells every agent that
+    /// raw `cargo test` / `cargo clippy` runs take the host-wide lease, in
+    /// both languages and in the generated file.
+    #[test]
+    fn heavy_command_serialization_is_in_both_bodies_and_the_generated_file() {
+        for phrase in [
+            "## Heavy commands",
+            "verify.lease.acquire",
+            "verify.lease.release",
+            "`cargo test`",
+            "`cargo clippy`",
+            "verify.run",
+            "deferred",
+            "issue.monitor.wait",
         ] {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(
