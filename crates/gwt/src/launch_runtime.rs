@@ -559,6 +559,8 @@ pub fn build_shell_process_launch(
             remove_env,
             cwd: Some(worktree),
             pending_tool_runtime_migration: None,
+            // Shell panes keep the direct spawn route (SPEC #1921 FR-237).
+            resource_policy: None,
         });
     }
 
@@ -593,6 +595,7 @@ pub fn build_shell_process_launch(
         remove_env: Vec::new(),
         cwd: Some(worktree),
         pending_tool_runtime_migration: None,
+        resource_policy: None,
     })
 }
 

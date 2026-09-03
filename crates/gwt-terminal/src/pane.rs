@@ -158,6 +158,11 @@ impl PendingPane {
     pub fn abort(self) -> Result<(), TerminalError> {
         self.pty.abort()
     }
+
+    /// Apply a resource policy to the gated tree before [`Self::release`].
+    pub fn apply_policy(&self, policy: crate::pty::ProcessPolicy) -> Result<(), TerminalError> {
+        self.pty.apply_policy(policy)
+    }
 }
 
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {

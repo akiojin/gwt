@@ -5250,6 +5250,7 @@
         agentBackendsState,
         systemSettingsState,
         systemSettingsInteractionGuard,
+        applyAgentResourceSnapshot,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,
@@ -6383,6 +6384,7 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource: event.agent_resource,
               })
             ) {
               break;
@@ -6392,6 +6394,7 @@
               event.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(event.agent_resource);
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -6409,6 +6412,7 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource: event.agent_resource,
               })
             ) {
               break;
@@ -6418,6 +6422,7 @@
               event.codex_trust_managed_hooks !== false;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
+            applyAgentResourceSnapshot(event.agent_resource);
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
@@ -7037,6 +7042,19 @@
           systemSettingsInteractionGuard.activate();
         }
       });
+      // SPEC #1921 Phase 86 (#3813): numeric / text `.settings-input`
+      // fields get the same protection — a backend echo arriving while the
+      // user is typing a CPU limit would otherwise rebuild the panel and
+      // discard the half-typed value.
+      const isSettingsInput = (target) =>
+        Boolean(target)
+        && target.tagName === "INPUT"
+        && target.classList.contains("settings-input");
+      document.addEventListener("focusin", (event) => {
+        if (isSettingsInput(event.target)) {
+          systemSettingsInteractionGuard.activate();
+        }
+      });
       document.addEventListener("change", (event) => {
         const target = event.target;
         if (
@@ -7050,9 +7068,10 @@
       document.addEventListener("focusout", (event) => {
         const target = event.target;
         if (
-          target
-          && target.tagName === "SELECT"
-          && target.classList.contains("settings-select")
+          (target
+            && target.tagName === "SELECT"
+            && target.classList.contains("settings-select"))
+          || isSettingsInput(target)
         ) {
           systemSettingsInteractionGuard.release();
         }
@@ -7375,6 +7394,24 @@
             if (terminal && typeof terminal.scrollToBottom === "function") {
               terminal.scrollToBottom();
             }
+          },
+          // SPEC #1921 Phase 86 (#3813) T519: plain-text tail of a pane's
+          // xterm buffer so live specs can assert on agent output without
+          // scraping renderer DOM.
+          bufferText(windowId, maxLines = 400) {
+            const buffer = terminalMap.get(windowId)?.terminal?.buffer?.active;
+            if (!buffer) {
+              return "";
+            }
+            const lines = [];
+            const start = Math.max(0, buffer.length - maxLines);
+            for (let index = start; index < buffer.length; index += 1) {
+              const line = buffer.getLine(index);
+              if (line) {
+                lines.push(line.translateToString(true));
+              }
+            }
+            return lines.join("\n");
           },
         });
       }
