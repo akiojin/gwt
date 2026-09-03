@@ -17,7 +17,7 @@
 //!    `clippy-driver`, test binaries under `target/`) to drain — those are the
 //!    raw skill runs that never took the lease.
 //! 4. The whole wait is bounded (`params.max_wait_secs`, default
-//!    [`DEFAULT_MAX_WAIT_SECS`], hard cap [`MAX_WAIT_SECS`]). The cap stays
+//!    `DEFAULT_MAX_WAIT_SECS`, hard cap `MAX_WAIT_SECS`). The cap stays
 //!    below the Issue Monitor's default `stuck_timeout_secs` on purpose: a
 //!    bounded wait inside one tool call can never be mistaken for a stalled
 //!    agent, and the retry an agent makes after a `deferred` answer is a
@@ -455,7 +455,7 @@ impl BoardNotice {
 /// Claim host admission for a `verify.run` in `worktree`, waiting at most
 /// `max_wait`. A wait that outlives the budget answers with a `deferred`
 /// error naming what the host was busy with; the caller reports a granted
-/// admission through [`Admission::summary`].
+/// admission through `Admission::summary`.
 pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
     worktree: &Path,
