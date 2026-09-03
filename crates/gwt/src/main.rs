@@ -3138,6 +3138,8 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_fallback_commit_timeout:
+                crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
             issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
