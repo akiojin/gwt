@@ -58688,14 +58688,6 @@ fn pm_wake_targets_only_the_registered_pm_pane_on_new_needs_human() {
         decision.prompt.ends_with('\r'),
         "the prompt must submit itself"
     );
-    // Issue #3767 AC-2: the delta wake carries the steering obligation.
-    assert!(
-        decision
-            .prompt
-            .contains(gwt::pm_registry::PM_STEERING_CLAUSE),
-        "the wake prompt must steer the running launches: {}",
-        decision.prompt
-    );
 
     let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("loop state");
     assert_eq!(
@@ -59086,15 +59078,6 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
     assert_eq!(decision.window_id, pm_window_id);
     assert!(decision.prompt.contains("issue.monitor.status"));
     assert!(decision.prompt.ends_with('\r'));
-    // Issue #3767 AC-2: the scheduled tick carries the steering obligation
-    // ahead of the no-change judgment.
-    assert!(
-        decision
-            .prompt
-            .contains(gwt::pm_registry::PM_STEERING_CLAUSE),
-        "the periodic tick must steer the running launches: {}",
-        decision.prompt
-    );
 
     let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("state");
     assert_eq!(rearmed.consecutive_continuations, 0, "budget re-armed");
@@ -59265,6 +59248,12 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
     assert!(
         prompt.contains("never auto-close"),
         "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
+    );
+    // Issue #3767 AC-2 / AC-3: both prompts steer the running launches through
+    // the ruling channels before the no-change judgment.
+    assert!(
+        prompt.contains(gwt::pm_registry::PM_STEERING_WAKE_CLAUSE),
+        "{label} must carry the steering clause verbatim (Issue #3767); got: {prompt}"
     );
     // Issue #3868 / #3825: both prompts are written into the PM pane's PTY,
     // whose canonical queue is 1024 bytes on macOS. A longer prompt does not
