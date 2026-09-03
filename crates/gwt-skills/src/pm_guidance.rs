@@ -177,6 +177,14 @@ drive them.
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without
   you (see below), so report them rather than acting on them.
+- A silent row whose inbox entry carries a `waiting` field is not a
+  stall: the agent declared a wait with `issue.monitor.wait`, and the
+  field tells you `reason`, `resume_condition`, `since`, and `expires_at`
+  (the declaration caps out after 3 hours, after which ordinary stuck
+  detection applies again). Stuck detection skips the row until then, so
+  do not chase it — check whether the resume condition is something you
+  can unblock (a serialization order, a ruling), and report what it is
+  waiting for rather than that it is idle.
 
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.
@@ -532,17 +540,24 @@ that then stalls the Issue Monitor scan and every agent's PR handoff.
 
 Agents serialize heavy verification through `verify.lease.acquire`; a
 contended attempt returns the current holder instead of queueing. The
-agent-side wait procedure is defined in the gwt-verify skill: retry
+agent-side wait procedure is defined in the gwt-verify skill: declare
+the wait with `issue.monitor.wait` (Issue #3844), retry
 `verify.lease.acquire` every 3 minutes for up to 15 attempts (about 45
-minutes), run `workspace.update` with the wait as `current_focus` on
-every attempt so `last_activity_at` advances, and on the final refusal
-post `kind:"blocked"` to the Board naming the holder. Your part:
+minutes), keep the holder readable through `workspace.update`
+`current_focus`, and on the final refusal post `kind:"blocked"` to the
+Board naming the holder. Your part:
 
 - A Board post from a waiting agent names the lease holder. Read
   `verify.lease.status` and arbitrate the order — tell the holder to
   release or the waiter to keep waiting — instead of relaunching either.
-- An agent whose `current_focus` says it is waiting for the lease is
-  waiting, not stuck. Do not stop it on `last_activity_at` alone.
+- An agent whose `current_focus` says it is waiting for the lease, or
+  whose row carries a `waiting` declaration, is waiting, not stuck. Do
+  not stop it on `last_activity_at` alone.
+- `verify.run` admits itself (Issue #3913): it claims the lease
+  in-process and waits, bounded, for other worktrees' heavy processes to
+  drain. While it waits `verify.lease.status` counts it under `pending`;
+  when the budget runs out it answers `deferred` and the agent reruns it.
+  A `deferred` agent is retrying, not stuck.
 
 ## NeedsHuman
 
@@ -1292,6 +1307,10 @@ mod tests {
             "`workspace.update`",
             "`verify.lease.status`",
             "waiting, not stuck",
+            // Issue #3913: verify.run admits itself and answers `deferred`
+            // on a busy host; a deferred agent is retrying, not stuck.
+            "`deferred`",
+            "`pending`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

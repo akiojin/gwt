@@ -1469,6 +1469,19 @@ enum IssueMonitorControl {
         issue_number: u64,
         at: String,
     },
+    /// Issue #3844 AC-1: the launched agent declared it is waiting; stuck
+    /// detection skips the issue while the declaration is within its cap.
+    WaitDeclared {
+        issue_number: u64,
+        reason: String,
+        resume_condition: String,
+        at: String,
+    },
+    /// Issue #3844: the agent resumed; ordinary stuck detection applies again.
+    WaitCleared {
+        issue_number: u64,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
@@ -2017,6 +2030,21 @@ fn apply_routine_issue_monitor_control(
             monitor.record_autonomous_heartbeat(issue_number, &at);
             false
         }
+        IssueMonitorControl::WaitDeclared {
+            issue_number,
+            reason,
+            resume_condition,
+            at,
+        } => {
+            // The driver decides whether the issue is actually launched; a
+            // declaration for anything else is dropped, not scanned.
+            let _ = monitor.declare_autonomous_wait(issue_number, &reason, &resume_condition, &at);
+            false
+        }
+        IssueMonitorControl::WaitCleared { issue_number, at } => {
+            let _ = monitor.clear_autonomous_wait(issue_number, &at);
+            false
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
             true
@@ -2409,6 +2437,34 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
                 return Some(IssueMonitorControl::Heartbeat { issue_number, at });
+            }
+            if let Some(wait) = payload.get("wait") {
+                let issue_number = wait.get("issue_number")?.as_u64()?;
+                let at = wait
+                    .get("at")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                if wait
+                    .get("clear")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return Some(IssueMonitorControl::WaitCleared { issue_number, at });
+                }
+                let reason = wait
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                let resume_condition = wait
+                    .get("resume_condition")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                return Some(IssueMonitorControl::WaitDeclared {
+                    issue_number,
+                    reason,
+                    resume_condition,
+                    at,
+                });
             }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;
@@ -6539,6 +6595,71 @@ exit 0
     }
 
     #[test]
+    fn issue_monitor_wait_control_declares_and_clears_the_wait() {
+        // Issue #3844 AC-1/AC-2: the `wait` control carries the agent's
+        // declaration (reason + resume condition) into the driver, where it
+        // suspends stuck detection; `clear:true` ends it.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": {
+                    "issue_number": 42,
+                    "reason": "host 排他の順番待ち",
+                    "resume_condition": "#3791 の verify が完了する",
+                    "at": "2026-06-29T00:10:00Z",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("wait decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "a wait declaration does not request a scan"
+        );
+        let waiting = monitor.autonomous_wait(42).expect("wait recorded");
+        assert_eq!(waiting.reason, "host 排他の順番待ち");
+        assert_eq!(waiting.resume_condition, "#3791 の verify が完了する");
+        assert_eq!(waiting.since, "2026-06-29T00:10:00Z");
+        assert!(
+            monitor
+                .stuck_autonomous_issues("2026-06-29T02:00:00Z")
+                .is_empty(),
+            "declared wait suspends stuck detection"
+        );
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": { "issue_number": 42, "clear": true, "at": "2026-06-29T02:00:00Z" }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("wait clear decodes");
+        assert!(!apply_issue_monitor_control(&mut monitor, control));
+        assert!(monitor.autonomous_wait(42).is_none());
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T02:31:00Z"),
+            vec![42],
+            "ordinary detection resumes from the clearing heartbeat"
+        );
+    }
+
+    #[test]
     fn window_closed_control_requeues_only_the_exact_durable_claim() {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -6713,6 +6834,7 @@ exit 0
                 pr_number: None,
                 reviewed_sha: None,
                 review_passed: None,
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -6816,6 +6938,7 @@ exit 0
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
                 review_passed: None,
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -9120,6 +9243,7 @@ exit 0
                     pr_number: None,
                     reviewed_sha: None,
                     review_passed: None,
+                    wait: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -9608,6 +9732,7 @@ exit 1
                     pr_number: Some(99),
                     reviewed_sha: Some("abc".to_string()),
                     review_passed: Some(true),
+                    wait: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -11832,6 +11957,7 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11893,6 +12019,7 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc123".to_string()),
                 review_passed: None,
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11941,6 +12068,7 @@ exit 1
                     pr_number: Some(70),
                     reviewed_sha: Some("sha-7".to_string()),
                     review_passed: None,
+                    wait: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -11955,6 +12083,7 @@ exit 1
                     pr_number: Some(80),
                     reviewed_sha: Some("sha-8".to_string()),
                     review_passed: None,
+                    wait: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -12019,6 +12148,7 @@ exit 1
                 pr_number: Some(70),
                 reviewed_sha: Some("sha-7".to_string()),
                 review_passed: None,
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12632,6 +12762,7 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("sha-a".to_string()),
                 review_passed: Some(true),
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12768,6 +12899,7 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12899,6 +13031,7 @@ exit 1
                 pr_number: Some(99),
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
+                wait: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -13215,6 +13348,7 @@ exit 1
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -13436,6 +13570,7 @@ exit 1
                     pr_number: None,
                     reviewed_sha: None,
                     review_passed: None,
+                    wait: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14444,6 +14579,7 @@ exit 1
                     pr_number: None,
                     reviewed_sha: None,
                     review_passed: None,
+                    wait: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14728,6 +14864,7 @@ exit 1
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,

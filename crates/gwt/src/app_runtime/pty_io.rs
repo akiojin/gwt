@@ -851,6 +851,7 @@ impl AppRuntime {
         let sessions_dir = self.sessions_dir.clone();
         let proxy = self.proxy.clone();
         let window_lifecycle_generations = Arc::clone(&self.window_lifecycle_generations);
+        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let window_id = window_id.to_string();
         let scheduler_window_id = window_id.clone();
         let task: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
@@ -1207,6 +1208,7 @@ impl AppRuntime {
                         Self::finalize_issue_monitor_window_close_in_background(
                             project_root,
                             &target,
+                            fallback_commit_timeout,
                         )
                     }
                     (_, Ok(_)) => WindowCloseMonitorResult::Noop,

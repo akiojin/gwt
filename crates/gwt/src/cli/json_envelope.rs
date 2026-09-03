@@ -344,6 +344,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
         }),
+        "issue.monitor.wait" => {
+            let clear = optional_bool(params, "clear")?.unwrap_or(false);
+            let (reason, resume_condition) = if clear {
+                (
+                    optional_string(params, "reason")?,
+                    optional_string(params, "resume_condition")?,
+                )
+            } else {
+                // An unexplained wait is exactly the state the PM cannot act on.
+                (
+                    Some(required_string(params, "reason")?),
+                    Some(required_string(params, "resume_condition")?),
+                )
+            };
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: optional_path(params, "project_root")?,
+                number: optional_u64(params, "number")?,
+                reason,
+                resume_condition,
+                clear,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -494,7 +516,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
+            // Issue #3913: bound on the host admission wait.
+            let max_wait_secs = optional_u64(params, "max_wait_secs")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands,
+                max_wait_secs,
+            })
         }
         "verify.adjudicate" => {
             reject_unknown_params(
@@ -1634,6 +1661,36 @@ mod tests {
         }
     }
 
+    /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
+    #[test]
+    fn verify_run_parses_max_wait_secs() {
+        use crate::cli::verification_record::VerifyCommand;
+        assert_eq!(
+            ok(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": 2})
+            ),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: Some(2),
+            })
+        );
+        assert_eq!(
+            ok("verify.run", json!({"commands": ["git --version"]})),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+            })
+        );
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": "soon"})
+            ),
+            CliParseError::InvalidNumber(_)
+        ));
+    }
+
     /// Issue #3510: a failed operation used to leave stdout empty and report
     /// only a bare stderr line, so a machine caller could not tell an
     /// operation failure apart from a crashed process — let alone which stage
@@ -2375,6 +2432,52 @@ mod tests {
     /// row it recovers has no launch left to name — that is precisely why the
     /// stop and failover operations cannot reach it. A reason stays mandatory:
     /// releasing a hold that something recorded for a cause is auditable work.
+    /// Issue #3844: an agent declares (or clears) a wait for its own launch.
+    /// `number` is optional because the launch context already names the
+    /// owner Issue; `reason` and `resume_condition` are mandatory unless the
+    /// declaration is being cleared, because an unexplained wait is exactly
+    /// the state the PM cannot act on.
+    #[test]
+    fn issue_monitor_wait_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait",
+                json!({
+                    "reason": "host 排他の順番待ち",
+                    "resume_condition": "#3791 の verify が完了する",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: None,
+                number: None,
+                reason: Some("host 排他の順番待ち".to_string()),
+                resume_condition: Some("#3791 の verify が完了する".to_string()),
+                clear: false,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait",
+                json!({ "project_root": "/tmp/project", "number": 42, "clear": true })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: Some(42),
+                reason: None,
+                resume_condition: None,
+                clear: true,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait", json!({"resume_condition": "x"})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait", json!({"reason": "x"})),
+            CliParseError::MissingFlag("resume_condition")
+        ));
+    }
+
     #[test]
     fn issue_monitor_requeue_parses() {
         assert_eq!(
