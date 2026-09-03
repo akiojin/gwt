@@ -7481,6 +7481,7 @@ fn issue_monitor_autonomous_record(
         pr_number: None,
         reviewed_sha: None,
         review_passed: None,
+        wait: None,
     }
 }
 
@@ -41742,6 +41743,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 pr_number: None,
                 reviewed_sha: None,
                 review_passed: None,
+                wait: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
