@@ -540,17 +540,19 @@ that then stalls the Issue Monitor scan and every agent's PR handoff.
 
 Agents serialize heavy verification through `verify.lease.acquire`; a
 contended attempt returns the current holder instead of queueing. The
-agent-side wait procedure is defined in the gwt-verify skill: retry
+agent-side wait procedure is defined in the gwt-verify skill: declare
+the wait with `issue.monitor.wait` (Issue #3844), retry
 `verify.lease.acquire` every 3 minutes for up to 15 attempts (about 45
-minutes), run `workspace.update` with the wait as `current_focus` on
-every attempt so `last_activity_at` advances, and on the final refusal
-post `kind:"blocked"` to the Board naming the holder. Your part:
+minutes), keep the holder readable through `workspace.update`
+`current_focus`, and on the final refusal post `kind:"blocked"` to the
+Board naming the holder. Your part:
 
 - A Board post from a waiting agent names the lease holder. Read
   `verify.lease.status` and arbitrate the order — tell the holder to
   release or the waiter to keep waiting — instead of relaunching either.
-- An agent whose `current_focus` says it is waiting for the lease is
-  waiting, not stuck. Do not stop it on `last_activity_at` alone.
+- An agent whose `current_focus` says it is waiting for the lease, or
+  whose row carries a `waiting` declaration, is waiting, not stuck. Do
+  not stop it on `last_activity_at` alone.
 - `verify.run` admits itself (Issue #3913): it claims the lease
   in-process and waits, bounded, for other worktrees' heavy processes to
   drain. While it waits `verify.lease.status` counts it under `pending`;

@@ -171,9 +171,11 @@ test:
    command, then `verify.lease.release` with the lease id. Never start a
    raw `cargo` command without the lease.
 2. On refusal, follow the wait procedure in gwt-verify's "Heavy
-   verification serialization" section (retry every 3 minutes, make the
-   wait visible, escalate after 15 attempts). A refusal is not permission
-   to run anyway.
+   verification serialization" section: declare the wait with
+   `issue.monitor.wait` so it costs no autonomous attempt (Issue #3844),
+   retry every 3 minutes, keep the holder visible, escalate after 15
+   attempts, and clear the declaration once granted. A refusal is not
+   permission to run anyway.
 3. `verify.run` admits itself: it honors a lease this worktree already
    holds, otherwise claims the lease in-process and waits up to
    `params.max_wait_secs` (default 300, hard cap 1500) for other

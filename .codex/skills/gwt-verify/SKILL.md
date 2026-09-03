@@ -326,11 +326,17 @@ current holder instead of queueing, so the wait loop is yours:
 
 1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
    success run the matrix, then `verify.lease.release` with the lease id.
-2. On refusal, wait 3 minutes and retry. Before every retry run JSON
-   operation `workspace.update` with `current_focus` set to
-   `waiting for verification lease (attempt N/15, holder: <holder>)` so
-   `last_activity_at` advances and the Issue Monitor reads you as waiting,
-   not stuck.
+2. On refusal, declare the wait once with JSON operation
+   `issue.monitor.wait` (`params.reason`: `waiting for verification lease`,
+   `params.resume_condition`: `verify.lease.acquire is granted`) so stuck
+   detection skips your Issue instead of charging an attempt (Issue #3844),
+   then wait 3 minutes and retry. Record the holder for humans with JSON
+   operation `workspace.update`, `current_focus` set to
+   `waiting for verification lease (attempt N/15, holder: <holder>)`, when
+   the wait starts and whenever the holder changes — that is state, not a
+   liveness signal, so do not run it just to look alive. Clear the
+   declaration (`issue.monitor.wait` with `params.clear:true`) the moment
+   the lease is granted.
 3. Stop after 15 attempts (about 45 minutes). Post `kind:"blocked"` to the
    Board mentioning the PM with the holder from `verify.lease.status` and
    the host-wide heavy process list, and wait for the PM's arbitration.
@@ -344,10 +350,12 @@ in-process, then waits for `cargo` / `rustc` / `clippy-driver` / test
 binaries of other worktrees of the same repository to drain, bounded by
 `params.max_wait_secs` (default 300, hard cap 1500 — below the Issue
 Monitor's stuck timeout). While it waits, `verify.lease.status` lists it
-under `pending` and it posts one Board `status` entry. A `deferred` answer
-means the budget ran out without a record: treat it as one refused attempt
-of the loop above and rerun `verify.run` — the rerun is a fresh tool call,
-so the wait never counts as idle.
+under `pending` and it posts one Board `status` entry. Its own wait is
+shorter than the Issue Monitor's stuck timeout, so it needs no
+declaration. A `deferred` answer means the budget ran out without a
+record: treat it as one refused attempt of the loop above and rerun
+`verify.run` — the rerun is a fresh tool call, and if the host stays busy
+the same `issue.monitor.wait` declaration covers the retries.
 
 ## Stop Conditions
 

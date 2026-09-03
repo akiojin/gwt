@@ -908,6 +908,7 @@ mod tests {
                 // documented where the loop is defined.
                 "verify.lease.acquire",
                 "verify.lease.release",
+                "issue.monitor.wait",
                 "max_wait_secs",
                 "deferred",
             ] {
@@ -935,6 +936,7 @@ mod tests {
                 "`cargo test`",
                 "`cargo clippy`",
                 "verify.lease.acquire",
+                "issue.monitor.wait",
                 "max_wait_secs",
                 "deferred",
             ] {
