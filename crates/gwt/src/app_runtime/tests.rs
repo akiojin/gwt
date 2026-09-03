@@ -3642,6 +3642,9 @@ fn sample_runtime_with_events(
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
+        // Issue #3878: own the fallback commit budget instead of inheriting
+        // the GUI-thread one; tests that assert that budget set it explicitly.
+        issue_monitor_fallback_commit_timeout: super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
         // Issue #3676 AC-2: tests default to fail-open so ambient developer /
         // CI credential state never decides a launch; auth-preflight tests
         // install a real or explicit probe themselves.
@@ -42063,6 +42066,7 @@ fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     lock.lock_exclusive().expect("hold prefs lock");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_fallback_commit_timeout = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
 
     let started = Instant::now();
     let events = runtime.issue_monitor_launch_failed_result_events(
@@ -42973,6 +42977,7 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     lock.lock_exclusive().expect("hold prefs lock");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_fallback_commit_timeout = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
 
     let started = Instant::now();
     let events = runtime.handle_frontend_event(
@@ -43459,8 +43464,6 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
     let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
-    let _commit_timeout =
-        ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT_MS", "2000");
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -43730,7 +43733,8 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
         .expect("open prefs lock");
     lock.lock_exclusive().expect("hold prefs lock");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_fallback_commit_timeout = super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     let scan_deadline = Instant::now() + Duration::from_secs(5);
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
@@ -44268,6 +44272,113 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
             .expect("reload prefs")
             .pending_launch_deliveries
             .is_empty()
+    );
+}
+
+#[test]
+fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
+    // Issue #3878: the local fallback commit that claims, marks and ACKs a
+    // durable delivery runs under a wall-clock deadline. Production keeps a
+    // GUI-thread budget; a test runtime must own its budget explicitly instead
+    // of inheriting a host-load-dependent one, and an exhausted budget must
+    // leave the delivery replayable rather than half-materialized.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
+        .save(&sessions_dir)
+        .expect("save previous session");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3165,
+        title: "SPEC: budgeted durable delivery".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3165,
+        "claim-3165",
+        "host/session",
+        "effect-3165",
+        "2026-07-28T00:00:00Z",
+    ));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    assert_eq!(
+        runtime.issue_monitor_fallback_commit_timeout,
+        super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        "the test fixture must pin its own fallback commit budget",
+    );
+    assert!(
+        super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT
+            > super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        "the test budget must not inherit the production GUI-thread budget",
+    );
+
+    runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
+    let starved = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    assert!(
+        !starved
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "an exhausted fallback commit budget must not materialize a window",
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload prefs")
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.delivery_id == "launch:effect-3165"
+                && delivery.materializer_window_id.is_none()),
+        "a starved claim must leave the delivery unbound and replayable",
+    );
+
+    runtime.issue_monitor_fallback_commit_timeout =
+        super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+    let replay = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    assert!(
+        replay
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "the same delivery replays into exactly one window once the budget is explicit",
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1,
     );
 }
 
