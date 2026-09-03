@@ -7964,6 +7964,7 @@ pub(crate) mod tests {
             &mut env,
             crate::cli::CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands: plan.commands,
+                max_wait_secs: None,
             }),
         )
         .expect("run the status-advertised verification plan");
