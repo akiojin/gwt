@@ -278,6 +278,57 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+## Steering the running agents
+
+Observing is not enough. Every resident cycle you steer the launches
+that are running: the queue tells you what was started, the pane tells
+you whether it is still going anywhere, and the user reads an idle
+window as your neglect. Steering is a cycle duty, not a discretionary
+act.
+
+- For every active launch in `issue.monitor.status`, and every idle or
+  waiting project Agent pane in `pane.list`, read `last_activity_at`
+  and the agent's latest Board posts and decide whether it needs a
+  directive. Three findings require one:
+  - **stalled** — no activity for more than twice the monitor scan
+    interval (`last_activity_at` more than two scan intervals behind
+    `last_scan_at`) with no lease wait, quota hold, or human prompt
+    explaining it;
+  - **scope drift** — its Board posts or Work focus have left the owner
+    Issue's acceptance criteria, or it is changing surfaces the Issue
+    never named;
+  - **waiting for its next action** — it posted `next` or `handoff`, or
+    the routine "ready for the next instruction" notice, or its pane
+    sits idle at the prompt with an open obligation and nobody has told
+    it what to do.
+- Classify an idle launch before you act, with at most one bounded
+  `pane.read`, and take the default action of its class:
+  - **finished and settled** — the execution record is settled and the
+    PR is handed off: close the window (the runtime half of that is
+    #3756) and confirm the Issue's delivery;
+  - **waiting for your ruling** — read its `blocked` or `handoff` Board
+    entry and post the ruling, with `params.resolves` for an
+    escalation or a mention for a handoff;
+  - **waiting for the user** — present the window title and the exact
+    action required in the digest, every cycle until it is resolved;
+  - **stopped for no visible reason** — read the pane, then send one
+    line through `pm.message.send` saying what to resume and why.
+- The directive goes through the ruling channels only: `board.post`
+  with a mention when the agent will pick it up at its next intent
+  boundary, `pm.message.send` when the pane is idle and must move now.
+  Never spawn, relaunch, or inject launch or bootstrap instructions
+  past the Issue Monitor's launch path, and never `pane.send` into
+  another pane: steering tells a running agent what to do next; it
+  never starts one.
+- A launch waiting on a `verify.lease` holder, held by a provider quota,
+  or sitting at a human approval prompt is waiting, not stalled. Those
+  keep the rules above; do not steer them into a wrong answer.
+- The steering judgment precedes the no-change judgment. No cycle is a
+  no-change cycle until every running launch has passed it, and a
+  launch left idle without a directive is never a no-change cycle.
+  Record each directive in your session notes so the same launch is
+  not re-sent the same line every cycle.
+
 ## Recovering a row with no live launch
 
 `agent_failed` and `launch_failed` rows have already lost their launch.
@@ -420,7 +471,10 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   whose inbox row looks wrong (stuck in the same state, an
   `error_message`, `blocked_by_owner`) or that has gone quiet far longer
   than its peers. Watching the queue alone tells you what was started,
-  never what is actually going on inside it.
+  never what is actually going on inside it. Then steer them (see
+  *Steering the running agents*): a stalled, drifting, or
+  next-action-waiting launch gets its directive in the same cycle,
+  before you decide the cycle changed nothing.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
@@ -638,7 +692,8 @@ and urgency.
   volunteered.
 - A cycle that produced no milestone and no escalation, with no open
   PR in `CI-RED`, `CONFLICTED`, or `escalation_due`, ends with no
-  user-facing output at all. Do not post a "no change" line, do not
+  user-facing output at all — provided every running launch passed
+  the steering judgment first. Do not post a "no change" line, do not
   restate the queue or the running launches, and do not emit a keepalive
   to prove you are still looping: the resident loop's liveness is
   observable in the GUI's PM residency indicator and in
@@ -1078,6 +1133,56 @@ mod tests {
     #[test]
     fn contract_makes_the_resident_loop_check_the_running_agents() {
         assert!(body().contains("check the agents that are running"));
+    }
+
+    /// Bounded body of one `## heading` section, whitespace-collapsed.
+    fn section(heading: &str) -> String {
+        let text = SKILL_BODY_EN
+            .split_once(heading)
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .unwrap_or_else(|| panic!("{heading} must be a bounded section"));
+        unwrapped(text)
+    }
+
+    /// Issue #3767 AC-1 / AC-3: every resident cycle steers the running
+    /// launches — stalled, drifting, or waiting for the next action — through
+    /// the ruling channels only, and classifies an idle launch before acting.
+    /// AC-2: that judgment comes before the no-change judgment.
+    #[test]
+    fn contract_steers_running_launches_before_declaring_no_change() {
+        let steering = section("## Steering the running agents");
+        for phrase in [
+            "`last_activity_at`",
+            "latest Board posts",
+            "more than twice the monitor scan interval",
+            "scope drift",
+            "waiting for its next action",
+            "finished and settled",
+            "waiting for your ruling",
+            "waiting for the user",
+            "stopped for no visible reason",
+            "`board.post` with a mention",
+            "`pm.message.send`",
+            "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issue Monitor's launch path",
+            "never `pane.send`",
+            "The steering judgment precedes the no-change judgment",
+            "a launch left idle without a directive is never a no-change cycle",
+        ] {
+            assert!(
+                steering.contains(phrase),
+                "steering contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            section("## Resident loop (unattended)").contains("steer them"),
+            "the resident cycle must steer the running agents, not only check them"
+        );
+        assert!(
+            section("## Reporting cadence")
+                .contains("every running launch passed the steering judgment"),
+            "the silent no-change cycle must be gated on the steering judgment"
+        );
     }
 
     /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own

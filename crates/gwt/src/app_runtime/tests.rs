@@ -58688,6 +58688,14 @@ fn pm_wake_targets_only_the_registered_pm_pane_on_new_needs_human() {
         decision.prompt.ends_with('\r'),
         "the prompt must submit itself"
     );
+    // Issue #3767 AC-2: the delta wake carries the steering obligation.
+    assert!(
+        decision
+            .prompt
+            .contains(gwt::pm_registry::PM_STEERING_CLAUSE),
+        "the wake prompt must steer the running launches: {}",
+        decision.prompt
+    );
 
     let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("loop state");
     assert_eq!(
@@ -59078,6 +59086,15 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
     assert_eq!(decision.window_id, pm_window_id);
     assert!(decision.prompt.contains("issue.monitor.status"));
     assert!(decision.prompt.ends_with('\r'));
+    // Issue #3767 AC-2: the scheduled tick carries the steering obligation
+    // ahead of the no-change judgment.
+    assert!(
+        decision
+            .prompt
+            .contains(gwt::pm_registry::PM_STEERING_CLAUSE),
+        "the periodic tick must steer the running launches: {}",
+        decision.prompt
+    );
 
     let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("state");
     assert_eq!(rearmed.consecutive_continuations, 0, "budget re-armed");

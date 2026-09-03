@@ -57,6 +57,20 @@ pub const PM_GWTD_EXECUTION_CLAUSE: &str =
      in-session sub-agent; collect the result only from its task-completion notification, and \
      never duplicate an operation while it is pending.";
 
+/// Issue #3767 AC-1〜AC-3: compact steering obligation shared by the delta
+/// wake, the periodic wake, the Stop-gate continuation, and the PM's
+/// intent-boundary reminder. The generated gwt-pm guidance owns the full
+/// classification and default actions; this clause only keeps every injected
+/// prompt from restoring "observe only" and from judging a cycle unchanged
+/// before the running launches were steered.
+pub const PM_STEERING_CLAUSE: &str =
+    "Steer every running launch before you judge the cycle unchanged: from its \
+     `last_activity_at` and its latest Board posts decide whether it is stalled (no activity for \
+     more than twice the monitor scan interval), drifting outside its owner Issue's scope, or \
+     waiting for its next action, and give the directive through `board.post` with a mention or \
+     `pm.message.send` — the ruling channels only; never inject launch or bootstrap instructions \
+     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle.";
+
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmRegistration {
