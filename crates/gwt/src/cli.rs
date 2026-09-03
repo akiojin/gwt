@@ -17,6 +17,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
@@ -51,10 +52,7 @@ pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
 
-use std::{
-    io::{self},
-    path::PathBuf,
-};
+use std::{io, path::PathBuf};
 
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
@@ -196,6 +194,7 @@ pub enum CliCommand {
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
+    GithubBudget(github_budget::GithubBudgetCommand),
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -659,6 +658,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::VerifyLease(inner) => verification_lease::run(env, inner, &mut out)?,
+        CliCommand::GithubBudget(inner) => github_budget::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

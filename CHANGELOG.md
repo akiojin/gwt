@@ -1,6 +1,62 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.86.0] - 2026-09-02
+
+### Bug Fixes
+
+- **terminal:** Start gate が存在しない target を release 前の spawn 失敗として報告する
+- **terminal:** Unix の agent 優先度を PRIO_PGRP でプロセスグループ全体に適用する
+- **terminal:** Start gate の accept 済み socket を blocking に戻してから handshake を読む
+- Preserve live agent from stale launch failure
+- **issue-monitor:** Auto-merge Issue の AC ブロック形式を作成時に検証する
+- **usage:** Codex の rate-limit ウィンドウを window_minutes の実値で分類する
+- **test:** Fake gh の atomic owner readiness を待機する
+- **gwtd:** Issue.edit を単一 PATCH に統合し labels null を省略扱いにする
+- **launch:** Owner ledger 確立後の worktree pointer 欠落を起動時に self-heal する
+- **pm:** Wake prompt を PTY canonical queue の 1024 バイト以下に保つ (#3868)
+- **core:** 担当が自力で解消できる拒否を自動起票の対象から外す (#3868)
+- **terminal:** Unix 専用テストの Instant import を cfg で制限する
+- **hook:** Normalize PM worktree path comparison
+- **gui:** Issue 行に inline terminal を常設しプレビュー配置をミニマップから外す
+- **gui:** Issue 行の agent 表示を読み取り専用 status row に縮退する
+- **gui:** Agent status row の活動行を 2 行目に回しタイトルの切れを防ぐ
+- **gui:** Agent status row の Windowize を活動行より前に配置する
+
+### Features
+
+- **agent:** エージェントプロセスツリーを低優先度で隔離し cargo 並列度を制限する
+- **agent:** 資源分離にプリセットを追加しビルド並列度を汎用化する
+- **gwtd:** Plain Issue を更新する issue.edit を追加し gwt-spec 判定基準を明文化する
+- **gwtd:** Issue.edit に auto-merge の受け入れ基準ガードを適用する
+- **pm:** Open PR の駆動フォールバック・滞留時限・quota 契約を定義 (#3868)
+- **launch:** Hermes の Model / Profile / Toolsets / Skills を config 実読みの選択式にし前回設定を復元する
+- **gh:** GitHub API 予算に供給側キャッシュと需要側の間引きを導入 (#3891)
+
+### Miscellaneous Tasks
+
+- **work:** #3813 の Work event shard を取り込む
+- Satisfy stable clippy for provider hold
+- **work:** Issue #3865 の Work event shard を追加
+- **work:** Issue #3865 の検証 Work event shard を追加
+- **work:** Issue #3873 の Work event shard を記録
+- **work:** Issue #3860 の Work event shard を記録
+- **work:** Issue #3860 の Work event shard を記録（Done 終端）
+- **work:** Issue #3865 の終端 Work event shard を追加
+- **work:** Record issue 3759 delivery state
+- **work:** Record issue 3759 verification state
+- **work:** #3868 の Work event shard を追跡（develop 取り込み後）
+- **work:** #3868 の終端 Work event shard を追跡
+- **work:** Settle issue 3759 delivery
+- **work:** Record issue 3863 work events
+- **work:** Issue #3874 の backfill event を記録
+- **work:** Settle issue 3863 delivery
+- **work:** Issue #3884 の Work event shard を記録
+
+### Refactor
+
+- **cli:** Github.budget の command model を tuple variant にして cli.rs の行数予算を守る (#3891)
+
 ## [9.85.0] - 2026-09-01
 
 ### Bug Fixes

@@ -435,6 +435,8 @@ fn parse_pr_list() {
         CliCommand::Pr(PrCommand::List {
             stale_after_hours: None,
             escalate_after_cycles: None,
+            refresh: false,
+            include: None,
         })
     );
 }
