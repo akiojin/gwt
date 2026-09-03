@@ -223,6 +223,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
+        "  issue.monitor.wait",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -235,6 +236,9 @@ fn format_issue_help() -> String {
         "  number, reason                        issue.monitor.requeue releases a dead",
         "                                        agent_failed / launch_failed hold, or a",
         "                                        daemon-reported blocked_by_claim hold",
+        "  reason, resume_condition, clear       issue.monitor.wait declares that the",
+        "                                        current launch is waiting (stuck detection",
+        "                                        pauses, max 3h); clear=true when resumed",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -1057,6 +1061,9 @@ mod tests {
             // launch. If it is not discoverable here, the operator falls back
             // to hand-editing the state file, which is the bug.
             "issue.monitor.requeue",
+            // Issue #3844: the only way a waiting agent can tell the monitor it
+            // is waiting rather than stuck.
+            "issue.monitor.wait",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",
