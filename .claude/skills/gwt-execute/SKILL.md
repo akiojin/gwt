@@ -158,6 +158,30 @@ PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
 pre-PR verification passes and the `User Verification Result` is `confirmed` or
 `n/a`.
 
+## Heavy command serialization
+
+Every `cargo test`, `cargo clippy`, `cargo build`, coverage, or headed
+browser run in the RED / GREEN / refactor / verify loop compiles on a host
+shared with every other agent worktree (Issue #3913). Serialize them
+through the host-wide lease before starting, even for a single focused
+test:
+
+1. Run JSON operation `verify.lease.acquire` with `params.reason` naming
+   the Issue and a `ttl_minutes` sized for the run (default 45). Run the
+   command, then `verify.lease.release` with the lease id. Never start a
+   raw `cargo` command without the lease.
+2. On refusal, follow the wait procedure in gwt-verify's "Heavy
+   verification serialization" section (retry every 3 minutes, make the
+   wait visible, escalate after 15 attempts). A refusal is not permission
+   to run anyway.
+3. `verify.run` admits itself: it honors a lease this worktree already
+   holds, otherwise claims the lease in-process and waits up to
+   `params.max_wait_secs` (default 300, hard cap 1500) for other
+   worktrees' `cargo` / `rustc` / test binaries to drain. A `deferred`
+   answer means the budget ran out without writing a record — rerun
+   `verify.run`; each rerun is a fresh tool call and counts as one attempt
+   of the same wait procedure.
+
 ## Legacy aliases
 
 During the transition, `$gwt-build-spec SPEC-N` and `$gwt-fix-issue #N` are

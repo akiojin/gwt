@@ -3570,6 +3570,8 @@ pub(crate) fn evaluate_pr_ready_evidence(
 pub enum VerifyCommand {
     Run {
         commands: Vec<String>,
+        /// Issue #3913: bound on the host admission wait (seconds).
+        max_wait_secs: Option<u64>,
     },
     /// Attach one existing Board decision to one exact failing command in the
     /// latest canonical record. The Board remains the decision audit source;
@@ -3582,10 +3584,7 @@ pub enum VerifyCommand {
     /// T-130-lite: register the required verification matrix before running.
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
     /// matrix when no explicit commands are given.
-    Plan {
-        commands: Vec<String>,
-        derive: bool,
-    },
+    Plan { commands: Vec<String>, derive: bool },
     /// Explicit plan with an exact generated-file allowlist.
     PlanWithOutputs {
         commands: Vec<String>,
@@ -3719,7 +3718,17 @@ pub(super) fn run<E: CliEnv>(
             ));
             Ok(0)
         }
-        VerifyCommand::Run { commands } => {
+        VerifyCommand::Run {
+            commands,
+            max_wait_secs,
+        } => {
+            // Issue #3913: claim host admission (the SPEC #3576 lease plus a
+            // quiet host) before anything heavy starts. A budget overrun
+            // answers `deferred` without writing a record.
+            let max_wait = crate::cli::verification_admission::resolve_max_wait(max_wait_secs)?;
+            let admission = crate::cli::verification_admission::admit(env, &worktree, max_wait)?;
+            out.push_str(&admission.summary());
+            out.push('\n');
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to load verification plan for quarantine preparation: {error}"
@@ -3727,15 +3736,20 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
-            let (record, transcript) = run_verification_for_caller(
+            let run = run_verification_for_caller(
                 &worktree,
                 &session_id,
                 &commands,
                 &authority,
                 &prepared_quarantines,
                 &quarantine_diagnostics,
-            )
-            .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            );
+            // Release the in-process lease before the (lease-free) evidence
+            // evaluation so the next claimant starts as soon as the commands
+            // are done.
+            drop(admission);
+            let (record, transcript) =
+                run.map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
             // T-131 core: surface the coverage map of the plan this run
             // covered, so the rationale travels with the evidence output.
             if record.plan_covered {
@@ -5498,6 +5512,7 @@ mod tests {
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
             }),
         )
         .expect_err("missing GWT_SESSION_ID must fail");
@@ -5563,6 +5578,7 @@ mod tests {
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
             }),
         )
         .unwrap();
@@ -5596,6 +5612,7 @@ mod tests {
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
             }),
         )
         .unwrap();
@@ -6096,6 +6113,7 @@ mod tests {
             "session-foreign-run-authority-secret",
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
+                max_wait_secs: None,
             },
         )
         .expect_err("foreign Session must be rejected before command dispatch");
@@ -6234,6 +6252,7 @@ mod tests {
             session_id,
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
+                max_wait_secs: None,
             },
         )
         .expect_err("Completed generation must not dispatch verification commands");
@@ -6296,6 +6315,7 @@ mod tests {
             session_id,
             VerifyCommand::Run {
                 commands: commands.clone(),
+                max_wait_secs: None,
             },
         )
         .expect("exact Blocked owner Session may produce recovery evidence");
@@ -6357,6 +6377,7 @@ mod tests {
                 session_id,
                 VerifyCommand::Run {
                     commands: commands.clone(),
+                    max_wait_secs: None,
                 },
             )
             .expect("ledgerless verify.run remains compatible")
@@ -6445,6 +6466,7 @@ mod tests {
             session_id,
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
+                max_wait_secs: None,
             },
         )
         .expect_err("capability rotation before dispatch must fail closed");

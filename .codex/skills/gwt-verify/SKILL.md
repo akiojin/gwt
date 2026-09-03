@@ -314,13 +314,15 @@ supplied:
 If no selection UI exists in the current runtime, fall back to plain-text
 prompting but keep the same three-option discipline.
 
-## Heavy verification serialization (Issue #3868 AC-30)
+## Heavy verification serialization (Issue #3868 AC-30 / Issue #3913)
 
-Heavy verification (`cargo test --all-features`, coverage, headed Playwright,
-`verify.run`) contends for host CPU with every other agent. Serialize it
-through JSON operation `verify.lease.acquire` (SPEC #3576). A contended
-acquire answers immediately with the current holder instead of queueing, so
-the wait loop is yours:
+Heavy commands — `cargo test` (focused or full), `cargo clippy`,
+`cargo build`, coverage, headed Playwright, and `verify.run` — contend for
+host CPU with every other agent worktree. Serialize every one of them
+through JSON operation `verify.lease.acquire` (SPEC #3576); a raw `cargo`
+started without the lease is exactly the parallel run that saturates the
+host (Issue #3913). A contended acquire answers immediately with the
+current holder instead of queueing, so the wait loop is yours:
 
 1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
    success run the matrix, then `verify.lease.release` with the lease id.
@@ -335,6 +337,17 @@ the wait loop is yours:
    Never run the heavy matrix without the lease, and never go idle at the
    prompt without the Board post — an idle agent with a stale
    `last_activity_at` is terminated as stuck.
+
+`verify.run` admits itself (Issue #3913): a lease this worktree already
+holds is honored without waiting; otherwise it claims the lease
+in-process, then waits for `cargo` / `rustc` / `clippy-driver` / test
+binaries of other worktrees of the same repository to drain, bounded by
+`params.max_wait_secs` (default 300, hard cap 1500 — below the Issue
+Monitor's stuck timeout). While it waits, `verify.lease.status` lists it
+under `pending` and it posts one Board `status` entry. A `deferred` answer
+means the budget ran out without a record: treat it as one refused attempt
+of the loop above and rerun `verify.run` — the rerun is a fresh tool call,
+so the wait never counts as idle.
 
 ## Stop Conditions
 

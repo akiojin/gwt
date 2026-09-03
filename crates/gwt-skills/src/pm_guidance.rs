@@ -543,6 +543,11 @@ post `kind:"blocked"` to the Board naming the holder. Your part:
   release or the waiter to keep waiting — instead of relaunching either.
 - An agent whose `current_focus` says it is waiting for the lease is
   waiting, not stuck. Do not stop it on `last_activity_at` alone.
+- `verify.run` admits itself (Issue #3913): it claims the lease
+  in-process and waits, bounded, for other worktrees' heavy processes to
+  drain. While it waits `verify.lease.status` counts it under `pending`;
+  when the budget runs out it answers `deferred` and the agent reruns it.
+  A `deferred` agent is retrying, not stuck.
 
 ## NeedsHuman
 
@@ -1292,6 +1297,10 @@ mod tests {
             "`workspace.update`",
             "`verify.lease.status`",
             "waiting, not stuck",
+            // Issue #3913: verify.run admits itself and answers `deferred`
+            // on a busy host; a deferred agent is retrying, not stuck.
+            "`deferred`",
+            "`pending`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

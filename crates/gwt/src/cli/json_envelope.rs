@@ -488,7 +488,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
+            // Issue #3913: bound on the host admission wait.
+            let max_wait_secs = optional_u64(params, "max_wait_secs")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands,
+                max_wait_secs,
+            })
         }
         "verify.adjudicate" => {
             reject_unknown_params(
@@ -1626,6 +1631,36 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
+    #[test]
+    fn verify_run_parses_max_wait_secs() {
+        use crate::cli::verification_record::VerifyCommand;
+        assert_eq!(
+            ok(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": 2})
+            ),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: Some(2),
+            })
+        );
+        assert_eq!(
+            ok("verify.run", json!({"commands": ["git --version"]})),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+            })
+        );
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": "soon"})
+            ),
+            CliParseError::InvalidNumber(_)
+        ));
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report

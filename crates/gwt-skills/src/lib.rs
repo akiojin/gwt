@@ -903,6 +903,13 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
+                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
+                // the host-wide lease, and verify.run's own admission is
+                // documented where the loop is defined.
+                "verify.lease.acquire",
+                "verify.lease.release",
+                "max_wait_secs",
+                "deferred",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -913,6 +920,29 @@ mod tests {
                 !execute_skill.contains("adopt is also the repair path"),
                 "{relative} must not direct integrity-failed records to adopt"
             );
+        }
+
+        // Issue #3913 AC-2: the verification skill's serialization section
+        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let verify_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "## Heavy verification serialization",
+                "`cargo test`",
+                "`cargo clippy`",
+                "verify.lease.acquire",
+                "max_wait_secs",
+                "deferred",
+            ] {
+                assert!(
+                    verify_skill.contains(required),
+                    "expected gwt-verify serialization guidance in {relative}: {required}"
+                );
+            }
         }
 
         let execute_command =
