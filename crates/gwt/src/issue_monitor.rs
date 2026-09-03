@@ -1762,6 +1762,10 @@ pub struct IssueMonitorInboxSummary {
     pub claim_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    /// Issue #3844 AC-2: what the launched agent declared it is waiting for,
+    /// so a silent row can be told apart from a stalled one by its reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<IssueMonitorWaitSummary>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -2177,6 +2181,76 @@ pub struct AutonomousIssueRecord {
     /// `None` while review is in flight; `Some(true/false)` once it returns.
     #[serde(default)]
     pub review_passed: Option<bool>,
+    /// Issue #3844: the agent's own statement that its silence is a wait, not
+    /// a stall. While in force (see [`AUTONOMOUS_WAIT_MAX_SECS`]) stuck/idle
+    /// detection skips this record. Cleared when the launch ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<AutonomousWaitDeclaration>,
+}
+
+/// Issue #3844: what a launched agent declared it is waiting for.
+///
+/// Waiting is not progress, but it is also not a stall: an agent parked on a
+/// host-exclusivity turn, a PM serialization ruling, or a long verify run it
+/// must not touch produces no heartbeat and is exactly as healthy as a busy
+/// one. The declaration carries the reason and the resume condition so the
+/// PM can read *what* is being waited for from `issue.monitor.status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousWaitDeclaration {
+    pub reason: String,
+    pub resume_condition: String,
+    /// RFC3339 of the first declaration of this continuous wait. Re-declaring
+    /// updates the text but never this anchor, so renewals cannot chain past
+    /// [`AUTONOMOUS_WAIT_MAX_SECS`].
+    pub since: String,
+    /// RFC3339 of the latest (re)declaration.
+    pub declared_at: String,
+}
+
+/// Issue #3844 AC-3: how long one continuous wait declaration suspends stuck
+/// detection. Sized for a serialized verification queue of a few predecessors
+/// at 30–40 minutes each; past it the ordinary `stuck_timeout_secs` rule
+/// applies to the record's heartbeat again, so a declaration can never keep a
+/// genuinely dead agent alive indefinitely.
+pub const AUTONOMOUS_WAIT_MAX_SECS: u64 = 3 * 60 * 60;
+
+/// Outcome of a wait declaration or clearing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousWaitOutcome {
+    /// The wait is recorded; `expires_at` is when it stops protecting the record.
+    Declared {
+        since: String,
+        expires_at: String,
+    },
+    Cleared,
+    /// Clearing found no declaration to clear.
+    NotWaiting,
+    /// Declaring is refused: only a launch that is running can be waiting.
+    NotLaunched,
+}
+
+/// Issue #3844 AC-2: the wait declaration as the PM reads it from an inbox row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorWaitSummary {
+    pub reason: String,
+    pub resume_condition: String,
+    pub since: String,
+    /// RFC3339 after which the declaration no longer suspends stuck detection.
+    pub expires_at: String,
+}
+
+fn autonomous_wait_expires_at(since: &str) -> String {
+    rfc3339_plus_secs(since, AUTONOMOUS_WAIT_MAX_SECS).unwrap_or_else(|| since.to_string())
+}
+
+/// Whether `record`'s wait declaration still suspends stuck detection at `now`.
+/// An unparseable anchor fails closed (not in force).
+fn autonomous_wait_in_force(record: &AutonomousIssueRecord, now: &str) -> bool {
+    record
+        .wait
+        .as_ref()
+        .and_then(|wait| rfc3339_elapsed_secs(&wait.since, now))
+        .is_some_and(|elapsed| elapsed < AUTONOMOUS_WAIT_MAX_SECS as i64)
 }
 
 /// SPEC #3200 T-043/FR-029: bounded exponential backoff (seconds) for the
@@ -2277,6 +2351,7 @@ impl AutonomousIssueRecord {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         }
     }
 }
@@ -4436,6 +4511,60 @@ impl IssueMonitorState {
         self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
     }
 
+    /// Issue #3844 AC-1: record that the launched agent for `issue_number` is
+    /// waiting (`reason`) until `resume_condition`. Refused for anything
+    /// without a live launch. Declaring is itself a liveness signal. A
+    /// re-declaration refreshes the text but keeps the original `since`, so
+    /// the [`AUTONOMOUS_WAIT_MAX_SECS`] cap cannot be extended by renewing.
+    pub fn declare_autonomous_wait(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        resume_condition: &str,
+        now: &str,
+    ) -> AutonomousWaitOutcome {
+        if !self.active_launches.contains(&issue_number) {
+            return AutonomousWaitOutcome::NotLaunched;
+        }
+        self.record_autonomous_heartbeat(issue_number, now);
+        let record = self.autonomous_record_mut(issue_number);
+        let since = record
+            .wait
+            .as_ref()
+            .map(|wait| wait.since.clone())
+            .unwrap_or_else(|| now.to_string());
+        record.wait = Some(AutonomousWaitDeclaration {
+            reason: reason.trim().to_string(),
+            resume_condition: resume_condition.trim().to_string(),
+            since: since.clone(),
+            declared_at: now.to_string(),
+        });
+        AutonomousWaitOutcome::Declared {
+            expires_at: autonomous_wait_expires_at(&since),
+            since,
+        }
+    }
+
+    /// Issue #3844: the agent resumed; ordinary stuck detection applies again
+    /// from this (liveness) instant.
+    pub fn clear_autonomous_wait(&mut self, issue_number: u64, now: &str) -> AutonomousWaitOutcome {
+        let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
+            return AutonomousWaitOutcome::NotWaiting;
+        };
+        if record.wait.take().is_none() {
+            return AutonomousWaitOutcome::NotWaiting;
+        }
+        self.record_autonomous_heartbeat(issue_number, now);
+        AutonomousWaitOutcome::Cleared
+    }
+
+    /// Issue #3844: the current wait declaration for `issue_number`, if any.
+    pub fn autonomous_wait(&self, issue_number: u64) -> Option<&AutonomousWaitDeclaration> {
+        self.autonomous_records
+            .get(&issue_number)
+            .and_then(|record| record.wait.as_ref())
+    }
+
     /// SPEC #3200 T-044/T-035/FR-013: launched autonomous issues whose agent has
     /// shown no liveness for longer than `stuck_timeout_secs`. Pipeline-in-flight
     /// phases are excluded because they self-heal without a liveness signal:
@@ -4443,7 +4572,9 @@ impl IssueMonitorState {
     /// [`resume_inflight_reviews_after_restart`](Self::resume_inflight_reviews_after_restart)),
     /// and `Delivering` re-polls the persisted PR for its merge commit. Terminal
     /// phases are excluded too. Issues with no heartbeat yet are conservatively
-    /// NOT judged stuck (no liveness data).
+    /// NOT judged stuck (no liveness data). Issue #3844: a record whose agent
+    /// declared a wait (see [`Self::declare_autonomous_wait`]) is skipped
+    /// while the declaration is within [`AUTONOMOUS_WAIT_MAX_SECS`].
     pub fn stuck_autonomous_issues(&self, now: &str) -> Vec<u64> {
         let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
         self.autonomous_records
@@ -4455,6 +4586,9 @@ impl IssueMonitorState {
                     AutonomousPhase::Idle | AutonomousPhase::Implementing
                 )
             })
+            // Issue #3844 AC-1/AC-3: a declared wait is not a stall while its
+            // cap holds; past the cap the heartbeat rule below applies again.
+            .filter(|record| !autonomous_wait_in_force(record, now))
             .filter(|record| {
                 record
                     .last_heartbeat
@@ -6280,6 +6414,14 @@ impl IssueMonitorState {
                         // match it enforces is unsatisfiable from the PM's side.
                         claim_id: self.live_claim_id(item.issue.number),
                         delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                        waiting: self.autonomous_wait(item.issue.number).map(|wait| {
+                            IssueMonitorWaitSummary {
+                                reason: wait.reason.clone(),
+                                resume_condition: wait.resume_condition.clone(),
+                                since: wait.since.clone(),
+                                expires_at: autonomous_wait_expires_at(&wait.since),
+                            }
+                        }),
                     }
                 })
                 .collect(),
@@ -6567,6 +6709,8 @@ impl IssueMonitorState {
                 record.retry_not_before = None;
                 record.retry_hold_reason = None;
                 record.retry_hold_provider = None;
+                // Issue #3844: a wait belongs to one launch; never inherit it.
+                record.wait = None;
                 // SPEC #3200 T-045/FR-025: seed the liveness baseline at launch so
                 // stuck detection actually fires for an agent that hangs without
                 // producing a PR within stuck_timeout_secs. Real progress (a
@@ -7909,6 +8053,11 @@ impl IssueMonitorState {
         self.queued_launch_session_strategies.remove(&issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
+        // Issue #3844: the wait declaration is scoped to the launch that made
+        // it; every path that ends the launch funnels through here.
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.wait = None;
+        }
     }
 
     /// Reconcile persisted in-flight accounting against one complete live
@@ -9711,6 +9860,7 @@ mod tests {
                     retry_hold_reason: None,
                     claim_id: None,
                     delivery_id: None,
+                    waiting: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -10433,6 +10583,7 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         };
         let disk = IssueMonitorPrefs {
             launch_profile: Some(profile.clone()),
@@ -10550,6 +10701,7 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         };
         save_issue_monitor_prefs(
             &path,
@@ -10613,6 +10765,7 @@ mod tests {
                 pr_number: None,
                 reviewed_sha: None,
                 review_passed: None,
+                wait: None,
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -10676,6 +10829,7 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         };
         let older_disk = IssueMonitorPrefs {
             legacy_git_launch_failure_migration_version: 0,
@@ -10728,6 +10882,7 @@ mod tests {
             pr_number: None,
             reviewed_sha: None,
             review_passed: None,
+            wait: None,
         };
         let mut stale = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
@@ -17130,6 +17285,174 @@ mod tests {
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn wait_declaration_suspends_stuck_detection_and_preserves_attempts() {
+        // Issue #3844 AC-1/AC-4: a launched agent that declares it is waiting
+        // (host exclusivity, PM serialization, a long verify run) is not stuck
+        // while the declaration is in force, and no attempt is consumed.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        assert!(matches!(
+            monitor.declare_autonomous_wait(
+                42,
+                "host 排他の順番待ち",
+                "#3791 の verify が完了する",
+                "2026-06-29T00:10:00Z",
+            ),
+            AutonomousWaitOutcome::Declared { .. }
+        ));
+        // Two hours later the heartbeat is far past stuck_timeout_secs.
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T02:00:00Z")
+            .is_empty());
+        assert!(monitor
+            .recover_stuck_autonomous("2026-06-29T02:00:00Z")
+            .is_empty());
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "waiting never costs an attempt"
+        );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the slot stays with the waiting agent"
+        );
+    }
+
+    #[test]
+    fn wait_declaration_expires_at_the_cap_and_redeclaration_does_not_extend_it() {
+        // Issue #3844 AC-3: a declaration cannot hold stuck detection off
+        // forever. Past AUTONOMOUS_WAIT_MAX_SECS the ordinary rule applies, and
+        // re-declaring keeps the original `since` so renewals cannot chain.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "順番待ち",
+            "前の agent の完了",
+            "2026-06-29T00:10:00Z",
+        );
+        assert!(matches!(
+            monitor.declare_autonomous_wait(42, "順番待ち (更新)", "同上", "2026-06-29T02:00:00Z"),
+            AutonomousWaitOutcome::Declared { ref since, .. } if since == "2026-06-29T00:10:00Z"
+        ));
+        assert!(
+            monitor
+                .stuck_autonomous_issues("2026-06-29T03:05:00Z")
+                .is_empty(),
+            "still inside the 3h cap"
+        );
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T03:11:00Z"),
+            vec![42],
+            "past the cap the stale heartbeat counts again"
+        );
+    }
+
+    #[test]
+    fn wait_declaration_is_cleared_when_the_launch_ends() {
+        // Issue #3844: the declaration belongs to one launch. Once the launch is
+        // torn down (here: stuck recovery after the cap) the next launch must
+        // start without an inherited wait.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "順番待ち",
+            "前の agent の完了",
+            "2026-06-29T00:10:00Z",
+        );
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T03:20:00Z");
+        assert!(matches!(
+            recovered.as_slice(),
+            [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+        ));
+        assert!(monitor.autonomous_wait(42).is_none());
+    }
+
+    #[test]
+    fn wait_declaration_requires_a_live_launch() {
+        // Issue #3844: only the agent that owns a launch can declare a wait for
+        // it; a queued or parked row has nothing to suspend.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        assert_eq!(
+            monitor.declare_autonomous_wait(42, "順番待ち", "同上", "2026-06-29T00:10:00Z"),
+            AutonomousWaitOutcome::NotLaunched
+        );
+        assert!(monitor.autonomous_wait(42).is_none());
+        assert_eq!(
+            monitor.clear_autonomous_wait(42, "2026-06-29T00:11:00Z"),
+            AutonomousWaitOutcome::NotWaiting
+        );
+    }
+
+    #[test]
+    fn agent_status_projects_the_wait_declaration() {
+        // Issue #3844 AC-2: the PM reads what the agent is waiting for, since
+        // when, and when the declaration stops protecting it, from the same
+        // `issue.monitor.status` row that carries last_activity_at.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "host 排他の順番待ち",
+            "#3791 の verify が完了する",
+            "2026-06-29T00:10:00Z",
+        );
+        let row = |monitor: &IssueMonitorState| {
+            monitor
+                .agent_status()
+                .inbox
+                .into_iter()
+                .find(|row| row.issue_number == 42)
+                .expect("row 42")
+        };
+        let waiting = row(&monitor).waiting.expect("waiting projected");
+        assert_eq!(waiting.reason, "host 排他の順番待ち");
+        assert_eq!(waiting.resume_condition, "#3791 の verify が完了する");
+        assert_eq!(waiting.since, "2026-06-29T00:10:00Z");
+        assert_eq!(waiting.expires_at, "2026-06-29T03:10:00Z");
+        assert_eq!(
+            row(&monitor).last_activity_at.as_deref(),
+            Some("2026-06-29T00:10:00Z"),
+            "declaring is itself a liveness signal"
+        );
+
+        assert_eq!(
+            monitor.clear_autonomous_wait(42, "2026-06-29T00:40:00Z"),
+            AutonomousWaitOutcome::Cleared
+        );
+        assert!(row(&monitor).waiting.is_none());
+        assert_eq!(
+            monitor.clear_autonomous_wait(42, "2026-06-29T00:41:00Z"),
+            AutonomousWaitOutcome::NotWaiting
+        );
+    }
+
+    #[test]
+    fn clearing_the_wait_restores_ordinary_stuck_detection() {
+        // Issue #3844 AC-5/AC-6: after the agent resumes, recent activity
+        // (hook heartbeats from tool calls) keeps it alive exactly as before,
+        // and genuine silence is detected again.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "順番待ち",
+            "前の agent の完了",
+            "2026-06-29T00:10:00Z",
+        );
+        monitor.clear_autonomous_wait(42, "2026-06-29T00:20:00Z");
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T00:45:00Z")
+            .is_empty());
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:45:00Z");
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T01:10:00Z")
+            .is_empty());
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T01:16:00Z"),
+            vec![42]
         );
     }
 

@@ -177,6 +177,14 @@ drive them.
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without
   you (see below), so report them rather than acting on them.
+- A silent row whose inbox entry carries a `waiting` field is not a
+  stall: the agent declared a wait with `issue.monitor.wait`, and the
+  field tells you `reason`, `resume_condition`, `since`, and `expires_at`
+  (the declaration caps out after 3 hours, after which ordinary stuck
+  detection applies again). Stuck detection skips the row until then, so
+  do not chase it — check whether the resume condition is something you
+  can unblock (a serialization order, a ruling), and report what it is
+  waiting for rather than that it is idle.
 
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.
