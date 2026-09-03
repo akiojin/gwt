@@ -132,6 +132,54 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
     parse_gh_issues_json(&output.stdout)
 }
 
+/// Fetch the comment bodies of one Issue via `gh issue view --json comments`
+/// (Issue #3917 AC-2: delegation records may live in Issue comments).
+pub fn fetch_issue_comment_bodies(owner: &str, repo: &str, number: u64) -> Result<Vec<String>> {
+    let repo_slug = format!("{owner}/{repo}");
+    let number = number.to_string();
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
+            "issue",
+            "view",
+            number.as_str(),
+            "--repo",
+            repo_slug.as_str(),
+            "--json",
+            "comments",
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh issue view comments"),
+    )
+    .map_err(|e| GwtError::Git(format!("gh issue view comments: {e}")))?;
+    if !output.success() {
+        return Err(GwtError::Git(format!(
+            "gh issue view comments: {}",
+            output.stderr
+        )));
+    }
+    parse_gh_issue_comment_bodies(&output.stdout)
+}
+
+/// Parse `gh issue view --json comments` into the comment bodies in order.
+pub fn parse_gh_issue_comment_bodies(json: &str) -> Result<Vec<String>> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(e.to_string()))?;
+    Ok(value
+        .get("comments")
+        .and_then(serde_json::Value::as_array)
+        .map(|comments| {
+            comments
+                .iter()
+                .filter_map(|comment| comment.get("body").and_then(serde_json::Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Parse the JSON output from `gh issue list --json`.
 pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
     let raw: Vec<serde_json::Value> =
@@ -220,6 +268,16 @@ mod tests {
             issues[1].updated_at.as_deref(),
             Some("2026-08-05T10:01:00Z")
         );
+    }
+
+    #[test]
+    fn parse_gh_issue_comment_bodies_reads_comments_array() {
+        // Issue #3917 AC-2: delegation records may live in Issue comments.
+        let json = r#"{"comments":[{"body":"first"},{"body":"残 AC は別 Issue に委譲 (#77)"},{"author":{"login":"x"}}]}"#;
+        let bodies = parse_gh_issue_comment_bodies(json).unwrap();
+        assert_eq!(bodies, vec!["first", "残 AC は別 Issue に委譲 (#77)"]);
+        assert!(parse_gh_issue_comment_bodies("{}").unwrap().is_empty());
+        assert!(parse_gh_issue_comment_bodies("not json").is_err());
     }
 
     #[test]

@@ -136,6 +136,9 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
+        /// stored value untouched).
+        auto_close_merged_issues: Option<bool>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.

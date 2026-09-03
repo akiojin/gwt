@@ -21,9 +21,19 @@ pub struct AcceptanceCriteria {
     /// True when any criterion is tagged as targeting a visual surface
     /// (`(visual)`), so review-time judgment must include visual assessment.
     pub visual_surface: bool,
+    /// Criterion ids whose checklist box is not `[x]` (Issue #3917 AC-2).
+    /// Kept beside `ids` on purpose: [`AcceptanceSnapshot`] compares the id
+    /// set only, so ticking a box is completion evidence, never drift.
+    pub unchecked: Vec<String>,
 }
 
 impl AcceptanceCriteria {
+    /// Whether a well-formed block exists and every criterion is checked. A
+    /// missing block is never vacuously complete (fail-closed).
+    pub fn all_checked(&self) -> bool {
+        self.machine_checkable && self.unchecked.is_empty()
+    }
+
     /// Capture the launch-time snapshot used to detect post-launch drift
     /// (SPEC #3200 T-018 / FR-014). Only the stable id set and the
     /// visual-surface flag are retained — these are the gate-relevant facts.
@@ -87,6 +97,7 @@ fn heading_text(line: &str) -> Option<String> {
 pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let mut in_block = false;
     let mut ids: Vec<String> = Vec::new();
+    let mut unchecked: Vec<String> = Vec::new();
     let mut visual_surface = false;
 
     for line in issue_body.lines() {
@@ -106,6 +117,7 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
             .or_else(|| item.strip_prefix("* "))
             .map(str::trim_start);
         let Some(rest) = after_bullet else { continue };
+        let checked = rest.starts_with("[x]") || rest.starts_with("[X]");
         let rest = rest
             .strip_prefix("[ ]")
             .or_else(|| rest.strip_prefix("[x]"))
@@ -128,6 +140,9 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
             continue;
         }
         ids.push(format!("AC-{id_part}"));
+        if !checked {
+            unchecked.push(format!("AC-{id_part}"));
+        }
         let body = after_ac[colon + 1..].to_ascii_lowercase();
         if body.contains("(visual)") || body.contains("[visual]") {
             visual_surface = true;
@@ -138,6 +153,7 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         machine_checkable: !ids.is_empty(),
         ids,
         visual_surface,
+        unchecked,
     }
 }
 
@@ -420,6 +436,31 @@ mod tests {
         assert!(c.machine_checkable);
         assert_eq!(c.ids, vec!["AC-1", "AC-2"]);
         assert!(c.visual_surface, "(visual) tag marks a visual surface");
+    }
+
+    #[test]
+    fn unchecked_criteria_are_reported_by_id() {
+        // Issue #3917 AC-2: the merged-Issue close gate needs the checkbox
+        // state, which `ids` deliberately discards for snapshot comparison.
+        let body = "## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: pending\n- [X] AC-3: done upper\n";
+        let c = classify_acceptance_criteria(body);
+        assert_eq!(c.ids, vec!["AC-1", "AC-2", "AC-3"]);
+        assert_eq!(c.unchecked, vec!["AC-2"]);
+        assert!(!c.all_checked());
+
+        let done = classify_acceptance_criteria("## Acceptance Criteria\n- [x] AC-1: done\n");
+        assert!(done.unchecked.is_empty());
+        assert!(done.all_checked());
+
+        let missing = classify_acceptance_criteria("no block");
+        assert!(
+            !missing.all_checked(),
+            "a missing block is never vacuously complete"
+        );
+        // A bare item without any checkbox is not evidence of completion.
+        let bare = classify_acceptance_criteria("## Acceptance Criteria\n- AC-1: no box\n");
+        assert_eq!(bare.unchecked, vec!["AC-1"]);
+        assert!(!bare.all_checked());
     }
 
     #[test]

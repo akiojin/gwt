@@ -261,12 +261,14 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            auto_close_merged_issues,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
             enabled,
             autonomous_mode,
             max_active,
+            auto_close_merged_issues,
             out,
         )?,
         _ => unreachable!("issue::run called with non-issue command"),
@@ -1154,8 +1156,14 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    auto_close_merged_issues: Option<bool>,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    validate_monitor_config_set(
+        enabled,
+        autonomous_mode,
+        max_active,
+        auto_close_merged_issues,
+    )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1171,6 +1179,11 @@ fn apply_monitor_config_set(
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
     }
+    if let Some(auto_close_merged_issues) = auto_close_merged_issues {
+        candidate
+            .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
+            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+    }
     *prefs = candidate.prefs();
     Ok(())
 }
@@ -1179,8 +1192,13 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    auto_close_merged_issues: Option<bool>,
 ) -> io::Result<()> {
-    if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+    if enabled.is_none()
+        && autonomous_mode.is_none()
+        && max_active.is_none()
+        && auto_close_merged_issues.is_none()
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "at least one Issue Monitor config field is required",
@@ -1209,10 +1227,17 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    auto_close_merged_issues: Option<bool>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
+    validate_monitor_config_set(
+        enabled,
+        autonomous_mode,
+        max_active,
+        auto_close_merged_issues,
+    )
+    .map_err(io_as_api_error)?;
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1221,6 +1246,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "auto_close_merged_issues": auto_close_merged_issues,
             }
         }),
         std::process::id(),
@@ -1232,7 +1258,13 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+            apply_monitor_config_set(
+                prefs,
+                enabled,
+                autonomous_mode,
+                max_active,
+                auto_close_merged_issues,
+            )
         })
         .map_err(io_as_api_error)?;
     }
@@ -1245,6 +1277,10 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
+            "auto_close_merged_issues": prefs.auto_close_merged_issues,
+            "auto_close_merged_issues_effective": prefs
+                .auto_close_merged_issues
+                .unwrap_or(prefs.autonomous_mode),
         })
         .to_string(),
     );
@@ -3659,6 +3695,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                auto_close_merged_issues: None,
             },
             &mut out,
         )
@@ -3680,6 +3717,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                auto_close_merged_issues: None,
             },
             &mut out,
         )
@@ -3743,6 +3781,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    auto_close_merged_issues: None,
                 },
                 &mut out,
             );

@@ -354,9 +354,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
-            if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+            let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
+            if enabled.is_none()
+                && autonomous_mode.is_none()
+                && max_active.is_none()
+                && auto_close_merged_issues.is_none()
+            {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active",
+                    "enabled|autonomous_mode|max_active|auto_close_merged_issues",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -372,6 +377,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                auto_close_merged_issues,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -2211,6 +2217,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                auto_close_merged_issues: None,
             })
         );
         assert_eq!(
@@ -2220,7 +2227,22 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                auto_close_merged_issues: None,
             })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"auto_close_merged_issues": false})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: Some(false),
+            }),
+            "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
     }
 
@@ -2516,6 +2538,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                auto_close_merged_issues: None,
             })
         );
     }
