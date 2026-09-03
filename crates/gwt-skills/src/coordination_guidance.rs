@@ -122,6 +122,33 @@ posting output and every PM-facing surface repeat back to you:
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### Waiting is not a stall: declare it
+
+The Issue Monitor judges a launched agent stuck when it sees no activity
+for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
+costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
+serialization ruling, or on a long verification run you must not touch
+produces no activity either, so before you go quiet for that long,
+declare the wait:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` defaults to the owner Issue of this launch. While the
+declaration is in force stuck detection skips your issue and the PM reads
+`reason` / `resume_condition` / `expires_at` from the `waiting` field of
+your row in `issue.monitor.status`. It is capped (`max_wait_secs` in the
+response, 3 hours): re-declaring refreshes the text but never the cap, and
+past it the ordinary rule applies again. Clear it the moment you resume:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+Do not fake activity instead (periodic `workspace.update` or Board posts
+to look alive) - a declared wait is the honest signal.
+
 ### Proposing new Issues to the PM
 
 Do not call `issue.create`. When you find something that deserves its own
@@ -366,6 +393,31 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
     gwtd <<'JSON'
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
+
+### 待機は停滞ではない: 申告する
+
+Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
+排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
+の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` は省略するとこの launch の担当 Issue になります。申告が有効な間は
+stuck 判定が自分の Issue をスキップし、PM は `issue.monitor.status` の自分の
+行の `waiting` フィールドから `reason` / `resume_condition` / `expires_at` を
+読めます。申告には上限があります（応答の `max_wait_secs`、3 時間）。再申告は
+本文を更新しますが上限は延びず、超過後は通常の判定に戻ります。再開したら
+すぐ解除します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
+でください。待機の申告が正直なシグナルです。
 
 ### Issue 化は PM へ提案する
 
