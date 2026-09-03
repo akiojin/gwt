@@ -35,6 +35,9 @@ function makeLevelNormalizer(levels, fallback) {
  * @param {boolean} [opts.newestOnTop] prepend new items (default true).
  * @param {string[]} [opts.levels] allowed level keywords.
  * @param {string} [opts.defaultLevel] fallback level for unknown input.
+ * @param {boolean} [opts.dismissOnActivate] remove an item after its
+ *   onActivate ran (default true = transient alerts). The notification-center
+ *   history passes false so a jump-to stays reusable (SPEC #3206 v2).
  */
 export function createToastStack({
   document,
@@ -50,6 +53,7 @@ export function createToastStack({
   defaultLevel = "info",
   animateDismiss = false,
   dismissMs = 320,
+  dismissOnActivate = true,
 } = {}) {
   if (!document) {
     throw new Error("createToastStack requires a document");
@@ -161,13 +165,15 @@ export function createToastStack({
 
     // Whole-card activation (jump-to-window / jump-to-project / jump-to-entry):
     // the item becomes a keyboard-operable button that runs the handler then
-    // dismisses itself.
+    // dismisses itself — unless the region opted out (history keeps its rows).
     if (typeof notice?.onActivate === "function") {
       item.setAttribute("role", "button");
       item.setAttribute("tabindex", "0");
       const activate = () => {
         notice.onActivate();
-        removeItem(item);
+        if (dismissOnActivate) {
+          removeItem(item);
+        }
       };
       item.addEventListener("click", activate);
       item.addEventListener("keydown", (event) => {
