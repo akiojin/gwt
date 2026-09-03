@@ -101,6 +101,14 @@ You own the backlog for its whole life, not just at creation.
   `auto-merge` acceptance-block guard of `issue.create` applies to the
   edited result too: a body or label change that leaves an `auto-merge`
   Issue without a `- [ ] AC-N:` block is refused.
+- Readiness format the Issue Monitor reads: a `## Acceptance Criteria`,
+  `## 受け入れ基準` or `## 受け入れ条件` heading (never `## 成功基準`)
+  followed by `- [ ] AC-N:` checkbox lines. A `- [ ]` line without the
+  `AC-N:` prefix is accepted and numbered by position; a `gwt-spec` Issue
+  keeps the block in its `spec` section, which is read wherever it is
+  stored (body or comment). A `needs_human` reason names the missing
+  element — fix it with `issue.edit` / `issue.spec.edit`, then run
+  `issue.monitor.requeue`; a body edit alone never re-evaluates the row.
 - `issue.spec.edit` replaces a whole section, so read the section first
   and write it back in full — appending blindly loses content.
 - Keep the backlog honest. Fold duplicates into the surviving Issue and
@@ -980,6 +988,14 @@ mod tests {
             "only the fields you pass are updated",
             "replaces the whole body",
             "refuses a body update on a `gwt-spec` Issue",
+            // Issue #3930 AC-1: the readiness format is written down where the
+            // PM curates Issues — heading candidates and the checkbox shape.
+            "`## Acceptance Criteria`",
+            "`## 受け入れ基準`",
+            "`## 受け入れ条件`",
+            "never `## 成功基準`",
+            "prefix is accepted and numbered by position",
+            "stored (body or comment)",
             "## Plain Issue or design-required",
             "spans more than one crate or layer",
             "changes an existing public interface or type",

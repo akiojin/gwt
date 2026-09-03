@@ -741,6 +741,20 @@ mod tests {
                 issue_skill.contains("- [ ] AC-1:"),
                 "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
             );
+            // Issue #3930 AC-1: the readiness format is spelled out where
+            // Issues are authored — every heading the classifier scans, the
+            // one it does not, and the un-prefixed checkbox fallback.
+            for phrase in [
+                "`## Acceptance Criteria`, `## 受け入れ基準`,\n    `## 受け入れ条件`",
+                "`## 成功基準` is not scanned",
+                "numbered by position",
+                "body or comment",
+            ] {
+                assert!(
+                    issue_skill.contains(phrase),
+                    "expected the readiness format note {phrase:?} in: {relative}"
+                );
+            }
             assert!(
                 issue_skill.contains("\"labels\":[\"auto-merge\"]"),
                 "expected the auto-merge label applied by default at issue.create: {relative}"
