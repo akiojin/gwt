@@ -19,6 +19,31 @@ import { createFocusTrap } from "./focus-trap.js";
 
 const DEFAULT_MAX_RETAINED = 100;
 const HISTORY_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
+const BADGE_MAX = 99;
+
+/**
+ * Sync the rail bell with the unread model (FR-009). The badge is decorative
+ * (aria-hidden); the count is mirrored into the button's aria-label so screen
+ * readers hear it, and aria-expanded follows the drawer state.
+ */
+export function renderNotificationBell({ button, badge, count = 0, hasError = false, open = false } = {}) {
+  const unread = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  if (badge) {
+    badge.hidden = unread === 0;
+    badge.textContent = unread > BADGE_MAX ? `${BADGE_MAX}+` : String(unread);
+    badge.dataset.hasError = hasError ? "true" : "false";
+  }
+  if (button) {
+    button.dataset.unread = String(unread);
+    button.dataset.hasError = hasError ? "true" : "false";
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    const label = unread === 0
+      ? "Notifications"
+      : `Notifications (${unread} unread${hasError ? ", includes errors" : ""})`;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("title", label);
+  }
+}
 
 function formatClock(date) {
   try {
@@ -69,6 +94,7 @@ export function createNotificationCenter({
   // clear-all, cap) are pruned lazily so every removal path counts.
   const unread = new Set();
   const unreadListeners = new Set();
+  const openListeners = new Set();
 
   function liveUnread() {
     for (const item of unread) {
@@ -118,6 +144,16 @@ export function createNotificationCenter({
     drawer.hidden = !isOpen;
     backdrop.dataset.open = isOpen ? "true" : "false";
     backdrop.hidden = !isOpen;
+  }
+
+  function notifyOpen() {
+    for (const listener of openListeners) {
+      try {
+        listener(isOpen);
+      } catch (error) {
+        console.error("notification-center open listener failed", error);
+      }
+    }
   }
 
   function mount(parent) {
@@ -250,6 +286,7 @@ export function createNotificationCenter({
     // FR-014: opening the drawer reads everything.
     unread.clear();
     notifyUnread();
+    notifyOpen();
   }
 
   function close() {
@@ -270,6 +307,7 @@ export function createNotificationCenter({
       }
     }
     focusReturn = null;
+    notifyOpen();
   }
 
   function toggle() {
@@ -295,6 +333,14 @@ export function createNotificationCenter({
     return () => unreadListeners.delete(listener);
   }
 
+  function onOpenChange(listener) {
+    if (typeof listener !== "function") {
+      return () => {};
+    }
+    openListeners.add(listener);
+    return () => openListeners.delete(listener);
+  }
+
   return Object.freeze({
     mount,
     record,
@@ -306,6 +352,7 @@ export function createNotificationCenter({
     unreadHasError,
     clearAll,
     onUnreadChange,
+    onOpenChange,
     count: stack.count,
     droppedCount: stack.droppedCount,
     element: () => drawer,

@@ -23,6 +23,8 @@ const ROOT_MODULES = new Set([
   "autonomous-notifications.js",
   // SPEC #3206 — shared floating-toast primitive (autonomous log region).
   "toast-host.js",
+  // SPEC #3206 v2 — notification center (bell + unread badge + drawer).
+  "notification-center.js",
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",

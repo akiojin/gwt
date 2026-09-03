@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 
-import { createNotificationCenter } from "../notification-center.js";
+import { createNotificationCenter, renderNotificationBell } from "../notification-center.js";
 
 function setup(opts = {}) {
   const { document } = parseHTML(
@@ -195,8 +195,11 @@ test("toggle() flips the drawer, syncs data-open / hidden and the backdrop", () 
   const { document, center } = setup();
   const drawer = document.querySelector(".notification-center-drawer");
   const backdrop = document.querySelector(".notification-center-backdrop");
+  const seen = [];
+  center.onOpenChange((open) => seen.push(open));
   center.toggle();
   assert.equal(center.isOpen(), true);
+  assert.deepEqual(seen, [true], "open-state subscribers (bell aria-expanded) are told");
   assert.equal(drawer.dataset.open, "true");
   assert.equal(drawer.hidden, false);
   assert.equal(backdrop.dataset.open, "true");
@@ -205,6 +208,7 @@ test("toggle() flips the drawer, syncs data-open / hidden and the backdrop", () 
   assert.equal(drawer.dataset.open, "false");
   assert.equal(drawer.hidden, true);
   assert.equal(backdrop.dataset.open, "false");
+  assert.deepEqual(seen, [true, false]);
 });
 
 test("the close control and the backdrop both close the drawer", () => {
@@ -215,4 +219,33 @@ test("the close control and the backdrop both close the drawer", () => {
   center.open();
   click(document, document.querySelector(".notification-center-backdrop"));
   assert.equal(center.isOpen(), false);
+});
+
+// --- T-006 (model half): bell badge renderer (FR-009) ---
+
+test("renderNotificationBell syncs count, visibility, error emphasis, aria-label and aria-expanded", () => {
+  const { document } = parseHTML(
+    '<!doctype html><button id="b" aria-label="Notifications" aria-expanded="false"><span class="op-rail__badge" hidden aria-hidden="true"></span></button>',
+  );
+  const button = document.getElementById("b");
+  const badge = button.querySelector(".op-rail__badge");
+
+  renderNotificationBell({ button, badge, count: 0, hasError: false, open: false });
+  assert.equal(badge.hidden, true, "0 unread hides the badge");
+  assert.equal(button.dataset.unread, "0");
+  assert.equal(button.getAttribute("aria-label"), "Notifications");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+
+  renderNotificationBell({ button, badge, count: 3, hasError: false, open: false });
+  assert.equal(badge.hidden, false);
+  assert.equal(badge.textContent, "3");
+  assert.equal(badge.dataset.hasError, "false");
+  assert.equal(button.dataset.unread, "3");
+  assert.equal(button.getAttribute("aria-label"), "Notifications (3 unread)");
+
+  renderNotificationBell({ button, badge, count: 120, hasError: true, open: true });
+  assert.equal(badge.textContent, "99+", "count is clamped for the tiny rail badge");
+  assert.equal(badge.dataset.hasError, "true", "state token emphasis hook");
+  assert.equal(button.getAttribute("aria-label"), "Notifications (120 unread, includes errors)");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
 });

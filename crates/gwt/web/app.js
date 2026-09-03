@@ -82,6 +82,7 @@
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
+      import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -4911,6 +4912,34 @@
       const autonomousNotifications = createAutonomousNotifications({ document });
       autonomousNotifications.mount(document.body);
 
+      // SPEC #3206 v2 — notification center: bell (rail System group) + unread
+      // badge + history drawer. The drawer mounts on <body>, never inside
+      // .op-rail (its stacking context would clamp the drawer under toasts and
+      // modals). It is a pure sink; firing/dedup/gating stay in the controllers.
+      const notificationCenter = createNotificationCenter({ document });
+      notificationCenter.mount(document.body);
+      const notificationBellButton = document.getElementById("op-notifications-button");
+      const notificationBellBadge =
+        notificationBellButton?.querySelector(".op-rail__badge") ?? null;
+      notificationCenter.onUnreadChange((count, hasError) => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count,
+          hasError,
+          open: notificationCenter.isOpen(),
+        });
+      });
+      notificationCenter.onOpenChange(() => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count: notificationCenter.unreadCount(),
+          hasError: notificationCenter.unreadHasError(),
+          open: notificationCenter.isOpen(),
+        });
+      });
+
       // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
       // notifications that used to be three hand-offset systems (agent
       // completion / attention / board mention). The pure controllers still
@@ -7155,6 +7184,13 @@
         if (handleMigrationModalEscape(event)) {
           return;
         }
+        // SPEC #3206 v2 — Esc closes the notification center drawer through
+        // the same chain as the other modal surfaces.
+        if (notificationCenter.isOpen()) {
+          notificationCenter.close();
+          event.preventDefault();
+          return;
+        }
         // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
         // before the windowList dropdown because the Drawer is a
         // modal surface and outranks the dropdown affordance.
@@ -7321,6 +7357,9 @@
             // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
             // is the keyboard-only path to the same panel.
             frontendUnits.pmSettingsPanel.open();
+            return;
+          case "toggle-notifications":
+            notificationCenter.toggle();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
