@@ -4,9 +4,9 @@
 // dismiss / newest-on-top / bounded cap) behind every floating toast region.
 // Callers supply the region's class + CSS and map their notice onto push();
 // firing, dedup and gating stay in the callers (the primitive is a pure DOM
-// sink). Phase 0 powers the autonomous `log` region; later phases reuse it for
-// the bottom-right `alerts` region (completion / attention / board-mention),
-// replacing their hand-coded offsets and z-index tiers with one managed stack.
+// sink). It powers the bottom-right `alerts` region (completion / attention /
+// board-mention, one managed stack instead of hand-coded offsets) and, in v2,
+// the notification-center history list mounted inside the drawer.
 
 const DEFAULT_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
 
@@ -24,7 +24,7 @@ function makeLevelNormalizer(levels, fallback) {
  *
  * @param {object} opts
  * @param {Document} opts.document
- * @param {string} opts.className BEM root, e.g. "autonomous-notifications";
+ * @param {string} opts.className BEM root, e.g. "toast-alerts";
  *   items derive `${className}__item|__title|__message|__dismiss|__list`.
  * @param {string} [opts.styleText] CSS injected once into <head>.
  * @param {string} [opts.styleMarker] attribute used to dedupe the <style>.

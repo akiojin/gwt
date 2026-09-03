@@ -5794,6 +5794,10 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
   assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
   // history scrolls inside the drawer body
   assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);
+  // FR-017 indicator is a flex row, so its hidden state must be restated
+  // (display:flex outranks the UA [hidden] rule — caught by real-browser E2E).
+  assert.match(frontendStyle, /\.surface-error-indicator\s*\{[^}]*display:\s*flex/);
+  assert.match(frontendStyle, /\.surface-error-indicator\[hidden\]\s*\{[^}]*display:\s*none/);
 });
 
 test("SPEC #3206 v2: the --z-* ladder keeps the persistent drawer below the transient notice stack (FR-015)", () => {

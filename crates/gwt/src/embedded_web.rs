@@ -192,12 +192,8 @@ root_js_modules! {
     // app.js imports this at module top level, so the asset MUST be registered
     // or the ES module load 404s and the splash hangs.
     "pm-settings-panel.js" => "createPmSettingsPanel",
-    // SPEC #3200 FR-034/FR-035 — autonomous Issue Monitor scrollable side-toast
-    // notification stack. app.js imports this at module top level, so the asset
-    // MUST be registered or the ES module load fails and the splash hangs.
-    "autonomous-notifications.js" => "createAutonomousNotifications",
-    // SPEC #3206 — shared floating-toast primitive imported by
-    // autonomous-notifications.js (and later the bottom-right alerts trio).
+    // SPEC #3206 — shared floating-toast primitive behind the bottom-right
+    // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",
     // SPEC #3206 v2 — notification center (bell + unread badge + history
     // drawer). app.js imports this at module top level, so the asset MUST be

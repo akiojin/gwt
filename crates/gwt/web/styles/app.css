@@ -3190,6 +3190,12 @@ body {
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
 }
+/* `display: flex` outranks the UA `[hidden] { display: none }` rule, so the
+   hidden state must be restated or the line stays visible (real-browser E2E
+   caught this). */
+.surface-error-indicator[hidden] {
+  display: none;
+}
 .surface-error-indicator__count {
   flex: 0 0 auto;
   color: var(--color-state-blocked);
