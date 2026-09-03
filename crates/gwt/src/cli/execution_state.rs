@@ -23339,6 +23339,7 @@ exit 1
                     &mut env,
                     CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                         commands: Vec::new(),
+                        max_wait_secs: None,
                     }),
                 )
                 .unwrap();
@@ -24971,6 +24972,7 @@ exit 1
                 &mut env,
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
+                    max_wait_secs: None,
                 }),
             )
             .unwrap();
