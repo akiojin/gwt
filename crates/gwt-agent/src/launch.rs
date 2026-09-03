@@ -401,6 +401,18 @@ fn absolute_launch_cwd(cwd: Option<&Path>) -> PathBuf {
 }
 
 fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -> Option<String> {
+    effective_launch_path_with_host(env, remove_env, host_process_path)
+}
+
+/// [`effective_launch_path`] with the inherited host `PATH` supplied by
+/// `host_path` instead of read from the process. Tests inject a fixture PATH
+/// here rather than swapping the process-global one, which would race every
+/// parallel process spawn (Issue #3895).
+fn effective_launch_path_with_host(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    host_path: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     if let Some((_, value)) = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
         return Some(value.clone());
     }
@@ -410,6 +422,10 @@ fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -
     {
         return None;
     }
+    host_path()
+}
+
+fn host_process_path() -> Option<String> {
     host_process_env()
         .into_iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
@@ -512,8 +528,17 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
     remove_env: &[String],
     cwd: Option<&Path>,
 ) -> String {
+    resolve_host_npx_fallback_executable_with_host_path(env, remove_env, cwd, host_process_path)
+}
+
+fn resolve_host_npx_fallback_executable_with_host_path(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+    host_path: impl FnOnce() -> Option<String>,
+) -> String {
     let cwd = absolute_launch_cwd(cwd);
-    effective_launch_path(env, remove_env)
+    effective_launch_path_with_host(env, remove_env, host_path)
         .as_deref()
         .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
         .map(|(executable, _needs_yes)| executable)
@@ -4249,22 +4274,35 @@ mod tests {
         std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
         write_test_runner(&inherited_bin.join("npx"));
         write_test_runner(&explicit_bin.join("npx"));
-        let _lock = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &inherited_bin);
+        // The inherited host PATH is injected through the seam instead of
+        // swapping the process-global PATH, which would race every parallel
+        // process spawn in this test binary (Issue #3895).
+        let host_path = || Some(inherited_bin.display().to_string());
 
-        let removed = resolve_host_npx_fallback_executable_with_effective_env(
+        let inherited = resolve_host_npx_fallback_executable_with_host_path(
+            &HashMap::new(),
+            &[],
+            Some(temp.path()),
+            host_path,
+        );
+        let removed = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::new(),
             &["PATH".to_string()],
             Some(temp.path()),
+            host_path,
         );
-        let overridden = resolve_host_npx_fallback_executable_with_effective_env(
+        let overridden = resolve_host_npx_fallback_executable_with_host_path(
             &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
             &["PATH".to_string()],
             Some(temp.path()),
+            host_path,
         );
 
+        assert_eq!(
+            PathBuf::from(inherited),
+            inherited_bin.join("npx"),
+            "host PATH must be honored when nothing removes it"
+        );
         assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
         assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
     }

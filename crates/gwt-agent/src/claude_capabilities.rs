@@ -101,7 +101,17 @@ fn detect_claude_workflows_enabled() -> bool {
 /// spawns a subprocess): the Launch Wizard captures this once at open time,
 /// not on every render.
 pub fn detect_claude_version_raw() -> Option<String> {
-    let request = gwt_core::process::ProcessPlanRequest::new("claude").arg("--version");
+    detect_claude_version_raw_in_env(&[])
+}
+
+/// [`detect_claude_version_raw`] with `env` layered over the host environment
+/// for executable lookup and the probe child. The process environment is
+/// never mutated (Issue #3895), so fixtures inject their `PATH` here.
+pub(crate) fn detect_claude_version_raw_in_env(env: &[(&str, &std::ffi::OsStr)]) -> Option<String> {
+    let request = env.iter().fold(
+        gwt_core::process::ProcessPlanRequest::new("claude").arg("--version"),
+        |request, (key, value)| request.env(key, value),
+    );
     let output = match gwt_core::process::resolved_command(request) {
         Ok(mut command) => command.output().ok()?,
         Err(error) => {
@@ -260,19 +270,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn live_version_probe_resolves_real_bun_global_placeholder_fixture() {
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture =
             gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
                 .expect("create real Windows Bun fixture");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
-        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
 
         assert_eq!(
-            detect_claude_version_raw().as_deref(),
+            detect_claude_version_raw_in_env(&windows_fixture_env(&fixture)).as_deref(),
             Some("2.1.210 (Claude Code)")
         );
     }
@@ -280,9 +284,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn live_version_probe_rejects_real_bun_global_placeholder_fixture_without_safe_target() {
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture =
             gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
@@ -290,11 +291,24 @@ mod tests {
         fixture
             .remove_safe_targets()
             .expect("remove safe redirect targets");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
-        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
 
-        assert_eq!(detect_claude_version_raw(), None);
+        assert_eq!(
+            detect_claude_version_raw_in_env(&windows_fixture_env(&fixture)),
+            None
+        );
+    }
+
+    /// Probe environment for the real Windows Bun fixture, layered over the
+    /// host environment for the probe only (Issue #3895).
+    #[cfg(windows)]
+    fn windows_fixture_env(
+        fixture: &gwt_core::test_support::WindowsBunClaudeFixture,
+    ) -> [(&'static str, &std::ffi::OsStr); 3] {
+        [
+            ("PATH", fixture.bun_bin.as_os_str()),
+            ("PATHEXT", std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD")),
+            ("USERPROFILE", fixture.profile.as_os_str()),
+        ]
     }
 
     #[test]
