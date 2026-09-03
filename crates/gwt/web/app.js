@@ -4658,8 +4658,12 @@
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
-        // stack. The arrow defers to the alertsToasts binding (created below).
-        pushAlertToast: (notice) => alertsToasts.push(notice),
+        // stack and are recorded into the notification center history
+        // (FR-011). Both bindings are created below; the arrow defers to them.
+        pushAlertToast: (notice) => {
+          notificationCenter.record({ kind: "board-mention", ...notice });
+          alertsToasts.push(notice);
+        },
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         activeWorkspace,
@@ -4723,7 +4727,7 @@
       // createAgentCompletionNotifier; this only renders. Singleton via id; the
       // whole card jumps to the project tab.
       function showAgentCompletionToast(notice) {
-        alertsToasts.push({
+        const alert = {
           id: "agent-completion",
           level: "neutral",
           title: notice.title || "Agent notification",
@@ -4736,7 +4740,11 @@
               send({ kind: "select_project_tab", tab_id: notice.projectId });
             }
           },
-        });
+        };
+        // FR-011: the history record is independent of the transient toast
+        // (the center drops id / timeoutMs, so singletons never collapse).
+        notificationCenter.record({ kind: "agent-completion", ...alert });
+        alertsToasts.push(alert);
       }
 
       // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
@@ -4748,7 +4756,7 @@
         const flavor = notice.flavor || "needs_input";
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
-        alertsToasts.push({
+        const alert = {
           id: `attention-${notice.windowId}`,
           level,
           title: notice.title || "Agent attention",
@@ -4756,7 +4764,11 @@
           dismissible: true,
           timeoutMs,
           onActivate: () => frameWindow(notice.windowId),
-        });
+        };
+        // FR-011: recorded regardless of the toast; the history row keeps the
+        // jump-to (Sc 7) and survives the window's toast being dismissed.
+        notificationCenter.record({ kind: "attention", ...alert });
+        alertsToasts.push(alert);
       }
 
       function handleContinueWorkOutcome(event) {
@@ -6052,6 +6064,19 @@
             scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_toast":
+            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+            // into the notification center history FIRST and independently of
+            // any display path, so events that fire while no Issue window is
+            // open (or while the operator is away) are never lost. The backend
+            // IssueMonitorToast carries {level, message, issue_number} only —
+            // the title is a literal.
+            notificationCenter.record({
+              kind: "issue-monitor",
+              level: event?.level,
+              title: "Issue Monitor",
+              message: event?.message,
+              issueNumber: event?.issue_number,
+            });
             // SPEC #3200 FR-034: also surface as a persistent, scrollable side
             // toast so unattended autonomous events accumulate where the
             // operator can review them later.

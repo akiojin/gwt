@@ -65,6 +65,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/autonomous-notifications.test.mjs \
   crates/gwt/web/__tests__/toast-host.test.mjs \
   crates/gwt/web/__tests__/notification-center.test.mjs \
+  crates/gwt/web/__tests__/notification-fanout.test.mjs \
   crates/gwt/web/__tests__/project-switcher.test.mjs \
   crates/gwt/web/__tests__/project-tabs-renderer.test.mjs \
   crates/gwt/web/__tests__/close-project-tab.smoke.test.mjs \
