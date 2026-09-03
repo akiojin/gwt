@@ -8,7 +8,9 @@ struct ProbeSite {
 const AGENT_PROBE_SITES: &[ProbeSite] = &[
     ProbeSite {
         relative_path: "crates/gwt-agent/src/claude_capabilities.rs",
-        function_name: "detect_claude_version_raw",
+        // `detect_claude_version_raw` delegates here; this is the function
+        // that spawns the probe (Issue #3895).
+        function_name: "detect_claude_version_raw_in_env",
     },
     ProbeSite {
         relative_path: "crates/gwt-core/src/usage/claude.rs",
