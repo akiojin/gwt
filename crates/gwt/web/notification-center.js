@@ -95,6 +95,9 @@ export function createNotificationCenter({
   const unread = new Set();
   const unreadListeners = new Set();
   const openListeners = new Set();
+  // FR-017: surface errors keyed by source. A recurring failure is ONE row
+  // with an occurrence count; a resolved failure falls to read automatically.
+  const errorRows = new Map();
 
   function liveUnread() {
     for (const item of unread) {
@@ -265,6 +268,101 @@ export function createNotificationCenter({
     return item;
   }
 
+  function liveErrorRow(key) {
+    const entry = errorRows.get(key);
+    if (!entry) {
+      return null;
+    }
+    if (!entry.item.isConnected) {
+      errorRows.delete(key);
+      return null;
+    }
+    return entry;
+  }
+
+  function renderErrorCount(item, count) {
+    let badge = item.querySelector(".notification-center__count");
+    if (count <= 1) {
+      badge?.remove();
+      return;
+    }
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "notification-center__count";
+      (item.querySelector(".notification-center__title") || item).appendChild(badge);
+    }
+    badge.textContent = `×${count}`;
+    badge.setAttribute("title", `${count} occurrences`);
+  }
+
+  /**
+   * Record a surface error (FR-017). `error` = { key, title?, message?,
+   * onActivate? }. Same `key` while its row is still in the history → the
+   * row is reused: occurrence count +1, message/time refreshed, unread again.
+   */
+  function recordError(error) {
+    if (!error) {
+      return null;
+    }
+    const key = error.key == null ? "" : String(error.key);
+    const existing = key ? liveErrorRow(key) : null;
+    if (existing) {
+      existing.count += 1;
+      const item = existing.item;
+      if (error.message != null) {
+        let message = item.querySelector(".notification-center__message");
+        if (!message) {
+          message = document.createElement("div");
+          message.className = "notification-center__message";
+          const time = item.querySelector(".notification-center__time");
+          item.insertBefore(message, time);
+        }
+        message.textContent = String(error.message);
+      }
+      const time = item.querySelector(".notification-center__time");
+      if (time) {
+        const stamp = now();
+        time.dateTime = stamp.toISOString();
+        time.textContent = formatClock(stamp);
+      }
+      item.dataset.resolved = "false";
+      renderErrorCount(item, existing.count);
+      if (!isOpen) {
+        unread.add(item);
+      }
+      notifyUnread();
+      return item;
+    }
+    const item = record({
+      kind: "error",
+      level: "error",
+      title: error.title,
+      message: error.message,
+      onActivate: error.onActivate,
+    });
+    if (!item) {
+      return null;
+    }
+    if (key) {
+      item.dataset.errorKey = key;
+      item.dataset.resolved = "false";
+      errorRows.set(key, { item, count: 1 });
+    }
+    return item;
+  }
+
+  /** Mark the error row for `key` resolved and read. Returns whether one existed. */
+  function resolveError(key) {
+    const existing = key == null ? null : liveErrorRow(String(key));
+    if (!existing) {
+      return false;
+    }
+    existing.item.dataset.resolved = "true";
+    unread.delete(existing.item);
+    notifyUnread();
+    return true;
+  }
+
   function open() {
     if (isOpen) {
       return;
@@ -321,6 +419,7 @@ export function createNotificationCenter({
   function clearAll() {
     stack.clear();
     unread.clear();
+    errorRows.clear();
     syncEmptyState();
     notifyUnread();
   }
@@ -344,6 +443,8 @@ export function createNotificationCenter({
   return Object.freeze({
     mount,
     record,
+    recordError,
+    resolveError,
     open,
     close,
     toggle,

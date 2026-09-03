@@ -249,3 +249,49 @@ test("renderNotificationBell syncs count, visibility, error emphasis, aria-label
   assert.equal(button.getAttribute("aria-label"), "Notifications (120 unread, includes errors)");
   assert.equal(button.getAttribute("aria-expanded"), "true");
 });
+
+// --- FR-017: surface errors — dedup by key, occurrence count, auto-read on resolve ---
+
+test("recordError dedups by key: repeats bump the occurrence count on ONE error row", () => {
+  const { document, center } = setup();
+  const first = center.recordError({ key: "issue-monitor:last_error", title: "Issue Monitor", message: "scan failed" });
+  const again = center.recordError({ key: "issue-monitor:last_error", title: "Issue Monitor", message: "scan failed" });
+  assert.equal(first, again, "same key reuses the row");
+  assert.equal(center.count(), 1);
+  assert.equal(first.dataset.level, "error");
+  assert.equal(first.dataset.kind, "error");
+  assert.equal(first.dataset.errorKey, "issue-monitor:last_error");
+  assert.equal(first.querySelector(".notification-center__count")?.textContent, "×2", "occurrence count is visible");
+  assert.equal(center.unreadCount(), 1, "one unread row, not two");
+  assert.equal(center.unreadHasError(), true);
+  center.recordError({ key: "issue-window:w1:load", title: "Issue window", message: "gh: rate_limited" });
+  assert.equal(center.count(), 2, "different keys are different rows");
+});
+
+test("resolveError marks the row resolved and read; a later recurrence re-flags the SAME row unread", () => {
+  const { document, center } = setup();
+  const row = center.recordError({ key: "k", title: "Issue window", message: "boom" });
+  assert.equal(center.unreadCount(), 1);
+  assert.equal(center.resolveError("k"), true);
+  assert.equal(row.dataset.resolved, "true");
+  assert.equal(center.unreadCount(), 0, "resolved errors fall to read automatically");
+  assert.equal(center.unreadHasError(), false);
+  assert.equal(center.count(), 1, "history keeps the record");
+  assert.equal(center.resolveError("unknown"), false);
+
+  const again = center.recordError({ key: "k", title: "Issue window", message: "boom" });
+  assert.equal(again, row, "recurrence reuses the row instead of piling up duplicates");
+  assert.equal(row.dataset.resolved, "false");
+  assert.equal(row.querySelector(".notification-center__count")?.textContent, "×2");
+  assert.equal(center.unreadCount(), 1, "the recurrence is unread again");
+});
+
+test("a dismissed error row does not resurrect on recurrence", () => {
+  const { document, center } = setup();
+  const row = center.recordError({ key: "k", title: "t", message: "m" });
+  click(document, row.querySelector(".notification-center__dismiss"));
+  assert.equal(center.count(), 0);
+  const fresh = center.recordError({ key: "k", title: "t", message: "m" });
+  assert.notEqual(fresh, row, "a new row is created after the old one was dismissed");
+  assert.equal(fresh.querySelector(".notification-center__count"), null, "count starts over (single occurrence shows no ×N)");
+});

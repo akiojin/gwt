@@ -151,3 +151,13 @@ test("issue_monitor_toast is never coalesced by the receive dispatcher (history 
   assert.equal(DEFAULT_COALESCE_KINDS.has("issue_monitor_toast"), false);
   assert.equal(DEFAULT_COALESCE_KINDS.has("issue_monitor_status"), true, "status stays latest-wins");
 });
+
+// --- FR-017: surface error seams into the Issue surface ---
+
+test("app.js injects the FR-017 error seams into the Issue surface (report / resolve / open)", () => {
+  const call = appSource.match(/createKnowledgeKanbanSurface\(\{[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(call, "createKnowledgeKanbanSurface call found");
+  assert.match(call, /reportSurfaceError:\s*\(error\)\s*=>\s*notificationCenter\.recordError\(error\)/);
+  assert.match(call, /resolveSurfaceError:\s*\(key\)\s*=>\s*notificationCenter\.resolveError\(key\)/);
+  assert.match(call, /openNotificationCenter:\s*\(\)\s*=>\s*notificationCenter\.open\(\)/);
+});

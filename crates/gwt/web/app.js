@@ -4619,6 +4619,12 @@
         openWorkspaceCleanup: (candidate, sourceWindowId) =>
           openWorkspaceCleanup(candidate, sourceWindowId),
         getResumeBounds: () => visibleBounds(),
+        // SPEC #3206 FR-017: surface errors become notification-center error
+        // rows (dedup by key, occurrence count, auto-read on resolve). Lazy:
+        // the center is constructed after this factory.
+        reportSurfaceError: (error) => notificationCenter.recordError(error),
+        resolveSurfaceError: (key) => notificationCenter.resolveError(key),
+        openNotificationCenter: () => notificationCenter.open(),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log

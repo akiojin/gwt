@@ -5779,8 +5779,8 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
       defined.add(m[1]);
     }
   }
-  const blocks = frontendStyle.match(/\.(?:notification-center|op-rail__badge)[^{}]*\{[^}]*\}/g) ?? [];
-  assert.ok(blocks.length >= 8, `expected the .notification-center / .op-rail__badge rule family (got ${blocks.length})`);
+  const blocks = frontendStyle.match(/\.(?:notification-center|op-rail__badge|surface-error-indicator)[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 12, `expected the .notification-center / .op-rail__badge / .surface-error-indicator rule family (got ${blocks.length})`);
   for (const block of blocks) {
     assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/, `raw hex in ${block.split("\n")[0]}`);
     assert.doesNotMatch(block, /\brgba?\(/, `raw rgb in ${block.split("\n")[0]}`);
