@@ -46,7 +46,6 @@ mod title_summary_guard;
 pub mod tray;
 pub mod trusted_store;
 pub mod update;
-pub(crate) mod verification_admission;
 pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;

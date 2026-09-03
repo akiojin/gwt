@@ -38,6 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::CliEnv;
 
+/// Issue #3913: `verify.run` host admission — the lease's in-process claimant.
+pub(crate) mod admission;
+
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
 /// Upper bound so a typo cannot park the host for a day.

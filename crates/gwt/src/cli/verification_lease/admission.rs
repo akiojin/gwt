@@ -456,7 +456,7 @@ impl BoardNotice {
 /// `max_wait`. A wait that outlives the budget answers with a `deferred`
 /// error naming what the host was busy with; the caller reports a granted
 /// admission through [`Admission::summary`].
-pub(super) fn admit<E: CliEnv>(
+pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
     worktree: &Path,
     max_wait: Duration,
@@ -839,7 +839,7 @@ mod tests {
             .args([
                 "--ignored",
                 "--exact",
-                "cli::verification_admission::tests::fake_heavy_process_parks",
+                "cli::verification_lease::admission::tests::fake_heavy_process_parks",
             ])
             .current_dir(sibling.path())
             .stdout(std::process::Stdio::null())

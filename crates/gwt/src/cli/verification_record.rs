@@ -3725,8 +3725,10 @@ pub(super) fn run<E: CliEnv>(
             // Issue #3913: claim host admission (the SPEC #3576 lease plus a
             // quiet host) before anything heavy starts. A budget overrun
             // answers `deferred` without writing a record.
-            let max_wait = crate::cli::verification_admission::resolve_max_wait(max_wait_secs)?;
-            let admission = crate::cli::verification_admission::admit(env, &worktree, max_wait)?;
+            let max_wait =
+                crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
+            let admission =
+                crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
             out.push_str(&admission.summary());
             out.push('\n');
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
