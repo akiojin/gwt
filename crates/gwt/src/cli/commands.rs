@@ -204,6 +204,11 @@ pub enum PrCommand {
     List {
         stale_after_hours: Option<i64>,
         escalate_after_cycles: Option<u32>,
+        /// Issue #3891: bypass the TTL cache and the budget throttle.
+        refresh: bool,
+        /// Issue #3891 AC-2: heavy fields to hydrate; `None` keeps the crate
+        /// default (checks, no body).
+        include: Option<gwt_git::PrInventoryInclude>,
     },
     Create {
         base: String,
