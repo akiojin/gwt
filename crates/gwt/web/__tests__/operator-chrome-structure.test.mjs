@@ -5716,3 +5716,111 @@ test("app.css must not redeclare display for the Workspace overview shell", () =
   const shellBlock = componentsCss.match(/\.workspace-overview-shell\s*\{[^}]*\}/)?.[0] ?? "";
   assert.match(shellBlock, /display\s*:\s*grid/, "components.css owns the grid layout");
 });
+
+// --- SPEC #3206 v2: notification center (bell + unread badge + drawer) ---
+
+test("SPEC #3206 v2: the System rail group carries the notification bell with an unread badge (FR-009)", () => {
+  const system = document.querySelector(".op-rail__group--system");
+  assert.ok(system, "System rail group exists");
+  const bell = system.querySelector('.op-rail__item[data-cmd="toggle-notifications"]');
+  assert.ok(bell, "bell lives in the System group and dispatches through data-cmd");
+  assert.equal(bell.id, "op-notifications-button");
+  assert.equal(bell.getAttribute("type"), "button");
+  assert.ok(bell.getAttribute("aria-label"), "icon-only button carries an aria-label");
+  assert.equal(bell.getAttribute("aria-controls"), "notification-center");
+  assert.equal(bell.getAttribute("aria-expanded"), "false", "drawer closed at rest");
+  const icon = bell.querySelector(".op-rail__icon");
+  assert.equal(icon?.getAttribute("aria-hidden"), "true");
+  const flyout = bell.querySelector(".op-rail__flyout");
+  assert.equal(flyout?.getAttribute("aria-hidden"), "true");
+  assert.ok(flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim());
+  const badge = bell.querySelector(".op-rail__badge");
+  assert.ok(badge, "unread badge element is part of the bell");
+  assert.equal(badge.hidden, true, "badge hidden at rest (0 unread)");
+  assert.equal(badge.getAttribute("aria-hidden"), "true", "count is mirrored into the aria-label instead");
+  // FR-009 keeps the rail group order intact (no new group).
+  const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
+    (group) => group.getAttribute("aria-label"),
+  );
+  assert.deepEqual(groups, ["Navigate", "Windows", "Agents", "System"]);
+});
+
+test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle, Esc closes, badge is wired (FR-009 / FR-014)", () => {
+  assert.match(
+    appSource,
+    /case "toggle-notifications":\s*\n\s*notificationCenter\.toggle\(\);/,
+    "app.js must route toggle-notifications to the center (otherwise the bell is a no-op)",
+  );
+  assert.match(
+    appSource,
+    /if \(notificationCenter\.isOpen\(\)\) \{\s*\n\s*notificationCenter\.close\(\);\s*\n\s*event\.preventDefault\(\);/,
+    "Esc closes the drawer through the shared keydown chain",
+  );
+  assert.match(appSource, /import \{ createNotificationCenter, renderNotificationBell \} from "\/notification-center\.js";/);
+  assert.match(appSource, /const notificationCenter = createNotificationCenter\(\{\s*document/);
+  assert.match(
+    appSource,
+    /notificationCenter\.mount\(document\.body\)/,
+    "drawer mounts on body, never inside the rail stacking context",
+  );
+  assert.match(
+    appSource,
+    /notificationCenter\.onUnreadChange\(\(count, hasError\) =>[\s\S]{0,400}renderNotificationBell\(\{/,
+    "unread changes re-render the bell badge",
+  );
+});
+
+test("SPEC #3206 v2: notification-center / badge CSS only references defined Operator tokens (FR-015)", () => {
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const typographyCss = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+  const defined = new Set();
+  for (const source of [tokensCss, typographyCss, frontendStyle]) {
+    for (const m of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      defined.add(m[1]);
+    }
+  }
+  const blocks = frontendStyle.match(/\.(?:notification-center|op-rail__badge)[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 8, `expected the .notification-center / .op-rail__badge rule family (got ${blocks.length})`);
+  for (const block of blocks) {
+    assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/, `raw hex in ${block.split("\n")[0]}`);
+    assert.doesNotMatch(block, /\brgba?\(/, `raw rgb in ${block.split("\n")[0]}`);
+    for (const m of block.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+      assert.ok(defined.has(m[1]), `notification center references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`);
+    }
+  }
+  // level → accent rim via state tokens
+  assert.match(frontendStyle, /\.notification-center__item\[data-level="error"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(frontendStyle, /\.notification-center__item\[data-level="warn"\]\s*\{[^}]*--color-state-needs-input/);
+  assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
+  // history scrolls inside the drawer body
+  assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);
+  // User ruling 2026-09-04: errors are read in ONE place, so the Issue
+  // surface carries no indicator of its own — its CSS must not ship.
+  assert.doesNotMatch(frontendStyle, /surface-error-indicator/);
+});
+
+test("SPEC #3206 v2: the --z-* ladder keeps the persistent drawer below the transient notice stack (FR-015)", () => {
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const bareRoot = tokensCss.match(/(?:^|\n):root\s*\{([^}]*)\}/)?.[1] ?? "";
+  const z = {};
+  for (const m of bareRoot.matchAll(/(--z-[a-z0-9-]+)\s*:\s*(\d+)\s*;/g)) {
+    z[m[1]] = Number(m[2]);
+  }
+  for (const name of ["--z-rail", "--z-notification-center", "--z-modal", "--z-notice-stack"]) {
+    assert.ok(Number.isFinite(z[name]), `${name} must be defined as a number in the bare :root block`);
+  }
+  assert.ok(z["--z-rail"] < z["--z-notification-center"], "drawer sits above the rail");
+  assert.ok(z["--z-notification-center"] < z["--z-modal"], "modals still cover the drawer");
+  assert.ok(z["--z-notification-center"] < z["--z-notice-stack"], "persistent UI never covers transient alerts");
+  assert.match(
+    frontendStyle,
+    /\.notification-center-drawer\s*\{[^}]*z-index:\s*var\(--z-notification-center\)/,
+    "the drawer takes its tier from the token, not a raw number",
+  );
+  assert.match(
+    frontendStyle,
+    /\.operator-notice-stack\s*\{[^}]*z-index:\s*var\(--z-notice-stack\)/,
+    "the notice stack takes its tier from the token",
+  );
+  assert.match(frontendStyle, /\.op-rail\s*\{[^}]*z-index:\s*var\(--z-rail\)/);
+});

@@ -26,6 +26,7 @@ pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_search;
+mod index_status_projection;
 pub mod index_worker;
 pub mod issue_cache;
 pub mod issue_monitor;
@@ -139,20 +140,22 @@ pub use issue_monitor::{
     try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousHandoffDeliveryAttempt,
     AutonomousHandoffDeliveryFailureOutcome, AutonomousHandoffDeliveryPreparation,
     AutonomousHandoffResumption, AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase,
-    AutonomousReviewDispatch, AutonomousWaitDeclaration, AutonomousWaitOutcome,
-    EligibilityDecision, FailureClass, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
-    IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
-    IssueMonitorFailoverOutcome, IssueMonitorFailure, IssueMonitorInboxItem, IssueMonitorIssue,
-    IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
-    IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy,
-    IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue, IssueMonitorPrefs,
-    IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness, IssueMonitorReleasedFailure,
-    IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary,
-    IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
-    IssueMonitorStopTarget, IssueMonitorWaitSummary, MonitorInboxState, PendingIssueMonitorEffect,
-    AUTONOMOUS_WAIT_MAX_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    AutonomousReviewDispatch, AutonomousSteeringRequest, AutonomousWaitDeclaration,
+    AutonomousWaitOutcome, EligibilityDecision, IssueMonitorAgentStatus,
+    IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
+    IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,
+    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorFailure,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchPlan,
+    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest,
+    IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
+    IssueMonitorPrefs, IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness,
+    IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
+    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
+    IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
+    IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary,
+    MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

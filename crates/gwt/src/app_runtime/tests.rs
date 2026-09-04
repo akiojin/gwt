@@ -3482,6 +3482,12 @@ fn insert_exited_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str, ex
         test_pane_cwd(),
     )
     .expect("exited test pane");
+    // Windows ConPTY waits for the terminal to answer its startup cursor
+    // position query before the attached command can finish. Production does
+    // this from the frontend; this fixture has no frontend, so complete the
+    // handshake explicitly before waiting for the natural exit.
+    #[cfg(windows)]
+    let _ = pane.pty().write_input(b"\x1b[1;1R");
     if let Ok(mut reader) = pane.reader() {
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
@@ -3530,6 +3536,14 @@ fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
 /// keep them deterministic on the already-exited path they were written for.
 /// Coverage for the still-running path belongs to Issue #3744, which restores
 /// a bounded guarantee instead of dropping the proof.
+///
+/// Twenty seconds preserves the established fixture budget while allowing
+/// shared CI runners to reap a PTY process tree under saturation. Both waits
+/// poll positive settlement signals, so this is an upper bound rather than a
+/// fixed delay (Issue #3751).
+const TEST_PTY_STOP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(20);
+const TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
     let pane = runtime
         .runtimes
@@ -3541,7 +3555,7 @@ fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
         .expect("test pane")
         .kill()
         .expect("kill test child");
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
     loop {
         if pane
             .lock()
@@ -3555,7 +3569,42 @@ fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
             Instant::now() < deadline,
             "test child for {window_id} did not exit before the deadline"
         );
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_test_pty_stop_settlement(
+    sessions_dir: &Path,
+    session_id: &str,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    child_pid: u32,
+    child_started_at: u64,
+) {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let runtime_path = gwt_agent::runtime_state_path(sessions_dir, session_id);
+    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
+    loop {
+        let process_tree_exited =
+            !gwt::process::exact_pty_process_tree_is_alive(child_pid, child_started_at);
+        let session_stopped = gwt_agent::Session::load(&session_path)
+            .is_ok_and(|session| session.status == gwt_agent::AgentStatus::Stopped);
+        let terminal_proof_persisted = gwt_agent::SessionRuntimeState::load(&runtime_path)
+            .is_ok_and(|proof| {
+                proof.status == gwt_agent::AgentStatus::Stopped
+                    && proof.execution_identity.as_ref() == Some(identity)
+                    && proof.runtime_incarnation == Some(incarnation)
+                    && proof.child_pid == Some(child_pid)
+                    && proof.child_started_at == Some(child_started_at)
+            });
+        if process_tree_exited && session_stopped && terminal_proof_persisted {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "test PTY stop did not settle before the deadline: session={session_id}, process_tree_exited={process_tree_exited}, session_stopped={session_stopped}, terminal_proof_persisted={terminal_proof_persisted}",
+        );
+        thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
     }
 }
 
@@ -3662,6 +3711,9 @@ fn sample_runtime_with_events(
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        terminal_close_candidates: HashMap::new(),
+        terminal_convergence_scan_in_flight: false,
+        terminal_close_grace: Duration::from_secs(60),
         work_merged_branches: HashMap::new(),
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
@@ -7347,10 +7399,10 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
         |proxy, project_root| {
             proxy.send(UserEvent::ProjectIndexStatus {
                 project_root: project_root.display().to_string(),
-                status: gwt::ProjectIndexStatusView::new(
+                status: Box::new(gwt::ProjectIndexStatusView::new(
                     gwt::ProjectIndexStatusState::Ready,
                     "ready",
-                ),
+                )),
             });
         },
     );
@@ -7485,6 +7537,8 @@ fn issue_monitor_autonomous_record(
         reviewed_sha: None,
         review_passed: None,
         wait: None,
+        needs_human_kind: None,
+        steering: None,
     }
 }
 
@@ -30004,10 +30058,14 @@ fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit(
 
     runtime.stop_window_runtime(&window_id);
 
-    assert!(!gwt::process::exact_pty_process_tree_is_alive(
+    wait_for_test_pty_stop_settlement(
+        &runtime.sessions_dir,
+        session_id,
+        &identity,
+        incarnation,
         child_pid,
-        child_started_at
-    ));
+        child_started_at,
+    );
     assert_eq!(
         gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
             .expect("load terminal Session")
@@ -32950,6 +33008,128 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         .count();
     assert_eq!(agent_windows, 1);
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+}
+
+/// Issue #3934: seed one Active owner whose durable holder is in `status` and
+/// has no runtime sidecar anywhere, and return its worktree inventory.
+#[cfg(test)]
+fn seed_defunct_active_owner(
+    sessions_dir: &std::path::Path,
+    repo: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+    status: gwt_agent::AgentStatus,
+) -> Vec<std::path::PathBuf> {
+    gwt::cli::execution_state::materialize_at_launch(
+        worktree,
+        owner.kind,
+        owner.number,
+        session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize Active execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        worktree,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("ensure generation ledger");
+    let binding = gwt::cli::execution_state::current_execution_binding(worktree, owner)
+        .expect("load current binding")
+        .expect("current binding");
+    let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.agent_session_id = Some(format!("native-{session_id}"));
+    session.linked_issue_number = Some(owner.number);
+    session.restore_window_on_startup = false;
+    session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: session.repo_hash.clone().expect("repo hash"),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: binding,
+        capability_generation: 1,
+    });
+    session.update_status(status);
+    session
+        .save(sessions_dir)
+        .expect("save defunct holder Session");
+    gwt::worktree_inventory::enumerate_worktrees(repo, None)
+        .expect("worktree inventory")
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
+}
+
+/// Issue #3934: a closed agent window leaves its Session durably `Idle` with
+/// no runtime sidecar anywhere. The coarse liveness prefilter reads that as
+/// "cannot tell" and used to drop the owner before the exact stage ever looked
+/// at it, so the generation was held for good and the work could only be
+/// restarted under a fresh Issue number. The prefilter may narrow the work the
+/// exact stage does; it must never be what decides the outcome.
+#[test]
+fn startup_reaper_reclaims_a_durably_idle_holder_the_prefilter_calls_unknown() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("idle-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/idle-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3934,
+    };
+    let session_id = "startup-idle-holder";
+    let worktrees = seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/idle-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Idle,
+    );
+
+    assert!(
+        matches!(
+            runtime.classify_nonlocal_active_owner_liveness(session_id),
+            ActiveOwnerLiveness::Unknown
+        ),
+        "the coarse prefilter still cannot classify a durably Idle holder"
+    );
+
+    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+
+    assert_eq!(
+        summary.reaped, 1,
+        "the exact stage decides, not the prefilter"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
 }
 
 /// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
@@ -41747,6 +41927,8 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 reviewed_sha: None,
                 review_passed: None,
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -59290,7 +59472,11 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
         &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
         "2026-08-10T00:00:00Z",
     );
-    monitor.escalate_to_needs_human(42, "operator decision required");
+    monitor.escalate_to_needs_human(
+        42,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "operator decision required",
+    );
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("needs-human prefs");
     let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
     gwt::pm_registry::save_pm_loop_state(
@@ -60559,6 +60745,82 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-08-12T07:00:00Z"));
 }
 
+/// Issue #3934: the generation reaper used to run once, during bootstrap. A
+/// holder that died after that kept its owner unlaunchable until someone
+/// restarted the GUI, which is why 45 Issues had to be re-registered under
+/// fresh numbers. Every scan must try the recovery.
+#[test]
+fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3934,
+    };
+    let session_id = "scan-defunct-holder";
+    // The scan worker resolves its own paths from the process-global HOME, so
+    // the holder has to be durable where that worker will look for it.
+    seed_defunct_active_owner(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &repo,
+        &repo,
+        "work/scan-defunct-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Interrupted,
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+        "the owner starts the scan holding a live-looking generation"
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+
+    let _outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        "2026-09-04T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan runs");
+
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the scan must release a generation whose holder is gone"
+    );
+}
+
 #[test]
 fn scheduled_scan_defers_to_live_daemon_without_remote_io_or_launch() {
     let _env_lock = env_test_lock()
@@ -61754,4 +62016,517 @@ fn app_runtime_issue_monitor_configure_profile_wizard_injects_hermes_launch_choi
         })
         .expect("launch wizard view");
     assert_hermes_choices_injected(view, "open_issue_monitor_configure_profile_wizard_events");
+}
+
+// Issue #3927 (SPEC #3340 T-624 / AS-40〜42 / FR-045〜046): the Tao thread
+// tracks a grace candidate per eligible window, resets it on eligibility loss,
+// and closes only the exact window / Session / lifecycle generation it saw.
+#[test]
+fn terminal_convergence_grace_candidate_resets_and_closes_the_exact_window() {
+    use crate::app_runtime::terminal_convergence::{
+        TerminalCloseEligibility, TerminalCloseReason, TerminalWindowObservation,
+    };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    runtime
+        .window_lifecycle_generations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(window_id.clone(), 7);
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let grace = Duration::from_secs(60);
+    let t0 = Instant::now();
+    let observation = |eligibility: TerminalCloseEligibility, generation: u64| {
+        vec![TerminalWindowObservation {
+            window_id: window_id.clone(),
+            session_id: "session-1".to_string(),
+            lifecycle_generation: Some(generation),
+            eligibility,
+        }]
+    };
+    let eligible = TerminalCloseEligibility::Eligible(TerminalCloseReason::SettledExecution);
+
+    runtime.terminal_convergence_observed_events_at(grace, observation(eligible, 7), t0);
+    assert_eq!(runtime.terminal_close_grace, grace);
+    let since = runtime
+        .terminal_close_candidates
+        .get(&window_id)
+        .expect("eligible observation starts a candidate")
+        .since;
+    assert_eq!(since, t0);
+
+    // A repeated eligible observation keeps the original start.
+    runtime.terminal_convergence_observed_events_at(
+        grace,
+        observation(eligible, 7),
+        t0 + Duration::from_secs(30),
+    );
+    assert_eq!(runtime.terminal_close_candidates[&window_id].since, t0);
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "the window stays open inside the grace"
+    );
+
+    // Eligibility loss resets the candidate; user activity is not consulted.
+    runtime.terminal_convergence_observed_events_at(
+        grace,
+        observation(TerminalCloseEligibility::Ineligible("obligation_open"), 7),
+        t0 + Duration::from_secs(40),
+    );
+    assert!(runtime.terminal_close_candidates.is_empty());
+    runtime.terminal_convergence_observed_events_at(
+        grace,
+        observation(eligible, 7),
+        t0 + Duration::from_secs(50),
+    );
+    assert_eq!(
+        runtime.terminal_close_candidates[&window_id].since,
+        t0 + Duration::from_secs(50)
+    );
+    runtime.close_expired_terminal_window_candidates_at(t0 + Duration::from_secs(100));
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "fifty seconds since the fresh candidate is inside the grace"
+    );
+
+    // A stale lifecycle generation never closes the current window.
+    runtime.terminal_convergence_observed_events_at(
+        grace,
+        observation(eligible, 6),
+        t0 + Duration::from_secs(50),
+    );
+    let events = runtime.close_expired_terminal_window_candidates_at(t0 + Duration::from_secs(200));
+    assert!(events.is_empty());
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(runtime.terminal_close_candidates.is_empty());
+
+    // The exact generation closes through the shared finalizer once the
+    // grace elapsed.
+    runtime.terminal_convergence_observed_events_at(
+        grace,
+        observation(eligible, 7),
+        t0 + Duration::from_secs(300),
+    );
+    let events = runtime.close_expired_terminal_window_candidates_at(t0 + Duration::from_secs(360));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+    assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(runtime.terminal_close_candidates.is_empty());
+    assert_eq!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "the terminal close queues exactly one detached finalizer"
+    );
+}
+
+// Issue #3927 (SPEC #3340 T-627 / PM ruling): the settlement bridge releases
+// the Monitor slot through the exact terminal-delivery transition (daemon
+// control, local exact-CAS fallback here) and refuses a stale identity; the
+// observer then classifies a durably closed Issue as eligible while a window
+// whose Session has no Issue link is never eligible.
+#[test]
+fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibility() {
+    use crate::app_runtime::terminal_convergence::{
+        observe_terminal_windows_in_background,
+        settle_issue_monitor_terminal_delivery_in_background, TerminalCloseEligibility,
+        TerminalCloseReason, TerminalWindowSnapshot,
+    };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let window_id = "tab-1::agent-42".to_string();
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.clone(),
+            }],
+            launched_claims: std::collections::BTreeMap::from([(42, "claim-live".to_string())]),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+    assert_eq!(seeded.record_attempt(42), 1, "one attempt already spent");
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded.prefs()).expect("seed prefs");
+
+    // Settlement bridge: exact identity commits, stale identity is refused.
+    assert!(
+        settle_issue_monitor_terminal_delivery_in_background(
+            &repo,
+            "tab-1::agent-99",
+            42,
+            Duration::from_secs(5)
+        )
+        .is_err(),
+        "a window the Monitor does not bind cannot settle the launch"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "a refused settlement mutates nothing"
+    );
+    settle_issue_monitor_terminal_delivery_in_background(
+        &repo,
+        &window_id,
+        42,
+        Duration::from_secs(5),
+    )
+    .expect("exact settlement commits through the local fallback");
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        persisted.launched_issues.is_empty(),
+        "the settlement released the Monitor slot"
+    );
+    assert_eq!(
+        persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .map(|record| record.attempts),
+        Some(1),
+        "settlement spends no attempt"
+    );
+
+    // Observer classification: a durable closed-Issue record is eligible; a
+    // Session without an Issue link is not.
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            closure_records: vec![gwt::issue_monitor::IssueClosureRecord {
+                issue_number: 42,
+                generation: 1,
+                state: gwt::issue_monitor::IssueClosureState::Closed,
+                evidence: gwt::issue_monitor::IssueClosureEvidence::DirectRelease,
+                issue_updated_at: None,
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed closed prefs");
+    let mut linked = gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+    linked.id = "session-linked".to_string();
+    linked.linked_issue_number = Some(42);
+    linked.update_status(gwt_agent::AgentStatus::Idle);
+    linked.save(&sessions_dir).expect("save linked session");
+    let mut manual = gwt_agent::Session::new(&repo, "feature/manual", gwt_agent::AgentId::Codex);
+    manual.id = "session-manual".to_string();
+    manual.update_status(gwt_agent::AgentStatus::Idle);
+    manual.save(&sessions_dir).expect("save manual session");
+
+    let snapshot = |window_id: &str, session_id: &str| TerminalWindowSnapshot {
+        window_id: window_id.to_string(),
+        session_id: session_id.to_string(),
+        project_root: repo.clone(),
+        worktree_path: repo.clone(),
+        window_status: WindowProcessStatus::Running,
+        lifecycle_generation: Some(1),
+    };
+    let observations = observe_terminal_windows_in_background(
+        &sessions_dir,
+        vec![
+            snapshot(&window_id, "session-linked"),
+            snapshot("tab-1::agent-7", "session-manual"),
+        ],
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        observations[0].eligibility,
+        TerminalCloseEligibility::Eligible(TerminalCloseReason::ClosedIssue)
+    );
+    assert_eq!(
+        observations[1].eligibility,
+        TerminalCloseEligibility::Ineligible("no_linked_issue")
+    );
+}
+
+// Issue #3927 (SPEC #3340 T-625 / AS-43 / FR-047): startup restore refuses a
+// persisted window whose linked Issue is durably closed, marks the Session
+// restore-disabled, and removes its placeholder, while an unlinked
+// placeholder restores exactly as before.
+#[test]
+fn app_runtime_startup_auto_resume_refuses_closed_issue_window_and_disables_restore() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("terminal-restore");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/terminal-restore",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&worktree),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            merged_issues: vec![42],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+
+    let mut persisted = empty_workspace_state();
+    let mut closed_window = sample_window(
+        "agent-closed",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    closed_window.agent_id = Some("codex".to_string());
+    closed_window.session_id = Some("session-closed".to_string());
+    let mut open_window = sample_window(
+        "agent-open",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    open_window.agent_id = Some("codex".to_string());
+    open_window.session_id = Some("session-open".to_string());
+    persisted.windows.push(closed_window);
+    persisted.windows.push(open_window);
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-terminal".to_string(),
+        title: "Terminal Restore".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-terminal"));
+    for (session_id, native_id, linked_issue) in [
+        ("session-closed", "native-closed", Some(42)),
+        ("session-open", "native-open", None),
+    ] {
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/terminal-restore",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(native_id.to_string());
+        session.linked_issue_number = linked_issue;
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+    }
+
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let windows = runtime.tabs[0].workspace.persisted().windows.clone();
+    assert!(
+        !windows
+            .iter()
+            .any(|window| window.session_id.as_deref() == Some("session-closed")),
+        "the closed Issue's placeholder is removed before any spawn: {windows:?}"
+    );
+    assert_eq!(
+        windows
+            .iter()
+            .filter(|window| crate::runtime_support::window_is_agent_pane(window))
+            .count(),
+        1,
+        "only the unlinked placeholder is replaced by a resumed window"
+    );
+    assert!(
+        runtime
+            .pending_auto_resume_sources
+            .values()
+            .all(|source| source == "session-open"),
+        "no resume was queued for the closed Issue"
+    );
+    let refused =
+        gwt_agent::Session::load_and_migrate(&runtime.sessions_dir.join("session-closed.toml"))
+            .expect("reload refused session");
+    assert!(
+        !refused.restore_window_on_startup,
+        "the refused Session is durably restore-disabled"
+    );
+    assert_eq!(refused.status, gwt_agent::AgentStatus::Stopped);
+}
+
+// Issue #3927 (SPEC #3340 T-626 / AS-44〜45 / FR-048): a Monitor-owned
+// restored window that fails before PTY start is closed only after the
+// concrete failure is durably committed as the Issue's `error_message`; a
+// manual window that fails the same way keeps its diagnostic pane.
+#[test]
+fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is_retained() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owned_id = combined_window_id("tab-1", "agent-42");
+    let manual_id = combined_window_id("tab-1", "agent-7");
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: owned_id.clone(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+
+    let mut persisted = empty_workspace_state();
+    for raw_id in ["agent-42", "agent-7"] {
+        let mut window = sample_window(raw_id, WindowPreset::Codex, WindowProcessStatus::Running);
+        window.agent_id = Some("codex".to_string());
+        persisted.windows.push(window);
+    }
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (window_id, raw_id) in [(&owned_id, "agent-42"), (&manual_id, "agent-7")] {
+        runtime.window_lookup.insert(
+            window_id.clone(),
+            crate::app_runtime::WindowAddress {
+                tab_id: "tab-1".to_string(),
+                raw_id: raw_id.to_string(),
+            },
+        );
+    }
+    for (window_id, session_id, linked_issue) in [
+        (&owned_id, "session-owned", Some(42)),
+        (&manual_id, "session-manual", None),
+    ] {
+        let mut active = sample_active_agent_session("tab-1", window_id);
+        active.session_id = session_id.to_string();
+        active.worktree_path = repo.clone();
+        runtime
+            .active_agent_sessions
+            .insert(window_id.clone(), active);
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.linked_issue_number = linked_issue;
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let detail = "Prepared continuation no longer matches its owner generation attempt";
+
+    let events = runtime.launch_error_events(owned_id.clone(), detail.to_string(), None);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorLaunchFailed {
+                issue_number: 42,
+                ..
+            }
+        )),
+        "the failure is committed to the Issue Monitor first: {events:?}"
+    );
+    assert!(
+        !runtime.window_lookup.contains_key(&owned_id),
+        "the Monitor-owned pre-PTY failure window is closed after the commit"
+    );
+    assert!(runtime.tabs[0].workspace.window("agent-42").is_none());
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        persisted
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 42 && failed.message.contains(detail)),
+        "the concrete reason is the Issue's durable error_message: {:?}",
+        persisted.failed_issues
+    );
+    assert!(persisted.launched_issues.is_empty(), "the slot is released");
+    assert_eq!(
+        finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1
+    );
+
+    let manual_events = runtime.launch_error_events(manual_id.clone(), detail.to_string(), None);
+    assert!(
+        !manual_events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::IssueMonitorLaunchFailed { .. })),
+        "a manual window reports nothing to the Monitor"
+    );
+    assert!(
+        runtime.window_lookup.contains_key(&manual_id),
+        "the manual window keeps its diagnostic pane"
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .window("agent-7")
+            .map(|window| window.status),
+        Some(WindowProcessStatus::Error)
+    );
 }

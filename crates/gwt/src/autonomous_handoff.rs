@@ -63,6 +63,40 @@ impl AutonomousHandoffReason {
             Self::Unclassified => "unclassified",
         }
     }
+
+    /// Issue #3944 AC-1: which of the two human-answerable `needs_human` kinds
+    /// a question of this reason parks the Issue under. A boundary whose
+    /// effect cannot be undone (destructive, credential, external side effect)
+    /// asks for an approval; every other question is a choice only the user
+    /// can make.
+    pub fn needs_human_kind(self) -> crate::issue_monitor::NeedsHumanKind {
+        use crate::issue_monitor::NeedsHumanKind;
+        match self {
+            Self::IrreversibleAction | Self::SecurityCredential | Self::ExternalSideEffect => {
+                NeedsHumanKind::DestructiveChangeApproval
+            }
+            Self::SpecConflict | Self::HumanVerification | Self::Unclassified => {
+                NeedsHumanKind::UserChoiceRequired
+            }
+        }
+    }
+}
+
+/// Issue #3944 AC-5: the first non-empty line of `text`, trimmed and bounded,
+/// so a park reason stays one line however long the question body is.
+fn one_line(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= MAX_CHARS {
+        return line.to_string();
+    }
+    let mut truncated = line.chars().take(MAX_CHARS - 1).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 /// Lifecycle of one structured handoff. The Issue Monitor driver owns every
@@ -345,6 +379,22 @@ pub struct AutonomousQuestionHandoff {
 }
 
 impl AutonomousQuestionHandoff {
+    /// Issue #3944 AC-5: the question on one line, for the park reason.
+    pub fn question_line(&self) -> String {
+        one_line(&self.question)
+    }
+
+    /// Issue #3944 AC-1/AC-5: the reason line the Issue is parked under — the
+    /// human-answerable kind, the judgment code, and what is being decided.
+    pub fn needs_human_reason(&self) -> String {
+        format!(
+            "{} — human judgment ({}): {}",
+            self.reason_code.needs_human_kind().label(),
+            self.reason_code.as_str(),
+            self.question_line()
+        )
+    }
+
     pub fn new(
         handoff_id: String,
         context: &AutonomousExecutionContext,

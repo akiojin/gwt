@@ -297,6 +297,32 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+### Fallback cleanup of windows the runtime failed to close
+
+Terminal cleanup is the runtime's job (Issue #3927): once an
+Issue-linked Agent window's Work is canonically terminal — the execution
+record settled cleanly, the Issue has a durable closed record, or the
+Monitor replaced the launch — the runtime settles the Monitor slot and
+closes the exact window after the configured close grace (60 seconds by
+default), and refuses to restore such a window at startup. Closed
+Issues and settled Work therefore need no PM action at all.
+
+Your part is fallback only, for a window the runtime demonstrably
+missed:
+
+- Inventory a candidate only after the configured close grace has
+  elapsed since its Work settled; a window inside the grace is not a
+  miss.
+- Reread the canonical state before acting: `execution.status` for the
+  exact Session (settled and terminal, nothing open), the Issue's
+  durable closed record or Monitor row, and `pane.read` for a
+  diagnostic. A NeedsHuman row, an Error pane, an open obligation, or
+  any fact you cannot read keeps the window.
+- Close only that exact inert window with `pane.close`, and say in the
+  digest which runtime miss you are cleaning up. Never sweep panes in
+  bulk, and never close a window whose Work is still open — that close
+  is a failed attempt (see `pane.close` above), not cleanup.
+
 ## Steering the running agents
 
 Observing is not enough. Every resident cycle you steer the launches
@@ -323,8 +349,10 @@ act.
 - Classify an idle launch before you act, with at most one bounded
   `pane.read`, and take the default action of its class:
   - **finished and settled** — the execution record is settled and the
-    PR is handed off: close the window (the runtime half of that is
-    #3756) and confirm the Issue's delivery;
+    PR is handed off: confirm the Issue's delivery. The runtime closes
+    that window itself after the configured close grace (Issue #3927,
+    60 seconds by default); do not close it in the same cycle it
+    settled. Fallback cleanup is bounded, see below;
   - **waiting for your ruling** — read its `blocked` or `handoff` Board
     entry and post the ruling, with `params.resolves` for an
     escalation or a mention for a handoff;
@@ -631,6 +659,20 @@ Board naming the holder. Your part:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- In autonomous mode `needs_human` has exactly two kinds, read from
+  `needs_human_kind` on the autonomous row: `destructive_change_approval`
+  (the reason line names the change to approve or refuse) and
+  `user_choice_required` (the reason line names the decision to make).
+  Stuck/idle timeouts, exhausted attempts, launch failures, readiness
+  gaps, CI, review, and branch protection never park an Issue; they
+  requeue, mark the row `not_ready` with its reason, or ask you to steer.
+- A row carrying `steering` (a live window that made no progress, an
+  attempt ladder past its cap, or a gate held by the environment) is
+  asking you to act now: send that launch a one-line instruction with
+  `pm.message.send` or a Board mention, or fix the named environment
+  cause. If the window is gone, `issue.monitor.requeue` it. The request
+  clears itself on the agent's next progress and renews once per stuck
+  window with an incremented `count` while nothing changes.
 - A structured autonomous question is different from a generic
   escalation. Read it with `issue.monitor.questions`, preserve its
   exact handoff ID and options when presenting it, then apply the
@@ -904,6 +946,14 @@ mod tests {
             // explicit amendment to FR-023's blanket prohibition.
             "`pane.close`",
             "counts as one attempt",
+            // Issue #3927 / SPEC #3340 FR-049: terminal cleanup is the
+            // runtime's; the PM only cleans an exact window the runtime
+            // demonstrably missed, after the grace and a fresh reread.
+            "Terminal cleanup is the runtime's job",
+            "after the configured close grace has elapsed",
+            "Reread the canonical state before acting",
+            "Close only that exact inert window",
+            "Never sweep panes in bulk",
             // FR-033: the Monitor-owned stop, and the fact that its identity
             // is exact. A PM that sends a partial identity stops nothing, so
             // the contract has to say why omission is not a wildcard.
@@ -993,6 +1043,11 @@ mod tests {
             "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            // Issue #3944 AC-1/AC-2: the two park kinds and the steering request.
+            "`needs_human_kind`",
+            "`destructive_change_approval`",
+            "`user_choice_required`",
+            "A row carrying `steering`",
             "`issue.monitor.questions`",
             "`issue.monitor.question.answer`",
             // FR-015: the PM must be able to account for its own ordering.
