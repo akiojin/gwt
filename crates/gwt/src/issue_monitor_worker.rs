@@ -233,6 +233,26 @@ fn issue_monitor_candidate(
     }
 }
 
+/// Issue #3930 AC-4: the text the acceptance-criteria classifier reads for a
+/// gwt-spec Issue. The storage layer may route the `spec` section to a
+/// comment (#3864's shape), in which case the Issue body no longer carries the
+/// `## 受け入れ基準` block; the assembled section is appended so the Monitor
+/// sees the same block regardless of where it is stored. A body-resident
+/// section is already inside `body`, so nothing is duplicated.
+fn acceptance_source_text(body: &str, entry: &CacheEntry) -> String {
+    let spec = SectionName("spec".to_string());
+    let comment_resident = matches!(
+        entry.spec_body.sections_index.0.get(&spec),
+        Some(gwt_github::SectionLocation::Comments(_))
+    );
+    match entry.spec_body.sections.get(&spec) {
+        Some(content) if comment_resident && !content.trim().is_empty() => {
+            format!("{body}\n\n{content}")
+        }
+        _ => body.to_string(),
+    }
+}
+
 fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
     let section = |name: &str| {
         entry
@@ -429,6 +449,14 @@ where
             .as_ref()
             .map(spec_cache_entry_readiness)
             .unwrap_or(IssueMonitorReadiness::NotReady);
+        let mut issue = issue;
+        if let Some(entry) = entry.as_ref() {
+            // Issue #3930 AC-4: the generation-matched cache entry knows where
+            // the `spec` section lives; a comment-resident block must reach
+            // the acceptance classifier too.
+            let body = issue.body.as_deref().unwrap_or(&entry.snapshot.body);
+            issue.body = Some(acceptance_source_text(body, entry));
+        }
         candidates.push(issue_monitor_candidate(issue, readiness));
     }
 
@@ -1061,27 +1089,36 @@ pub fn load_cached_issue_monitor_candidates(
         .list_entries()
         .map_err(|error| error.to_string())?
         .into_iter()
-        .map(|entry| IssueMonitorIssue {
-            readiness: if entry
+        .map(|entry| {
+            let is_spec = entry
                 .snapshot
                 .labels
                 .iter()
-                .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
-            {
-                spec_cache_entry_readiness(&entry)
+                .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+            let (readiness, body) = if is_spec {
+                (
+                    spec_cache_entry_readiness(&entry),
+                    acceptance_source_text(&entry.snapshot.body, &entry),
+                )
             } else {
-                IssueMonitorReadiness::NotApplicable
-            },
-            number: entry.snapshot.number.0,
-            title: entry.snapshot.title,
-            labels: entry.snapshot.labels,
-            state: match entry.snapshot.state {
-                IssueState::Open => IssueMonitorIssueState::Open,
-                IssueState::Closed => IssueMonitorIssueState::Closed,
-            },
-            body: (!entry.snapshot.body.is_empty()).then_some(entry.snapshot.body),
-            url: None,
-            updated_at: Some(entry.snapshot.updated_at.0),
+                (
+                    IssueMonitorReadiness::NotApplicable,
+                    entry.snapshot.body.clone(),
+                )
+            };
+            IssueMonitorIssue {
+                readiness,
+                number: entry.snapshot.number.0,
+                title: entry.snapshot.title,
+                labels: entry.snapshot.labels,
+                state: match entry.snapshot.state {
+                    IssueState::Open => IssueMonitorIssueState::Open,
+                    IssueState::Closed => IssueMonitorIssueState::Closed,
+                },
+                body: (!body.is_empty()).then_some(body),
+                url: None,
+                updated_at: Some(entry.snapshot.updated_at.0),
+            }
         })
         .collect::<Vec<_>>();
     issues.sort_by_key(|issue| issue.number);
@@ -2102,6 +2139,129 @@ mod tests {
 
         assert_eq!(launch_numbers, vec![42, 43, 44]);
         assert_eq!(monitor.active_count(), 3);
+    }
+
+    /// A gwt-spec snapshot whose `spec` section is either inlined in the body
+    /// or routed to one comment — the two shapes the storage layer produces.
+    fn spec_with_storage(number: u64, spec: &str, in_comment: bool) -> IssueSnapshot {
+        let comment_id = 900_000 + number;
+        let wrapped = format!("<!-- artifact:spec BEGIN -->\n{spec}\n<!-- artifact:spec END -->");
+        let (index, body_spec, comments) = if in_comment {
+            (
+                format!("spec=comment:{comment_id}"),
+                String::new(),
+                vec![CommentSnapshot {
+                    id: CommentId(comment_id),
+                    body: wrapped,
+                    updated_at: UpdatedAt::new("t1"),
+                }],
+            )
+        } else {
+            (
+                "spec=body".to_string(),
+                format!("{wrapped}\n\n"),
+                Vec::new(),
+            )
+        };
+        IssueSnapshot {
+            number: IssueNumber(number),
+            title: format!("SPEC {number}"),
+            body: format!(
+                "<!-- gwt-spec id={number} version=1 -->\n\
+                 <!-- sections:\n\
+                 {index}\n\
+                 plan=body\n\
+                 tasks=body\n\
+                 -->\n\n\
+                 {body_spec}\
+                 <!-- artifact:plan BEGIN -->\nPlan\n<!-- artifact:plan END -->\n\n\
+                 <!-- artifact:tasks BEGIN -->\n- [ ] T-001\n<!-- artifact:tasks END -->"
+            ),
+            labels: vec!["gwt-spec".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments,
+        }
+    }
+
+    /// Issue #3930 AC-4 / AC-7 (storage dimension): the acceptance-criteria
+    /// text a candidate carries includes the `spec` section even when the
+    /// storage layer routed it to a comment (#3864's shape), on both the cache
+    /// loader and the live-readiness path. `AC-N:` present / absent × English
+    /// / Japanese heading × body / comment storage all classify as
+    /// machine-checkable with the same ids.
+    #[test]
+    fn spec_candidates_expose_comment_resident_acceptance_criteria() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut expected: Vec<(u64, Vec<&str>)> = Vec::new();
+        let mut number = 100;
+        for heading in ["Acceptance Criteria", "受け入れ基準"] {
+            for prefixed in [true, false] {
+                for in_comment in [false, true] {
+                    number += 1;
+                    let items = if prefixed {
+                        "- [ ] AC-7: first\n- [ ] AC-8: second"
+                    } else {
+                        "- [ ] first\n- [ ] second"
+                    };
+                    let spec = format!("# Spec\n\n## {heading}\n\n{items}");
+                    cache
+                        .write_snapshot(&spec_with_storage(number, &spec, in_comment))
+                        .expect("write spec");
+                    expected.push((
+                        number,
+                        if prefixed {
+                            vec!["AC-7", "AC-8"]
+                        } else {
+                            vec!["AC-1", "AC-2"]
+                        },
+                    ));
+                }
+            }
+        }
+        let classify = |issue: &IssueMonitorIssue| {
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                issue.body.as_deref().unwrap_or(""),
+            )
+        };
+
+        let candidates = load_cached_issue_monitor_candidates(dir.path()).expect("load cache");
+        for (number, want) in &expected {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.number == *number)
+                .expect("cached candidate");
+            let criteria = classify(candidate);
+            assert!(
+                criteria.machine_checkable,
+                "cache #{number}: {:?}",
+                candidate.body
+            );
+            assert_eq!(criteria.ids, *want, "cache #{number}");
+        }
+
+        let live = expected
+            .iter()
+            .map(|(number, _)| live_issue(*number, &["gwt-spec"], Some("t1")))
+            .collect();
+        let (issues, errors) = issue_monitor_candidates_with_readiness(live, dir.path(), |_| {
+            panic!("cache matches live; no refresh expected")
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        for (number, want) in &expected {
+            let issue = issues
+                .iter()
+                .find(|issue| issue.number == *number)
+                .expect("live candidate");
+            let criteria = classify(issue);
+            assert!(
+                criteria.machine_checkable,
+                "live #{number}: {:?}",
+                issue.body
+            );
+            assert_eq!(criteria.ids, *want, "live #{number}");
+        }
     }
 
     #[test]
