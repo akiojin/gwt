@@ -199,16 +199,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(issueSurface).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(
-      issueSurface.locator('[data-issue-number="3273"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3273"] .knowledge-row-badge'),
     ).toHaveText("Queued");
     await expect(issueSurface.locator('[data-issue-number="3273"]')).toContainText(
       "Queue 1",
     );
     await expect(
-      issueSurface.locator('[data-issue-number="3096"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3096"] .knowledge-row-badge'),
     ).toHaveText("Needs human");
     await expect(
-      issueSurface.locator('[data-issue-number="3097"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3097"] .knowledge-row-badge'),
     ).toHaveText("On hold");
     await expect(issueSurface.locator('[data-issue-number="3097"]')).toContainText(
       "Excluded by label: hold",
@@ -221,9 +221,13 @@ test.describe("Issue Bridge load recovery", () => {
     await issueSurface
       .locator('[data-issue-number="3273"] [data-action="launch-now"]')
       .click();
-    await issueSurface
-      .locator('[data-issue-number="3095"] [data-action="move-up"]')
-      .click();
+    // SPEC #3885 AC-5: queue reordering lives in the row's overflow menu.
+    const menu3095 = issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu');
+    await menu3095.locator("summary").click();
+    await menu3095.locator('[data-action="move-up"]').click();
+    await expect(
+      issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu'),
+    ).not.toHaveAttribute("open", "");
     await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
     await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
