@@ -748,6 +748,7 @@ mod tests {
                 "`## Acceptance Criteria`, `## 受け入れ基準`,\n    `## 受け入れ条件`",
                 "`## 成功基準` is not scanned",
                 "numbered by position",
+                "Do not mix the two styles",
                 "body or comment",
             ] {
                 assert!(

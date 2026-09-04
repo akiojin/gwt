@@ -95,7 +95,10 @@ FR-002, …) — gaps cause a Format validation issue.>
   `- [ ] AC-N: <text>` directly under this exact heading (`## Acceptance
   Criteria` and `## 受け入れ条件` are also accepted; `## 成功基準` is not).
   A `- [ ]` line without the prefix is numbered by position, but keep the
-  explicit `AC-N:` so ids stay stable across edits. The classifier reads
+  explicit `AC-N:` so ids stay stable across edits. Do not mix the two
+  styles in one block: when any item carries an explicit `AC-N:`, the
+  un-prefixed lines in that block are dropped from the criteria. The
+  classifier reads
   this section wherever the storage layer put it (body or comment), so a
   comment-resident `spec` section is fine. An `auto-merge` Issue
   without this block is refused at `issue.create` / `issue.spec.create` /

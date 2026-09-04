@@ -82,7 +82,13 @@ plus the `auto-merge` label):
   - Items: `- [ ] AC-N: <text>` checkbox lines directly under that heading
     (parsing stops at the next heading). A `- [ ]` line without the `AC-N:`
     prefix is also accepted and numbered by position (`AC-1`, `AC-2`, …);
-    keep the explicit prefix so ids stay stable across edits.
+    the prefix is recommended, not required, because it keeps ids stable
+    across edits.
+  - Do not mix the two styles in one block. When any item carries an
+    explicit `AC-N:`, only those items become criteria and every
+    un-prefixed `- [ ]` line in the same block is dropped from the
+    readiness snapshot and from the review verdict. Put notes and
+    sub-tasks outside the acceptance block.
   - Design-required (`gwt-spec`) Issues keep the block in the `spec`
     section; the classifier reads it wherever the storage layer placed that
     section (body or comment), so no body rewrite is needed.

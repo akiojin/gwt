@@ -104,7 +104,10 @@ You own the backlog for its whole life, not just at creation.
 - Readiness format the Issue Monitor reads: a `## Acceptance Criteria`,
   `## 受け入れ基準` or `## 受け入れ条件` heading (never `## 成功基準`)
   followed by `- [ ] AC-N:` checkbox lines. A `- [ ]` line without the
-  `AC-N:` prefix is accepted and numbered by position; a `gwt-spec` Issue
+  `AC-N:` prefix is accepted and numbered by position, so the prefix is
+  recommended rather than required — but do not mix the two styles: when
+  any item carries an explicit `AC-N:`, the un-prefixed lines in that
+  block are dropped from the criteria. A `gwt-spec` Issue
   keeps the block in its `spec` section, which is read wherever it is
   stored (body or comment). A `needs_human` reason names the missing
   element — fix it with `issue.edit` / `issue.spec.edit`, then run
@@ -995,6 +998,7 @@ mod tests {
             "`## 受け入れ条件`",
             "never `## 成功基準`",
             "prefix is accepted and numbered by position",
+            "do not mix the two styles",
             "stored (body or comment)",
             "## Plain Issue or design-required",
             "spans more than one crate or layer",
