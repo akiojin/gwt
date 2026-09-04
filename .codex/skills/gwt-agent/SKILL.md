@@ -155,6 +155,19 @@ The response reports `scan_delivery`: `immediate` when a daemon accepted the
 scan request, `next-scheduled-scan` when none was reachable (the new order is
 already durable either way).
 
+List every provider-wide quota hold with the evidence it was formed from, and
+release a false one by provider (Issue #3923). The release is a durable fence,
+so no process can re-stamp the old hold from memory:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.quota_hold.list","params":{}}
+JSON
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.quota_hold.clear","params":{"provider":"codex","reason":"usage poller reads 26%; the pane notice was stale"}}
+JSON
+```
+
 `enabled=true` and `autonomous_mode=true` are rejected for every JSON caller,
 including the registered PM. Enabling either capability requires an explicit
 GUI action. Configuration changes are

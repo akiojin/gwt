@@ -9023,6 +9023,7 @@ impl IssueMonitorState {
     /// [`Self::agent_status`] can say *why* a queued issue is not launching —
     /// the failure this fixes was a quota-dead pane that read as `launched` for
     /// 23 minutes and then as terminal `AgentFailed`.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_hold_provider_usage_limit(
         &mut self,
         issue_number: u64,
