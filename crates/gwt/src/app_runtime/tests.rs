@@ -32952,6 +32952,128 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
 }
 
+/// Issue #3934: seed one Active owner whose durable holder is in `status` and
+/// has no runtime sidecar anywhere, and return its worktree inventory.
+#[cfg(test)]
+fn seed_defunct_active_owner(
+    sessions_dir: &std::path::Path,
+    repo: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+    status: gwt_agent::AgentStatus,
+) -> Vec<std::path::PathBuf> {
+    gwt::cli::execution_state::materialize_at_launch(
+        worktree,
+        owner.kind,
+        owner.number,
+        session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize Active execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        worktree,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("ensure generation ledger");
+    let binding = gwt::cli::execution_state::current_execution_binding(worktree, owner)
+        .expect("load current binding")
+        .expect("current binding");
+    let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.agent_session_id = Some(format!("native-{session_id}"));
+    session.linked_issue_number = Some(owner.number);
+    session.restore_window_on_startup = false;
+    session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: session.repo_hash.clone().expect("repo hash"),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: binding,
+        capability_generation: 1,
+    });
+    session.update_status(status);
+    session
+        .save(sessions_dir)
+        .expect("save defunct holder Session");
+    gwt::worktree_inventory::enumerate_worktrees(repo, None)
+        .expect("worktree inventory")
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
+}
+
+/// Issue #3934: a closed agent window leaves its Session durably `Idle` with
+/// no runtime sidecar anywhere. The coarse liveness prefilter reads that as
+/// "cannot tell" and used to drop the owner before the exact stage ever looked
+/// at it, so the generation was held for good and the work could only be
+/// restarted under a fresh Issue number. The prefilter may narrow the work the
+/// exact stage does; it must never be what decides the outcome.
+#[test]
+fn startup_reaper_reclaims_a_durably_idle_holder_the_prefilter_calls_unknown() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("idle-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/idle-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3934,
+    };
+    let session_id = "startup-idle-holder";
+    let worktrees = seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/idle-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Idle,
+    );
+
+    assert!(
+        matches!(
+            runtime.classify_nonlocal_active_owner_liveness(session_id),
+            ActiveOwnerLiveness::Unknown
+        ),
+        "the coarse prefilter still cannot classify a durably Idle holder"
+    );
+
+    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+
+    assert_eq!(
+        summary.reaped, 1,
+        "the exact stage decides, not the prefilter"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
+}
+
 /// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
 /// generation reaper. The selected exact holder remains Active while another
 /// stale owner in the same repository is audited Blocked in the same batch.
@@ -60551,6 +60673,82 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
         status.last_error
     );
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-08-12T07:00:00Z"));
+}
+
+/// Issue #3934: the generation reaper used to run once, during bootstrap. A
+/// holder that died after that kept its owner unlaunchable until someone
+/// restarted the GUI, which is why 45 Issues had to be re-registered under
+/// fresh numbers. Every scan must try the recovery.
+#[test]
+fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3934,
+    };
+    let session_id = "scan-defunct-holder";
+    // The scan worker resolves its own paths from the process-global HOME, so
+    // the holder has to be durable where that worker will look for it.
+    seed_defunct_active_owner(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &repo,
+        &repo,
+        "work/scan-defunct-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Interrupted,
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+        "the owner starts the scan holding a live-looking generation"
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+
+    let _outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        "2026-09-04T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan runs");
+
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the scan must release a generation whose holder is gone"
+    );
 }
 
 #[test]
