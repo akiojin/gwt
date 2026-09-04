@@ -631,6 +631,20 @@ Board naming the holder. Your part:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- In autonomous mode `needs_human` has exactly two kinds, read from
+  `needs_human_kind` on the autonomous row: `destructive_change_approval`
+  (the reason line names the change to approve or refuse) and
+  `user_choice_required` (the reason line names the decision to make).
+  Stuck/idle timeouts, exhausted attempts, launch failures, readiness
+  gaps, CI, review, and branch protection never park an Issue; they
+  requeue, mark the row `not_ready` with its reason, or ask you to steer.
+- A row carrying `steering` (a live window that made no progress, an
+  attempt ladder past its cap, or a gate held by the environment) is
+  asking you to act now: send that launch a one-line instruction with
+  `pm.message.send` or a Board mention, or fix the named environment
+  cause. If the window is gone, `issue.monitor.requeue` it. The request
+  clears itself on the agent's next progress and renews once per stuck
+  window with an incremented `count` while nothing changes.
 - A structured autonomous question is different from a generic
   escalation. Read it with `issue.monitor.questions`, preserve its
   exact handoff ID and options when presenting it, then apply the
@@ -993,6 +1007,11 @@ mod tests {
             "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            // Issue #3944 AC-1/AC-2: the two park kinds and the steering request.
+            "`needs_human_kind`",
+            "`destructive_change_approval`",
+            "`user_choice_required`",
+            "A row carrying `steering`",
             "`issue.monitor.questions`",
             "`issue.monitor.question.answer`",
             // FR-015: the PM must be able to account for its own ordering.
