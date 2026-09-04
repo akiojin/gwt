@@ -80,8 +80,8 @@
       // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
       // Settings window — the PM is configured where it is seen.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
-      import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
+      import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -3486,16 +3486,21 @@
               detailMap.delete(windowId);
             }
             const effectiveDetail = detailMap.get(windowId) || "";
-            agentCompletionNotifier.handleRuntimeState({
-              windowId,
-              runtimeState,
-              windowData,
-              projectTab: windowContext?.tab || activeProjectTab(),
-              statusDetail: effectiveDetail,
-            });
             // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
             // that carry a waiting state) raise in-app attention toasts.
+            // SPEC #3206 v2 (user ruling 2026-09-04): completion notices take
+            // the same gate. The controller has no preset check of its own, so
+            // ungated it publishes "Agent stopped" for Settings / Board / Logs
+            // windows using that window's own title — noise that v2 would then
+            // persist into the history instead of letting it pass as a toast.
             if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+              agentCompletionNotifier.handleRuntimeState({
+                windowId,
+                runtimeState,
+                windowData,
+                projectTab: windowContext?.tab || activeProjectTab(),
+                statusDetail: effectiveDetail,
+              });
               agentAttentionToaster.handleRuntimeState({
                 windowId,
                 runtimeState,
@@ -4627,6 +4632,11 @@
         openWorkspaceCleanup: (candidate, sourceWindowId) =>
           openWorkspaceCleanup(candidate, sourceWindowId),
         getResumeBounds: () => visibleBounds(),
+        // SPEC #3206 FR-017: surface errors become notification-center error
+        // rows (dedup by key, occurrence count, auto-read on resolve). Lazy:
+        // the center is constructed after this factory.
+        reportSurfaceError: (error) => notificationCenter.recordError(error),
+        resolveSurfaceError: (key) => notificationCenter.resolveError(key),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
@@ -4666,8 +4676,12 @@
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
-        // stack. The arrow defers to the alertsToasts binding (created below).
-        pushAlertToast: (notice) => alertsToasts.push(notice),
+        // stack and are recorded into the notification center history
+        // (FR-011). Both bindings are created below; the arrow defers to them.
+        pushAlertToast: (notice) => {
+          notificationCenter.record({ kind: "board-mention", ...notice });
+          alertsToasts.push(notice);
+        },
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         activeWorkspace,
@@ -4731,7 +4745,7 @@
       // createAgentCompletionNotifier; this only renders. Singleton via id; the
       // whole card jumps to the project tab.
       function showAgentCompletionToast(notice) {
-        alertsToasts.push({
+        const alert = {
           id: "agent-completion",
           level: "neutral",
           title: notice.title || "Agent notification",
@@ -4744,7 +4758,11 @@
               send({ kind: "select_project_tab", tab_id: notice.projectId });
             }
           },
-        });
+        };
+        // FR-011: the history record is independent of the transient toast
+        // (the center drops id / timeoutMs, so singletons never collapse).
+        notificationCenter.record({ kind: "agent-completion", ...alert });
+        alertsToasts.push(alert);
       }
 
       // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
@@ -4756,7 +4774,7 @@
         const flavor = notice.flavor || "needs_input";
         const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
         const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
-        alertsToasts.push({
+        const alert = {
           id: `attention-${notice.windowId}`,
           level,
           title: notice.title || "Agent attention",
@@ -4764,7 +4782,11 @@
           dismissible: true,
           timeoutMs,
           onActivate: () => frameWindow(notice.windowId),
-        });
+        };
+        // FR-011: recorded regardless of the toast; the history row keeps the
+        // jump-to (Sc 7) and survives the window's toast being dismissed.
+        notificationCenter.record({ kind: "attention", ...alert });
+        alertsToasts.push(alert);
       }
 
       function handleContinueWorkOutcome(event) {
@@ -4913,12 +4935,33 @@
       });
       pmSettingsPanel.mount();
 
-      // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
-      // scrollable side-toast stack so nothing is missed while the operator is
-      // away. Mounted to the body so it is visible regardless of which window
-      // or surface is focused.
-      const autonomousNotifications = createAutonomousNotifications({ document });
-      autonomousNotifications.mount(document.body);
+      // SPEC #3206 v2 — notification center: bell (rail System group) + unread
+      // badge + history drawer. The drawer mounts on <body>, never inside
+      // .op-rail (its stacking context would clamp the drawer under toasts and
+      // modals). It is a pure sink; firing/dedup/gating stay in the controllers.
+      const notificationCenter = createNotificationCenter({ document });
+      notificationCenter.mount(document.body);
+      const notificationBellButton = document.getElementById("op-notifications-button");
+      const notificationBellBadge =
+        notificationBellButton?.querySelector(".op-rail__badge") ?? null;
+      notificationCenter.onUnreadChange((count, hasError) => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count,
+          hasError,
+          open: notificationCenter.isOpen(),
+        });
+      });
+      notificationCenter.onOpenChange(() => {
+        renderNotificationBell({
+          button: notificationBellButton,
+          badge: notificationBellBadge,
+          count: notificationCenter.unreadCount(),
+          hasError: notificationCenter.unreadHasError(),
+          open: notificationCenter.isOpen(),
+        });
+      });
 
       // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
       // notifications that used to be three hand-offset systems (agent
@@ -5895,7 +5938,6 @@
         logsSurface,
         agentKanbanSurface,
         pmSettingsPanel,
-        autonomousNotifications,
         knowledgeSettingsSurface,
       });
 
@@ -6032,12 +6074,16 @@
             scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_toast":
-            // SPEC #3200 FR-034: also surface as a persistent, scrollable side
-            // toast so unattended autonomous events accumulate where the
-            // operator can review them later.
-            frontendUnits.autonomousNotifications.push({
+            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+            // into the notification center history FIRST and independently of
+            // any display path, so events that fire while no Issue window is
+            // open (or while the operator is away) are never lost. The backend
+            // IssueMonitorToast carries {level, message, issue_number} only —
+            // the title is a literal.
+            notificationCenter.record({
+              kind: "issue-monitor",
               level: event?.level,
-              title: event?.title || "Issue Monitor",
+              title: "Issue Monitor",
               message: event?.message,
               issueNumber: event?.issue_number,
             });
@@ -7164,6 +7210,13 @@
         if (handleMigrationModalEscape(event)) {
           return;
         }
+        // SPEC #3206 v2 — Esc closes the notification center drawer through
+        // the same chain as the other modal surfaces.
+        if (notificationCenter.isOpen()) {
+          notificationCenter.close();
+          event.preventDefault();
+          return;
+        }
         // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
         // before the windowList dropdown because the Drawer is a
         // modal surface and outranks the dropdown affordance.
@@ -7330,6 +7383,9 @@
             // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
             // is the keyboard-only path to the same panel.
             frontendUnits.pmSettingsPanel.open();
+            return;
+          case "toggle-notifications":
+            notificationCenter.toggle();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
