@@ -419,14 +419,20 @@ test("Issue #3884: every launched Issue row shows a read-only agent status row w
   const first = rows[0];
   assert.equal(first.querySelector(".issue-agent-status-title").textContent, "Agent agent-1");
   assert.equal(first.querySelector(".issue-agent-status-meta").textContent, "codex");
-  const chip = first.querySelector(".knowledge-monitor-chip");
-  assert.equal(chip.textContent, "Running");
-  assert.equal(chip.dataset.tone, "active");
+  // SPEC #3885 AC-5: the agent state is the Issue row's single primary badge;
+  // the status row itself carries no second badge.
+  assert.equal(first.querySelector(".knowledge-monitor-chip"), null);
+  const badge = first.closest(".knowledge-row").querySelector(".knowledge-row-badge");
+  assert.equal(badge.textContent, "Running");
+  assert.equal(badge.dataset.tone, "active");
   assert.equal(first.querySelector(".issue-agent-status-output").textContent, "Running cargo test");
   assert.equal(first.querySelector(".issue-agent-status-elapsed").textContent, "7m");
 
   const second = rows[1];
-  assert.equal(second.querySelector(".knowledge-monitor-chip").textContent, "Needs input");
+  assert.equal(
+    second.closest(".knowledge-row").querySelector(".knowledge-row-badge").textContent,
+    "Needs input",
+  );
   assert.equal(
     second.querySelector(".issue-agent-status-output").textContent,
     "",
