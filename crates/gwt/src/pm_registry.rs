@@ -57,6 +57,29 @@ pub const PM_GWTD_EXECUTION_CLAUSE: &str =
      in-session sub-agent; collect the result only from its task-completion notification, and \
      never duplicate an operation while it is pending.";
 
+/// Issue #3767 AC-1〜AC-3: compact steering obligation shared by the delta
+/// wake, the periodic wake, the Stop-gate continuation, and the PM's
+/// intent-boundary reminder. The generated gwt-pm guidance owns the full
+/// classification and default actions; this clause only keeps every injected
+/// prompt from restoring "observe only" and from judging a cycle unchanged
+/// before the running launches were steered.
+pub const PM_STEERING_CLAUSE: &str =
+    "Steer every running launch before you judge the cycle unchanged: from its \
+     `last_activity_at` and its latest Board posts decide whether it is stalled (no activity for \
+     more than twice the monitor scan interval), drifting outside its owner Issue's scope, or \
+     waiting for its next action, and give the directive through `board.post` with a mention or \
+     `pm.message.send` — the ruling channels only; never inject launch or bootstrap instructions \
+     past the Issue Monitor. A launch left idle without a directive is never a no-change cycle.";
+
+/// Issue #3767 AC-2: the same steering obligation for the two PTY wake prompts.
+/// Kept terse on purpose — those prompts must stay under the 1024-byte PTY
+/// canonical queue (#3825 / #3868), so the delta wake and the periodic tick
+/// carry this line while the Stop-gate continuation and the gwt-pm guidance
+/// carry [`PM_STEERING_CLAUSE`] in full.
+pub const PM_STEERING_WAKE_CLAUSE: &str =
+    "Steer stalled/off-scope/waiting launches (`board.post` mention or `pm.message.send`, never \
+     past the Monitor) before judging no change.";
+
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmRegistration {
@@ -4506,6 +4529,23 @@ pub fn pm_status_report_for_caller(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #3767 AC-2 / AC-3: the terse wake clause and the full Stop-gate
+    /// clause name the same ruling channels and the same Monitor boundary, so
+    /// the two injected wordings cannot drift into different policies.
+    #[test]
+    fn steering_clauses_name_the_same_channels_and_monitor_boundary() {
+        for clause in [PM_STEERING_CLAUSE, PM_STEERING_WAKE_CLAUSE] {
+            for phrase in ["`board.post`", "`pm.message.send`", "Monitor"] {
+                assert!(
+                    clause.contains(phrase),
+                    "steering clause is missing {phrase}: {clause}"
+                );
+            }
+        }
+        assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
+        assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
 
     #[cfg(unix)]
     #[test]

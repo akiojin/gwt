@@ -182,6 +182,16 @@ pub enum IssueCommand {
         number: u64,
         reason: String,
     },
+    /// Issue #3844: a launched agent declares (or clears) that it is waiting,
+    /// so the Issue Monitor does not mistake the silence for a stall. `number`
+    /// defaults to the launch context's owner Issue.
+    MonitorWait {
+        project_root: Option<std::path::PathBuf>,
+        number: Option<u64>,
+        reason: Option<String>,
+        resume_condition: Option<String>,
+        clear: bool,
+    },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.
     MonitorQuestions {

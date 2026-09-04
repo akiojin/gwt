@@ -639,3 +639,156 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
     globalThis.requestAnimationFrame = previousRequestAnimationFrame;
   }
 });
+
+test("Usage popover lists per-session tokens and context per provider, capped (Issue #3862)", async () => {
+  const { createProviderUsageSurface } = await import(
+    resolve(here, "../provider-usage-surface.js")
+  );
+  const { document, window } = parseHTML(
+    "<html><body><div id='usage-anchor'></div></body></html>",
+  );
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  const previousCustomEvent = globalThis.CustomEvent;
+  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+  globalThis.document = document;
+  globalThis.window = window;
+  globalThis.CustomEvent = window.CustomEvent;
+  globalThis.requestAnimationFrame = (cb) => cb();
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+
+  try {
+    const surface = createProviderUsageSurface({
+      send: () => {},
+      renderWorkspaceWindows: () => {},
+      sessionLabel: (sessionId) =>
+        sessionId === "sess-claude-a" ? "Issue #3862 popover" : null,
+    });
+    const codexSessions = Array.from({ length: 7 }, (_, i) => ({
+      session_id: `sess-codex-${i}`,
+      provider: "codex",
+      model: "gpt-5-codex",
+      total_tokens: 1000 * (i + 1),
+      context_left_pct: 90 - i * 10,
+      eligible: true,
+      state: { kind: "ok" },
+    }));
+    surface.applyProviderUsageUi({
+      accounts: [
+        {
+          provider: "codex",
+          windows: [{ kind: "weekly", used_percent: 10 }],
+          state: { kind: "ok" },
+        },
+        {
+          provider: "claude_code",
+          windows: [],
+          state: { kind: "disabled" },
+        },
+      ],
+      consumption: [],
+      sessions: [
+        ...codexSessions,
+        {
+          session_id: "sess-claude-a",
+          provider: "claude_code",
+          model: "claude-fable-5-1",
+          total_tokens: 1234567,
+          context_used_tokens: 420000,
+          context_limit_tokens: 1000000,
+          context_left_pct: 58,
+          eligible: true,
+          state: { kind: "ok" },
+        },
+        {
+          session_id: "sess-claude-b",
+          provider: "claude_code",
+          model: "claude-sonnet-5",
+          total_tokens: 2500,
+          context_left_pct: 12,
+          eligible: true,
+          state: { kind: "ok" },
+        },
+        {
+          session_id: "sess-claude-apikey",
+          provider: "claude_code",
+          model: null,
+          total_tokens: 900,
+          context_left_pct: null,
+          eligible: false,
+          state: { kind: "ok" },
+        },
+        {
+          session_id: "sess-claude-nodata",
+          provider: "claude_code",
+          model: null,
+          total_tokens: 0,
+          context_left_pct: null,
+          eligible: true,
+          state: { kind: "no_data" },
+        },
+      ],
+    });
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+
+    // Claude card: sessions are visible even while account usage is disabled
+    // (per-session data is local and opt-in free); the account reason stays.
+    const claudeCard = document.querySelector('.op-usage-card[data-provider="claude_code"]');
+    assert.ok(claudeCard, "claude card renders");
+    assert.match(claudeCard.textContent, /Enable in Settings/);
+    const claudeSess = claudeCard.querySelector(".op-usage-sess");
+    assert.ok(claudeSess, "claude sessions block renders");
+    assert.match(claudeSess.querySelector(".op-usage-sess__head").textContent, /Sessions/);
+    const claudeRows = [...claudeSess.querySelectorAll(".op-usage-sess__row")];
+    assert.equal(claudeRows.length, 4);
+    // Lowest remaining context first, then unknown context, then ineligible.
+    assert.deepEqual(
+      claudeRows.map((row) => row.dataset.sessionId),
+      ["sess-claude-b", "sess-claude-a", "sess-claude-nodata", "sess-claude-apikey"],
+    );
+    const named = claudeRows[1];
+    assert.equal(named.querySelector(".op-usage-sess__name").textContent, "Issue #3862 popover");
+    assert.equal(named.querySelector(".op-usage-sess__model").textContent, "claude-fable-5-1");
+    assert.equal(named.querySelector(".op-usage-sess__tokens").textContent, "1.2M");
+    assert.match(named.querySelector(".op-usage-sess__ctx").textContent, /58%/);
+    assert.match(named.querySelector(".op-usage-sess__ctx").title, /420k \/ 1\.0M/);
+    // Unnamed sessions fall back to a short session id, never an empty cell.
+    assert.equal(claudeRows[0].querySelector(".op-usage-sess__name").textContent, "sess-cla…");
+    // Ineligible (API-key backend) sessions never show quota/context values.
+    const apiKey = claudeRows[3];
+    assert.equal(apiKey.dataset.eligible, "false");
+    assert.equal(apiKey.querySelector(".op-usage-sess__ctx").textContent, "n/a");
+    assert.equal(apiKey.querySelector(".op-usage-sess__tokens").textContent, "900");
+    // A session without data shows its state instead of a fake 0 / 100%.
+    const noData = claudeRows[2];
+    assert.equal(noData.querySelector(".op-usage-sess__ctx").textContent, "No data yet");
+    assert.equal(noData.querySelector(".op-usage-sess__tokens").textContent, "—");
+
+    // Codex card: 7 sessions are capped to 5 rows plus a "+N more" line so the
+    // popover never grows unbounded (the reason the old list was removed).
+    const codexCard = document.querySelector('.op-usage-card[data-provider="codex"]');
+    const codexSess = codexCard.querySelector(".op-usage-sess");
+    assert.match(codexSess.querySelector(".op-usage-sess__head").textContent, /Sessions \(7\)/);
+    const codexRows = [...codexSess.querySelectorAll(".op-usage-sess__row")];
+    assert.equal(codexRows.length, 5);
+    assert.equal(codexRows[0].dataset.sessionId, "sess-codex-6");
+    assert.equal(codexSess.querySelector(".op-usage-sess__more").textContent, "+2 more sessions");
+
+    // Sessions are absent when the snapshot carries none for the provider.
+    surface.applyProviderUsageUi({
+      accounts: [{ provider: "codex", windows: [], state: { kind: "no_data" } }],
+      consumption: [],
+      sessions: [],
+    });
+    assert.equal(document.querySelector(".op-usage-sess"), null);
+    assert.match(document.body.textContent, /No data yet/);
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.window = previousWindow;
+    globalThis.CustomEvent = previousCustomEvent;
+    globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+  }
+});
