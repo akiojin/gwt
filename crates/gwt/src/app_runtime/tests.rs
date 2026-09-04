@@ -7485,6 +7485,8 @@ fn issue_monitor_autonomous_record(
         reviewed_sha: None,
         review_passed: None,
         wait: None,
+        needs_human_kind: None,
+        steering: None,
     }
 }
 
@@ -41747,6 +41749,8 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 reviewed_sha: None,
                 review_passed: None,
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -59290,7 +59294,11 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
         &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
         "2026-08-10T00:00:00Z",
     );
-    monitor.escalate_to_needs_human(42, "operator decision required");
+    monitor.escalate_to_needs_human(
+        42,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "operator decision required",
+    );
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("needs-human prefs");
     let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
     gwt::pm_registry::save_pm_loop_state(

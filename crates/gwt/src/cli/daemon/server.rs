@@ -3375,9 +3375,15 @@ fn commit_issue_monitor_effect_result(
                     ),
                 ) => {
                     let _ = candidate.complete_pending_effect(&key);
+                    // Issue #3944 AC-5: the auto-merge may still be armed on
+                    // GitHub after the kill switch — an irreversible merge is
+                    // the human's call to approve or disarm by hand.
                     candidate.escalate_to_needs_human(
                         *issue_number,
-                        format!("kill-switch disarm authority failure: {reason}"),
+                        crate::NeedsHumanKind::DestructiveChangeApproval,
+                        format!(
+                            "disarm the PR auto-merge by hand or approve it: kill-switch disarm authority failure: {reason}"
+                        ),
                     );
                     settled = true;
                 }
@@ -3417,11 +3423,16 @@ fn commit_issue_monitor_effect_result(
                             ));
                     }
                     if current_authority {
-                        candidate.escalate_to_needs_human(
+                        // Issue #3944 AC-3: a moved HEAD is re-reviewed by the
+                        // next attempt (the gate's own remediation), never parked.
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        candidate.record_autonomous_failure(
                             *issue_number,
                             format!(
-                                "auto-merge authority rejected: reviewed HEAD {expected}, current HEAD {actual}"
+                                "auto-merge authority rejected: reviewed HEAD {expected}, current HEAD {actual} — re-review"
                             ),
+                            &now,
                         );
                     }
                     settled = true;
@@ -3434,7 +3445,15 @@ fn commit_issue_monitor_effect_result(
                 ) => {
                     let _ = candidate.complete_pending_effect(&key);
                     if current_authority {
-                        candidate.escalate_to_needs_human(*issue_number, reason);
+                        // Issue #3944 AC-3: an authority mismatch while arming
+                        // is mechanical — retry through the ladder, never park.
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        candidate.record_autonomous_failure(
+                            *issue_number,
+                            format!("auto-merge arm authority mismatch: {reason}"),
+                            &now,
+                        );
                     }
                     settled = true;
                 }
@@ -5284,7 +5303,11 @@ exit 0
             linked_issue_kind: crate::LinkedIssueKind::Issue,
         });
         monitor.set_autonomous_mode(true);
-        monitor.escalate_to_needs_human(43, "human decision required");
+        monitor.escalate_to_needs_human(
+            43,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "human decision required",
+        );
 
         assert!(!super::issue_monitor_gui_connected(&hub));
         super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -6662,6 +6685,8 @@ exit 0
                 reviewed_sha: None,
                 review_passed: None,
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -6766,6 +6791,8 @@ exit 0
                 reviewed_sha: Some("abc123".to_string()),
                 review_passed: None,
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -8779,6 +8806,8 @@ exit 0
                     reviewed_sha: None,
                     review_passed: None,
                     wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -9268,6 +9297,8 @@ exit 1
                     reviewed_sha: Some("abc".to_string()),
                     review_passed: Some(true),
                     wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -11017,7 +11048,6 @@ exit 1
         assert_eq!(
             scanned.record_autonomous_failure(
                 42,
-                crate::FailureClass::Transient,
                 "agent exited before review",
                 "2026-08-13T00:00:00Z",
             ),
@@ -11076,7 +11106,6 @@ exit 1
         assert!(matches!(
             stale_scan.record_autonomous_failure(
                 42,
-                crate::FailureClass::Transient,
                 "agent exited before review",
                 "2026-08-13T00:00:00Z",
             ),
@@ -11134,7 +11163,6 @@ exit 1
         assert!(matches!(
             scanned.record_autonomous_failure(
                 42,
-                crate::FailureClass::Transient,
                 "agent exited before review",
                 "2026-08-13T00:00:00Z",
             ),
@@ -11146,7 +11174,11 @@ exit 1
             .contains_key(&42));
 
         let mut terminal_writer = canonical.clone();
-        terminal_writer.escalate_to_needs_human(42, "terminal agent failure");
+        terminal_writer.escalate_to_needs_human(
+            42,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "terminal agent failure",
+        );
         crate::save_issue_monitor_prefs(&prefs_path, &terminal_writer.prefs())
             .expect("commit newer terminal state");
         assert!(
@@ -11493,6 +11525,8 @@ exit 1
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11555,6 +11589,8 @@ exit 1
                 reviewed_sha: Some("abc123".to_string()),
                 review_passed: None,
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11604,6 +11640,8 @@ exit 1
                     reviewed_sha: Some("sha-7".to_string()),
                     review_passed: None,
                     wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -11619,6 +11657,8 @@ exit 1
                     reviewed_sha: Some("sha-8".to_string()),
                     review_passed: None,
                     wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -11684,6 +11724,8 @@ exit 1
                 reviewed_sha: Some("sha-7".to_string()),
                 review_passed: None,
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12298,6 +12340,8 @@ exit 1
                 reviewed_sha: Some("sha-a".to_string()),
                 review_passed: Some(true),
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12435,6 +12479,8 @@ exit 1
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12567,6 +12613,8 @@ exit 1
                 reviewed_sha: Some("abc".to_string()),
                 review_passed: Some(true),
                 wait: None,
+                needs_human_kind: None,
+                steering: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -12884,6 +12932,8 @@ exit 1
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -13106,6 +13156,8 @@ exit 1
                     reviewed_sha: None,
                     review_passed: None,
                     wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14115,6 +14167,8 @@ exit 1
                     reviewed_sha: None,
                     review_passed: None,
                     wait: None,
+                    needs_human_kind: None,
+                    steering: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14234,7 +14288,11 @@ exit 1
             crate::IssueMonitorConfig::default(),
             legacy_failed_prefs(temp.path()),
         );
-        daemon.escalate_to_needs_human(100, "local terminal failure");
+        daemon.escalate_to_needs_human(
+            100,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "local terminal failure",
+        );
 
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
 
@@ -14400,6 +14458,8 @@ exit 1
             reviewed_sha: None,
             review_passed: None,
             wait: None,
+            needs_human_kind: None,
+            steering: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,
