@@ -8,8 +8,8 @@
  * second describe boots the full frontend against a fixture WebSocket and
  * asserts what only a real browser proves: the retired region is absent, the
  * bell/badge/drawer wiring works end to end (click, Esc, ×, clear-all), the
- * history scrolls inside the drawer, and the FR-017 Issue-window error
- * aggregation renders as one indicator line in both themes.
+ * history scrolls inside the drawer, and FR-017 Issue-window errors are read
+ * only in the notification center — never rendered in the Issue window.
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
@@ -500,13 +500,14 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(drawer).toHaveAttribute("data-open", "false");
   });
 
-  test("FR-017: an Issue Monitor error is one compact indicator line + a deduped center row that resolves to read", async ({
+  test("FR-017: an Issue Monitor error is read only in the notification center, never in the Issue window", async ({
     page,
   }) => {
     const issueWindow = page.locator(".surface-knowledge .issue-bridge-root");
-    const indicator = issueWindow.locator(".surface-error-indicator");
-    await expect(indicator).toBeHidden();
+    // User ruling 2026-09-04: errors are read in ONE place. The Issue window
+    // carries neither the old red banner nor any indicator of its own.
     await expect(issueWindow.locator(".knowledge-monitor-error")).toHaveCount(0);
+    await expect(issueWindow.locator(".surface-error-indicator")).toHaveCount(0);
 
     const status = (lastError: string | null) => ({
       kind: "issue_monitor_status",
@@ -525,38 +526,36 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     });
 
     await inject(page, status("issue #3785: gh issue list: github_rate_limited"));
-    await expect(indicator).toBeVisible();
-    await expect(indicator.locator(".surface-error-indicator__count")).toHaveText("1 error");
-    await expect(indicator.locator(".surface-error-indicator__summary")).toContainText("github_rate_limited");
-    // No persistent red band anywhere in the Issue window.
-    await expect(issueWindow.locator(".knowledge-status.error")).toHaveCount(0);
-
     const badge = page.locator("#op-notifications-button .op-rail__badge");
     await expect(badge).toHaveText("1");
     await expect(badge).toHaveAttribute("data-has-error", "true");
+    // Still nothing rendered inside the Issue window.
+    await expect(issueWindow.locator(".surface-error-indicator")).toHaveCount(0);
+    await expect(issueWindow.locator(".knowledge-status.error")).toHaveCount(0);
 
-    // A changed error text is a new occurrence of the same key: one row, ×2.
+    // A changed error text is a new occurrence of the same key: one row, x2.
     await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
-    await indicator.locator(".surface-error-indicator__jump").click();
+    await page.locator("#op-notifications-button").click();
     const drawer = page.locator("#notification-center");
     await expect(drawer).toHaveAttribute("data-open", "true");
     const row = drawer.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
     await expect(row).toHaveCount(1);
     await expect(row).toHaveAttribute("data-level", "error");
-    await expect(row.locator(".notification-center__count")).toHaveText("×2");
+    await expect(row.locator(".notification-center__count")).toHaveText("\u00d72");
     await expect(row).toContainText("(retry)");
     await page.keyboard.press("Escape");
 
-    // Recovery: indicator disappears and the row falls to read/resolved.
+    // Recovery: the row falls to read/resolved and the badge clears.
     await inject(page, status(null));
-    await expect(indicator).toBeHidden();
     await expect(row).toHaveAttribute("data-resolved", "true");
     await expect(badge).toBeHidden();
 
     const rendered = await page.evaluate(() => {
-      const theme = document.documentElement.getAttribute("data-theme");
       const rowNode = document.querySelector('.notification-center__item[data-error-key="issue-monitor:last_error"]') as HTMLElement;
-      return { theme, rim: getComputedStyle(rowNode).borderLeftColor };
+      return {
+        theme: document.documentElement.getAttribute("data-theme"),
+        rim: getComputedStyle(rowNode).borderLeftColor,
+      };
     });
     expect(rendered.rim).not.toBe("");
     expect(["dark", "light", null]).toContain(rendered.theme);

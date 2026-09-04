@@ -3175,58 +3175,6 @@ body {
   font-size: var(--type-sm);
 }
 
-/* SPEC #3206 FR-017 — one compact error line per Issue window: count +
-   latest summary + jump to the notification center. Replaces the red
-   monitor banner and the red status band (which still serves other kinds). */
-.surface-error-indicator {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  padding: var(--space-1) var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-}
-/* `display: flex` outranks the UA `[hidden] { display: none }` rule, so the
-   hidden state must be restated or the line stays visible (real-browser E2E
-   caught this). */
-.surface-error-indicator[hidden] {
-  display: none;
-}
-.surface-error-indicator__count {
-  flex: 0 0 auto;
-  color: var(--color-state-blocked);
-  font-weight: 700;
-}
-.surface-error-indicator__summary {
-  flex: 1 1 auto;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.surface-error-indicator__jump {
-  flex: 0 0 auto;
-  appearance: none;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--color-text-muted);
-  padding: 0 var(--space-2);
-  height: var(--space-5);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  cursor: pointer;
-}
-.surface-error-indicator__jump:hover {
-  color: var(--color-text-strong);
-  border-color: var(--color-border-strong);
-}
-
 .knowledge-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

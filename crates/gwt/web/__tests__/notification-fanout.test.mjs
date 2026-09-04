@@ -18,6 +18,7 @@ import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const boardLogsSource = readFileSync(resolve(here, "../board-logs-surface.js"), "utf8");
+const kanbanSource = readFileSync(resolve(here, "../knowledge-kanban-surface.js"), "utf8");
 const completionSource = readFileSync(
   resolve(here, "../agent-completion-notifications.js"),
   "utf8",
@@ -154,10 +155,37 @@ test("issue_monitor_toast is never coalesced by the receive dispatcher (history 
 
 // --- FR-017: surface error seams into the Issue surface ---
 
-test("app.js injects the FR-017 error seams into the Issue surface (report / resolve / open)", () => {
+test("app.js reports Issue-surface errors to the center and renders nothing in the surface (FR-017)", () => {
   const call = appSource.match(/createKnowledgeKanbanSurface\(\{[\s\S]*?\n {6}\}\);/)?.[0];
   assert.ok(call, "createKnowledgeKanbanSurface call found");
   assert.match(call, /reportSurfaceError:\s*\(error\)\s*=>\s*notificationCenter\.recordError\(error\)/);
   assert.match(call, /resolveSurfaceError:\s*\(key\)\s*=>\s*notificationCenter\.resolveError\(key\)/);
-  assert.match(call, /openNotificationCenter:\s*\(\)\s*=>\s*notificationCenter\.open\(\)/);
+  // User ruling 2026-09-04: errors are read in ONE place. The Issue surface
+  // gets no indicator and therefore no jump-to-center seam.
+  assert.doesNotMatch(call, /openNotificationCenter/);
+  assert.doesNotMatch(kanbanSource, /surface-error-indicator/);
+});
+
+// --- 選別（どの窓が通知を生むか）: user ruling 2026-09-04 ---
+
+test("completion notices are gated to agent panes, like attention (a Settings window must not say 'Agent stopped')", () => {
+  // createAgentCompletionNotifier has no preset gate of its own (FR-016 keeps
+  // the controller untouched), so the gate lives at the app.js call site —
+  // exactly where the attention toaster is already gated. Without it every
+  // window preset (Settings / Board / Logs / Issue) can publish an
+  // "Agent stopped" notice titled with that window's own title, and v2 makes
+  // it worse by persisting it into the history instead of a passing toast.
+  const call = appSource.match(
+    /if \(windowData && presetSupportsWaitingStatus\(windowData\.preset\)\) \{[\s\S]*?\n {12}\}/,
+  )?.[0];
+  assert.ok(call, "the preset-gated block must exist");
+  assert.match(call, /agentCompletionNotifier\.handleRuntimeState\(/, "completion runs inside the preset gate");
+  assert.match(call, /agentAttentionToaster\.handleRuntimeState\(/, "attention stays inside the same gate");
+  // and nothing calls the completion notifier outside that gate
+  const ungated = appSource.split("presetSupportsWaitingStatus")[0];
+  assert.doesNotMatch(
+    ungated,
+    /agentCompletionNotifier\.handleRuntimeState\(/,
+    "no ungated completion call may remain",
+  );
 });

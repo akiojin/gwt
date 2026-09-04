@@ -354,11 +354,12 @@ export function createKnowledgeKanbanSurface({
   getResumeBounds,
   // SPEC #3206 FR-017: surface errors (Issue Monitor last_error, Issue window
   // load/search failures) are reported to the notification center as error
-  // rows and the surface shows one compact indicator line instead of a red
-  // band. Pure seams: the surface never learns the center's shape.
+  // rows and are NOT rendered in this surface at all — the bell + drawer are
+  // the single place errors are read (user ruling 2026-09-04; a per-surface
+  // indicator re-fragments the very thing v2 consolidated). Pure seams: the
+  // surface never learns the center's shape.
   reportSurfaceError = () => {},
   resolveSurfaceError = () => {},
-  openNotificationCenter = () => {},
 }) {
       const knowledgeBridgeStateMap = new Map();
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
@@ -405,24 +406,6 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
-      function renderSurfaceErrorIndicator(element, state) {
-        const indicator = element?.querySelector(".surface-error-indicator");
-        if (!indicator) return;
-        const errors = [];
-        const monitorError = issueMonitorErrorText();
-        if (monitorError) errors.push({ message: monitorError, sequence: issueMonitorErrorSequence });
-        if (state?.error) errors.push({ message: state.error, sequence: state.errorSequence || 0 });
-        indicator.hidden = errors.length === 0;
-        if (errors.length === 0) return;
-        const latest = errors.reduce((a, b) => (b.sequence >= a.sequence ? b : a));
-        const count = indicator.querySelector(".surface-error-indicator__count");
-        const summary = indicator.querySelector(".surface-error-indicator__summary");
-        if (count) count.textContent = `${errors.length} error${errors.length === 1 ? "" : "s"}`;
-        if (summary) {
-          summary.textContent = latest.message;
-          summary.title = latest.message;
-        }
-      }
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
@@ -551,9 +534,7 @@ export function createKnowledgeKanbanSurface({
       function renderAllIssueMonitorControls() {
         for (const [windowId, state] of knowledgeBridgeStateMap) {
           if (normalizeKnowledgeKind(state.kind) !== "issue") continue;
-          const element = windowMap.get(windowId);
-          renderIssueMonitorControls(element);
-          renderSurfaceErrorIndicator(element, state);
+          renderIssueMonitorControls(windowMap.get(windowId));
         }
       }
 
@@ -615,10 +596,6 @@ export function createKnowledgeKanbanSurface({
               enabled: !Boolean(issueMonitorStatus.enabled),
             });
           });
-        panel
-          .closest(".issue-bridge-root")
-          ?.querySelector(".surface-error-indicator__jump")
-          ?.addEventListener("click", () => openNotificationCenter());
         panel
           .querySelector('[data-action="monitor-autonomous"]')
           ?.addEventListener("click", () => {
@@ -2593,7 +2570,6 @@ export function createKnowledgeKanbanSurface({
           // FR-017: Issue window errors go to the notification center + the
           // compact indicator line, never a persistent red band.
           syncIssueWindowErrorReport(windowId, state);
-          renderSurfaceErrorIndicator(element, state);
         }
         if (state.error) {
           // Issue windows keep the status line empty on error (a failed load
@@ -3169,11 +3145,6 @@ export function createKnowledgeKanbanSurface({
                     <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
                   </div>
                 </section>
-                <div class="surface-error-indicator" role="status" hidden>
-                  <span class="surface-error-indicator__count"></span>
-                  <span class="surface-error-indicator__summary"></span>
-                  <button type="button" class="surface-error-indicator__jump" data-action="open-notifications">Notifications</button>
-                </div>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">

@@ -3486,16 +3486,21 @@
               detailMap.delete(windowId);
             }
             const effectiveDetail = detailMap.get(windowId) || "";
-            agentCompletionNotifier.handleRuntimeState({
-              windowId,
-              runtimeState,
-              windowData,
-              projectTab: windowContext?.tab || activeProjectTab(),
-              statusDetail: effectiveDetail,
-            });
             // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
             // that carry a waiting state) raise in-app attention toasts.
+            // SPEC #3206 v2 (user ruling 2026-09-04): completion notices take
+            // the same gate. The controller has no preset check of its own, so
+            // ungated it publishes "Agent stopped" for Settings / Board / Logs
+            // windows using that window's own title — noise that v2 would then
+            // persist into the history instead of letting it pass as a toast.
             if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+              agentCompletionNotifier.handleRuntimeState({
+                windowId,
+                runtimeState,
+                windowData,
+                projectTab: windowContext?.tab || activeProjectTab(),
+                statusDetail: effectiveDetail,
+              });
               agentAttentionToaster.handleRuntimeState({
                 windowId,
                 runtimeState,
@@ -4632,7 +4637,6 @@
         // the center is constructed after this factory.
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
-        openNotificationCenter: () => notificationCenter.open(),
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log

@@ -97,15 +97,12 @@ async function makeFixture(options = {}) {
 function errorSpies() {
   const reported = [];
   const resolved = [];
-  const opened = [];
   return {
     reported,
     resolved,
-    opened,
     options: {
       reportSurfaceError: (error) => reported.push(error),
       resolveSurfaceError: (key) => resolved.push(key),
-      openNotificationCenter: () => opened.push(true),
     },
   };
 }
@@ -200,12 +197,10 @@ test("Issue Monitor panel preserves higher-priority states around quota-hold met
   });
 
   assert.equal(summary.textContent, "Error | Queue 3 | Active 0/2");
-  // FR-017: the red monitor banner is gone; the compact indicator carries it.
+  // FR-017: the red monitor banner is gone and nothing replaces it in the
+  // surface — the error is read in the notification center.
   assert.equal(body.querySelector(".knowledge-monitor-error"), null);
-  assert.match(
-    body.querySelector(".surface-error-indicator__summary").textContent,
-    /issue #3785: failed/,
-  );
+  assert.equal(body.querySelector(".surface-error-indicator"), null);
   assert.doesNotMatch(summary.textContent, /Quota hold|Provider|Reset/);
 
   surface.applyIssueMonitorStatus({
@@ -373,40 +368,36 @@ test("Issue rows render monitor projections and send controls from the full cano
   assert.equal(document.querySelector(".issue-monitor-card"), null);
 });
 
-// --- SPEC #3206 FR-017: surface error aggregation ---
+// --- SPEC #3206 FR-017: errors are read in ONE place (notification center) ---
+// User ruling 2026-09-04: the Issue window shows no error surface of its own.
+// It reports every error to the notification center and renders nothing.
 
-test("FR-017: Issue Monitor last_error shows one compact indicator line, reports to the center, and resolves", async (t) => {
+test("FR-017: Issue Monitor last_error is reported to the center and nothing renders in the window", async (t) => {
   const spies = errorSpies();
   const { body, surface } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const indicator = body.querySelector(".surface-error-indicator");
-  assert.ok(indicator, "Issue window carries the compact indicator");
-  assert.equal(indicator.hidden, true, "hidden while there is no error");
-  assert.equal(body.querySelector(".knowledge-monitor-error"), null, "no red banner element in the markup");
+  assert.equal(body.querySelector(".knowledge-monitor-error"), null, "no red banner");
+  assert.equal(body.querySelector(".surface-error-indicator"), null, "no compact indicator either");
 
   surface.applyIssueMonitorStatus({ enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: "issue #3785: scan failed" });
-  assert.equal(indicator.hidden, false);
-  assert.equal(indicator.querySelector(".surface-error-indicator__count").textContent, "1 error");
-  assert.equal(indicator.querySelector(".surface-error-indicator__summary").textContent, "issue #3785: scan failed");
   assert.deepEqual(spies.reported, [
     { key: "issue-monitor:last_error", title: "Issue Monitor", message: "issue #3785: scan failed" },
   ]);
+  assert.equal(body.querySelector(".surface-error-indicator"), null, "still nothing in the surface");
 
-  // Identical status frames (issue_monitor_status is re-broadcast constantly)
-  // must not re-report the same occurrence.
+  // issue_monitor_status is re-broadcast constantly — an unchanged error is
+  // not a new occurrence.
   surface.applyIssueMonitorStatus({ enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: "issue #3785: scan failed" });
   assert.equal(spies.reported.length, 1);
 
   surface.applyIssueMonitorStatus({ enabled: true, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: null });
-  assert.equal(indicator.hidden, true, "clears when the monitor recovers");
-  assert.deepEqual(spies.resolved, ["issue-monitor:last_error"]);
+  assert.deepEqual(spies.resolved, ["issue-monitor:last_error"], "recovery resolves the center row");
 });
 
-test("FR-017: Issue window load errors (e.g. gh rate limit) use the indicator, never the red status band", async (t) => {
+test("FR-017: Issue window load errors report to the center without a red status band", async (t) => {
   const spies = errorSpies();
   const { body, surface, load } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const indicator = body.querySelector(".surface-error-indicator");
   const status = body.querySelector(".knowledge-status");
 
   surface.applyKnowledgeReceiveEvent({
@@ -417,37 +408,21 @@ test("FR-017: Issue window load errors (e.g. gh rate limit) use the indicator, n
     message: "gh issue list: github_rate_limited (resets 09:30Z)",
   });
   assert.equal(status.classList.contains("error"), false, "no red band");
-  assert.equal(status.textContent, "");
-  assert.equal(indicator.hidden, false);
-  assert.equal(indicator.querySelector(".surface-error-indicator__count").textContent, "1 error");
-  assert.match(indicator.querySelector(".surface-error-indicator__summary").textContent, /github_rate_limited/);
+  assert.equal(status.textContent, "", "and no error text in the surface");
   assert.deepEqual(spies.reported, [
     { key: "issue-window:win-1:load", title: "Issue window", message: "gh issue list: github_rate_limited (resets 09:30Z)" },
   ]);
 
-  // Both sources aggregate into one line (count + latest summary).
-  surface.applyIssueMonitorStatus({ enabled: true, state: "error", queue_len: 0, active_count: 0, max_active_agents: 1, last_error: "issue #1: launch failed" });
-  assert.equal(indicator.querySelector(".surface-error-indicator__count").textContent, "2 errors");
-  assert.equal(indicator.querySelector(".surface-error-indicator__summary").textContent, "issue #1: launch failed");
-
   // A successful reload resolves the window's error automatically.
-  const reload = { ...load, request_id: load.request_id };
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_entries",
     id: "win-1",
     knowledge_kind: "issue",
-    request_id: reload.request_id,
+    request_id: load.request_id,
     entries: [knowledgeEntry(42, "queued", 1)],
     selected_number: 42,
     empty_message: "",
     refresh_enabled: true,
   });
   assert.ok(spies.resolved.includes("issue-window:win-1:load"));
-  assert.equal(indicator.querySelector(".surface-error-indicator__count").textContent, "1 error");
-
-  // The jump control opens the notification center.
-  indicator.querySelector(".surface-error-indicator__jump").dispatchEvent(
-    new body.ownerDocument.defaultView.Event("click", { bubbles: true }),
-  );
-  assert.equal(spies.opened.length, 1);
 });
