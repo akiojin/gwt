@@ -250,6 +250,14 @@ pub(super) fn run<E: CliEnv>(
             number,
             reason,
         } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, out)?,
+        IssueCommand::MonitorQuotaHoldList { project_root } => {
+            run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorQuotaHoldClear {
+            project_root,
+            provider,
+            reason,
+        } => run_monitor_quota_hold_clear(env, project_root.as_deref(), &provider, &reason, out)?,
         IssueCommand::MonitorWait {
             project_root,
             number,
@@ -278,12 +286,14 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            launch_agent,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
             enabled,
             autonomous_mode,
             max_active,
+            launch_agent.as_deref(),
             out,
         )?,
         _ => unreachable!("issue::run called with non-issue command"),
@@ -670,6 +680,122 @@ fn run_monitor_launch_now<E: CliEnv>(
     );
     out.push('\n');
     Ok(if delivery.scan_requested { 0 } else { 1 })
+}
+
+/// Issue #3923 AC-1: list every provider quota hold in force with the evidence
+/// it was formed from.
+///
+/// Read from the daemon's live projection when one is up (the same snapshot
+/// `issue.monitor.status` serves), otherwise from the durable prefs. Expired
+/// holds are not listed: they no longer gate anything.
+fn run_monitor_quota_hold_list<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let holds = live_provider_quota_holds(&project_root)?;
+    out.push_str(
+        &serde_json::json!({
+            "provider_quota_holds": holds,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+fn live_provider_quota_holds(
+    project_root: &std::path::Path,
+) -> Result<Vec<crate::IssueMonitorProviderQuotaHold>, SpecOpsError> {
+    #[cfg(unix)]
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    {
+        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        return Ok(status.provider_quota_holds);
+    }
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Ok(monitor.agent_status_at(&now).provider_quota_holds)
+}
+
+/// Issue #3923 AC-1: release one provider's quota hold.
+///
+/// The release is committed under the prefs lock as a durable fence, so the
+/// daemon (which joins holds by the later reset and would otherwise re-stamp
+/// the hold from memory) adopts the release on its next rebase. Every issue
+/// the hold was holding is readmitted, and one immediate scan is requested so
+/// the queue moves without waiting for the next tick.
+fn run_monitor_quota_hold_clear<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    provider: &str,
+    reason: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Millisecond precision: the fence orders holds by instant, and a hold
+    // formed right after this clear must not share its second.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.clear_provider_quota_hold(provider, reason, &now);
+        if matches!(
+            outcome,
+            crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+        ) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+        released_reset_at,
+        released_issues,
+    } = outcome
+    else {
+        out.push_str(
+            &serde_json::json!({
+                "provider": provider,
+                "status": "refused",
+                "refusal": "unknown_provider",
+                "detail": "provider must name the held agent (for example codex or claude)",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    };
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+    let remaining =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs)
+            .agent_status_at(&now)
+            .provider_quota_holds;
+    out.push_str(
+        &serde_json::json!({
+            "provider": provider,
+            "status": if released_reset_at.is_some() { "cleared" } else { "not_held" },
+            "reason": reason,
+            "released_reset_at": released_reset_at,
+            "released_issues": released_issues,
+            "provider_quota_holds": remaining,
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
 }
 
 /// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
@@ -1171,8 +1297,9 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1188,6 +1315,11 @@ fn apply_monitor_config_set(
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
     }
+    if let Some(launch_agent) = launch_agent {
+        candidate
+            .switch_launch_profile_agent(launch_agent)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    }
     *prefs = candidate.prefs();
     Ok(())
 }
@@ -1196,8 +1328,19 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+    if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::IssueMonitorLaunchProfileSwitchError::InvalidAgent.to_string(),
+        ));
+    }
+    if enabled.is_none()
+        && autonomous_mode.is_none()
+        && max_active.is_none()
+        && launch_agent.is_none()
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "at least one Issue Monitor config field is required",
@@ -1226,10 +1369,27 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)
+        .map_err(io_as_api_error)?;
+    // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
+    // before publishing so the daemon never has to reject a control it
+    // cannot explain back to the caller.
+    if launch_agent.is_some() {
+        let prefs = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&project_root),
+        )
+        .map_err(io_as_api_error)?;
+        if prefs.launch_profile.is_none() {
+            return Err(io_as_api_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::IssueMonitorLaunchProfileSwitchError::NoSavedProfile.to_string(),
+            )));
+        }
+    }
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1238,6 +1398,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "launch_agent": launch_agent,
             }
         }),
         std::process::id(),
@@ -1249,7 +1410,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, launch_agent)
         })
         .map_err(io_as_api_error)?;
     }
@@ -1262,6 +1423,9 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
+            "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
+                crate::issue_monitor_launch_profile_summary(&profile.clone().into())
+            }),
         })
         .to_string(),
     );
@@ -3106,6 +3270,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
@@ -3126,6 +3291,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 issue_number: 2338,
@@ -3215,6 +3381,7 @@ mod tests {
                 autonomous_mode: true,
                 has_launch_profile: true,
                 quota_hold: None,
+                provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     issue_number: 2338,
@@ -3278,6 +3445,7 @@ mod tests {
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
+            provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
@@ -3833,6 +4001,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                launch_agent: None,
             },
             &mut out,
         )
@@ -3854,6 +4023,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                launch_agent: None,
             },
             &mut out,
         )
@@ -3917,6 +4087,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    launch_agent: None,
                 },
                 &mut out,
             );
@@ -4950,5 +5121,233 @@ mod tests {
         )
         .expect("plain issues keep today's behaviour");
         assert_eq!(code, 0);
+    }
+
+    /// Issue #3923 AC-5: the PM switches the saved profile's agent from the
+    /// CLI; without a saved profile the switch is refused before anything is
+    /// published or written.
+    #[test]
+    fn config_set_launch_agent_switches_the_saved_profile_or_refuses_without_one() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("claude".to_string()),
+            },
+            &mut out,
+        )
+        .is_err());
+        assert!(!prefs_path.exists(), "a refused switch writes nothing");
+
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                    agent_id: "codex".to_string(),
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: None,
+                    session_mode: Default::default(),
+                    skip_permissions: true,
+                    codex_fast_mode: false,
+                    runtime_target: Default::default(),
+                    docker_service: None,
+                    docker_lifecycle_intent: Default::default(),
+                    windows_shell: None,
+                }),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("Claude".to_string()),
+            },
+            &mut out,
+        )
+        .expect("config set");
+        assert_eq!(code, 0, "output: {out}");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let profile = prefs.launch_profile.expect("profile survives");
+        assert_eq!(profile.agent_id, "claude");
+        assert_eq!(profile.model, None);
+        assert_eq!(profile.reasoning, None);
+        assert!(
+            profile.skip_permissions,
+            "the wizard's permission choice is kept"
+        );
+    }
+
+    /// Issue #3923 AC-1 / AC-4: the PM lists a provider hold with its evidence
+    /// and clears it by provider; the release is durable and readmits the
+    /// issues the hold was holding.
+    #[test]
+    fn quota_hold_list_and_clear_roundtrip_releases_the_provider_hold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let reset_at = (chrono::Utc::now() + chrono::Duration::days(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                provider_quota_holds: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    reset_at.clone(),
+                )]),
+                provider_quota_hold_evidence: std::collections::BTreeMap::from([(
+                    "codex".to_string(),
+                    crate::IssueMonitorProviderQuotaHoldEvidence {
+                        recorded_at: "2026-09-02T09:01:00Z".to_string(),
+                        source: "screen_notice".to_string(),
+                        issue_number: Some(42),
+                        window_id: Some("tab-1::agent-42".to_string()),
+                        screen_text: Some("You've hit your usage limit".to_string()),
+                        poller_state: Some("ok".to_string()),
+                        poller_limit_reached: Some(false),
+                        poller_windows: vec![crate::IssueMonitorProviderQuotaPollerWindow {
+                            kind: "weekly".to_string(),
+                            used_percent: 26,
+                        }],
+                    },
+                )]),
+                autonomous_records: vec![crate::AutonomousIssueRecord {
+                    issue_number: 42,
+                    retry_not_before: Some(reset_at.clone()),
+                    retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                    retry_hold_provider: Some("codex".to_string()),
+                    ..crate::AutonomousIssueRecord::new(42)
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldList { project_root: None },
+            &mut out,
+        )
+        .expect("list result");
+        assert_eq!(code, 0);
+        let listed: serde_json::Value = serde_json::from_str(out.trim()).expect("list JSON");
+        assert_eq!(listed["provider_quota_holds"][0]["provider"], "codex");
+        assert_eq!(listed["provider_quota_holds"][0]["reset_at"], reset_at);
+        assert_eq!(
+            listed["provider_quota_holds"][0]["evidence"]["screen_text"],
+            "You've hit your usage limit"
+        );
+        assert_eq!(
+            listed["provider_quota_holds"][0]["evidence"]["poller_windows"][0]["used_percent"],
+            26
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM: Codex is not rate limited".to_string(),
+            },
+            &mut out,
+        )
+        .expect("clear result");
+        assert_eq!(code, 0, "clear output: {out}");
+        let cleared: serde_json::Value = serde_json::from_str(out.trim()).expect("clear JSON");
+        assert_eq!(cleared["provider"], "codex");
+        assert_eq!(cleared["status"], "cleared");
+        assert_eq!(cleared["released_reset_at"], reset_at);
+        assert_eq!(cleared["released_issues"], serde_json::json!([42]));
+        assert_eq!(cleared["provider_quota_holds"], serde_json::json!([]));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.provider_quota_holds.is_empty());
+        assert!(persisted.provider_quota_hold_evidence.is_empty());
+        let release = persisted
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("release fence is durable");
+        assert_eq!(release.reason, "PM: Codex is not rate limited");
+        assert_eq!(
+            release.released_reset_at.as_deref(),
+            Some(reset_at.as_str())
+        );
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("the record survives");
+        assert_eq!(record.retry_not_before, None);
+        assert_eq!(record.retry_hold_provider, None);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldList { project_root: None },
+            &mut out,
+        )
+        .expect("list result");
+        assert_eq!(code, 0);
+        let listed: serde_json::Value = serde_json::from_str(out.trim()).expect("list JSON");
+        assert_eq!(listed["provider_quota_holds"], serde_json::json!([]));
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "again".to_string(),
+            },
+            &mut out,
+        )
+        .expect("second clear result");
+        assert_eq!(code, 0);
+        let cleared: serde_json::Value = serde_json::from_str(out.trim()).expect("clear JSON");
+        assert_eq!(cleared["status"], "not_held");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "   ".to_string(),
+                reason: "x".to_string(),
+            },
+            &mut out,
+        )
+        .expect("unknown provider result");
+        assert_eq!(code, 1);
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "unknown_provider");
     }
 }

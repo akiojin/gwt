@@ -344,6 +344,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
         }),
+        "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
+                project_root: optional_path(params, "project_root")?,
+            })
+        }
+        "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: optional_path(params, "project_root")?,
+                provider: required_string(params, "provider")?,
+                // An unexplained release of a provider hold is not auditable.
+                reason: required_string(params, "reason")?,
+            })
+        }
         "issue.monitor.wait" => {
             let clear = optional_bool(params, "clear")?.unwrap_or(false);
             let (reason, resume_condition) = if clear {
@@ -376,9 +389,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
-            if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            let launch_agent = optional_string(params, "launch_agent")?;
+            if enabled.is_none()
+                && autonomous_mode.is_none()
+                && max_active.is_none()
+                && launch_agent.is_none()
+            {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active",
+                    "enabled|autonomous_mode|max_active|launch_agent",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -394,6 +413,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                launch_agent,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -2304,6 +2324,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: Some(7),
+                launch_agent: None,
             })
         );
         assert_eq!(
@@ -2313,8 +2334,31 @@ mod tests {
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                launch_agent: None,
             })
         );
+    }
+
+    /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
+    #[test]
+    fn issue_monitor_config_set_accepts_launch_agent_alone() {
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"launch_agent": "claude"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("claude".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({})),
+            CliParseError::MissingFlag("enabled|autonomous_mode|max_active|launch_agent")
+        ));
     }
 
     // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
@@ -2492,6 +2536,38 @@ mod tests {
         ));
     }
 
+    /// Issue #3923 AC-1: provider quota holds are listed and cleared through
+    /// JSON operations, and a clear must name its provider and reason.
+    #[test]
+    fn issue_monitor_quota_hold_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.quota_hold.list", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex", "reason": "Codex is not rate limited"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "Codex is not rate limited".to_string(),
+            })
+        );
+        assert!(matches!(
+            err(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex"})
+            ),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.quota_hold.clear", json!({"reason": "x"})),
+            CliParseError::MissingFlag("provider")
+        ));
+    }
+
     #[test]
     fn issue_monitor_requeue_parses() {
         assert_eq!(
@@ -2655,6 +2731,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                launch_agent: None,
             })
         );
     }
