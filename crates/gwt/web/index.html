@@ -240,6 +240,25 @@
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
+            <!-- SPEC #3206 v2 (FR-009): notification bell + unread badge. The
+                 drawer itself mounts on <body> (app.js) — never inside the rail,
+                 whose stacking context would clamp it under toasts/modals. -->
+            <button
+              class="op-rail__item op-rail__item--notifications"
+              type="button"
+              id="op-notifications-button"
+              data-cmd="toggle-notifications"
+              aria-label="Notifications"
+              title="Notifications"
+              aria-controls="notification-center"
+              aria-expanded="false"
+            >
+              <span class="op-rail__icon" aria-hidden="true">🔔</span>
+              <span class="op-rail__badge" aria-hidden="true" hidden></span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Notifications</span>
+              </span>
+            </button>
             <button
               class="op-rail__item"
               id="op-palette-button"
