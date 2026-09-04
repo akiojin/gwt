@@ -1383,6 +1383,17 @@ enum UserEvent {
     /// default); daemon supervision is a liveness check that must not inherit
     /// it, or a crashed daemon would leave the control lane dead for minutes.
     RuntimeDaemonEnsureTick,
+    /// Issue #3927 (SPEC #3340 FR-045): observer tick for runtime-owned
+    /// terminal convergence of Issue-linked Agent windows. Its own short
+    /// cadence: the scan poll interval (minutes) is far coarser than the
+    /// 60-second close grace it has to honour.
+    TerminalConvergenceTick,
+    /// Typed observations from the terminal convergence worker. Grace is
+    /// read from Agent settings off-thread and carried with them.
+    TerminalConvergenceObserved {
+        grace: std::time::Duration,
+        observations: Vec<app_runtime::terminal_convergence::TerminalWindowObservation>,
+    },
     IssueMonitorScheduledScanComplete {
         project_root: PathBuf,
         prefs_path: PathBuf,
@@ -3161,6 +3172,9 @@ mod tests {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            terminal_close_candidates: HashMap::new(),
+            terminal_convergence_scan_in_flight: false,
+            terminal_close_grace: std::time::Duration::from_secs(60),
             work_merged_branches: HashMap::new(),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
@@ -8482,6 +8496,26 @@ fn main() -> std::io::Result<()> {
             tracing::error!(%error, "failed to start the runtime daemon supervision thread");
         }
     }
+    // Issue #3927 (SPEC #3340 FR-045): runtime-owned terminal convergence.
+    // The observer needs a cadence finer than the scan poll so a settled
+    // window closes within one tick after its 60-second grace.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        if let Err(error) = std::thread::Builder::new()
+            .name("terminal-convergence-tick".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(app_runtime::terminal_convergence::TERMINAL_CONVERGENCE_TICK);
+                if tick_proxy
+                    .send_event(UserEvent::TerminalConvergenceTick)
+                    .is_err()
+                {
+                    break;
+                }
+            })
+        {
+            tracing::error!(%error, "failed to start the terminal convergence tick thread");
+        }
+    }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
@@ -9004,6 +9038,17 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeDaemonEnsureTick) => {
                 app.ensure_runtime_daemons_for_enabled_projects();
+            }
+            Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
+                let events = app.terminal_convergence_tick_events();
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::TerminalConvergenceObserved {
+                grace,
+                observations,
+            }) => {
+                let events = app.terminal_convergence_observed_events(grace, observations);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,
