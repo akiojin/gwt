@@ -440,12 +440,11 @@ impl AppRuntime {
                 .windows
                 .iter()
                 .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
-                .map(|window| combined_window_id(&tab_id, &window.id))
-                .unwrap_or_default();
+                .map(|window| combined_window_id(&tab_id, &window.id));
             if let Some(reason) = self.restore_admission_terminal_reason(
                 &session,
                 &project_root,
-                &placeholder_window_id,
+                placeholder_window_id.as_deref(),
             ) {
                 self.refuse_terminal_session_restore(&tab_id, &session.id, reason);
                 continue;
@@ -906,7 +905,7 @@ impl AppRuntime {
                     .map(|tab| tab.project_root.clone())
                     .unwrap_or_default();
                 if let Some(reason) =
-                    self.restore_admission_terminal_reason(&session, &project_root, &combined)
+                    self.restore_admission_terminal_reason(&session, &project_root, Some(&combined))
                 {
                     self.refuse_terminal_session_restore(tab_id, &session.id, reason);
                     events.push(self.workspace_state_broadcast());

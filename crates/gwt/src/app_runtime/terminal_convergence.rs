@@ -462,10 +462,36 @@ impl AppRuntime {
         let profile_config_path = self.profile_config_path.clone();
         let commit_timeout = self.issue_monitor_fallback_commit_timeout;
         self.terminal_convergence_scan_in_flight = true;
+        let fallback_grace = self.terminal_close_grace;
         let spawn = self.blocking_tasks.try_spawn(move || {
-            let grace = configured_terminal_close_grace(profile_config_path.as_deref());
-            let observations =
-                observe_terminal_windows_in_background(&sessions_dir, snapshots, commit_timeout);
+            // The in-flight flag is cleared only by the completion event, so
+            // a panicking worker must still send one (with no observations,
+            // which drops every candidate) or the observer would stay wedged.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let grace = configured_terminal_close_grace(profile_config_path.as_deref());
+                let observations = observe_terminal_windows_in_background(
+                    &sessions_dir,
+                    snapshots,
+                    commit_timeout,
+                );
+                (grace, observations)
+            }));
+            let (grace, observations) = match result {
+                Ok(observed) => observed,
+                Err(panic) => {
+                    let detail = panic
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    tracing::error!(
+                        target: "gwt.pane.teardown",
+                        %detail,
+                        "terminal convergence observer panicked; no window is eligible this scan"
+                    );
+                    (fallback_grace, Vec::new())
+                }
+            };
             proxy.send(UserEvent::TerminalConvergenceObserved {
                 grace,
                 observations,
@@ -622,20 +648,31 @@ impl AppRuntime {
     /// FR-047: decide whether automatic restore may spawn `session`. Returns
     /// the terminal reason when the persisted window is already eligible;
     /// the caller then disables restore and removes the placeholder.
+    ///
+    /// `window_id` is the persisted placeholder when one exists. An orphan
+    /// Session (no persisted window) has no identity to compare against the
+    /// Monitor binding, so only the identity-free facts — a closed Issue or
+    /// a settled execution — can refuse it; `RevokedLaunch` needs the exact
+    /// window and is never inferred from a missing one.
     pub(crate) fn restore_admission_terminal_reason(
         &self,
         session: &gwt_agent::Session,
         project_root: &Path,
-        window_id: &str,
+        window_id: Option<&str>,
     ) -> Option<TerminalCloseReason> {
         session.linked_issue_number?;
         let facts = read_terminal_window_facts(
             session,
-            window_id,
+            window_id.unwrap_or_default(),
             WindowProcessStatus::Stopped,
             project_root,
         );
         match classify_terminal_window(&facts) {
+            TerminalCloseEligibility::Eligible(TerminalCloseReason::RevokedLaunch)
+                if window_id.is_none() =>
+            {
+                None
+            }
             TerminalCloseEligibility::Eligible(reason) => Some(reason),
             TerminalCloseEligibility::Ineligible(_) => None,
         }

@@ -3627,9 +3627,11 @@ impl AppRuntime {
     /// Issue #3927 (SPEC #3340 AS-44): the Issue a restored window belongs
     /// to when the Issue Monitor durably owns that launch. A restore carries
     /// no launch feedback context, so the link is read from the window's
-    /// Session and confirmed against the repository-scoped Monitor prefs.
-    /// Manual windows (no linked Issue, or an Issue the Monitor never
-    /// launched) answer `None` and keep their diagnostic pane.
+    /// Session and confirmed against the repository-scoped Monitor prefs,
+    /// which must bind this exact window to that Issue. Manual windows (no
+    /// linked Issue, or a window the Monitor never bound — even when the
+    /// Monitor launched the same Issue elsewhere) answer `None` and keep
+    /// their diagnostic pane.
     pub(crate) fn issue_monitor_owned_restore_issue(
         &self,
         window_id: &str,
@@ -3655,9 +3657,7 @@ impl AppRuntime {
         ))
         .ok()?;
         let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-        (monitor.launched_window_id(linked_issue).is_some()
-            || monitor.launched_window_issue(window_id) == Some(linked_issue))
-        .then_some(linked_issue)
+        (monitor.launched_window_issue(window_id) == Some(linked_issue)).then_some(linked_issue)
     }
 
     fn issue_monitor_launch_failure_committed(

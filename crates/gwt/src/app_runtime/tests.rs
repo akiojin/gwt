@@ -62168,9 +62168,9 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
     let window_id = "tab-1::agent-42".to_string();
 
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
+    let mut seeded = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
             enabled: true,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
@@ -62179,8 +62179,9 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
             launched_claims: std::collections::BTreeMap::from([(42, "claim-live".to_string())]),
             ..gwt::IssueMonitorPrefs::default()
         },
-    )
-    .expect("seed prefs");
+    );
+    assert_eq!(seeded.record_attempt(42), 1, "one attempt already spent");
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded.prefs()).expect("seed prefs");
 
     // Settlement bridge: exact identity commits, stale identity is refused.
     assert!(
@@ -62211,11 +62212,13 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
         persisted.launched_issues.is_empty(),
         "the settlement released the Monitor slot"
     );
-    assert!(
+    assert_eq!(
         persisted
             .autonomous_records
             .iter()
-            .all(|record| record.attempts == 0),
+            .find(|record| record.issue_number == 42)
+            .map(|record| record.attempts),
+        Some(1),
         "settlement spends no attempt"
     );
 
