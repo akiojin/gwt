@@ -3271,68 +3271,133 @@ body {
   opacity: 0.45;
 }
 
-/* SPEC-3671 FR-012 / FR-013: the Work block on an Issue row. It spans both row
- * columns so the Work state and its actions read as one band under the Issue. */
-.knowledge-row-work {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--color-border);
-}
-
-.knowledge-work-summary {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.knowledge-work-lifecycle {
+/* SPEC #3885 T-004 (FR-006): the Issue row state. One primary badge carries the
+ * state; at most two secondary items (a reason line or attribute chips) sit under
+ * the title; at most two visible actions, the rest in the row's overflow menu. */
+.knowledge-row-badge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
-  letter-spacing: 0;
-  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  white-space: nowrap;
+  background: color-mix(in oklab, var(--color-state-idle) 18%, transparent);
+  color: var(--color-state-idle);
 }
 
-.knowledge-work-lifecycle[data-lifecycle="active"] {
-  border-color: var(--color-state-active);
+.knowledge-row-badge[data-tone="active"] {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
   color: var(--color-state-active);
 }
 
-.knowledge-work-attention {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--type-xs);
+.knowledge-row-badge[data-tone="blocked"] {
+  background: color-mix(in oklab, var(--color-state-blocked) 18%, transparent);
   color: var(--color-state-blocked);
 }
 
-.knowledge-work-pr {
+.knowledge-row-badge[data-tone="done"] {
+  background: color-mix(in oklab, var(--color-state-done) 18%, transparent);
+  color: var(--color-state-done);
+}
+
+.knowledge-row-badge[data-tone="needs-input"] {
+  background: color-mix(in oklab, var(--color-state-needs-input) 18%, transparent);
+  color: var(--color-state-needs-input);
+}
+
+.knowledge-row-badge[data-tone="remote"] {
+  background: color-mix(in oklab, var(--color-state-remote) 18%, transparent);
+  color: var(--color-state-remote);
+}
+
+.knowledge-row-secondary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.knowledge-row-secondary-item {
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-mono);
   color: var(--color-text-muted);
 }
 
-.knowledge-work-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.knowledge-row-secondary-item[data-kind="chip"] {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.knowledge-work-actions button:disabled {
+.knowledge-row-secondary-item[data-kind="reason"] {
+  flex-basis: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-body);
+  letter-spacing: 0;
+  color: var(--color-state-needs-input);
+}
+
+.knowledge-row-menu {
+  position: relative;
+}
+
+.knowledge-row-menu > summary {
+  list-style: none;
+  min-width: 28px;
+  min-height: 28px;
+  cursor: pointer;
+}
+
+.knowledge-row-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.knowledge-row-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+}
+
+.knowledge-row-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.knowledge-row-menu-item:hover,
+.knowledge-row-menu-item:focus-visible {
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
+  color: var(--color-text-strong);
+}
+
+.knowledge-row-menu-item:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -3427,13 +3492,6 @@ body {
   color: var(--color-state-needs-input);
 }
 
-.knowledge-monitor-reason {
-  flex-basis: 100%;
-  color: var(--color-state-needs-input);
-  font-family: var(--font-body);
-  font-size: var(--type-xs);
-}
-
 .knowledge-chip {
   background: color-mix(in oklab, var(--agent-codex) 18%, transparent);
   color: var(--agent-codex);
@@ -3464,14 +3522,16 @@ body {
 }
 
 /* Issue #3884 AC-6: the read-only agent status row on an Issue row — name,
- * state, last activity line, elapsed time, Windowize. Spans both row columns
- * under the Issue / Work bands so every running agent is visible from the list. */
+ * last activity line, elapsed time, Windowize (the state is the row's primary
+ * badge, SPEC #3885 AC-5). Spans both row columns so every running agent is
+ * visible from the list. */
 .issue-agent-status {
   grid-column: 1 / -1;
   display: grid;
-  /* Row 1: title · state · elapsed · Windowize. Row 2: the activity line spans
-     the full width so a long agent title is not squeezed by it. */
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  /* Row 1: title · elapsed · Windowize (the state is the Issue row's primary
+     badge, SPEC #3885 AC-5). Row 2: the activity line spans the full width so a
+     long agent title is not squeezed by it. */
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 4px 8px;
   min-width: 0;
@@ -3587,6 +3647,22 @@ body {
 .issue-preview-terminal .terminal-root {
   position: absolute;
   inset: 0;
+}
+
+/* SPEC #3885 T-005 (FR-003a / FR-012): after Windowize the status row slot
+ * shows a "Shown on canvas" face with no second input face. */
+.issue-agent-status.is-on-canvas {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+}
+
+.issue-agent-status-placeholder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
 }
 
 .knowledge-detail-header {

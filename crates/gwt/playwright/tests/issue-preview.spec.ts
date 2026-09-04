@@ -79,7 +79,9 @@ test.describe("Issue preview placement", () => {
       "tab-issue::agent-preview",
     );
 
-    await page.locator(".surface-knowledge [data-issue-number='3672']").click();
+    await page
+      .locator(".surface-knowledge .knowledge-row[data-issue-number='3672'] .knowledge-row-select")
+      .click();
 
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(1);
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveAttribute(
@@ -124,6 +126,9 @@ test.describe("Issue preview placement", () => {
     await expect(
       page.locator(".surface-knowledge .issue-preview .knowledge-monitor-chip"),
     ).toHaveText("Error");
+    const badge = page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge");
+    await expect(badge).toHaveText("Error");
+    await expect(badge).toHaveAttribute("data-tone", "blocked");
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
   });
@@ -140,22 +145,51 @@ test.describe("Issue preview placement", () => {
 
     await expect(page.locator(".workspace-window.surface-work")).toHaveCount(0);
 
-    const work = page.locator(
-      ".surface-knowledge [data-issue-number='3671'] .knowledge-row-work",
-    );
-    await expect(work).toHaveCount(1);
-    await expect(work.locator(".knowledge-work-lifecycle")).toHaveText("Active");
-    await expect(work.locator(".knowledge-work-attention")).toHaveText("Waiting on review");
-    await expect(work.locator(".knowledge-work-pr")).toHaveText("PR #3699 · open");
-    await expect(work.locator('[data-action="continue-work"]')).toBeEnabled();
-    await expect(work.locator('[data-action="resume-work"]')).toBeEnabled();
-    // The backend owns cleanup eligibility; a live agent keeps the action off.
-    await expect(work.locator('[data-action="cleanup-work"]')).toBeDisabled();
-
-    // An Issue with no correlated Work row shows no Work band.
+    // SPEC #3885 T-004: the Work state is folded into the row — the attention
+    // reason and the PR are the two secondary items under the primary badge, and
+    // the Work actions sit in the row's overflow menu while the agent is live.
+    // `.issue-preview` in the detail pane also carries data-issue-number, so
+    // scope every row assertion to `.knowledge-row`.
+    const row = page.locator(".surface-knowledge .knowledge-row[data-issue-number='3671']");
+    await expect(row.locator(".knowledge-row-work")).toHaveCount(0);
+    await expect(row.locator(".knowledge-row-badge")).toHaveText("Running");
+    const secondary = row.locator(".knowledge-row-secondary-item");
+    await expect(secondary).toHaveCount(2);
+    await expect(secondary.nth(0)).toHaveAttribute("data-kind", "reason");
+    await expect(secondary.nth(0)).toHaveText("Waiting on review");
+    await expect(secondary.nth(1)).toHaveText("PR #3699 · open");
     await expect(
-      page.locator(".surface-knowledge [data-issue-number='3672'] .knowledge-row-work"),
-    ).toHaveCount(0);
+      row.locator("button[data-action]:not(.knowledge-row-menu-list button)"),
+    ).toHaveText(["Windowize"]);
+    const menu = row.locator(".knowledge-row-menu");
+    await expect(menu).toHaveCount(1);
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
+    await expect(menu.locator('[data-action="continue-work"]')).toBeVisible();
+    await expect(menu.locator('[data-action="continue-work"]')).toBeEnabled();
+    await expect(menu.locator('[data-action="resume-work"]')).toBeEnabled();
+    // The backend owns cleanup eligibility; a live agent keeps the action off.
+    await expect(menu.locator('[data-action="cleanup-work"]')).toBeDisabled();
+
+    // An Issue with no correlated Work row has no PR chip and no Work actions.
+    const other = page.locator(".surface-knowledge .knowledge-row[data-issue-number='3672']");
+    await expect(other.locator('.knowledge-row-secondary-item[data-key="pr"]')).toHaveCount(0);
+    await expect(other.locator('[data-action="continue-work"]')).toHaveCount(0);
+
+    // SPEC #3885 AC-5: one primary badge, at most two secondary items, at most
+    // two visible actions on every row.
+    for (const issue of ["3671", "3672", "3673", "3674"]) {
+      const each = page.locator(`.surface-knowledge .knowledge-row[data-issue-number='${issue}']`);
+      await expect(each.locator(".knowledge-row-badge")).toHaveCount(1);
+      expect(await each.locator(".knowledge-row-secondary-item").count()).toBeLessThanOrEqual(2);
+      const visibleActions = await each
+        .locator("button[data-action]:not(.knowledge-row-menu-list button)")
+        .count();
+      expect(visibleActions).toBeLessThanOrEqual(2);
+      await expect(each.locator(".knowledge-chip")).toHaveCount(0);
+      await expect(each.locator(".knowledge-state-chip")).toHaveCount(0);
+      await expect(each.locator(".knowledge-monitor-chip")).toHaveCount(0);
+    }
   });
 
   // Issue #3884 AC-1 / AC-3 / AC-5: with three auto-launched agents and an
@@ -203,6 +237,33 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator("#op-strip-running")).toHaveText("3");
     await expect(inline).toHaveText("2 inline");
 
+    // SPEC #3885 T-005 / FR-012: the row keeps the Issue ↔ agent link as a
+    // "Shown on canvas" face with no second input face for the PTY.
+    const face = page.locator(
+      ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
+    );
+    await expect(face).toHaveCount(1);
+    await expect(face).toHaveClass(/is-on-canvas/);
+    await expect(face).toContainText("Shown on canvas");
+    await expect(face.locator(".terminal-root")).toHaveCount(0);
+    await expect(face.locator("[data-action='windowize-issue-preview']")).toHaveCount(0);
+    await expect(
+      page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
+    ).toHaveText("Running");
+    // The Windowized canvas window overlaps the Issue window in the fixture, so
+    // dispatch the click instead of relying on hit-testing through it.
+    await face.locator("[data-action='focus-canvas-window']").dispatchEvent("click");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__knowledgeLoadMessages
+            .filter((message) => message.kind === "focus_window")
+            .map((message) => message.id)
+            .at(-1),
+        ),
+      )
+      .toBe("tab-issue::agent-preview");
+
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
@@ -234,7 +295,11 @@ test.describe("Issue preview placement", () => {
         `.surface-knowledge [data-issue-number='${issue}'] .issue-agent-status`,
       );
       await expect(row).toHaveAttribute("data-window-id", id);
-      await expect(row.locator(".knowledge-monitor-chip")).toHaveText("Running");
+      // SPEC #3885 AC-5: the agent state is the Issue row's single primary badge.
+      await expect(row.locator(".knowledge-monitor-chip")).toHaveCount(0);
+      await expect(
+        page.locator(`.surface-knowledge [data-issue-number='${issue}'] .knowledge-row-badge`),
+      ).toHaveText("Running");
       await expect(row.locator(".terminal-root")).toHaveCount(0);
     }
     await expect(

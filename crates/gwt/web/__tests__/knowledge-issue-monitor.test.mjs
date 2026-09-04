@@ -295,13 +295,16 @@ test("Issue rows render monitor projections and send controls from the full cano
   assert.ok(row42.querySelector(":scope > .knowledge-row-select"));
   assert.ok(row42.querySelector(":scope > .knowledge-row-actions"));
   assert.equal(row42.querySelector("button button"), null, "no nested interactive controls");
-  assert.equal(row42.querySelector(".knowledge-monitor-chip").textContent, "Queued");
+  // SPEC #3885 T-004: the Monitor state is the row's single primary badge.
+  assert.equal(row42.querySelector(".knowledge-row-badge").textContent, "Queued");
+  assert.equal(row42.querySelectorAll(".knowledge-row-badge").length, 1);
   assert.match(row42.textContent, /Queue 1/);
-  assert.equal(row45.querySelector(".knowledge-monitor-chip").textContent, "On hold");
+  assert.equal(row45.querySelector(".knowledge-row-badge").textContent, "On hold");
   assert.match(row45.textContent, /Excluded by label: hold/);
-  assert.equal(row48.querySelector(".knowledge-monitor-chip").textContent, "Unknown (awaiting_review)");
-  assert.equal(row48.querySelector(".knowledge-monitor-chip").dataset.tone, "needs-input");
-  assert.equal(row49.querySelector(".knowledge-monitor-chip"), null);
+  assert.equal(row48.querySelector(".knowledge-row-badge").textContent, "Unknown (awaiting_review)");
+  assert.equal(row48.querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
+  assert.equal(row49.querySelector(".knowledge-row-badge").textContent, "Open");
+  assert.equal(row49.querySelector(".knowledge-row-badge").dataset.stateKey, "issue:open");
 
   row43.click();
   assert.deepEqual(sent.at(-1), {
@@ -319,7 +322,10 @@ test("Issue rows render monitor projections and send controls from the full cano
     linked_issue_kind: "spec",
   });
 
-  row44.querySelector('[data-action="move-up"]').click();
+  // Queue reordering lives in the row's overflow menu (SPEC #3885 AC-5).
+  const moveUp = row44.querySelector('.knowledge-row-menu [data-action="move-up"]');
+  assert.ok(moveUp, "Move up is reachable from the overflow menu");
+  moveUp.click();
   assert.deepEqual(sent.at(-1), {
     kind: "reorder_issue_monitor_issues",
     issue_numbers: [44, 42, 46],
