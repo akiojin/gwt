@@ -59484,6 +59484,12 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         prompt.contains("never auto-close"),
         "{label} must keep close proposals in the digest (Issue #3781); got: {prompt}"
     );
+    // Issue #3767 AC-2 / AC-3: both prompts steer the running launches through
+    // the ruling channels before the no-change judgment.
+    assert!(
+        prompt.contains(gwt::pm_registry::PM_STEERING_WAKE_CLAUSE),
+        "{label} must carry the steering clause verbatim (Issue #3767); got: {prompt}"
+    );
     // Issue #3868 / #3825: both prompts are written into the PM pane's PTY,
     // whose canonical queue is 1024 bytes on macOS. A longer prompt does not
     // fail — the writer blocks forever and the whole suite hangs with it.

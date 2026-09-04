@@ -290,10 +290,11 @@ fn handle_at(
          unavailable`; do not promote a pane or window ID to the primary identity. For a decision \
          include the question, your recommendation and rationale, and a copy-paste answer \
          example. Only an empty stalled-item inventory may end silently. \
-         {execution_clause} {clause} \
+         {steering_clause} {execution_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (cycles with running launches, escalations, or undigested \
          failures do not count as empty).{refresh_context}",
+        steering_clause = pm_registry::PM_STEERING_CLAUSE,
         execution_clause = pm_registry::PM_GWTD_EXECUTION_CLAUSE,
         clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
     ))
@@ -650,6 +651,15 @@ mod tests {
             "do not promote a pane or window ID to the primary identity",
             "the question, your recommendation and rationale, and a copy-paste answer example",
             "Only an empty stalled-item inventory may end silently",
+            // Issue #3767 AC-2 / AC-3: the running launches are steered
+            // through the ruling channels before the no-change judgment.
+            "Steer every running launch before you judge the cycle unchanged",
+            "more than twice the monitor scan interval",
+            "drifting outside its owner Issue's scope",
+            "waiting for its next action",
+            "`board.post` with a mention or `pm.message.send`",
+            "never inject launch or bootstrap instructions past the Issue Monitor",
+            "A launch left idle without a directive is never a no-change cycle",
         ] {
             assert!(
                 reason.contains(phrase),
@@ -658,6 +668,10 @@ mod tests {
         }
         assert!(reason.contains(pm_registry::PM_CYCLE_REPORTING_CLAUSE));
         assert!(reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE));
+        assert!(
+            reason.contains(pm_registry::PM_STEERING_CLAUSE),
+            "Issue #3767: the continuation must carry the shared steering clause verbatim; got: {reason}"
+        );
     }
 
     #[test]
