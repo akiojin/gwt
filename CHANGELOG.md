@@ -1,6 +1,66 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.87.0] - 2026-09-04
+
+### Bug Fixes
+
+- **issue-monitor:** 待機申告 issue.monitor.wait で正当な待機を stuck と誤判定しない (#3844)
+- **test:** Gwt-agent のテストからプロセス全体の PATH 差し替えを排除
+- **test:** Process resolver contract を detect_claude_version_raw_in_env に追従
+- **test:** PATH 書き換え lint の照合を大文字小文字非区別にする
+- **verify:** Verify.run が host 排他を取り他 worktree の heavy を待ってから開始する (#3913)
+- **verify:** Lease 待機を issue.monitor.wait の待機申告と整合させる (#3913)
+- **verify:** Admission モジュールの intra-doc link を外し rustdoc --document-private-items を通す (#3913)
+- Scope pane operations to the current gwt home
+- Remove needless pane scope borrow
+- **issue-monitor:** AC 判定が spec section と未 prefix の checkbox を読み、失敗理由に欠落要素を名指しする (#3930)
+
+### Documentation
+
+- **skills:** AC ブロックで明示 id と未 prefix を混在させない旨を明記 (#3930)
+
+### Features
+
+- **gui:** Issue 行を主バッジ 1・副情報 2・操作 2 に整理し inline terminal を拡大可能にする
+- **gui:** Usage popover にセッション別トークン/context を表示する
+- **pm:** 稼働中 launch への steering を gwt-pm 契約と wake/tick/Stop prompt に組み込む
+- **pm:** Wake prompt の steering 義務を PTY 予算内の短縮 clause で運ぶ
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3885 の Work event shard を記録
+- **work:** Issue #3844 の Work event shard を追跡に含める
+- **work:** Issue #3862 の Work event shard を記録する
+- **work:** Issue #3862 の終端 Work event shard を記録する
+- **work:** Issue #3862 の verify 完了 Work event shard を記録する
+- **work:** Settle issue 3895 delivery
+- **work:** Issue #3878 の Work event shard を記録する
+- **work:** 二重起動 window の Work event shard を記録する
+- **work:** Issue #3878 の settle 前 Work event shard を記録する
+- **work:** Issue #3913 の Work event shard を追跡に含める
+- **work:** Issue #3913 の Work event shard を追跡に含める（develop 取り込み後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（admission 移動後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（develop 再取り込み後）
+- **work:** Issue #3913 の Work event shard を追跡に含める（rustdoc 修正後）
+- **work:** Issue #3930 の Work event shard を追跡に含める
+- **work:** Issue #3930 の verify.run 後の Work event shard を追跡に含める
+- **work:** Issue #3930 の develop 取り込み後の Work event shard を追跡に含める
+- **work:** Issue #3930 の Done receipt に伴う Work event shard を追跡に含める
+- **work:** Issue 3767 の完了状態を記録
+- **work:** Issue #3937 の verify.run 後の Work event shard を追跡に含める
+
+### Refactor
+
+- **gui:** SPEC #3885 改訂に合わせて行内 terminal の拡大トグルを撤去する
+- **verify:** Admission モジュールを verification_lease 配下へ移し cli.rs の行数予算を守る (#3913)
+
+### Testing
+
+- **gwt:** Durable delivery の fallback commit 予算を test runtime の明示依存にする
+- **verification-lease:** Admission の解放判定を有界待ちにし holder と lease パスを診断に出す (#3937)
+- Seed pane runtime in windows launch mock
+
 ## [9.86.0] - 2026-09-02
 
 ### Bug Fixes
