@@ -168,6 +168,17 @@ JSON
 JSON
 ```
 
+Move the fleet to the other provider from the CLI (Issue #3923): `launch_agent`
+switches the saved launch profile's agent, resets model / reasoning to that
+agent's defaults, and keeps the wizard's runtime and Docker choices. It refuses
+when no profile was ever saved:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.config.set","params":{"launch_agent":"claude"}}
+JSON
+```
+
 `enabled=true` and `autonomous_mode=true` are rejected for every JSON caller,
 including the registered PM. Enabling either capability requires an explicit
 GUI action. Configuration changes are

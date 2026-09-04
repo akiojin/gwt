@@ -245,6 +245,8 @@ fn format_issue_help() -> String {
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
+        "  launch_agent                          Switch the saved launch profile's agent",
+        "                                        (codex / claude); model resets to default",
         "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
@@ -1070,6 +1072,8 @@ mod tests {
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            "launch_agent",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",

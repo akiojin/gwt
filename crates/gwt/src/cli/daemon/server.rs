@@ -1495,6 +1495,8 @@ enum IssueMonitorControl {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active_agents: Option<usize>,
+        /// Issue #3923 AC-5: switch the saved launch profile's agent.
+        launch_agent: Option<String>,
     },
     ClaimLaunchDelivery {
         issue_number: u64,
@@ -1829,15 +1831,24 @@ fn try_apply_issue_monitor_control(
             enabled,
             autonomous_mode,
             max_active_agents,
+            launch_agent,
         } => {
             if enabled == Some(true)
                 || autonomous_mode == Some(true)
                 || max_active_agents == Some(0)
-                || (enabled.is_none() && autonomous_mode.is_none() && max_active_agents.is_none())
+                || (enabled.is_none()
+                    && autonomous_mode.is_none()
+                    && max_active_agents.is_none()
+                    && launch_agent.is_none())
             {
                 return None;
             }
             let mut candidate = monitor.clone();
+            if let Some(launch_agent) = launch_agent.as_deref() {
+                // Issue #3923 AC-5: a switch without a saved profile has
+                // nothing to switch; refuse the whole control unapplied.
+                candidate.switch_launch_profile_agent(launch_agent).ok()?;
+            }
             if let Some(enabled) = enabled {
                 candidate.set_enabled_with_effect_revocation(enabled)?;
             }
@@ -2402,12 +2413,24 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
                 };
+                // Issue #3923 AC-5: a blank agent name is a malformed control.
+                let launch_agent = match config.get("launch_agent") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => {
+                        let agent = value.as_str()?.trim();
+                        if agent.is_empty() {
+                            return None;
+                        }
+                        Some(agent.to_string())
+                    }
+                };
                 if enabled == Some(true)
                     || autonomous_mode == Some(true)
                     || max_active_agents == Some(0)
                     || (enabled.is_none()
                         && autonomous_mode.is_none()
-                        && max_active_agents.is_none())
+                        && max_active_agents.is_none()
+                        && launch_agent.is_none())
                 {
                     return None;
                 }
@@ -2415,6 +2438,7 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     enabled,
                     autonomous_mode,
                     max_active_agents,
+                    launch_agent,
                 });
             }
             // SPEC-3431 FR-006: `scan_now` carries no fields — its presence is
@@ -8278,6 +8302,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                launch_agent: None,
             }
         );
 
@@ -8303,6 +8328,79 @@ exit 0
         assert!(!persisted.autonomous_mode);
         assert_eq!(persisted.max_active_agents, 4);
         assert_eq!(persisted.effect_authority_epoch, 9);
+    }
+
+    /// Issue #3923 AC-5: the daemon applies a launch-agent switch to the
+    /// saved profile and refuses one when no profile was ever saved.
+    #[test]
+    fn issue_monitor_config_set_switches_the_launch_agent_only_with_a_saved_profile() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"config_set": {"launch_agent": "claude"}}),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("launch_agent control");
+        assert_eq!(
+            control,
+            IssueMonitorControl::ConfigSet {
+                enabled: None,
+                autonomous_mode: None,
+                max_active_agents: None,
+                launch_agent: Some("claude".to_string()),
+            }
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let unsaved = crate::IssueMonitorPrefs::default();
+        crate::save_issue_monitor_prefs(&prefs_path, &unsaved).expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            unsaved.clone(),
+        );
+        assert!(!super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control.clone(),
+        ));
+        assert_eq!(monitor.prefs().launch_profile, None);
+
+        let saved = crate::IssueMonitorPrefs {
+            launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: None,
+                session_mode: Default::default(),
+                skip_permissions: false,
+                codex_fast_mode: true,
+                runtime_target: Default::default(),
+                docker_service: None,
+                docker_lifecycle_intent: Default::default(),
+                windows_shell: None,
+            }),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &saved).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), saved);
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let profile = persisted.launch_profile.expect("profile persists");
+        assert_eq!(profile.agent_id, "claude");
+        assert_eq!(profile.model, None);
+        assert_eq!(profile.reasoning, None);
+
+        let blank = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"config_set": {"launch_agent": "  "}}),
+            std::process::id() + 1,
+        );
+        assert!(decode_issue_monitor_control(blank).is_none());
     }
 
     #[test]
@@ -8347,6 +8445,7 @@ exit 0
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active_agents: Some(4),
+                launch_agent: None,
             },
         ));
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);

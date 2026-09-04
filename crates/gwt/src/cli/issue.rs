@@ -286,12 +286,14 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            launch_agent,
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
             enabled,
             autonomous_mode,
             max_active,
+            launch_agent.as_deref(),
             out,
         )?,
         _ => unreachable!("issue::run called with non-issue command"),
@@ -1293,8 +1295,9 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1310,6 +1313,11 @@ fn apply_monitor_config_set(
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
     }
+    if let Some(launch_agent) = launch_agent {
+        candidate
+            .switch_launch_profile_agent(launch_agent)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    }
     *prefs = candidate.prefs();
     Ok(())
 }
@@ -1318,8 +1326,19 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+    if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::IssueMonitorLaunchProfileSwitchError::InvalidAgent.to_string(),
+        ));
+    }
+    if enabled.is_none()
+        && autonomous_mode.is_none()
+        && max_active.is_none()
+        && launch_agent.is_none()
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "at least one Issue Monitor config field is required",
@@ -1348,10 +1367,27 @@ fn run_monitor_config_set<E: CliEnv>(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    launch_agent: Option<&str>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)
+        .map_err(io_as_api_error)?;
+    // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
+    // before publishing so the daemon never has to reject a control it
+    // cannot explain back to the caller.
+    if launch_agent.is_some() {
+        let prefs = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&project_root),
+        )
+        .map_err(io_as_api_error)?;
+        if prefs.launch_profile.is_none() {
+            return Err(io_as_api_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::IssueMonitorLaunchProfileSwitchError::NoSavedProfile.to_string(),
+            )));
+        }
+    }
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
@@ -1360,6 +1396,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "launch_agent": launch_agent,
             }
         }),
         std::process::id(),
@@ -1371,7 +1408,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, launch_agent)
         })
         .map_err(io_as_api_error)?;
     }
@@ -1384,6 +1421,9 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
+            "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
+                crate::issue_monitor_launch_profile_summary(&profile.clone().into())
+            }),
         })
         .to_string(),
     );
@@ -3959,6 +3999,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                launch_agent: None,
             },
             &mut out,
         )
@@ -3980,6 +4021,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                launch_agent: None,
             },
             &mut out,
         )
@@ -4043,6 +4085,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    launch_agent: None,
                 },
                 &mut out,
             );
@@ -5076,6 +5119,82 @@ mod tests {
         )
         .expect("plain issues keep today's behaviour");
         assert_eq!(code, 0);
+    }
+
+    /// Issue #3923 AC-5: the PM switches the saved profile's agent from the
+    /// CLI; without a saved profile the switch is refused before anything is
+    /// published or written.
+    #[test]
+    fn config_set_launch_agent_switches_the_saved_profile_or_refuses_without_one() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo.clone()),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("claude".to_string()),
+            },
+            &mut out,
+        )
+        .is_err());
+        assert!(!prefs_path.exists(), "a refused switch writes nothing");
+
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                    agent_id: "codex".to_string(),
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: None,
+                    session_mode: Default::default(),
+                    skip_permissions: true,
+                    codex_fast_mode: false,
+                    runtime_target: Default::default(),
+                    docker_service: None,
+                    docker_lifecycle_intent: Default::default(),
+                    windows_shell: None,
+                }),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                launch_agent: Some("Claude".to_string()),
+            },
+            &mut out,
+        )
+        .expect("config set");
+        assert_eq!(code, 0, "output: {out}");
+        let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
+        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let profile = prefs.launch_profile.expect("profile survives");
+        assert_eq!(profile.agent_id, "claude");
+        assert_eq!(profile.model, None);
+        assert_eq!(profile.reasoning, None);
+        assert!(
+            profile.skip_permissions,
+            "the wizard's permission choice is kept"
+        );
     }
 
     /// Issue #3923 AC-1 / AC-4: the PM lists a provider hold with its evidence

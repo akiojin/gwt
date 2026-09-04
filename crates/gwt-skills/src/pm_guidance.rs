@@ -160,6 +160,12 @@ body cannot hold `plan` / `tasks` sections.
 - `issue.monitor.config.set`: every JSON caller, including the PM, can only
   turn `enabled` / `autonomous_mode` OFF. Turning either switch ON requires an
   explicit action in the GUI. `max_active` changes are allowed for everyone.
+  `launch_agent` (`codex` / `claude`) switches the saved launch profile's
+  agent from the CLI (Issue #3923): model and reasoning reset to that
+  agent's defaults, the wizard's runtime and Docker choices are kept, and
+  a profile that was never saved cannot be switched — configure one in the
+  GUI first. Use it with `issue.monitor.quota_hold.clear` when a provider
+  is genuinely out and the fleet should move to the other one.
 
 ## Observing the running agents
 
@@ -991,6 +997,7 @@ mod tests {
             "`issue.monitor.quota_hold.list`",
             "`issue.monitor.quota_hold.clear`",
             "quota_hold",
+            "`launch_agent`",
             "resets the persisted autonomous attempt counter to zero",
             "starts a fresh bounded retry cycle",
             "launch_live",

@@ -136,6 +136,8 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Issue #3923 AC-5: switch the saved launch profile's agent.
+        launch_agent: Option<String>,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.

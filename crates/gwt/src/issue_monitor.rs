@@ -1628,6 +1628,27 @@ pub struct IssueMonitorProviderQuotaHoldRelease {
     pub released_reset_at: Option<String>,
 }
 
+/// Issue #3923 AC-5: why a CLI launch-profile switch was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorLaunchProfileSwitchError {
+    /// The wizard has never saved a profile: the runtime / Docker / session
+    /// choices it carries cannot be invented from an agent name alone.
+    NoSavedProfile,
+    /// The agent name is blank.
+    InvalidAgent,
+}
+
+impl std::fmt::Display for IssueMonitorLaunchProfileSwitchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSavedProfile => f.write_str(
+                "no saved Issue Monitor launch profile; configure one in the GUI before switching its agent",
+            ),
+            Self::InvalidAgent => f.write_str("launch_agent must name an agent (for example codex or claude)"),
+        }
+    }
+}
+
 /// Result of [`IssueMonitorState::clear_provider_quota_hold`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueMonitorProviderQuotaHoldClearOutcome {
@@ -6016,6 +6037,32 @@ impl IssueMonitorState {
             self.provider_quota_holds.remove(&provider);
             self.provider_quota_hold_evidence.remove(&provider);
         }
+    }
+
+    /// Issue #3923 AC-5: switch the saved launch profile to `agent` from the
+    /// CLI, so a PM can move the fleet off a held provider without the GUI.
+    ///
+    /// Only the agent changes. Model, reasoning, and pinned version are
+    /// provider-specific and are cleared so the new agent's defaults apply;
+    /// session mode, permissions, runtime target, and Docker choices are the
+    /// wizard's and are kept. Idempotent for the current agent.
+    pub fn switch_launch_profile_agent(
+        &mut self,
+        agent: &str,
+    ) -> Result<IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSwitchError> {
+        let Some(agent) = normalize_issue_monitor_provider(agent) else {
+            return Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent);
+        };
+        let Some(profile) = self.launch_profile.as_mut() else {
+            return Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile);
+        };
+        if normalize_issue_monitor_provider(&profile.agent_id).as_deref() != Some(agent.as_str()) {
+            profile.agent_id = agent;
+            profile.model = None;
+            profile.reasoning = None;
+            profile.version = None;
+        }
+        Ok(profile.clone())
     }
 
     /// Issue #3923 AC-1: release `provider`'s quota hold on the operator's
@@ -19969,6 +20016,76 @@ mod tests {
             restored.prefs().provider_quota_holds.is_empty(),
             "restore applies the same fence as a rebase"
         );
+    }
+
+    /// Issue #3923 AC-5: the PM can move the fleet off a held provider from
+    /// the CLI. Provider-specific model choices reset; the wizard's runtime
+    /// choices survive; a profile that was never saved cannot be invented.
+    #[test]
+    fn switching_the_launch_profile_agent_keeps_runtime_choices_and_lifts_the_hold() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(IssueMonitorLaunchProfile {
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: Some("0.153.2".to_string()),
+                    skip_permissions: true,
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                    docker_service: Some("dev".to_string()),
+                    ..test_launch_profile("codex")
+                }),
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-07T03:58:00Z".to_string(),
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(monitor
+            .provider_quota_hold_at("2026-09-02T09:00:00Z")
+            .is_some());
+
+        let switched = monitor
+            .switch_launch_profile_agent("Claude")
+            .expect("switch to a healthy provider");
+        assert_eq!(switched.agent_id, "claude");
+        assert_eq!(
+            switched.model, None,
+            "a Codex model does not apply to Claude"
+        );
+        assert_eq!(switched.reasoning, None);
+        assert_eq!(switched.version, None);
+        assert!(switched.skip_permissions);
+        assert_eq!(
+            switched.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(switched.docker_service.as_deref(), Some("dev"));
+        assert_eq!(monitor.prefs().launch_profile, Some(switched.clone()));
+        assert_eq!(
+            monitor.provider_quota_hold_at("2026-09-02T09:00:00Z"),
+            None,
+            "the queue is gated by the saved profile's provider, which is no longer held"
+        );
+
+        let again = monitor
+            .switch_launch_profile_agent("claude")
+            .expect("idempotent");
+        assert_eq!(again, switched);
+        assert_eq!(
+            monitor.switch_launch_profile_agent("  "),
+            Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent)
+        );
+
+        let mut unsaved = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(
+            unsaved.switch_launch_profile_agent("claude"),
+            Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile),
+            "runtime and Docker choices cannot be invented from an agent name"
+        );
+        assert!(!unsaved.has_launch_profile());
     }
 
     /// Issue #3923 AC-3: the poller reading that says "this account is fine"
