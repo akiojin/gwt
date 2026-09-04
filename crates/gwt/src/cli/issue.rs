@@ -34,15 +34,17 @@ pub(crate) fn guard_autonomous_acceptance_block(
     let opted_in = labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(crate::issue_monitor::AUTO_MERGE_LABEL));
-    if !opted_in || crate::issue_monitor_gate::classify_acceptance_criteria(body).machine_checkable
-    {
+    if !opted_in {
         return Ok(());
     }
+    let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(body);
+    let Some(missing) = criteria.rejection_reason() else {
+        return Ok(());
+    };
+    // Issue #3930 AC-2: the refusal names the element that is actually missing.
     Err(SpecOpsError::Validation(format!(
-        "the `{}` label opts this Issue into autonomous execution, but the body has no \
-         machine-checkable acceptance criteria block; add a `## 受け入れ基準` (or \
-         `## Acceptance Criteria`) heading followed by `- [ ] AC-1: ...` checklist items \
-         (`## 成功基準` is not scanned), or drop the label",
+        "the `{}` label opts this Issue into autonomous execution, but {missing}; fix the \
+         body or drop the label",
         crate::issue_monitor::AUTO_MERGE_LABEL
     )))
 }
@@ -2688,7 +2690,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().expect("tempdir");
-        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let home = tmp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let runtime_path = home.join(".gwt/sessions/runtime/123/session.json");
+        std::fs::create_dir_all(runtime_path.parent().expect("runtime parent"))
+            .expect("runtime directory");
+        std::fs::write(&runtime_path, "{}").expect("runtime evidence");
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
