@@ -93,7 +93,14 @@ FR-002, …) — gaps cause a Format validation issue.>
 - **受け入れ基準** — the machine-checkable checklist the Issue Monitor's
   autonomous gate (`classify_acceptance_criteria`) reads. Every line must be
   `- [ ] AC-N: <text>` directly under this exact heading (`## Acceptance
-  Criteria` is also accepted; `## 成功基準` is not). An `auto-merge` Issue
+  Criteria` and `## 受け入れ条件` are also accepted; `## 成功基準` is not).
+  A `- [ ]` line without the prefix is numbered by position, but keep the
+  explicit `AC-N:` so ids stay stable across edits. Do not mix the two
+  styles in one block: when any item carries an explicit `AC-N:`, the
+  un-prefixed lines in that block are dropped from the criteria. The
+  classifier reads
+  this section wherever the storage layer put it (body or comment), so a
+  comment-resident `spec` section is fine. An `auto-merge` Issue
   without this block is refused at `issue.create` / `issue.spec.create` /
   `issue.spec.edit` time and, if it slips through, lands in `needs_human`.
   Keep 成功基準 (how to verify) and 受け入れ基準 (what must be true, one
