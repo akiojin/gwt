@@ -590,12 +590,48 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             reason: optional_string(params, "reason")?,
         }),
         "execution.status" => {
-            if !params.is_empty() {
+            // Issue #3934: with no params this stays the caller's own
+            // diagnosis; `issue` or `spec` asks about any owner in this
+            // repository, which is how an operator finds out who holds a
+            // generation that keeps refusing the queue.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
                 return Err(CliParseError::InvalidJson(
-                    "execution.status accepts no params".to_string(),
+                    "execution.status accepts only issue or spec".to_string(),
                 ));
             }
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+            match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status owner number must be greater than zero".to_string(),
+                    ))
+                }
+                (Some(number), None) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                            number,
+                        },
+                    },
+                ),
+                (None, Some(number)) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                            number,
+                        },
+                    },
+                ),
+                (None, None) => {
+                    CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+                }
+            }
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -2864,7 +2900,37 @@ mod tests {
         assert!(matches!(
             err("execution.status", json!({"unexpected": true})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts no params")
+                if message.contains("accepts only issue or spec")
+        ));
+        // Issue #3934: an operator must be able to ask who holds any owner's
+        // generation, not only the one their own session is bound to.
+        assert!(matches!(
+            ok("execution.status", json!({"issue": 3934})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 3934,
+                }
+        ));
+        assert!(matches!(
+            ok("execution.status", json!({"spec": 3885})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number: 3885,
+                }
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 3934, "spec": 3885})),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 0})),
+            CliParseError::InvalidJson(message) if message.contains("greater than zero")
         ));
         assert!(matches!(
             ok("execution.complete", json!({})),
