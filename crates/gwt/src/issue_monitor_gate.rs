@@ -9,10 +9,28 @@
 //! Per-criterion verification is the review-time judgment (FR-015), kept
 //! separate to break the chicken-and-egg between eligibility and review.
 
+/// Why a text failed the acceptance-criteria classification (Issue #3930
+/// AC-2). Names the element that is actually missing so the author can fix
+/// the Issue without reverse-engineering the classifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptanceDefect {
+    /// No recognized acceptance heading anywhere in the scanned text.
+    MissingHeading,
+    /// A recognized heading was found but no `- [ ]` / `- [x]` checklist item
+    /// follows it before the next heading.
+    NoChecklistItems {
+        /// The heading as written (without the leading `#`s).
+        heading: String,
+    },
+}
+
 /// Outcome of the deterministic pre-launch acceptance-criteria classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptanceCriteria {
-    /// Stable criterion ids found in the structured block (e.g. `AC-1`).
+    /// Stable criterion ids found in the structured block (e.g. `AC-1`). An
+    /// item written without the `AC-N:` prefix is numbered by its position in
+    /// the block (Issue #3930 AC-5) unless the block already carries explicit
+    /// ids, in which case only those count.
     pub ids: Vec<String>,
     /// True only when a well-formed acceptance-criteria block with at least one
     /// criterion is present. Absence / malformation ⇒ `false` ⇒ the Issue is
@@ -21,9 +39,29 @@ pub struct AcceptanceCriteria {
     /// True when any criterion is tagged as targeting a visual surface
     /// (`(visual)`), so review-time judgment must include visual assessment.
     pub visual_surface: bool,
+    /// `Some` exactly when `machine_checkable` is false: what is missing.
+    pub defect: Option<AcceptanceDefect>,
 }
 
 impl AcceptanceCriteria {
+    /// Actionable rejection reason naming the missing element (Issue #3930
+    /// AC-2), or `None` when the criteria are machine-checkable.
+    pub fn rejection_reason(&self) -> Option<String> {
+        Some(match self.defect.as_ref()? {
+            AcceptanceDefect::MissingHeading => "no acceptance criteria heading found (the Issue \
+                 body is scanned, plus the `spec` section of a gwt-spec Issue wherever it is \
+                 stored); add a `## 受け入れ基準` / `## 受け入れ条件` / `## Acceptance Criteria` \
+                 heading followed by `- [ ] AC-1: ...` checklist items (`## 成功基準` is not \
+                 scanned)"
+                .to_string(),
+            AcceptanceDefect::NoChecklistItems { heading } => format!(
+                "acceptance criteria heading `## {heading}` found but no `- [ ]` checklist items \
+                 under it; write each criterion as `- [ ] AC-1: ...` (a `- [ ]` line without \
+                 the `AC-N:` prefix is accepted and numbered by position)"
+            ),
+        })
+    }
+
     /// Capture the launch-time snapshot used to detect post-launch drift
     /// (SPEC #3200 T-018 / FR-014). Only the stable id set and the
     /// visual-surface flag are retained — these are the gate-relevant facts.
@@ -68,76 +106,131 @@ impl AcceptanceSnapshot {
 
 /// Heading lines (case-insensitive, trimmed of leading `#`/spaces) that open the
 /// structured acceptance-criteria block.
-const ACCEPTANCE_HEADINGS: &[&str] = &["acceptance criteria", "受け入れ基準", "受け入れシナリオ"];
+const ACCEPTANCE_HEADINGS: &[&str] = &[
+    "acceptance criteria",
+    "受け入れ基準",
+    "受け入れ条件",
+    "受け入れシナリオ",
+];
 
-fn heading_text(line: &str) -> Option<String> {
+/// The heading text without its `#` markers: lower-cased for matching and as
+/// written for messages. `None` for a non-heading line.
+fn heading_text(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('#') {
         return None;
     }
-    Some(trimmed.trim_start_matches('#').trim().to_ascii_lowercase())
+    let written = trimmed.trim_start_matches('#').trim();
+    Some((written.to_ascii_lowercase(), written.to_string()))
 }
 
-/// Deterministically classify the acceptance criteria in an Issue body.
+/// Split an item's text into its explicit `AC-<id>` (when the item starts with
+/// a well-formed `AC-<id>:` token) and the remaining criterion text.
+fn split_explicit_id(rest: &str) -> (Option<String>, &str) {
+    if let Some(after_ac) = rest.strip_prefix("AC-") {
+        if let Some(colon) = after_ac.find(':') {
+            let id_part = after_ac[..colon].trim();
+            if !id_part.is_empty()
+                && id_part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
+                return (Some(format!("AC-{id_part}")), &after_ac[colon + 1..]);
+            }
+        }
+    }
+    (None, rest)
+}
+
+/// Deterministically classify the acceptance criteria in an Issue body (or
+/// any other text the Monitor treats as the acceptance source).
 ///
-/// The required block format is a heading from `ACCEPTANCE_HEADINGS` followed
-/// by checklist items of the form `- [ ] AC-<id>: <text>` (optionally trailing
-/// `(visual)`). Parsing stops at the next heading. No agent is invoked; this is
-/// coarse machine-checkability only.
+/// The block is a heading from `ACCEPTANCE_HEADINGS` followed by checklist
+/// items of the form `- [ ] AC-<id>: <text>` (optionally trailing `(visual)`).
+/// Parsing stops at the next heading. Issue #3930: a `- [ ]` item without the
+/// `AC-<id>:` prefix is still a criterion and is numbered by position, unless
+/// the text already carries explicit ids (then only those count, so launch
+/// snapshots of well-formed Issues never drift). A bullet that is neither a
+/// checkbox nor an explicit `AC-<id>:` item is prose, not a criterion. No agent
+/// is invoked; this is coarse machine-checkability only.
 pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let mut in_block = false;
-    let mut ids: Vec<String> = Vec::new();
-    let mut visual_surface = false;
+    let mut heading_found: Option<String> = None;
+    // (explicit id, criterion text) for every checklist / explicit-id item.
+    let mut items: Vec<(Option<String>, String)> = Vec::new();
 
     for line in issue_body.lines() {
-        if let Some(heading) = heading_text(line) {
+        if let Some((heading, written)) = heading_text(line) {
             // Entering the block iff this heading matches; any other heading
             // closes a previously open block.
             in_block = ACCEPTANCE_HEADINGS.iter().any(|h| heading == *h);
+            if in_block && heading_found.is_none() {
+                heading_found = Some(written);
+            }
             continue;
         }
         if !in_block {
             continue;
         }
         let item = line.trim_start();
+        // A gwt-spec section boundary (`<!-- artifact:NAME BEGIN/END -->`)
+        // closes the block too: a `tasks` section that follows without a
+        // markdown heading must not contribute positional criteria.
+        if item.starts_with("<!--") && item.contains("artifact:") {
+            in_block = false;
+            continue;
+        }
         // Checklist item: `- [ ] AC-..:` or `- [x] AC-..:` (and `*` bullets).
         let after_bullet = item
             .strip_prefix("- ")
             .or_else(|| item.strip_prefix("* "))
             .map(str::trim_start);
-        let Some(rest) = after_bullet else { continue };
-        let rest = rest
+        let Some(after_bullet) = after_bullet else {
+            continue;
+        };
+        let checkbox = after_bullet
             .strip_prefix("[ ]")
-            .or_else(|| rest.strip_prefix("[x]"))
-            .or_else(|| rest.strip_prefix("[X]"))
-            .map(str::trim_start)
-            .unwrap_or(rest);
-        // Require an explicit, stable `AC-<id>` token followed by `:`.
-        let Some(after_ac) = rest.strip_prefix("AC-") else {
-            continue;
-        };
-        let Some(colon) = after_ac.find(':') else {
-            continue;
-        };
-        let id_part = after_ac[..colon].trim();
-        if id_part.is_empty()
-            || !id_part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        {
+            .or_else(|| after_bullet.strip_prefix("[x]"))
+            .or_else(|| after_bullet.strip_prefix("[X]"))
+            .map(str::trim_start);
+        let (explicit_id, text) = split_explicit_id(checkbox.unwrap_or(after_bullet));
+        if explicit_id.is_none() && checkbox.is_none() {
             continue;
         }
-        ids.push(format!("AC-{id_part}"));
-        let body = after_ac[colon + 1..].to_ascii_lowercase();
-        if body.contains("(visual)") || body.contains("[visual]") {
-            visual_surface = true;
-        }
+        items.push((explicit_id, text.to_string()));
     }
+
+    let has_explicit_ids = items.iter().any(|(id, _)| id.is_some());
+    let accepted: Vec<(String, &str)> = if has_explicit_ids {
+        items
+            .iter()
+            .filter_map(|(id, text)| id.clone().map(|id| (id, text.as_str())))
+            .collect()
+    } else {
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, (_, text))| (format!("AC-{}", index + 1), text.as_str()))
+            .collect()
+    };
+    let visual_surface = accepted.iter().any(|(_, text)| {
+        let text = text.to_ascii_lowercase();
+        text.contains("(visual)") || text.contains("[visual]")
+    });
+    let ids: Vec<String> = accepted.into_iter().map(|(id, _)| id).collect();
+    let defect = if !ids.is_empty() {
+        None
+    } else if let Some(heading) = heading_found {
+        Some(AcceptanceDefect::NoChecklistItems { heading })
+    } else {
+        Some(AcceptanceDefect::MissingHeading)
+    };
 
     AcceptanceCriteria {
         machine_checkable: !ids.is_empty(),
         ids,
         visual_surface,
+        defect,
     }
 }
 
@@ -431,12 +524,133 @@ mod tests {
     }
 
     #[test]
-    fn malformed_items_without_ac_ids_are_ignored() {
-        // Heading present but items lack stable AC-<id>: tokens.
-        let body = "## Acceptance Criteria\n- it should work\n- [ ] returns ok\n- AC- : empty id\n";
+    fn plain_bullets_without_checkboxes_are_not_criteria() {
+        // Issue #3930 AC-2: heading present but nothing under it is a
+        // checklist item — the defect names the empty block, not a vague
+        // "no block".
+        let body = "## Acceptance Criteria\n- it should work\n- AC- : empty id\n";
         let c = classify_acceptance_criteria(body);
-        assert!(!c.machine_checkable, "no well-formed AC-<id> criterion");
+        assert!(!c.machine_checkable, "no checklist item under the heading");
         assert!(c.ids.is_empty());
+        assert_eq!(
+            c.defect,
+            Some(AcceptanceDefect::NoChecklistItems {
+                heading: "Acceptance Criteria".to_string()
+            })
+        );
+        let reason = c.rejection_reason().expect("a defect carries a reason");
+        assert!(
+            reason.contains("`## Acceptance Criteria`") && reason.contains("- [ ]"),
+            "reason must name the heading and the missing checklist shape: {reason}"
+        );
+    }
+
+    #[test]
+    fn missing_heading_defect_names_every_accepted_heading() {
+        // Issue #3930 AC-2: a body with no recognized heading is told which
+        // headings are scanned (and that 成功基準 is not).
+        let c = classify_acceptance_criteria("## 成功基準\n- [ ] AC-1: wrong heading\n");
+        assert!(!c.machine_checkable);
+        assert_eq!(c.defect, Some(AcceptanceDefect::MissingHeading));
+        let reason = c.rejection_reason().expect("a defect carries a reason");
+        for needle in [
+            "`## 受け入れ基準`",
+            "`## 受け入れ条件`",
+            "`## Acceptance Criteria`",
+            "`## 成功基準` is not scanned",
+            "- [ ] AC-1:",
+        ] {
+            assert!(reason.contains(needle), "missing {needle:?} in: {reason}");
+        }
+    }
+
+    #[test]
+    fn machine_checkable_criteria_carry_no_defect() {
+        let c = classify_acceptance_criteria("## 受け入れ基準\n- [ ] AC-1: x\n");
+        assert!(c.machine_checkable);
+        assert_eq!(c.defect, None);
+        assert_eq!(c.rejection_reason(), None);
+    }
+
+    #[test]
+    fn japanese_conditions_heading_is_recognized() {
+        // Issue #3930 AC-3: 23 of the 25 quarantined Issues in #3736 use
+        // `## 受け入れ条件`.
+        let body = "## 受け入れ条件\n- [ ] AC-1: 設定が保存される\n";
+        let c = classify_acceptance_criteria(body);
+        assert!(c.machine_checkable, "受け入れ条件 must open the block");
+        assert_eq!(c.ids, vec!["AC-1"]);
+    }
+
+    #[test]
+    fn unprefixed_checkboxes_get_positional_ids() {
+        // Issue #3930 AC-5: a checklist whose items lack the `AC-N:` prefix is
+        // still a machine-checkable block — ids are assigned by position so
+        // the review verdict and the launch snapshot have stable handles.
+        let body = "## 受け入れ条件\n\
+                    - [ ] 設定が保存される\n\
+                    - [x] 一覧がソートされる (visual)\n\
+                    - AC- : a malformed id is still a checkbox-less bullet\n\
+                    * [ ] star bullets count too\n";
+        let c = classify_acceptance_criteria(body);
+        assert!(c.machine_checkable);
+        assert_eq!(c.ids, vec!["AC-1", "AC-2", "AC-3"]);
+        assert!(
+            c.visual_surface,
+            "(visual) on an unprefixed item still counts"
+        );
+        assert_eq!(c.defect, None);
+    }
+
+    #[test]
+    fn explicit_ids_win_over_unprefixed_items_in_the_same_text() {
+        // A block that already carries explicit ids keeps exactly those ids:
+        // launch-time snapshots of Issues that passed before #3930 must not
+        // drift because a note-style checkbox sits next to the criteria.
+        let body = "## Acceptance Criteria\n\
+                    - [ ] AC-1: real\n\
+                    - [ ] a sub-note without an id\n\
+                    - [ ] AC-3: also real\n";
+        let c = classify_acceptance_criteria(body);
+        assert_eq!(c.ids, vec!["AC-1", "AC-3"]);
+    }
+
+    #[test]
+    fn artifact_section_markers_close_the_block() {
+        // Issue #3930: with positional ids, a `tasks` section that follows the
+        // spec section without a markdown heading must not be counted.
+        let body = "## 受け入れ基準\n- [ ] first\n<!-- artifact:spec END -->\n\n\
+                    <!-- artifact:tasks BEGIN -->\n- [ ] T-001\n<!-- artifact:tasks END -->\n";
+        let c = classify_acceptance_criteria(body);
+        assert_eq!(c.ids, vec!["AC-1"], "T-001 is a task, not a criterion");
+    }
+
+    #[test]
+    fn readiness_matrix_prefix_by_heading() {
+        // Issue #3930 AC-7 (text dimension): `AC-N:` present / absent ×
+        // English / Japanese heading. Every cell is machine-checkable; the
+        // body-vs-spec-comment dimension lives in issue_monitor_worker tests.
+        for (heading, prefixed, want_ids) in [
+            ("Acceptance Criteria", true, vec!["AC-7", "AC-8"]),
+            ("Acceptance Criteria", false, vec!["AC-1", "AC-2"]),
+            ("受け入れ基準", true, vec!["AC-7", "AC-8"]),
+            ("受け入れ基準", false, vec!["AC-1", "AC-2"]),
+            ("受け入れ条件", true, vec!["AC-7", "AC-8"]),
+            ("受け入れ条件", false, vec!["AC-1", "AC-2"]),
+        ] {
+            let items = if prefixed {
+                "- [ ] AC-7: first\n- [ ] AC-8: second\n"
+            } else {
+                "- [ ] first\n- [ ] second\n"
+            };
+            let body = format!("## Summary\ntext\n\n## {heading}\n{items}\n## Notes\n");
+            let c = classify_acceptance_criteria(&body);
+            assert!(
+                c.machine_checkable,
+                "heading={heading} prefixed={prefixed} must be machine-checkable"
+            );
+            assert_eq!(c.ids, want_ids, "heading={heading} prefixed={prefixed}");
+        }
     }
 
     #[test]
