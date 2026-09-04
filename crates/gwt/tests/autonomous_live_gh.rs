@@ -138,8 +138,13 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
 
     // Tick 1: Reviewing → real fetchers (mock gh) → real gate → durable arm
     // proposal. The scan itself has no authority to invoke the remote mutation.
-    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
-        .expect("gate scan succeeds");
+    let degradations =
+        try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+            .expect("gate scan succeeds");
+    assert!(
+        degradations.is_empty(),
+        "every readback must actually succeed here: {degradations:?}"
+    );
     assert_eq!(
         monitor.autonomous_record(42).map(|r| r.phase),
         Some(AutonomousPhase::Reviewing),
@@ -198,8 +203,13 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed
     // completes the delivery. The ordinary Issue is still Open, so it returns
     // to the queue in a fresh session instead of becoming terminal.
-    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
-        .expect("delivery scan succeeds");
+    let degradations =
+        try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+            .expect("delivery scan succeeds");
+    assert!(
+        degradations.is_empty(),
+        "every readback must actually succeed here: {degradations:?}"
+    );
     assert!(
         monitor.autonomous_record(42).is_none(),
         "merged head (headRefOid) == reviewed_sha ⇒ delivery record cleared",
