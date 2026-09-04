@@ -164,8 +164,11 @@ body cannot hold `plan` / `tasks` sections.
   agent from the CLI (Issue #3923): model and reasoning reset to that
   agent's defaults, the wizard's runtime and Docker choices are kept, and
   a profile that was never saved cannot be switched — configure one in the
-  GUI first. Use it with `issue.monitor.quota_hold.clear` when a provider
-  is genuinely out and the fleet should move to the other one.
+  GUI first. For a genuine outage, switch the profile and leave the hold in
+  place: admission follows the saved profile's provider, so the queue moves
+  without admitting work to the exhausted account. Never pair the switch
+  with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
+  for a false hold only.
 
 ## Observing the running agents
 
@@ -310,10 +313,12 @@ same profile to try again.
   the usage poller's reading. The list shows each hold with its
   evidence (`screen_text`, `poller_state`, `poller_windows` with
   `used_percent`), which is also what `issue.monitor.status` reports
-  under `provider_quota_holds`. When the evidence contradicts reality —
-  the poller reads the account far below 100% and a fresh pane on that
-  provider works — the hold is false: clear it with `params.provider`
-  (`codex` / `claude`) and a `params.reason`. The clear is a durable
+  under `provider_quota_holds`. The hold is false only when the poller's
+  reading contradicts it completely: `poller_state` is `ok`,
+  `poller_limit_reached` is `false`, and every `poller_windows[*].used_percent`
+  is below 100 (a low aggregate can hide one exhausted window), and a fresh
+  pane on that provider works. Then clear it with `params.provider`
+  (`codex` / `claude`, or a custom agent id) and a `params.reason`. The clear is a durable
   release, so the daemon cannot re-stamp the old hold from memory, and
   every issue the hold was holding is admitted again. A hold formed
   after the release is new evidence and stands. Do not wait for the

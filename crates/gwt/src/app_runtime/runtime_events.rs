@@ -750,7 +750,7 @@ impl AppRuntime {
         match quota_notice.as_ref() {
             Some(notice) => {
                 let recorded_at =
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                 let screen_text = self
                     .screen_tail(&id, QUOTA_NOTICE_TAIL_LINES, "\n")
                     .or_else(|| detail.clone())
@@ -1103,8 +1103,10 @@ impl AppRuntime {
             return Vec::new();
         }
         self.provider_quota_candidates.remove(window_id);
+        // Millisecond precision so a hold formed right after an operator's
+        // clear is ordered after that release instead of sharing its second.
         let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
-            &now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             window_id,
             screen.unwrap_or_default(),
         )

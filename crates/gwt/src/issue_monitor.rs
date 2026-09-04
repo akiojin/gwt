@@ -1666,6 +1666,9 @@ pub enum IssueMonitorProviderQuotaHoldClearOutcome {
 
 /// Whether `release` voids a hold recorded with `evidence`. A hold with no
 /// recorded instant predates evidence recording and is voided by any release.
+///
+/// Writers record both instants with millisecond precision, so a hold formed
+/// right after a clear is ordered after it instead of sharing its second.
 fn provider_quota_hold_is_released(
     evidence: Option<&IssueMonitorProviderQuotaHoldEvidence>,
     release: Option<&IssueMonitorProviderQuotaHoldRelease>,
@@ -5993,24 +5996,30 @@ impl IssueMonitorState {
         for (provider, reset_at) in &disk.provider_quota_holds {
             merge_provider_quota_hold(&mut self.provider_quota_holds, provider, reset_at);
         }
+        // A disk entry whose instant does not parse can neither be ordered
+        // nor fence anything, so it never replaces a valid local entry.
         for (provider, evidence) in normalize_provider_keyed(&disk.provider_quota_hold_evidence) {
+            let Some(disk_at) = parse_rfc3339_utc(&evidence.recorded_at) else {
+                continue;
+            };
             let newer = self
                 .provider_quota_hold_evidence
                 .get(&provider)
                 .and_then(|local| parse_rfc3339_utc(&local.recorded_at))
-                .zip(parse_rfc3339_utc(&evidence.recorded_at))
-                .is_none_or(|(local, disk)| disk > local);
+                .is_none_or(|local| disk_at > local);
             if newer {
                 self.provider_quota_hold_evidence.insert(provider, evidence);
             }
         }
         for (provider, release) in normalize_provider_keyed(&disk.provider_quota_hold_releases) {
+            let Some(disk_at) = parse_rfc3339_utc(&release.released_at) else {
+                continue;
+            };
             let newer = self
                 .provider_quota_hold_releases
                 .get(&provider)
                 .and_then(|local| parse_rfc3339_utc(&local.released_at))
-                .zip(parse_rfc3339_utc(&release.released_at))
-                .is_none_or(|(local, disk)| disk > local);
+                .is_none_or(|local| disk_at > local);
             if newer {
                 self.provider_quota_hold_releases.insert(provider, release);
             }
@@ -6042,8 +6051,8 @@ impl IssueMonitorState {
     /// Issue #3923 AC-5: switch the saved launch profile to `agent` from the
     /// CLI, so a PM can move the fleet off a held provider without the GUI.
     ///
-    /// Only the agent changes. Model, reasoning, and pinned version are
-    /// provider-specific and are cleared so the new agent's defaults apply;
+    /// Only the agent changes. Model, reasoning, pinned version, and fast mode
+    /// are provider-specific and are cleared so the new agent's defaults apply;
     /// session mode, permissions, runtime target, and Docker choices are the
     /// wizard's and are kept. Idempotent for the current agent.
     pub fn switch_launch_profile_agent(
@@ -6061,6 +6070,9 @@ impl IssueMonitorState {
             profile.model = None;
             profile.reasoning = None;
             profile.version = None;
+            // Fast mode is an explicit per-provider opt-in (the wizard maps it
+            // onto each CLI's own flag), so a switch must not carry it over.
+            profile.codex_fast_mode = false;
         }
         Ok(profile.clone())
     }
@@ -6082,12 +6094,20 @@ impl IssueMonitorState {
         let Some(provider) = normalize_issue_monitor_provider(provider) else {
             return IssueMonitorProviderQuotaHoldClearOutcome::UnknownProvider;
         };
+        // The fence is only as good as its instant: an unparsable `now`
+        // would record a release that fences nothing, so fall back to the
+        // wall clock (millisecond precision, see `provider_quota_hold_is_released`).
+        let released_at = if parse_rfc3339_utc(now).is_some() {
+            now.to_string()
+        } else {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
         let released_reset_at = self.provider_quota_holds.remove(&provider);
         let evidence = self.provider_quota_hold_evidence.remove(&provider);
         self.provider_quota_hold_releases.insert(
             provider.clone(),
             IssueMonitorProviderQuotaHoldRelease {
-                released_at: now.to_string(),
+                released_at,
                 reason: reason.to_string(),
                 released_reset_at: released_reset_at.clone(),
             },
@@ -19990,6 +20010,26 @@ mod tests {
             "a hold recorded after the release is new evidence and survives the same fence"
         );
 
+        let mut garbage = disk.clone();
+        garbage.provider_quota_hold_releases.insert(
+            "codex".to_string(),
+            IssueMonitorProviderQuotaHoldRelease {
+                released_at: "not-a-timestamp".to_string(),
+                reason: "corrupt".to_string(),
+                released_reset_at: None,
+            },
+        );
+        daemon.rebase_daemon_driver_prefs(&garbage);
+        assert_eq!(
+            daemon
+                .prefs()
+                .provider_quota_hold_releases
+                .get("codex")
+                .map(|release| release.released_at.as_str()),
+            Some("2026-09-02T09:11:00Z"),
+            "an unparsable disk instant cannot replace a valid local fence"
+        );
+
         let restored = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -20032,6 +20072,7 @@ mod tests {
                     reasoning: Some("high".to_string()),
                     version: Some("0.153.2".to_string()),
                     skip_permissions: true,
+                    codex_fast_mode: true,
                     runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                     docker_service: Some("dev".to_string()),
                     ..test_launch_profile("codex")
@@ -20057,6 +20098,10 @@ mod tests {
         );
         assert_eq!(switched.reasoning, None);
         assert_eq!(switched.version, None);
+        assert!(
+            !switched.codex_fast_mode,
+            "fast mode is a per-provider opt-in and must not carry over"
+        );
         assert!(switched.skip_permissions);
         assert_eq!(
             switched.runtime_target,

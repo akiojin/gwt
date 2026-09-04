@@ -62120,7 +62120,7 @@ fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence
     };
     assert_eq!(provider, "codex");
     assert_eq!(evidence.source, "screen_notice");
-    assert_eq!(evidence.recorded_at, "2026-09-02T09:00:00Z");
+    assert_eq!(evidence.recorded_at, "2026-09-02T09:00:00.000Z");
     assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
     assert!(
         evidence
