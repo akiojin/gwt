@@ -566,7 +566,9 @@ pub(crate) fn admit<E: CliEnv>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+    use gwt_core::index_coordinator::{
+        HeavyLeaseStatus, IndexCoordinator, JobAdmission, JobPriority, TargetKey,
+    };
     use gwt_core::test_support::ScopedGwtHome;
 
     fn strings(parts: &[&str]) -> Vec<String> {
@@ -709,6 +711,174 @@ mod tests {
         assert!(err.to_string().contains("max_wait_secs"), "{err}");
     }
 
+    /// How long a released lease may still read as held before the release is
+    /// treated as broken. Sized for a fork/exec window on a saturated CI
+    /// runner, not for a lease that was never released (Issue #3937).
+    const RELEASE_OBSERVATION_BUDGET: Duration = Duration::from_secs(5);
+
+    /// Issue #3937: one test's private verification-lease root, plus the
+    /// diagnosis a failure owes its reader.
+    ///
+    /// [`ScopedGwtHome`] is thread-local, so every `gwt_home()`-derived path a
+    /// test resolves — the coordinator root included — is private to the
+    /// running test thread. What the CI failure showed missing was proof and
+    /// evidence: the drop assertion read "dropping the admission must release
+    /// the lease" and named neither the holder nor the file that was still
+    /// locked, so one message fitted a leaked ambient lease, a foreign holder,
+    /// and a genuine release bug alike. This fixture proves the isolation
+    /// before the test body runs and renders the holder and both lease paths
+    /// into every assertion it owns.
+    struct IsolatedLeaseRoot {
+        coordinator: IndexCoordinator,
+        home: tempfile::TempDir,
+        // Dropped last so the override outlives every path this test resolves.
+        _home_guard: ScopedGwtHome,
+    }
+
+    impl IsolatedLeaseRoot {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let _home_guard = ScopedGwtHome::set(home.path());
+            let coordinator = IndexCoordinator::open_default().unwrap();
+            let root = Self {
+                coordinator,
+                home,
+                _home_guard,
+            };
+            assert!(
+                root.coordinator.root().starts_with(root.home.path()),
+                "the coordinator root must be this test's temp lease root, not {}",
+                root.coordinator.root().display()
+            );
+            root.assert_free("a private lease root must start free");
+            root
+        }
+
+        /// Holder identity and both lease paths (AC-3), so a CI-only
+        /// recurrence can be read without a local reproduction.
+        fn describe(&self) -> String {
+            let holder = match self.coordinator.heavy_lease_status() {
+                Ok(status) if status.held => {
+                    let owner = status
+                        .owner
+                        .as_ref()
+                        .map(|owner| owner.pid.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    format!(
+                        "held by target {} (lease {}, owner pid {owner}, {} waiting)",
+                        status.target.as_deref().unwrap_or("<no ticket>"),
+                        status.lease_id.as_deref().unwrap_or("<no lease id>"),
+                        status.pending
+                    )
+                }
+                Ok(status) => format!("free ({} waiting)", status.pending),
+                Err(err) => format!("unreadable: {err}"),
+            };
+            format!(
+                "verification lease {holder}; this process is pid {}; lock {}; ticket {}",
+                std::process::id(),
+                self.coordinator.heavy_lock_path().display(),
+                self.coordinator.heavy_ticket_path().display()
+            )
+        }
+
+        fn status(&self) -> HeavyLeaseStatus {
+            self.coordinator
+                .heavy_lease_status()
+                .unwrap_or_else(|err| panic!("the lease status must stay readable: {err}"))
+        }
+
+        /// Wait for the release to become observable.
+        ///
+        /// `heavy_lease_status` probes the kernel lock rather than the ticket,
+        /// and every `Command::spawn` on any thread of this test binary
+        /// duplicates the holder's descriptor into the forked child —
+        /// `O_CLOEXEC` closes it at `exec`, not at `fork`. So for the length of
+        /// one fork/exec window an unrelated child keeps the `flock` alive and
+        /// the lease still reads as held, seconds after its owner dropped it.
+        /// Measured on a 3000-release loop: 0 phantom holds with no concurrent
+        /// spawns, 5 with two spawner threads — the rate that reddened an
+        /// unrelated PR's CI (Issue #3937) inside a ~2900-test binary that
+        /// spawns subprocesses continuously. Waiting keeps the assertion
+        /// honest: a lease that is genuinely never released never becomes
+        /// free, so a real regression still fails here.
+        fn assert_free(&self, context: &str) {
+            let deadline = Instant::now() + RELEASE_OBSERVATION_BUDGET;
+            loop {
+                if !self.status().held {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{context} — still held {}s after the release; {}",
+                    RELEASE_OBSERVATION_BUDGET.as_secs(),
+                    self.describe()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn assert_held(&self, context: &str) -> HeavyLeaseStatus {
+            let status = self.status();
+            assert!(status.held, "{context} — {}", self.describe());
+            status
+        }
+    }
+
+    /// AC-3: every lease assertion in this module reports the holder, this
+    /// process, and both lease files.
+    #[test]
+    fn lease_diagnostics_name_the_holder_and_both_lease_paths() {
+        let lease_root = IsolatedLeaseRoot::new();
+        assert!(
+            lease_root.describe().contains("free"),
+            "{}",
+            lease_root.describe()
+        );
+
+        let worktree = tempfile::tempdir().unwrap();
+        let key = verification_key_for(worktree.path());
+        let JobAdmission::Owner(guard) = lease_root
+            .coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_millis(250))
+            .unwrap()
+        else {
+            panic!(
+                "a private lease root must admit the owner — {}",
+                lease_root.describe()
+            );
+        };
+        let lease = guard
+            .acquire_heavy_with_ttl(Duration::from_millis(250), Duration::from_secs(60))
+            .unwrap();
+
+        let described = lease_root.describe();
+        for expected in [
+            key.file_stem(),
+            lease.id().to_string(),
+            std::process::id().to_string(),
+            lease_root
+                .coordinator
+                .heavy_lock_path()
+                .display()
+                .to_string(),
+            lease_root
+                .coordinator
+                .heavy_ticket_path()
+                .display()
+                .to_string(),
+        ] {
+            assert!(
+                described.contains(&expected),
+                "the diagnosis must name {expected}: {described}"
+            );
+        }
+
+        drop(lease);
+        drop(guard);
+        lease_root.assert_free("releasing the lease must leave the private root free");
+    }
+
     fn verification_key_for(worktree: &Path) -> TargetKey {
         let root = gwt_core::paths::resolve_current_worktree_root(worktree);
         TargetKey::verification(
@@ -721,79 +891,110 @@ mod tests {
 
     #[test]
     fn admit_acquires_the_lease_in_process_and_releases_on_drop() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedGwtHome::set(home.path());
+        let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
 
-        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+        let admission =
+            admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap_or_else(|err| {
+                panic!(
+                    "a private lease root must grant admission: {err} — {}",
+                    lease_root.describe()
+                )
+            });
 
-        let coordinator = IndexCoordinator::open_default().unwrap();
-        let status = coordinator.heavy_lease_status().unwrap();
-        assert!(status.held, "admission must hold the host-wide lease");
+        // A lease this run merely found would satisfy every assertion below
+        // except the release, and would then fail as an unexplained "still
+        // held" (Issue #3937).
+        assert!(
+            matches!(admission, Admission::Acquired(_)),
+            "admit must take the lease itself here — {}",
+            lease_root.describe()
+        );
+        let status = lease_root.assert_held("admission must hold the host-wide lease");
         assert_eq!(
             status.target.as_deref(),
-            Some(verification_key_for(worktree.path()).file_stem().as_str())
+            Some(verification_key_for(worktree.path()).file_stem().as_str()),
+            "{}",
+            lease_root.describe()
         );
-        assert_eq!(admission.lease_id(), status.lease_id.as_deref());
+        assert_eq!(
+            admission.lease_id(),
+            status.lease_id.as_deref(),
+            "{}",
+            lease_root.describe()
+        );
         assert!(
             admission.summary().contains("host admission"),
             "{}",
             admission.summary()
         );
-        assert!(admission.waited() < Duration::from_secs(5));
+        assert!(
+            admission.waited() < Duration::from_secs(5),
+            "{}",
+            admission.summary()
+        );
 
         drop(admission);
-        assert!(
-            !coordinator.heavy_lease_status().unwrap().held,
-            "dropping the admission must release the lease"
-        );
+        lease_root.assert_free("dropping the admission must release the lease");
     }
 
     #[test]
     fn admit_honors_a_lease_already_held_by_this_worktree() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedGwtHome::set(home.path());
+        let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
-        let coordinator = IndexCoordinator::open_default().unwrap();
         let key = verification_key_for(worktree.path());
-        let JobAdmission::Owner(guard) = coordinator
+        let JobAdmission::Owner(guard) = lease_root
+            .coordinator
             .request_job(&key, JobPriority::ManualRebuild, Duration::from_millis(250))
             .unwrap()
         else {
-            panic!("fresh coordinator must admit the owner");
+            panic!(
+                "a private lease root must admit the owner — {}",
+                lease_root.describe()
+            );
         };
         let lease = guard
             .acquire_heavy_with_ttl(Duration::from_millis(250), Duration::from_secs(60))
             .unwrap();
 
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let admission = admit(&mut env, worktree.path(), Duration::ZERO).unwrap();
+        let admission = admit(&mut env, worktree.path(), Duration::ZERO).unwrap_or_else(|err| {
+            panic!(
+                "a lease this worktree already holds must be honored: {err} — {}",
+                lease_root.describe()
+            )
+        });
 
-        assert!(matches!(admission, Admission::PreHeld { .. }));
-        assert_eq!(admission.lease_id(), Some(lease.id()));
+        assert!(
+            matches!(admission, Admission::PreHeld { .. }),
+            "{}",
+            lease_root.describe()
+        );
+        assert_eq!(
+            admission.lease_id(),
+            Some(lease.id()),
+            "{}",
+            lease_root.describe()
+        );
         assert!(
             admission.summary().contains("already held"),
             "{}",
             admission.summary()
         );
         drop(admission);
-        assert!(
-            coordinator.heavy_lease_status().unwrap().held,
-            "a pre-held lease belongs to the agent and must survive the run"
-        );
+        lease_root.assert_held("a pre-held lease belongs to the agent and must survive the run");
         drop(lease);
         drop(guard);
     }
 
     #[test]
     fn admit_defers_when_another_target_holds_the_lease() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedGwtHome::set(home.path());
+        let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
-        let coordinator = IndexCoordinator::open_default().unwrap();
         let other = TargetKey::repo_shared("other-repo", "issues");
-        let JobAdmission::Owner(guard) = coordinator
+        let JobAdmission::Owner(guard) = lease_root
+            .coordinator
             .request_job(
                 &other,
                 JobPriority::ManualRebuild,
@@ -801,7 +1002,10 @@ mod tests {
             )
             .unwrap()
         else {
-            panic!("fresh coordinator must admit the owner");
+            panic!(
+                "a private lease root must admit the owner — {}",
+                lease_root.describe()
+            );
         };
         let _lease = guard
             .acquire_heavy_with_ttl(Duration::from_millis(250), Duration::from_secs(60))
