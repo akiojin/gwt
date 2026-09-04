@@ -8,6 +8,18 @@
 
 :root {
   color-scheme: light dark;
+
+  /* SPEC #3206 FR-015 — stacking tiers (lower = further back). Persistent
+     chrome (rail, drawers) sits below modals, and everything persistent sits
+     below the transient notice stack so a toast is never covered by UI that
+     stays on screen. Reference ladder of the remaining raw tiers:
+     palette 1200 < wizard 2000 < degradation banner 3500 <
+     connection overlay 4000 < notice stack 9999 < context menu 10000 <
+     update modal 10100. */
+  --z-rail: 30;
+  --z-notification-center: 31;
+  --z-modal: 1000;
+  --z-notice-stack: 9999;
 }
 
 :root[data-theme="dark"] {
