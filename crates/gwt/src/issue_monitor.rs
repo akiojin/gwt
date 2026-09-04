@@ -1379,6 +1379,26 @@ pub struct IssueMonitorStopTarget {
     pub window_id: Option<String>,
 }
 
+/// Issue #3927 (SPEC #3340 FR-044): the durable Monitor facts the runtime's
+/// canonical terminal predicate reads for one Issue-linked window. Read-only;
+/// the runtime decides, the Monitor only reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IssueMonitorTerminalWindowFacts {
+    /// The Monitor durably binds this exact window to the Issue.
+    pub binds_this_window: bool,
+    /// The Monitor durably binds the Issue to a different window: this
+    /// launch was replaced (failover / relaunch).
+    pub binds_other_window: bool,
+    /// A durable closed-Issue record or validated Issue-wide completion
+    /// exists.
+    pub issue_closed: bool,
+    /// The row is parked for a human.
+    pub needs_human: bool,
+    /// A failure record (launch / agent failure or operator stop) holds the
+    /// Issue.
+    pub failure_hold: bool,
+}
+
 /// SPEC-3431 FR-033: why a stop request was refused. Every variant leaves the
 /// monitor untouched, so the caller can surface the reason without having to
 /// undo anything.
@@ -4534,6 +4554,46 @@ impl IssueMonitorState {
             self.apply_priority_order_to_queue();
         }
         AutonomousFailureOutcome::Retry { attempt }
+    }
+
+    /// Issue #3941 AC-3: return a launch that transient infrastructure aborted
+    /// to the queue without spending an attempt. The reason stays on the inbox
+    /// item so an operator can see why the Issue is waiting, and the base
+    /// backoff keeps the retry off the scan that just saturated the host.
+    /// Applies in every mode: the failure is about the host, not the Issue.
+    pub fn record_transient_launch_retry(&mut self, issue_number: u64, message: String, now: &str) {
+        let backoff = autonomous_retry_backoff_secs(
+            1,
+            self.autonomous_tuning.retry_backoff_base_secs,
+            self.autonomous_tuning.retry_backoff_cap_secs,
+        );
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number} launch hit transient infrastructure (retry in {backoff}s, no attempt consumed): {message}"
+            ),
+        );
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        self.set_active_launch_id(issue_number, None);
+        let record = self.autonomous_record_mut(issue_number);
+        record.retry_not_before = rfc3339_plus_secs(now, backoff);
+        record.retry_hold_reason = None;
+        record.retry_hold_provider = None;
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.error_message = Some(message);
+        }
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
     }
 
     /// SPEC #3200 T-043/FR-029: whether `issue_number` may relaunch now. `true`
@@ -9578,6 +9638,69 @@ impl IssueMonitorState {
             .filter(|issue_number| *issue_number == target.issue_number)
     }
 
+    /// Issue #3927 (SPEC #3340 FR-044): report the durable facts the runtime's
+    /// terminal predicate consumes for `window_id` linked to `issue_number`.
+    pub fn terminal_window_facts(
+        &self,
+        issue_number: u64,
+        window_id: &str,
+    ) -> IssueMonitorTerminalWindowFacts {
+        let bound_window = self.launched_window_id(issue_number);
+        let binds_this_window = bound_window
+            .as_deref()
+            .is_some_and(|bound| issue_monitor_window_ids_match(bound, window_id));
+        IssueMonitorTerminalWindowFacts {
+            binds_this_window,
+            binds_other_window: bound_window.is_some() && !binds_this_window,
+            issue_closed: self.issue_is_closed(issue_number)
+                || self.merged_issues.contains(&issue_number),
+            needs_human: self
+                .inbox_item(issue_number)
+                .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+                || self
+                    .autonomous_records
+                    .get(&issue_number)
+                    .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman),
+            failure_hold: self.failed_issues.contains_key(&issue_number),
+        }
+    }
+
+    /// Issue #3927 (SPEC #3340 Phase 10S, PM ruling `1f7fdc9e`): settle one
+    /// successful exact terminal delivery.
+    ///
+    /// The runtime observed that the launched window's Work is canonically
+    /// terminal (settled execution record or durable closed Issue) and is
+    /// about to close the window itself. Unlike [`Self::requeue_exact_window`]
+    /// — the `window_closed` contract, which says "this attempt failed, try
+    /// again" — a settled delivery is a success: the active slot is released
+    /// in this mutation, no retry attempt is spent, and the row stays
+    /// `Launched` out of the queue until the ordinary completion probe (merged
+    /// PR / closed Issue) ends it. The window is unbound so the later
+    /// vanished-window reconciliation cannot mistake the runtime's own close
+    /// for a failed attempt.
+    ///
+    /// `target` must reproduce the live identity exactly, including the
+    /// window; a `Launching` row without a window has delivered nothing.
+    pub fn settle_exact_terminal_delivery(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+    ) -> Result<u64, IssueMonitorStopMismatch> {
+        let issue_number = target.issue_number;
+        if self.resolve_exact_launch(target)?.is_none() {
+            return Err(IssueMonitorStopMismatch::WindowMismatch);
+        }
+        self.clear_active_tracking(issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        Ok(issue_number)
+    }
+
     /// [`Self::requeue_window`] with an injected clock for the backoff floor.
     ///
     /// SPEC-3431 FR-066: a close is a bounded retry, not a free one. It used to
@@ -9654,6 +9777,15 @@ impl IssueMonitorState {
         state: MonitorInboxState,
     ) {
         let message = message.into();
+        // Issue #3941 AC-3: a launch aborted by transient infrastructure (exact
+        // package probe timeout with no cached version, a remote-tracking ref
+        // race between concurrent fetches) is neither an agent failure nor an
+        // attempt: it is requeued behind a short backoff in every mode.
+        if gwt_agent::is_transient_launch_failure(&message) {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            self.record_transient_launch_retry(issue_number, message, &now);
+            return;
+        }
         // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
         // issue (e.g. the independent review agent could not spawn, leaving the
         // record in `Reviewing`) must funnel through the autonomous
@@ -18010,6 +18142,123 @@ mod tests {
         );
     }
 
+    // Issue #3927 (SPEC #3340 T-630, PM ruling 1f7fdc9e): a successful exact
+    // terminal delivery releases the active slot in the same mutation, unbinds
+    // the window so the later vanished-window reconciliation has nothing to
+    // requeue, and spends no retry attempt. The row stays out of the queue
+    // until the ordinary completion probe (merged PR / closed Issue) ends it.
+    #[test]
+    fn settle_exact_terminal_delivery_releases_slot_without_requeue_or_attempt() {
+        let window_id = "tab-1::agent-42";
+        let mut monitor = launched_monitor(42, window_id);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: Some(window_id.to_string()),
+        };
+        let attempts_before = monitor.autonomous_record(42).map_or(0, |r| r.attempts);
+
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+        assert_eq!(monitor.active_count(), 0, "the slot is released");
+        assert_eq!(monitor.launched_window_issue(window_id), None);
+        assert!(
+            monitor
+                .vanished_launched_windows("tab-1", &BTreeSet::new())
+                .is_empty(),
+            "a settled window is not a vanished launch"
+        );
+        assert_eq!(
+            monitor.requeue_exact_window(&target),
+            None,
+            "the legacy window_closed path is a no-op after settlement"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map_or(0, |r| r.attempts),
+            attempts_before,
+            "settlement consumes no retry attempt"
+        );
+        let item = monitor.inbox_item(42).expect("row survives settlement");
+        assert_eq!(item.state, MonitorInboxState::Launched);
+        assert_eq!(item.launched_window_id, None);
+        assert_eq!(monitor.queue_len(), 0, "not relaunched");
+
+        // Durable roundtrip keeps the settlement.
+        let mut reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(reloaded.active_count(), 0);
+        assert_eq!(reloaded.launched_window_issue(window_id), None);
+        assert!(
+            reloaded.settle_exact_terminal_delivery(&target).is_err(),
+            "a second settlement of the same launch is refused"
+        );
+    }
+
+    #[test]
+    fn settle_exact_terminal_delivery_refuses_stale_identity() {
+        let window_id = "tab-1::agent-42";
+        let mut monitor = launched_monitor(42, window_id);
+        let live_claim = monitor.live_claim_id(42);
+        let stale_claim = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: Some("claim-predecessor".to_string()),
+            delivery_id: None,
+            window_id: Some(window_id.to_string()),
+        };
+        assert_eq!(
+            monitor.settle_exact_terminal_delivery(&stale_claim),
+            Err(IssueMonitorStopMismatch::ClaimMismatch)
+        );
+        let stale_window = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: live_claim.clone(),
+            delivery_id: None,
+            window_id: Some("tab-1::agent-99".to_string()),
+        };
+        assert_eq!(
+            monitor.settle_exact_terminal_delivery(&stale_window),
+            Err(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        let no_window = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: live_claim,
+            delivery_id: None,
+            window_id: None,
+        };
+        assert_eq!(
+            monitor.settle_exact_terminal_delivery(&no_window),
+            Err(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "a refused settlement mutates nothing"
+        );
+        assert_eq!(monitor.launched_window_issue(window_id), Some(42));
+    }
+
+    #[test]
+    fn window_closed_after_settlement_keeps_the_legacy_unsuccessful_contract() {
+        // The paired regression: an unsuccessful/manual close still requeues
+        // and consumes an attempt; the new exact settlement does not change it.
+        let window_id = "tab-1::agent-42";
+        let mut monitor = launched_monitor(42, window_id);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: Some(window_id.to_string()),
+        };
+        assert_eq!(monitor.requeue_exact_window(&target), Some(42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.autonomous_record(42).map_or(0, |r| r.attempts), 1);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+    }
+
     #[test]
     fn autoclose_failed_window_only_for_autonomous_candidates() {
         // #3165/#3200 error-window lifecycle: a failed autonomous issue
@@ -19082,6 +19331,65 @@ mod tests {
         assert_eq!(
             monitor, before,
             "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
+        );
+    }
+
+    #[test]
+    fn transient_launch_failure_requeues_without_consuming_an_attempt() {
+        // Issue #3941 AC-3: a launch aborted by transient infrastructure (probe
+        // timeout with no cached version, concurrent fetch ref race) is not an
+        // agent failure. It goes back to the queue behind a backoff, keeps its
+        // reason visible, and spends no attempt — no PM requeue needed.
+        let now = "2026-09-04T00:39:39Z";
+        let message = "exact npx package probe timed out for @openai/codex@0.153.2 after 120 seconds and the requested version is not in the local package cache; launch was aborted before spawn. Next: warm the cache; gwt retries this launch automatically without spending an attempt.";
+        for autonomous in [true, false] {
+            let mut monitor = if autonomous {
+                autonomous_state()
+            } else {
+                IssueMonitorState::new(IssueMonitorConfig::default())
+            };
+            scan_issue_monitor_candidates(
+                &mut monitor,
+                &[auto_issue(3928, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+                now,
+            );
+            monitor.complete_active_launch(3928, "agent-93");
+            assert_eq!(monitor.active_count(), 1, "autonomous={autonomous}");
+
+            monitor.record_agent_issue_failed(3928, message);
+
+            assert_eq!(monitor.attempt_count(3928), 0, "autonomous={autonomous}");
+            assert_eq!(monitor.active_count(), 0, "autonomous={autonomous}");
+            assert!(monitor.queue.contains(&3928), "autonomous={autonomous}");
+            assert!(
+                !monitor.failed_issues.contains_key(&3928),
+                "autonomous={autonomous}: transient failures are not parked"
+            );
+            let item = monitor.inbox_item(3928).expect("inbox item");
+            assert_eq!(
+                item.state,
+                MonitorInboxState::Queued,
+                "autonomous={autonomous}"
+            );
+            assert_eq!(item.error_message.as_deref(), Some(message));
+            assert!(item.launched_window_id.is_none());
+            // The funnel stamps the backoff from the wall clock.
+            let wall_now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            assert!(
+                !monitor.retry_ready(3928, &wall_now),
+                "autonomous={autonomous}: a backoff is scheduled"
+            );
+            assert!(monitor.retry_ready(3928, "2099-01-01T00:00:00Z"));
+        }
+
+        // A non-transient failure keeps the human-gated terminal path.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[auto_issue(3928, "b")], now);
+        monitor.complete_active_launch(3928, "agent-93");
+        monitor.record_agent_issue_failed(3928, "boom");
+        assert_eq!(
+            monitor.inbox_item(3928).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
         );
     }
 }

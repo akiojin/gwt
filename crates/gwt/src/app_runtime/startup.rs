@@ -429,6 +429,26 @@ impl AppRuntime {
             if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
                 continue;
             }
+            // Issue #3927 (SPEC #3340 FR-047): the canonical terminal
+            // predicate fences automatic restore. A settled, closed, or
+            // revoked Issue-linked window is marked restore-disabled and its
+            // placeholder removed instead of respawning.
+            let project_root = tab.project_root.clone();
+            let placeholder_window_id = tab
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
+                .map(|window| combined_window_id(&tab_id, &window.id));
+            if let Some(reason) = self.restore_admission_terminal_reason(
+                &session,
+                &project_root,
+                placeholder_window_id.as_deref(),
+            ) {
+                self.refuse_terminal_session_restore(&tab_id, &session.id, reason);
+                continue;
+            }
             let config = launch_config_from_persisted_session(&session);
             if config.session_mode != gwt_agent::SessionMode::Resume {
                 continue;
@@ -878,6 +898,19 @@ impl AppRuntime {
                 {
                     continue;
                 }
+                // Issue #3927 (SPEC #3340 FR-047): same restore fence as
+                // startup auto-resume.
+                let project_root = self
+                    .tab(tab_id)
+                    .map(|tab| tab.project_root.clone())
+                    .unwrap_or_default();
+                if let Some(reason) =
+                    self.restore_admission_terminal_reason(&session, &project_root, Some(&combined))
+                {
+                    self.refuse_terminal_session_restore(tab_id, &session.id, reason);
+                    events.push(self.workspace_state_broadcast());
+                    continue;
+                }
                 let project_state_root = session
                     .project_state_root
                     .as_deref()
@@ -925,7 +958,7 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
-    fn remove_stale_paused_agent_window(
+    pub(super) fn remove_stale_paused_agent_window(
         &mut self,
         tab_id: &str,
         session_id: &str,

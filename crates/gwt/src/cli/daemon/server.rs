@@ -1537,6 +1537,14 @@ enum IssueMonitorControl {
         window_id: String,
         target: Option<crate::IssueMonitorStopTarget>,
     },
+    /// Issue #3927 (SPEC #3340 Phase 10S, PM ruling `1f7fdc9e`): the GUI
+    /// runtime observed a successful exact terminal delivery and asks the
+    /// daemon to release the slot before it closes the window itself.
+    /// Internal to the gwt runtime / daemon pair — not a public JSON
+    /// operation. The exact identity is mandatory, window included.
+    TerminalDelivered {
+        target: crate::IssueMonitorStopTarget,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2139,6 +2147,9 @@ fn apply_routine_issue_monitor_control(
             // a possibly newer same-id launch.
             None => false,
         },
+        IssueMonitorControl::TerminalDelivered { target } => {
+            monitor.settle_exact_terminal_delivery(&target).is_ok()
+        }
     }
 }
 
@@ -2151,7 +2162,10 @@ fn rebase_issue_monitor_control_candidate(
         IssueMonitorControl::WindowClosed {
             target: Some(target),
             ..
-        } => monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, target.issue_number),
+        }
+        | IssueMonitorControl::TerminalDelivered { target } => {
+            monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, target.issue_number)
+        }
         _ => monitor.rebase_daemon_driver_prefs(disk),
     }
 }
@@ -2608,6 +2622,21 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                         window_id: Some(window_id.clone()),
                     });
                 return Some(IssueMonitorControl::WindowClosed { window_id, target });
+            }
+            if let Some(delivered) = payload.get("terminal_delivered") {
+                let target = crate::IssueMonitorStopTarget {
+                    issue_number: delivered.get("issue_number")?.as_u64()?,
+                    claim_id: delivered
+                        .get("claim_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    delivery_id: delivered
+                        .get("delivery_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    window_id: Some(delivered.get("window_id")?.as_str()?.to_string()),
+                };
+                return Some(IssueMonitorControl::TerminalDelivered { target });
             }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
@@ -6699,6 +6728,78 @@ exit 0
             .expect("current exact close decodes");
         assert!(apply_issue_monitor_control(&mut monitor, current));
         assert_eq!(monitor.active_count(), 0, "current close releases the slot");
+    }
+
+    // Issue #3927 (SPEC #3340 T-630): the internal terminal-delivery control
+    // settles only the exact live launch, releases the slot, and leaves the
+    // legacy `window_closed` requeue contract untouched.
+    #[test]
+    fn terminal_delivered_control_settles_only_the_exact_live_launch() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                launched_claims: std::collections::BTreeMap::from([(
+                    42,
+                    "claim-successor".to_string(),
+                )]),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let delivered_payload = |claim_id: &str, window_id: serde_json::Value| {
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "terminal_delivered": {
+                        "issue_number": 42,
+                        "claim_id": claim_id,
+                        "delivery_id": null,
+                        "window_id": window_id,
+                    }
+                }),
+                std::process::id() + 1,
+            )
+        };
+
+        assert!(
+            decode_issue_monitor_control(delivered_payload(
+                "claim-successor",
+                serde_json::Value::Null
+            ))
+            .is_none(),
+            "a delivery without its window is not decodable"
+        );
+        let stale = decode_issue_monitor_control(delivered_payload(
+            "claim-predecessor",
+            serde_json::json!("tab-1::agent-42"),
+        ))
+        .expect("stale settlement decodes");
+        assert!(!apply_issue_monitor_control(&mut monitor, stale));
+        assert_eq!(monitor.active_count(), 1, "stale identity settles nothing");
+
+        let current = decode_issue_monitor_control(delivered_payload(
+            "claim-successor",
+            serde_json::json!("tab-1::agent-42"),
+        ))
+        .expect("current settlement decodes");
+        assert!(apply_issue_monitor_control(&mut monitor, current));
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "exact settlement releases the slot"
+        );
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-42"), None);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .map_or(0, |record| record.attempts),
+            0,
+            "settlement spends no attempt"
+        );
     }
 
     #[test]

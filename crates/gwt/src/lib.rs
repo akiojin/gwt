@@ -153,8 +153,8 @@ pub use issue_monitor::{
     IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
     IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
     IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
-    IssueMonitorStopTarget, IssueMonitorWaitSummary, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary,
+    MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
