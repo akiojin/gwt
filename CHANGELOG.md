@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.89.0] - 2026-09-04
+
+### Bug Fixes
+
+- **issue-monitor:** Provider quota hold の誤検知を防ぎ一覧と解除の operation を追加する
+- **issue-monitor:** CI の clippy 引数数 lint と gwt-agent skill asset parity を修正する
+- **issue-monitor:** テストの clone slice を slice::from_ref に置き換え clippy を通す
+- **issue-monitor:** CodeRabbit 指摘に沿って quota hold fence と launch_agent の境界条件を締める
+
+### Features
+
+- **issue-monitor:** Config.set に launch_agent を追加し CLI から launch profile の agent を切り替える
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3923 の Work events shard を追加
+
 ## [9.88.0] - 2026-09-04
 
 ### Bug Fixes

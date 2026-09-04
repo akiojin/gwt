@@ -160,6 +160,15 @@ body cannot hold `plan` / `tasks` sections.
 - `issue.monitor.config.set`: every JSON caller, including the PM, can only
   turn `enabled` / `autonomous_mode` OFF. Turning either switch ON requires an
   explicit action in the GUI. `max_active` changes are allowed for everyone.
+  `launch_agent` (`codex` / `claude`) switches the saved launch profile's
+  agent from the CLI (Issue #3923): model and reasoning reset to that
+  agent's defaults, the wizard's runtime and Docker choices are kept, and
+  a profile that was never saved cannot be switched — configure one in the
+  GUI first. For a genuine outage, switch the profile and leave the hold in
+  place: admission follows the saved profile's provider, so the queue moves
+  without admitting work to the exhausted account. Never pair the switch
+  with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
+  for a false hold only.
 
 ## Observing the running agents
 
@@ -296,6 +305,25 @@ things:
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
+
+- `issue.monitor.quota_hold.list` and `issue.monitor.quota_hold.clear`
+  are how you handle a **provider-wide quota hold**. A hold stops every
+  launch on that provider until the reset the provider printed, which
+  can be days out, and it is formed from a notice on a pane screen plus
+  the usage poller's reading. The list shows each hold with its
+  evidence (`screen_text`, `poller_state`, `poller_windows` with
+  `used_percent`), which is also what `issue.monitor.status` reports
+  under `provider_quota_holds`. The hold is false only when the poller's
+  reading contradicts it completely: `poller_state` is `ok`,
+  `poller_limit_reached` is `false`, and every `poller_windows[*].used_percent`
+  is below 100 (a low aggregate can hide one exhausted window), and a fresh
+  pane on that provider works. Then clear it with `params.provider`
+  (`codex` / `claude`, or a custom agent id) and a `params.reason`. The clear is a durable
+  release, so the daemon cannot re-stamp the old hold from memory, and
+  every issue the hold was holding is admitted again. A hold formed
+  after the release is new evidence and stands. Do not wait for the
+  reset or switch the whole fleet's profile to work around a hold you
+  can release by name.
 
 ### Fallback cleanup of windows the runtime failed to close
 
@@ -970,6 +998,11 @@ mod tests {
             // prohibition below has to name the operation that replaces it.
             "`issue.monitor.requeue`",
             "there is no launch",
+            // Issue #3923: a false provider quota hold has a PM-side release.
+            "`issue.monitor.quota_hold.list`",
+            "`issue.monitor.quota_hold.clear`",
+            "quota_hold",
+            "`launch_agent`",
             "resets the persisted autonomous attempt counter to zero",
             "starts a fresh bounded retry cycle",
             "launch_live",

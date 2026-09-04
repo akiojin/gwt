@@ -91,6 +91,14 @@ fn normalize_provider_quota_holds(holds: &BTreeMap<String, String>) -> BTreeMap<
     normalized
 }
 
+fn normalize_provider_keyed<T: Clone>(map: &BTreeMap<String, T>) -> BTreeMap<String, T> {
+    map.iter()
+        .filter_map(|(provider, value)| {
+            normalize_issue_monitor_provider(provider).map(|provider| (provider, value.clone()))
+        })
+        .collect()
+}
+
 fn concrete_provider_quota_deadline(resets_at: Option<&str>, now: &str) -> String {
     let now = parse_rfc3339_utc(now).unwrap_or_else(chrono::Utc::now);
     let deadline = resets_at
@@ -710,6 +718,14 @@ pub struct IssueMonitorPrefs {
     /// deadlines; per-provider rebases join by the later instant.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_holds: BTreeMap<String, String>,
+    /// Issue #3923 AC-2: what each hold in `provider_quota_holds` was formed
+    /// from, keyed the same way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_quota_hold_evidence: BTreeMap<String, IssueMonitorProviderQuotaHoldEvidence>,
+    /// Issue #3923 AC-1: operator releases that fence stale holds across every
+    /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     /// Durable launch generation keyed by Issue number. Kept separate from the
@@ -830,6 +846,8 @@ impl Default for IssueMonitorPrefs {
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
             provider_quota_holds: BTreeMap::new(),
+            provider_quota_hold_evidence: BTreeMap::new(),
+            provider_quota_hold_releases: BTreeMap::new(),
             launched_issues: Vec::new(),
             launched_claims: BTreeMap::new(),
             launching_issues: Vec::new(),
@@ -1002,6 +1020,11 @@ pub enum IssueMonitorFailure {
         /// parseable one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at: Option<String>,
+        /// Issue #3923 AC-2: what the block was read from — the matched screen
+        /// text and the usage poller's reading at that moment — so a false
+        /// hold can be diagnosed from the record instead of guessed at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
     },
 }
 
@@ -1493,6 +1516,171 @@ pub struct IssueMonitorLaunchPlan {
 pub struct IssueMonitorProviderQuotaHold {
     pub provider: String,
     pub reset_at: String,
+    /// Issue #3923 AC-2: the evidence the hold was formed from, when the
+    /// process that formed it recorded any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+}
+
+/// Issue #3923 AC-2: one usage-poller window as it read when a hold formed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaPollerWindow {
+    pub kind: String,
+    /// Whole percent, `0..=100`. Rounded so the state stays `Eq`.
+    pub used_percent: u8,
+}
+
+/// Issue #3923 AC-2: what a provider quota hold was formed from.
+///
+/// The incident this records against was a hold whose only basis was a stale
+/// notice at the bottom of a pane while the poller read the account at 26%.
+/// Keeping both readings on the hold makes that contradiction visible in
+/// `issue.monitor.status` and in gwt.log instead of requiring a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaHoldEvidence {
+    /// RFC3339 instant the hold was recorded. Compared against a release's
+    /// `released_at` to decide whether that release fences this hold.
+    pub recorded_at: String,
+    /// `screen_notice` (a provider notice on the pane), `usage_poller` (the
+    /// legacy poller-driven release), or `unrecorded` for a path that gave no
+    /// detail.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    /// The screen tail the notice was matched in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_text: Option<String>,
+    /// The poller's `UsageState` for the agent's provider (`ok`, `stale`, ...),
+    /// `None` when the poller had no reading for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poller_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poller_limit_reached: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub poller_windows: Vec<IssueMonitorProviderQuotaPollerWindow>,
+}
+
+impl IssueMonitorProviderQuotaHoldEvidence {
+    /// Evidence for a hold read from a provider notice on `window_id`'s screen.
+    pub fn screen_notice(recorded_at: &str, window_id: &str, screen_text: &str) -> Self {
+        Self {
+            recorded_at: recorded_at.to_string(),
+            source: "screen_notice".to_string(),
+            issue_number: None,
+            window_id: Some(window_id.to_string()),
+            screen_text: Some(screen_text.trim().to_string()).filter(|text| !text.is_empty()),
+            poller_state: None,
+            poller_limit_reached: None,
+            poller_windows: Vec::new(),
+        }
+    }
+
+    /// Attach the usage poller's current reading for `agent_id`'s provider.
+    pub fn with_poller(
+        mut self,
+        agent_id: Option<&str>,
+        accounts: &[gwt_core::usage::ProviderUsage],
+    ) -> Self {
+        let Some(account) = agent_id.and_then(|agent_id| account_for_agent(agent_id, accounts))
+        else {
+            return self;
+        };
+        self.poller_state = Some(usage_state_label(&account.state).to_string());
+        self.poller_limit_reached = Some(account.limit_reached);
+        self.poller_windows = account
+            .windows
+            .iter()
+            .map(|window| IssueMonitorProviderQuotaPollerWindow {
+                kind: window.kind.as_str().to_string(),
+                used_percent: window.used_percent.round().clamp(0.0, 100.0) as u8,
+            })
+            .collect();
+        self
+    }
+}
+
+fn usage_state_label(state: &gwt_core::usage::UsageState) -> &'static str {
+    use gwt_core::usage::UsageState;
+    match state {
+        UsageState::Ok => "ok",
+        UsageState::Disabled => "disabled",
+        UsageState::NoData => "no_data",
+        UsageState::Unavailable { .. } => "unavailable",
+        UsageState::Stale { .. } => "stale",
+    }
+}
+
+/// Issue #3923 AC-1: an operator's explicit release of a provider quota hold.
+///
+/// Holds join by the later reset across every process, so removing one from
+/// disk says nothing to a process that still holds it in memory — it would
+/// re-stamp the hold on its next commit. A release is therefore a published
+/// fact: it voids every hold recorded at or before `released_at` and leaves a
+/// hold recorded after it untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaHoldRelease {
+    pub released_at: String,
+    pub reason: String,
+    /// The reset deadline the hold carried when it was released, for audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_reset_at: Option<String>,
+}
+
+/// Issue #3923 AC-5: why a CLI launch-profile switch was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorLaunchProfileSwitchError {
+    /// The wizard has never saved a profile: the runtime / Docker / session
+    /// choices it carries cannot be invented from an agent name alone.
+    NoSavedProfile,
+    /// The agent name is blank.
+    InvalidAgent,
+}
+
+impl std::fmt::Display for IssueMonitorLaunchProfileSwitchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSavedProfile => f.write_str(
+                "no saved Issue Monitor launch profile; configure one in the GUI before switching its agent",
+            ),
+            Self::InvalidAgent => f.write_str("launch_agent must name an agent (for example codex or claude)"),
+        }
+    }
+}
+
+/// Result of [`IssueMonitorState::clear_provider_quota_hold`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorProviderQuotaHoldClearOutcome {
+    /// `provider` is blank. Any non-blank name resolves to a builtin or
+    /// custom agent id, matching how holds themselves are keyed.
+    UnknownProvider,
+    /// The release is recorded. `released_reset_at` is `None` when nothing was
+    /// held in this snapshot; the release still fences a hold another process
+    /// has not committed yet.
+    Cleared {
+        released_reset_at: Option<String>,
+        released_issues: Vec<u64>,
+    },
+}
+
+/// Whether `release` voids a hold recorded with `evidence`. A hold with no
+/// recorded instant predates evidence recording and is voided by any release.
+///
+/// Writers record both instants with millisecond precision, so a hold formed
+/// right after a clear is ordered after it instead of sharing its second.
+fn provider_quota_hold_is_released(
+    evidence: Option<&IssueMonitorProviderQuotaHoldEvidence>,
+    release: Option<&IssueMonitorProviderQuotaHoldRelease>,
+) -> bool {
+    let Some(released_at) = release.and_then(|release| parse_rfc3339_utc(&release.released_at))
+    else {
+        return false;
+    };
+    match evidence.and_then(|evidence| parse_rfc3339_utc(&evidence.recorded_at)) {
+        Some(recorded_at) => recorded_at <= released_at,
+        None => true,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1532,6 +1720,11 @@ pub struct IssueMonitorAgentStatus {
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
+    /// the PM can see a hold on a provider the profile is not using and
+    /// release it by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
     /// SPEC-3431 FR-024: issues handed back to a human. Previously reachable
     /// only through the daemon's lossy broadcast ring, which made a missed
     /// escalation unrecoverable for an unattended reader.
@@ -1571,7 +1764,8 @@ pub fn rate_limit_reset_for_agent(
     agent_id: &str,
     accounts: &[gwt_core::usage::ProviderUsage],
 ) -> Option<String> {
-    exhausted_account_for_agent(agent_id, accounts)?
+    account_for_agent(agent_id, accounts)
+        .filter(|account| account.limit_reached)?
         .windows
         .iter()
         .filter_map(|window| window.resets_at)
@@ -1589,12 +1783,33 @@ pub fn provider_limit_reached_for_agent(
     agent_id: &str,
     accounts: &[gwt_core::usage::ProviderUsage],
 ) -> bool {
-    exhausted_account_for_agent(agent_id, accounts).is_some()
+    account_for_agent(agent_id, accounts).is_some_and(|account| account.limit_reached)
 }
 
-/// The exhausted account backing `agent_id`, scoped to that agent's own
-/// provider so one drained account never stalls a fleet on another.
-fn exhausted_account_for_agent<'accounts>(
+/// Issue #3923 AC-3: whether the poller independently reports `agent_id`'s
+/// account as usable — a fresh `Ok` reading, `limit_reached` false, and no
+/// window at 100%.
+///
+/// This is the reading that contradicts a stale notice at the bottom of a
+/// pane. Anything short of a fresh reading (stale, unavailable, no data) is
+/// not a contradiction and must not suppress a hold.
+pub fn provider_reports_healthy_for_agent(
+    agent_id: &str,
+    accounts: &[gwt_core::usage::ProviderUsage],
+) -> bool {
+    account_for_agent(agent_id, accounts).is_some_and(|account| {
+        account.state == gwt_core::usage::UsageState::Ok
+            && !account.limit_reached
+            && account
+                .windows
+                .iter()
+                .all(|window| window.used_percent < 100.0)
+    })
+}
+
+/// The poller account backing `agent_id`, scoped to that agent's own provider
+/// so one drained account never stalls a fleet on another.
+fn account_for_agent<'accounts>(
     agent_id: &str,
     accounts: &'accounts [gwt_core::usage::ProviderUsage],
 ) -> Option<&'accounts gwt_core::usage::ProviderUsage> {
@@ -1605,9 +1820,7 @@ fn exhausted_account_for_agent<'accounts>(
         "claude" | "claude-code" => UsageProvider::ClaudeCode,
         _ => return None,
     };
-    accounts
-        .iter()
-        .find(|account| account.provider == provider && account.limit_reached)
+    accounts.iter().find(|account| account.provider == provider)
 }
 
 /// Issue #3676 AC-2: whether the CLI backing an agent holds usable
@@ -1839,6 +2052,12 @@ pub struct IssueMonitorState {
     /// are canonicalized on restore and joined monotonically across rebases.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_holds: BTreeMap<String, String>,
+    /// Issue #3923 AC-2: evidence per held provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_quota_hold_evidence: BTreeMap<String, IssueMonitorProviderQuotaHoldEvidence>,
+    /// Issue #3923 AC-1: release fences per provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
     launched_windows: BTreeMap<u64, String>,
     /// Durable generation for each launched window binding. A successor launch
     /// receives a new claim even when its issue and window ids are reused.
@@ -3512,6 +3731,8 @@ impl IssueMonitorState {
             priority_order: Vec::new(),
             launch_profile: None,
             provider_quota_holds: BTreeMap::new(),
+            provider_quota_hold_evidence: BTreeMap::new(),
+            provider_quota_hold_releases: BTreeMap::new(),
             launched_windows: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
@@ -3552,6 +3773,11 @@ impl IssueMonitorState {
         state.last_scan_at = prefs.last_scan_at;
         state.launch_profile = prefs.launch_profile;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
+        state.provider_quota_hold_evidence =
+            normalize_provider_keyed(&prefs.provider_quota_hold_evidence);
+        state.provider_quota_hold_releases =
+            normalize_provider_keyed(&prefs.provider_quota_hold_releases);
+        state.enforce_provider_quota_hold_releases();
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
         // Issue #3627: restore used to re-inject every persisted launch into
@@ -3718,6 +3944,8 @@ impl IssueMonitorState {
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profile.clone(),
             provider_quota_holds: self.provider_quota_holds.clone(),
+            provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
+            provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
             launched_issues: self
                 .launched_windows
                 .iter()
@@ -4622,6 +4850,21 @@ impl IssueMonitorState {
             .get(&issue_number)
             .and_then(|record| record.retry_hold_provider.as_deref())
             .and_then(normalize_issue_monitor_provider);
+        // Issue #3923 AC-1: the provider-wide map is the admission source of
+        // truth and the row's deadline only mirrors it. Once the provider's
+        // hold is released (or has expired) the row is admissible, whichever
+        // process recorded the mirror.
+        if let Some(held) = held_provider.as_deref() {
+            let provider_hold_active = self
+                .provider_quota_holds
+                .get(held)
+                .and_then(|reset_at| parse_rfc3339_utc(reset_at))
+                .zip(parse_rfc3339_utc(now))
+                .is_some_and(|(reset_at, now)| reset_at > now);
+            if !provider_hold_active {
+                return true;
+            }
+        }
         let switched_to_healthy_provider = held_provider
             .zip(self.saved_launch_provider())
             .is_some_and(|(held, saved)| {
@@ -5753,6 +5996,148 @@ impl IssueMonitorState {
         for (provider, reset_at) in &disk.provider_quota_holds {
             merge_provider_quota_hold(&mut self.provider_quota_holds, provider, reset_at);
         }
+        // A disk entry whose instant does not parse can neither be ordered
+        // nor fence anything, so it never replaces a valid local entry.
+        for (provider, evidence) in normalize_provider_keyed(&disk.provider_quota_hold_evidence) {
+            let Some(disk_at) = parse_rfc3339_utc(&evidence.recorded_at) else {
+                continue;
+            };
+            let newer = self
+                .provider_quota_hold_evidence
+                .get(&provider)
+                .and_then(|local| parse_rfc3339_utc(&local.recorded_at))
+                .is_none_or(|local| disk_at > local);
+            if newer {
+                self.provider_quota_hold_evidence.insert(provider, evidence);
+            }
+        }
+        for (provider, release) in normalize_provider_keyed(&disk.provider_quota_hold_releases) {
+            let Some(disk_at) = parse_rfc3339_utc(&release.released_at) else {
+                continue;
+            };
+            let newer = self
+                .provider_quota_hold_releases
+                .get(&provider)
+                .and_then(|local| parse_rfc3339_utc(&local.released_at))
+                .is_none_or(|local| disk_at > local);
+            if newer {
+                self.provider_quota_hold_releases.insert(provider, release);
+            }
+        }
+        // Issue #3923 AC-1: applied after the joins above, which otherwise
+        // restore the very hold the operator released.
+        self.enforce_provider_quota_hold_releases();
+    }
+
+    /// Issue #3923 AC-1: drop every hold that a recorded release fences.
+    fn enforce_provider_quota_hold_releases(&mut self) {
+        let released = self
+            .provider_quota_holds
+            .keys()
+            .filter(|provider| {
+                provider_quota_hold_is_released(
+                    self.provider_quota_hold_evidence.get(*provider),
+                    self.provider_quota_hold_releases.get(*provider),
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for provider in released {
+            self.provider_quota_holds.remove(&provider);
+            self.provider_quota_hold_evidence.remove(&provider);
+        }
+    }
+
+    /// Issue #3923 AC-5: switch the saved launch profile to `agent` from the
+    /// CLI, so a PM can move the fleet off a held provider without the GUI.
+    ///
+    /// Only the agent changes. Model, reasoning, pinned version, and fast mode
+    /// are provider-specific and are cleared so the new agent's defaults apply;
+    /// session mode, permissions, runtime target, and Docker choices are the
+    /// wizard's and are kept. Idempotent for the current agent.
+    pub fn switch_launch_profile_agent(
+        &mut self,
+        agent: &str,
+    ) -> Result<IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSwitchError> {
+        let Some(agent) = normalize_issue_monitor_provider(agent) else {
+            return Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent);
+        };
+        let Some(profile) = self.launch_profile.as_mut() else {
+            return Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile);
+        };
+        if normalize_issue_monitor_provider(&profile.agent_id).as_deref() != Some(agent.as_str()) {
+            profile.agent_id = agent;
+            profile.model = None;
+            profile.reasoning = None;
+            profile.version = None;
+            // Fast mode is an explicit per-provider opt-in (the wizard maps it
+            // onto each CLI's own flag), so a switch must not carry it over.
+            profile.codex_fast_mode = false;
+        }
+        Ok(profile.clone())
+    }
+
+    /// Issue #3923 AC-1: release `provider`'s quota hold on the operator's
+    /// authority.
+    ///
+    /// The release is recorded even when nothing is held in this snapshot, so
+    /// a hold another process formed but has not committed yet is fenced too.
+    /// Every issue the hold was holding is readmitted: the provider-wide map is
+    /// the admission source of truth, and the per-issue retry deadline only
+    /// mirrored it.
+    pub fn clear_provider_quota_hold(
+        &mut self,
+        provider: &str,
+        reason: &str,
+        now: &str,
+    ) -> IssueMonitorProviderQuotaHoldClearOutcome {
+        let Some(provider) = normalize_issue_monitor_provider(provider) else {
+            return IssueMonitorProviderQuotaHoldClearOutcome::UnknownProvider;
+        };
+        // The fence is only as good as its instant: an unparsable `now`
+        // would record a release that fences nothing, so fall back to the
+        // wall clock (millisecond precision, see `provider_quota_hold_is_released`).
+        let released_at = if parse_rfc3339_utc(now).is_some() {
+            now.to_string()
+        } else {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+        let released_reset_at = self.provider_quota_holds.remove(&provider);
+        let evidence = self.provider_quota_hold_evidence.remove(&provider);
+        self.provider_quota_hold_releases.insert(
+            provider.clone(),
+            IssueMonitorProviderQuotaHoldRelease {
+                released_at,
+                reason: reason.to_string(),
+                released_reset_at: released_reset_at.clone(),
+            },
+        );
+        let mut released_issues = Vec::new();
+        for (issue_number, record) in &mut self.autonomous_records {
+            let held_by_provider = record
+                .retry_hold_provider
+                .as_deref()
+                .and_then(normalize_issue_monitor_provider)
+                .is_some_and(|held| held == provider);
+            if held_by_provider {
+                record.retry_not_before = None;
+                record.retry_hold_reason = None;
+                record.retry_hold_provider = None;
+                released_issues.push(*issue_number);
+            }
+        }
+        tracing::warn!(
+            provider = %provider,
+            released_reset_at = ?released_reset_at,
+            released_issues = ?released_issues,
+            evidence = ?evidence,
+            reason = %reason,
+            "Issue Monitor provider quota hold released by operator (Issue #3923)"
+        );
+        IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+            released_reset_at,
+            released_issues,
+        }
     }
 
     /// Rebase a GUI observer on the latest committed prefs. The GUI does not
@@ -6468,9 +6853,29 @@ impl IssueMonitorState {
         let deadline = parse_rfc3339_utc(reset_at)?;
         let now = parse_rfc3339_utc(now)?;
         (deadline > now).then(|| IssueMonitorProviderQuotaHold {
+            evidence: self.provider_quota_hold_evidence.get(&provider).cloned(),
             provider,
             reset_at: format_rfc3339_utc(deadline),
         })
+    }
+
+    /// Issue #3923 AC-1: every provider hold still in force at `now`, whether
+    /// or not it matches the saved launch profile.
+    fn active_provider_quota_holds_at(&self, now: &str) -> Vec<IssueMonitorProviderQuotaHold> {
+        let Some(now) = parse_rfc3339_utc(now) else {
+            return Vec::new();
+        };
+        self.provider_quota_holds
+            .iter()
+            .filter_map(|(provider, reset_at)| {
+                let deadline = parse_rfc3339_utc(reset_at)?;
+                (deadline > now).then(|| IssueMonitorProviderQuotaHold {
+                    provider: provider.clone(),
+                    reset_at: format_rfc3339_utc(deadline),
+                    evidence: self.provider_quota_hold_evidence.get(provider).cloned(),
+                })
+            })
+            .collect()
     }
 
     fn saved_profile_provider_is_held_at(&self, now: &str) -> bool {
@@ -6620,6 +7025,7 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
+            provider_quota_holds: self.active_provider_quota_holds_at(now),
             needs_human: status
                 .autonomous_issues
                 .iter()
@@ -8657,6 +9063,16 @@ impl IssueMonitorState {
             provider.as_deref(),
             None,
             Some(resets_at),
+            Some(IssueMonitorProviderQuotaHoldEvidence {
+                recorded_at: now.to_string(),
+                source: "usage_poller".to_string(),
+                issue_number: Some(issue_number),
+                window_id: Some(window_id.to_string()),
+                screen_text: None,
+                poller_state: None,
+                poller_limit_reached: Some(true),
+                poller_windows: Vec::new(),
+            }),
             now,
         )
         .then_some(issue_number)
@@ -8674,6 +9090,7 @@ impl IssueMonitorState {
     /// [`Self::agent_status`] can say *why* a queued issue is not launching —
     /// the failure this fixes was a quota-dead pane that read as `launched` for
     /// 23 minutes and then as terminal `AgentFailed`.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_hold_provider_usage_limit(
         &mut self,
         issue_number: u64,
@@ -8681,6 +9098,7 @@ impl IssueMonitorState {
         provider: &str,
         reason: impl Into<String>,
         resets_at: Option<&str>,
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
         now: &str,
     ) -> IssueMonitorProviderUsageLimitOutcome {
         let Some(provider) = normalize_issue_monitor_provider(provider) else {
@@ -8700,6 +9118,7 @@ impl IssueMonitorState {
             Some(&provider),
             Some(reason.into()),
             resets_at,
+            evidence,
             now,
         ) {
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -8717,6 +9136,7 @@ impl IssueMonitorState {
         provider: Option<&str>,
         reason: Option<String>,
         resets_at: Option<&str>,
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
         now: &str,
     ) -> bool {
         if self.merged_issues.contains(&issue_number) {
@@ -8740,6 +9160,40 @@ impl IssueMonitorState {
                 )
             })
             .unwrap_or(candidate_deadline);
+        if let Some(provider) = provider.as_deref() {
+            // Issue #3923 AC-2: every hold carries what it was formed from,
+            // and the same facts go to gwt.log so a false hold can be traced
+            // to its trigger.
+            let mut evidence = evidence.unwrap_or_else(|| IssueMonitorProviderQuotaHoldEvidence {
+                recorded_at: now.to_string(),
+                source: "unrecorded".to_string(),
+                issue_number: None,
+                window_id: None,
+                screen_text: None,
+                poller_state: None,
+                poller_limit_reached: None,
+                poller_windows: Vec::new(),
+            });
+            if parse_rfc3339_utc(&evidence.recorded_at).is_none() {
+                evidence.recorded_at = now.to_string();
+            }
+            evidence.issue_number.get_or_insert(issue_number);
+            tracing::warn!(
+                provider = %provider,
+                reset_at = %floor,
+                issue_number,
+                source = %evidence.source,
+                window_id = ?evidence.window_id,
+                screen_text = ?evidence.screen_text,
+                poller_state = ?evidence.poller_state,
+                poller_limit_reached = ?evidence.poller_limit_reached,
+                poller_windows = ?evidence.poller_windows,
+                reason = ?reason,
+                "Issue Monitor provider quota hold recorded (Issue #3923)"
+            );
+            self.provider_quota_hold_evidence
+                .insert(provider.to_string(), evidence);
+        }
         let held_provider_matches_profile = provider
             .clone()
             .zip(self.saved_launch_provider())
@@ -10210,6 +10664,7 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
                 quota_hold: None,
+                provider_quota_holds: Vec::new(),
                 needs_human: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
                     issue_number: 42,
@@ -11629,6 +12084,7 @@ mod tests {
             "Codex",
             "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -11679,6 +12135,7 @@ mod tests {
                     "codex",
                     "Codex usage limit reached",
                     resets_at,
+                    None,
                     "2026-08-16T02:26:00Z",
                 ),
                 IssueMonitorProviderUsageLimitOutcome::Held,
@@ -11759,6 +12216,7 @@ mod tests {
             "codex",
             "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -11815,6 +12273,7 @@ mod tests {
                 "codex",
                 "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
                 Some("2026-08-22T03:46:00Z"),
+                None,
                 "2026-08-16T02:26:00Z",
             ),
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -11823,6 +12282,12 @@ mod tests {
         let expected_hold = serde_json::json!({
             "provider": "codex",
             "reset_at": "2026-08-22T03:46:00Z",
+            // Issue #3923 AC-2: the hold names what it was formed from.
+            "evidence": {
+                "recorded_at": "2026-08-16T02:26:00Z",
+                "source": "unrecorded",
+                "issue_number": 42,
+            },
         });
         let agent_status = serde_json::to_value(monitor.agent_status_at("2026-08-16T02:26:30Z"))
             .expect("serialize agent status");
@@ -12243,6 +12708,7 @@ mod tests {
                 "Codex",
                 "Codex quota exhausted",
                 Some("2026-08-22T04:00:00Z"),
+                None,
                 "2026-08-22T02:01:00Z",
             ),
             IssueMonitorProviderUsageLimitOutcome::Held
@@ -12362,6 +12828,7 @@ mod tests {
             "codex",
             "Codex quota exhausted",
             Some("2026-08-22T04:00:00Z"),
+            None,
             "2026-08-22T02:01:00Z",
         );
 
@@ -12418,6 +12885,7 @@ mod tests {
             "codex",
             "Codex quota exhausted",
             Some("2026-08-22T04:00:00Z"),
+            None,
             "2026-08-22T02:01:00Z",
         );
 
@@ -12488,6 +12956,7 @@ mod tests {
             "codex",
             "Codex usage limit reached",
             None,
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -12511,6 +12980,7 @@ mod tests {
             "codex",
             "Codex usage limit reached",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
         assert!(!monitor.retry_ready(42, "2026-08-16T02:30:00Z"));
@@ -12548,6 +13018,7 @@ mod tests {
             "codex",
             "Codex usage limit reached",
             Some("2026-08-22T03:46:00Z"),
+            None,
             "2026-08-16T02:26:00Z",
         );
 
@@ -19332,6 +19803,377 @@ mod tests {
             monitor, before,
             "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
         );
+    }
+
+    fn quota_hold_evidence_fixture() -> IssueMonitorProviderQuotaHoldEvidence {
+        IssueMonitorProviderQuotaHoldEvidence {
+            recorded_at: "2026-09-02T09:01:00Z".to_string(),
+            source: "screen_notice".to_string(),
+            issue_number: None,
+            window_id: Some("tab-1::agent-42".to_string()),
+            screen_text: Some(
+                "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
+                 to purchase more credits or try again at Sep 7th, 2026 12:58 PM."
+                    .to_string(),
+            ),
+            poller_state: Some("ok".to_string()),
+            poller_limit_reached: Some(false),
+            poller_windows: vec![
+                IssueMonitorProviderQuotaPollerWindow {
+                    kind: "five_hour".to_string(),
+                    used_percent: 26,
+                },
+                IssueMonitorProviderQuotaPollerWindow {
+                    kind: "weekly".to_string(),
+                    used_percent: 26,
+                },
+            ],
+        }
+    }
+
+    /// Issue #3923 AC-1 / AC-2 / AC-4: a hold is listed with the evidence it
+    /// was formed from, and an explicit operator release removes the
+    /// provider-wide hold and readmits every issue it was holding.
+    #[test]
+    fn clearing_a_provider_quota_hold_readmits_the_issues_it_held() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        let evidence = quota_hold_evidence_fixture();
+
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-07T03:58:00Z"),
+                Some(evidence.clone()),
+                "2026-09-02T09:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+
+        let status = monitor.agent_status_at("2026-09-02T09:02:00Z");
+        assert_eq!(
+            status.provider_quota_holds.len(),
+            1,
+            "AC-1: every provider hold is listed"
+        );
+        let hold = &status.provider_quota_holds[0];
+        assert_eq!(hold.provider, "codex");
+        assert_eq!(hold.reset_at, "2026-09-07T03:58:00Z");
+        let recorded = hold
+            .evidence
+            .as_ref()
+            .expect("AC-2: the hold carries the evidence it was formed from");
+        assert_eq!(recorded.issue_number, Some(42));
+        assert_eq!(recorded.recorded_at, "2026-09-02T09:01:00Z");
+        assert_eq!(recorded.screen_text, evidence.screen_text);
+        assert_eq!(recorded.poller_windows, evidence.poller_windows);
+        assert_eq!(
+            monitor.prefs().provider_quota_hold_evidence.get("codex"),
+            Some(recorded),
+            "the evidence is durable alongside the hold"
+        );
+        assert!(!monitor.retry_ready_for_saved_profile(42, "2026-09-02T09:02:00Z"));
+
+        assert_eq!(
+            monitor.clear_provider_quota_hold(
+                "codex",
+                "PM: Codex is not rate limited",
+                "2026-09-02T09:11:00Z",
+            ),
+            IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+                released_reset_at: Some("2026-09-07T03:58:00Z".to_string()),
+                released_issues: vec![42],
+            }
+        );
+
+        let status = monitor.agent_status_at("2026-09-02T09:12:00Z");
+        assert!(status.provider_quota_holds.is_empty());
+        assert_eq!(status.quota_hold, None);
+        assert!(
+            monitor.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"),
+            "the issues the hold was holding are admitted again"
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.clone()),
+            None
+        );
+        let prefs = monitor.prefs();
+        assert!(prefs.provider_quota_holds.is_empty());
+        assert!(prefs.provider_quota_hold_evidence.is_empty());
+        let release = prefs
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("the release is a durable fact, not the absence of one");
+        assert_eq!(release.released_at, "2026-09-02T09:11:00Z");
+        assert_eq!(release.reason, "PM: Codex is not rate limited");
+        assert_eq!(
+            release.released_reset_at.as_deref(),
+            Some("2026-09-07T03:58:00Z")
+        );
+
+        assert_eq!(
+            monitor.clear_provider_quota_hold("codex", "again", "2026-09-02T09:13:00Z"),
+            IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
+                released_reset_at: None,
+                released_issues: Vec::new(),
+            },
+            "clearing an unheld provider is idempotent and still fences in-memory holds elsewhere"
+        );
+        assert_eq!(
+            monitor.clear_provider_quota_hold("   ", "x", "2026-09-02T09:13:00Z"),
+            IssueMonitorProviderQuotaHoldClearOutcome::UnknownProvider,
+            "a custom agent id is a valid provider, so only a blank name is unknown"
+        );
+    }
+
+    /// Issue #3923 AC-1: removing the hold from disk says nothing to a process
+    /// that still holds it in memory (holds join by the later reset), so the
+    /// release must be a published fence — and it must not erase a hold that
+    /// was formed after it.
+    #[test]
+    fn a_provider_quota_hold_release_fences_the_stale_hold_but_not_a_newer_one() {
+        let mut daemon = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        daemon.set_gui_connected(true);
+        daemon.record_candidate(issue(42));
+        daemon.complete_active_launch(42, "tab-1::agent-42");
+        assert_eq!(
+            daemon.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-07T03:58:00Z"),
+                None,
+                "2026-09-02T09:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+
+        let mut operator =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        assert!(matches!(
+            operator.clear_provider_quota_hold("codex", "PM ruling", "2026-09-02T09:11:00Z"),
+            IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+        ));
+        let disk = operator.prefs();
+        assert!(disk.provider_quota_holds.is_empty());
+
+        daemon.rebase_daemon_driver_prefs(&disk);
+        assert!(
+            daemon.prefs().provider_quota_holds.is_empty(),
+            "a hold released on disk must not be re-stamped by a process that still holds it"
+        );
+        assert!(daemon.retry_ready_for_saved_profile(42, "2026-09-02T09:12:00Z"));
+
+        daemon.complete_active_launch(42, "tab-1::agent-43");
+        assert_eq!(
+            daemon.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-43",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-09-07T03:58:00Z"),
+                None,
+                "2026-09-02T09:30:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        daemon.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            daemon
+                .prefs()
+                .provider_quota_holds
+                .get("codex")
+                .map(String::as_str),
+            Some("2026-09-07T03:58:00Z"),
+            "a hold recorded after the release is new evidence and survives the same fence"
+        );
+
+        let mut garbage = disk.clone();
+        garbage.provider_quota_hold_releases.insert(
+            "codex".to_string(),
+            IssueMonitorProviderQuotaHoldRelease {
+                released_at: "not-a-timestamp".to_string(),
+                reason: "corrupt".to_string(),
+                released_reset_at: None,
+            },
+        );
+        daemon.rebase_daemon_driver_prefs(&garbage);
+        assert_eq!(
+            daemon
+                .prefs()
+                .provider_quota_hold_releases
+                .get("codex")
+                .map(|release| release.released_at.as_str()),
+            Some("2026-09-02T09:11:00Z"),
+            "an unparsable disk instant cannot replace a valid local fence"
+        );
+
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-07T03:58:00Z".to_string(),
+                )]),
+                provider_quota_hold_evidence: BTreeMap::from([(
+                    "codex".to_string(),
+                    quota_hold_evidence_fixture(),
+                )]),
+                provider_quota_hold_releases: BTreeMap::from([(
+                    "codex".to_string(),
+                    IssueMonitorProviderQuotaHoldRelease {
+                        released_at: "2026-09-02T09:11:00Z".to_string(),
+                        reason: "PM ruling".to_string(),
+                        released_reset_at: Some("2026-09-07T03:58:00Z".to_string()),
+                    },
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(
+            restored.prefs().provider_quota_holds.is_empty(),
+            "restore applies the same fence as a rebase"
+        );
+    }
+
+    /// Issue #3923 AC-5: the PM can move the fleet off a held provider from
+    /// the CLI. Provider-specific model choices reset; the wizard's runtime
+    /// choices survive; a profile that was never saved cannot be invented.
+    #[test]
+    fn switching_the_launch_profile_agent_keeps_runtime_choices_and_lifts_the_hold() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(IssueMonitorLaunchProfile {
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning: Some("high".to_string()),
+                    version: Some("0.153.2".to_string()),
+                    skip_permissions: true,
+                    codex_fast_mode: true,
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                    docker_service: Some("dev".to_string()),
+                    ..test_launch_profile("codex")
+                }),
+                provider_quota_holds: BTreeMap::from([(
+                    "codex".to_string(),
+                    "2026-09-07T03:58:00Z".to_string(),
+                )]),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert!(monitor
+            .provider_quota_hold_at("2026-09-02T09:00:00Z")
+            .is_some());
+
+        let switched = monitor
+            .switch_launch_profile_agent("Claude")
+            .expect("switch to a healthy provider");
+        assert_eq!(switched.agent_id, "claude");
+        assert_eq!(
+            switched.model, None,
+            "a Codex model does not apply to Claude"
+        );
+        assert_eq!(switched.reasoning, None);
+        assert_eq!(switched.version, None);
+        assert!(
+            !switched.codex_fast_mode,
+            "fast mode is a per-provider opt-in and must not carry over"
+        );
+        assert!(switched.skip_permissions);
+        assert_eq!(
+            switched.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(switched.docker_service.as_deref(), Some("dev"));
+        assert_eq!(monitor.prefs().launch_profile, Some(switched.clone()));
+        assert_eq!(
+            monitor.provider_quota_hold_at("2026-09-02T09:00:00Z"),
+            None,
+            "the queue is gated by the saved profile's provider, which is no longer held"
+        );
+
+        let again = monitor
+            .switch_launch_profile_agent("claude")
+            .expect("idempotent");
+        assert_eq!(again, switched);
+        assert_eq!(
+            monitor.switch_launch_profile_agent("  "),
+            Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent)
+        );
+
+        let mut unsaved = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(
+            unsaved.switch_launch_profile_agent("claude"),
+            Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile),
+            "runtime and Docker choices cannot be invented from an agent name"
+        );
+        assert!(!unsaved.has_launch_profile());
+    }
+
+    /// Issue #3923 AC-3: the poller reading that says "this account is fine"
+    /// is scoped to the agent's own provider and requires fresh data.
+    #[test]
+    fn a_healthy_poller_reading_is_recognized_only_for_a_fresh_ok_account() {
+        use gwt_core::usage::{ProviderUsage, UsageProvider, UsageState, UsageWindow, WindowKind};
+
+        let healthy = ProviderUsage {
+            provider: UsageProvider::Codex,
+            account_label: None,
+            plan: None,
+            windows: vec![
+                UsageWindow::new(WindowKind::FiveHour, 26.0, None),
+                UsageWindow::new(WindowKind::Weekly, 26.0, None),
+            ],
+            limit_reached: false,
+            state: UsageState::Ok,
+            fetched_at: None,
+        };
+        assert!(provider_reports_healthy_for_agent(
+            "codex",
+            std::slice::from_ref(&healthy)
+        ));
+        assert!(
+            !provider_reports_healthy_for_agent("claude", std::slice::from_ref(&healthy)),
+            "a Codex reading says nothing about Claude"
+        );
+        let stale = ProviderUsage {
+            state: UsageState::Stale { age_secs: 900 },
+            ..healthy.clone()
+        };
+        assert!(!provider_reports_healthy_for_agent("codex", &[stale]));
+        let full = ProviderUsage {
+            windows: vec![UsageWindow::new(WindowKind::Weekly, 100.0, None)],
+            ..healthy.clone()
+        };
+        assert!(!provider_reports_healthy_for_agent("codex", &[full]));
+        let reached = ProviderUsage {
+            limit_reached: true,
+            ..healthy
+        };
+        assert!(!provider_reports_healthy_for_agent("codex", &[reached]));
     }
 
     #[test]

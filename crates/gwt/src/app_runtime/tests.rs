@@ -30910,6 +30910,7 @@ fn provider_usage_limit_exit_is_typed_as_a_quota_hold() {
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
+        ..
     } = failure.clone().expect("a quota notice is a typed failure")
     else {
         panic!("expected a provider usage limit failure, got {failure:?}");
@@ -30977,6 +30978,7 @@ fn a_claude_usage_limit_exit_is_attributed_to_the_panes_own_agent() {
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
+        ..
     } = failure.clone().expect("a quota notice is a typed failure")
     else {
         panic!("expected a provider usage limit failure, got {failure:?}");
@@ -31394,6 +31396,7 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
+        ..
     } = hold
     else {
         panic!("expected a provider usage limit hold, got {hold:?}");
@@ -42091,6 +42094,7 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
         gwt::IssueMonitorFailure::ProviderUsageLimit {
             provider: "codex".to_string(),
             resets_at: Some("2099-08-22T04:00:00Z".to_string()),
+            evidence: None,
         },
     );
 
@@ -62016,6 +62020,125 @@ fn app_runtime_issue_monitor_configure_profile_wizard_injects_hermes_launch_choi
         })
         .expect("launch wizard view");
     assert_hermes_choices_injected(view, "open_issue_monitor_configure_profile_wizard_events");
+}
+
+fn codex_usage_account(
+    weekly_used_percent: f32,
+    limit_reached: bool,
+) -> gwt_core::usage::ProviderUsage {
+    gwt_core::usage::ProviderUsage {
+        provider: gwt_core::usage::UsageProvider::Codex,
+        account_label: None,
+        plan: None,
+        windows: vec![gwt_core::usage::UsageWindow::new(
+            gwt_core::usage::WindowKind::Weekly,
+            weekly_used_percent,
+            Some(instant("2026-09-07T03:58:00Z")),
+        )],
+        limit_reached,
+        state: gwt_core::usage::UsageState::Ok,
+        fetched_at: None,
+    }
+}
+
+/// Issue #3923 AC-3: the incident was a Codex pane whose tail still showed an
+/// old limit notice while the poller read the account at 26% — the screen text
+/// alone must not hold the provider for the rest of the billing week.
+#[test]
+fn a_settled_screen_notice_does_not_become_a_hold_while_the_poller_reads_the_account_healthy() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+    runtime.set_provider_usage_accounts(vec![codex_usage_account(26.0, false)]);
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:00:00Z"),
+    );
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:05:00Z"),
+    );
+
+    assert!(
+        !runtime.provider_quota_holds.contains_key(&window_id),
+        "a healthy poller reading contradicts the screen, so the settle window must not promote it"
+    );
+    assert!(
+        runtime.provider_quota_candidates.contains_key(&window_id),
+        "the candidate stays pending so a later poller reading can still corroborate it"
+    );
+
+    runtime.set_provider_usage_accounts(vec![codex_usage_account(100.0, true)]);
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:06:00Z"),
+    );
+    assert!(
+        runtime.provider_quota_holds.contains_key(&window_id),
+        "once the poller agrees the account is out, the same notice is a block"
+    );
+}
+
+/// Issue #3923 AC-2: a hold records what it was formed from — the matched
+/// screen text and the poller reading — so a false hold can be diagnosed
+/// instead of guessed at.
+#[test]
+fn a_committed_quota_hold_carries_the_screen_text_and_poller_reading_as_evidence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+    runtime.set_provider_usage_accounts(vec![codex_usage_account(100.0, true)]);
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:00:00Z"),
+    );
+
+    let Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
+        provider,
+        evidence: Some(evidence),
+        ..
+    }) = runtime.provider_quota_holds.get(&window_id)
+    else {
+        panic!(
+            "the hold must be typed and carry evidence: {:?}",
+            runtime.provider_quota_holds.get(&window_id)
+        );
+    };
+    assert_eq!(provider, "codex");
+    assert_eq!(evidence.source, "screen_notice");
+    assert_eq!(evidence.recorded_at, "2026-09-02T09:00:00.000Z");
+    assert_eq!(evidence.window_id.as_deref(), Some(window_id.as_str()));
+    assert!(
+        evidence
+            .screen_text
+            .as_deref()
+            .is_some_and(|text| text.contains("hit your usage limit")),
+        "the matched screen text is the evidence: {:?}",
+        evidence.screen_text
+    );
+    assert_eq!(evidence.poller_state.as_deref(), Some("ok"));
+    assert_eq!(evidence.poller_limit_reached, Some(true));
+    assert_eq!(
+        evidence.poller_windows,
+        vec![gwt::IssueMonitorProviderQuotaPollerWindow {
+            kind: "weekly".to_string(),
+            used_percent: 100,
+        }]
+    );
 }
 
 // Issue #3927 (SPEC #3340 T-624 / AS-40〜42 / FR-045〜046): the Tao thread
