@@ -3482,6 +3482,12 @@ fn insert_exited_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str, ex
         test_pane_cwd(),
     )
     .expect("exited test pane");
+    // Windows ConPTY waits for the terminal to answer its startup cursor
+    // position query before the attached command can finish. Production does
+    // this from the frontend; this fixture has no frontend, so complete the
+    // handshake explicitly before waiting for the natural exit.
+    #[cfg(windows)]
+    let _ = pane.pty().write_input(b"\x1b[1;1R");
     if let Ok(mut reader) = pane.reader() {
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
@@ -3530,6 +3536,14 @@ fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
 /// keep them deterministic on the already-exited path they were written for.
 /// Coverage for the still-running path belongs to Issue #3744, which restores
 /// a bounded guarantee instead of dropping the proof.
+///
+/// Twenty seconds preserves the established fixture budget while allowing
+/// shared CI runners to reap a PTY process tree under saturation. Both waits
+/// poll positive settlement signals, so this is an upper bound rather than a
+/// fixed delay (Issue #3751).
+const TEST_PTY_STOP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(20);
+const TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
     let pane = runtime
         .runtimes
@@ -3541,7 +3555,7 @@ fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
         .expect("test pane")
         .kill()
         .expect("kill test child");
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
     loop {
         if pane
             .lock()
@@ -3555,7 +3569,42 @@ fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
             Instant::now() < deadline,
             "test child for {window_id} did not exit before the deadline"
         );
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_test_pty_stop_settlement(
+    sessions_dir: &Path,
+    session_id: &str,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    child_pid: u32,
+    child_started_at: u64,
+) {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let runtime_path = gwt_agent::runtime_state_path(sessions_dir, session_id);
+    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
+    loop {
+        let process_tree_exited =
+            !gwt::process::exact_pty_process_tree_is_alive(child_pid, child_started_at);
+        let session_stopped = gwt_agent::Session::load(&session_path)
+            .is_ok_and(|session| session.status == gwt_agent::AgentStatus::Stopped);
+        let terminal_proof_persisted = gwt_agent::SessionRuntimeState::load(&runtime_path)
+            .is_ok_and(|proof| {
+                proof.status == gwt_agent::AgentStatus::Stopped
+                    && proof.execution_identity.as_ref() == Some(identity)
+                    && proof.runtime_incarnation == Some(incarnation)
+                    && proof.child_pid == Some(child_pid)
+                    && proof.child_started_at == Some(child_started_at)
+            });
+        if process_tree_exited && session_stopped && terminal_proof_persisted {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "test PTY stop did not settle before the deadline: session={session_id}, process_tree_exited={process_tree_exited}, session_stopped={session_stopped}, terminal_proof_persisted={terminal_proof_persisted}",
+        );
+        thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
     }
 }
 
@@ -30006,10 +30055,14 @@ fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit(
 
     runtime.stop_window_runtime(&window_id);
 
-    assert!(!gwt::process::exact_pty_process_tree_is_alive(
+    wait_for_test_pty_stop_settlement(
+        &runtime.sessions_dir,
+        session_id,
+        &identity,
+        incarnation,
         child_pid,
-        child_started_at
-    ));
+        child_started_at,
+    );
     assert_eq!(
         gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
             .expect("load terminal Session")
