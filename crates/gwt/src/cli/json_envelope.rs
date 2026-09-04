@@ -594,13 +594,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // diagnosis; `issue` or `spec` asks about any owner in this
             // repository, which is how an operator finds out who holds a
             // generation that keeps refusing the queue.
-            let issue = optional_u64(params, "issue")?;
-            let spec = optional_u64(params, "spec")?;
-            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
+            // Reject unknown keys by name. Counting present values instead
+            // would refuse a well-formed request that spells an unused owner
+            // key as null, e.g. {"issue": null, "spec": 3885}.
+            if params.keys().any(|key| key != "issue" && key != "spec") {
                 return Err(CliParseError::InvalidJson(
                     "execution.status accepts only issue or spec".to_string(),
                 ));
             }
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
             match (issue, spec) {
                 (Some(_), Some(_)) => {
                     return Err(CliParseError::InvalidJson(
@@ -2931,6 +2934,17 @@ mod tests {
         assert!(matches!(
             err("execution.status", json!({"issue": 0})),
             CliParseError::InvalidJson(message) if message.contains("greater than zero")
+        ));
+        // A null owner key is an absent owner, not an unknown parameter.
+        assert!(matches!(
+            ok("execution.status", json!({"issue": null, "spec": 3885})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner.number == 3885
+        ));
+        assert!(matches!(
+            ok("execution.status", json!({"issue": null, "spec": null})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         ));
         assert!(matches!(
             ok("execution.complete", json!({})),

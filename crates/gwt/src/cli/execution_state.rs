@@ -2341,6 +2341,23 @@ pub struct OwnerExecutionDiagnosis {
     pub warnings: Vec<String>,
 }
 
+/// Issue #3934: the schema-version-1 name of a durable holder state.
+///
+/// Written out rather than derived from `Debug` so the wire value cannot drift
+/// with a formatting change, and so it matches how `AgentStatus` itself
+/// serializes (`WaitingInput` is `Waiting` on the wire).
+fn holder_session_state_wire_value(status: gwt_agent::AgentStatus) -> String {
+    match status {
+        gwt_agent::AgentStatus::Unknown => "Unknown",
+        gwt_agent::AgentStatus::Running => "Running",
+        gwt_agent::AgentStatus::Idle => "Idle",
+        gwt_agent::AgentStatus::WaitingInput => "Waiting",
+        gwt_agent::AgentStatus::Stopped => "Stopped",
+        gwt_agent::AgentStatus::Interrupted => "Interrupted",
+    }
+    .to_string()
+}
+
 /// Issue #3934: diagnose any owner in this repository without owning it.
 pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecutionDiagnosis {
     let mut diagnosis = OwnerExecutionDiagnosis {
@@ -2437,7 +2454,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         }
     };
     if let Some(holder) = &holder {
-        diagnosis.holder_session_state = Some(format!("{:?}", holder.status));
+        diagnosis.holder_session_state = Some(holder_session_state_wire_value(holder.status));
         diagnosis.holder_branch = Some(holder.branch.clone());
         diagnosis.holder_worktree = Some(holder.worktree_path.display().to_string());
     }
@@ -7550,10 +7567,12 @@ pub fn prepare_exact_terminal_active_successor(
                     }
                 }
             }
-            let session_is_terminal = matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            );
+            // Issue #3934: this must agree with the rule that produced the
+            // proof in the first place. `unreachable_current_generation_holder`
+            // hands this transaction a terminal proof for every durable state
+            // the reclaim rule allows, so requiring a narrower set here would
+            // turn a clean refusal into a PermissionDenied launch failure.
+            let session_is_terminal = holder_status_permits_generation_reclaim(session.status);
             if reconcile_active_launch_handshake_under_lease(sessions_dir, expected_session)? {
                 return Err(io::Error::new(
                     ErrorKind::PermissionDenied,
@@ -13812,6 +13831,86 @@ mod tests {
             load(dir.path()).unwrap().unwrap().primary_session_id,
             "session-original",
             "prepare must not publish the successor before activation"
+        );
+    }
+
+    /// Issue #3934: the launch route hands the successor transaction a
+    /// terminal proof for every durable holder state the reclaim rule allows.
+    /// A narrower gate inside that transaction turned what should be a clean
+    /// refusal into a `PermissionDenied` launch failure event.
+    #[test]
+    fn idle_holder_with_terminal_runtime_prepares_a_successor_instead_of_failing_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-idle-terminal-runtime";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, predecessor.clone());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut idle_session = gwt_agent::Session::load(&session_path).unwrap();
+        idle_session.update_status(gwt_agent::AgentStatus::Idle);
+        idle_session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&idle_session)
+            .unwrap()
+            .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &identity,
+            1,
+            crate::process::host_process_start_time(std::process::id()).unwrap(),
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        let holder = unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+            .unwrap()
+            .expect("an exact terminal runtime under an Idle holder is reclaimable");
+        assert!(matches!(
+            holder.1,
+            gwt_agent::ManualLaunchRuntimeEvidence::Proof(_)
+        ));
+
+        let prepared = prepare_exact_terminal_active_successor(
+            dir.path(),
+            owner,
+            &successor_request(
+                "idle-terminal-successor",
+                "gwt-host-manual-launch",
+                FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+            ),
+            &sessions_dir,
+            &identity,
+            gwt_agent::ManualLaunchRuntimeProof {
+                host_pid: std::process::id(),
+                runtime_incarnation: 1,
+            },
+            "exact producing runtime terminated before manual Launch Agent",
+        )
+        .expect("the successor transaction must accept every state the reclaim rule allows");
+
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
         );
     }
 
