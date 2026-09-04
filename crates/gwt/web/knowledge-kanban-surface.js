@@ -352,8 +352,60 @@ export function createKnowledgeKanbanSurface({
   openWorkspaceResumePicker,
   openWorkspaceCleanup,
   getResumeBounds,
+  // SPEC #3206 FR-017: surface errors (Issue Monitor last_error, Issue window
+  // load/search failures) are reported to the notification center as error
+  // rows and are NOT rendered in this surface at all — the bell + drawer are
+  // the single place errors are read (user ruling 2026-09-04; a per-surface
+  // indicator re-fragments the very thing v2 consolidated). Pure seams: the
+  // surface never learns the center's shape.
+  reportSurfaceError = () => {},
+  resolveSurfaceError = () => {},
 }) {
       const knowledgeBridgeStateMap = new Map();
+      // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
+      // is re-broadcast constantly, so only a CHANGED text is a new event) and
+      // remember which of the two sources changed last for the summary line.
+      const ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
+      let reportedIssueMonitorError = "";
+      let issueMonitorErrorSequence = 0;
+      let surfaceErrorSequence = 0;
+
+      function issueMonitorErrorText() {
+        return typeof issueMonitorStatus?.last_error === "string"
+          ? issueMonitorStatus.last_error.trim()
+          : "";
+      }
+
+      function syncIssueMonitorErrorReport() {
+        const lastError = issueMonitorErrorText();
+        if (lastError === reportedIssueMonitorError) return;
+        reportedIssueMonitorError = lastError;
+        if (lastError) {
+          surfaceErrorSequence += 1;
+          issueMonitorErrorSequence = surfaceErrorSequence;
+          reportSurfaceError({ key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: lastError });
+        } else {
+          resolveSurfaceError(ISSUE_MONITOR_ERROR_KEY);
+        }
+      }
+
+      function issueWindowErrorKey(windowId) {
+        return `issue-window:${windowId}:load`;
+      }
+
+      function syncIssueWindowErrorReport(windowId, state) {
+        const message = typeof state?.error === "string" ? state.error : "";
+        if (message === (state.reportedError || "")) return;
+        state.reportedError = message;
+        if (message) {
+          surfaceErrorSequence += 1;
+          state.errorSequence = surfaceErrorSequence;
+          reportSurfaceError({ key: issueWindowErrorKey(windowId), title: "Issue window", message });
+        } else {
+          resolveSurfaceError(issueWindowErrorKey(windowId));
+        }
+      }
+
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
@@ -477,11 +529,6 @@ export function createKnowledgeKanbanSurface({
           autonomous.dataset.enabled = enabled ? "true" : "false";
           autonomous.classList.toggle("primary", enabled);
         }
-        const error = panel.querySelector(".knowledge-monitor-error");
-        if (error) {
-          error.textContent = issueMonitorStatus.last_error || "";
-          error.hidden = !issueMonitorStatus.last_error;
-        }
       }
 
       function renderAllIssueMonitorControls() {
@@ -497,6 +544,9 @@ export function createKnowledgeKanbanSurface({
           ...(nextStatus || {}),
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
         };
+        // FR-017: the monitor's last_error is a notification-center error
+        // row, not a banner. Report once per changed text; resolve on clear.
+        syncIssueMonitorErrorReport();
         renderAllIssueMonitorControls();
       }
 
@@ -839,6 +889,11 @@ export function createKnowledgeKanbanSurface({
 
       function clearKnowledgeBridgeState(windowId) {
         const state = knowledgeBridgeStateMap.get(windowId);
+        if (state?.reportedError) {
+          // FR-017: a closed window's load error is no longer actionable.
+          resolveSurfaceError(issueWindowErrorKey(windowId));
+          state.reportedError = "";
+        }
         if (state?.pendingSearchTimer !== null && state?.pendingSearchTimer !== undefined) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
@@ -2511,9 +2566,18 @@ export function createKnowledgeKanbanSurface({
         const issueSurface = isSilentSemanticKind(state.kind);
         status.className = "knowledge-status";
         status.textContent = "";
+        if (issueSurface) {
+          // FR-017: Issue window errors go to the notification center + the
+          // compact indicator line, never a persistent red band.
+          syncIssueWindowErrorReport(windowId, state);
+        }
         if (state.error) {
-          status.classList.add("visible", "error");
-          status.textContent = state.error;
+          // Issue windows keep the status line empty on error (a failed load
+          // is not "no items"); other kinds keep their red band.
+          if (!issueSurface) {
+            status.classList.add("visible", "error");
+            status.textContent = state.error;
+          }
         } else if (!issueSurface && state.searching) {
           status.classList.add("visible", "info");
           status.textContent = "Searching semantic index";
@@ -3080,7 +3144,6 @@ export function createKnowledgeKanbanSurface({
                     <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />
                     <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
                   </div>
-                  <div class="knowledge-monitor-error" role="alert" hidden></div>
                 </section>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">

@@ -9,7 +9,7 @@ use crate::{
 };
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
-const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -104,10 +104,150 @@ impl fmt::Display for IssueMonitorScanFailure {
 
 impl std::error::Error for IssueMonitorScanFailure {}
 
+/// Issue #3933: how a scan stage failed *without* discarding the scan.
+///
+/// A stage failure used to be fatal to the whole pass, so one slow `gh` call
+/// took the launch stage down with it and free agent slots sat idle. These
+/// dispositions name what the scan fell back on instead, so a reader can tell a
+/// degraded scan (launch still ran) from a stopped one (launch never ran).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorScanContinuation {
+    /// A per-candidate readback exceeded its own budget. That candidate keeps
+    /// the value the last successful readback gave it until a later scan reads
+    /// it back again; every other candidate is unaffected.
+    StaleReadback,
+    /// A shared prerequisite failed, so the stage kept the previous scan's
+    /// successful result rather than throwing this pass away.
+    PreviousCandidates,
+}
+
+impl IssueMonitorScanContinuation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleReadback => "continued_with_stale_readback",
+            Self::PreviousCandidates => "continued_with_previous_candidates",
+        }
+    }
+}
+
+impl fmt::Display for IssueMonitorScanContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One survived stage failure, kept whole so the status surface can name the
+/// stage, the branch it was reading, and what the scan did instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueMonitorScanDegradation {
+    pub stage: IssueMonitorScanStage,
+    /// The branch, base branch, or issue whose value is now unknown.
+    pub target: Option<String>,
+    pub continuation: IssueMonitorScanContinuation,
+    pub detail: String,
+}
+
+impl IssueMonitorScanDegradation {
+    pub fn new(
+        failure: IssueMonitorScanFailure,
+        target: Option<String>,
+        continuation: IssueMonitorScanContinuation,
+    ) -> Self {
+        Self {
+            stage: failure.stage,
+            target,
+            continuation,
+            detail: failure.detail,
+        }
+    }
+}
+
+impl fmt::Display for IssueMonitorScanDegradation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "scan continued: {} failed", self.stage)?;
+        if let Some(target) = &self.target {
+            write!(formatter, " for {target}")?;
+        }
+        write!(formatter, " ({}): {}", self.continuation, self.detail)
+    }
+}
+
+/// Render every survived failure into the single operator-facing line that
+/// `last_error` carries (Issue #3933 AC-4). `None` when the scan was clean.
+pub fn issue_monitor_scan_degradation_summary(
+    degradations: &[IssueMonitorScanDegradation],
+) -> Option<String> {
+    if degradations.is_empty() {
+        return None;
+    }
+    Some(
+        degradations
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// Issue #3933 AC-3: what one per-candidate readback may spend.
+///
+/// Deliberately a per-call budget rather than a share of the scan deadline. The
+/// readbacks are a serial fan-out over candidate branches, so a single shared
+/// budget is consumed front-to-back and the last branch inherits whatever is
+/// left — in the production incident, nothing.
+const ISSUE_MONITOR_READBACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The scan budget held back for the launch stage. The readback loop stops
+/// issuing new calls once less than this remains, so a long fan-out degrades its
+/// own findings instead of starving the launch that fills free slots.
+const ISSUE_MONITOR_LAUNCH_RESERVE: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub fn issue_monitor_readback_budget() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(budget_ms) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS")
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        .filter(|budget_ms| *budget_ms <= 60_000)
+    {
+        return std::time::Duration::from_millis(budget_ms);
+    }
+    ISSUE_MONITOR_READBACK_BUDGET
+}
+
+/// Whether the scan still has budget to start another per-candidate readback
+/// and leave the launch stage something to run on. An absent ambient deadline
+/// (direct callers, tests) imposes no limit of its own.
+fn readback_fan_out_has_budget() -> bool {
+    gwt_core::operation_deadline::current().is_none_or(|deadline| {
+        deadline.saturating_duration_since(std::time::Instant::now()) > ISSUE_MONITOR_LAUNCH_RESERVE
+    })
+}
+
 pub fn ensure_scan_deadline(stage: IssueMonitorScanStage) -> Result<(), IssueMonitorScanFailure> {
     gwt_core::operation_deadline::ensure_remaining(stage.as_str())
         .map(|_| ())
         .map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))
+}
+
+/// Run one per-candidate readback under a budget of its own (Issue #3933 AC-3).
+///
+/// [`run_scan_stage`] hands the call whatever is left of the shared scan
+/// deadline, so in a serial fan-out the first slow branch can spend the entire
+/// window and every later branch inherits an already-expired one. Entering a
+/// per-call budget caps each branch instead. The budget still nests inside the
+/// scan deadline, and the loop refuses to start a candidate without
+/// [`ISSUE_MONITOR_LAUNCH_RESERVE`] left, so a call that does start always has a
+/// real budget and can never overrun the scan.
+pub(crate) fn run_budgeted_readback_stage<T, E>(
+    stage: IssueMonitorScanStage,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, IssueMonitorScanFailure>
+where
+    E: fmt::Display,
+{
+    let _budget = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + issue_monitor_readback_budget(),
+    );
+    operation().map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))
 }
 
 pub(crate) fn run_scan_stage<T, E>(
@@ -604,6 +744,45 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     summary
 }
 
+/// Issue #3933 AC-2 (review follow-up): read one candidate's authoritative state
+/// before the launch stage acts on a previous scan's result.
+///
+/// [`try_issue_completed_by_merged_pr`] decides an ordinary Issue purely from the
+/// loaded row's own `state`, so a previous-result row that GitHub has since
+/// closed would still read as launchable. A targeted single-issue refresh is far
+/// cheaper than the issue list whose failure put the scan on this path, and an
+/// unreadable state is reported as a failure rather than assumed Open.
+pub fn try_refresh_issue_monitor_candidate(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+) -> Result<IssueMonitorIssue, IssueMonitorScanFailure> {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
+        .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
+    let number = IssueNumber(issue.number);
+    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+        crate::issue_cache::refresh_issue_cache_entry_from_remote(repo_path, &cache_root, number)
+    })?;
+    let entry = Cache::new(cache_root).load_entry(number).ok_or_else(|| {
+        IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::CandidateLoad,
+            format!(
+                "issue #{number} has no cache entry after a targeted refresh",
+                number = issue.number
+            ),
+        )
+    })?;
+    Ok(IssueMonitorIssue {
+        state: match entry.snapshot.state {
+            IssueState::Open => IssueMonitorIssueState::Open,
+            IssueState::Closed => IssueMonitorIssueState::Closed,
+        },
+        updated_at: Some(entry.snapshot.updated_at.0),
+        ..issue.clone()
+    })
+}
+
 /// Issue #3225 / #3832: GitHub-derived completion probe for the claim loop.
 /// Ordinary Issues are terminal only when GitHub reports `Closed`; linked PR
 /// evidence remains delivery evidence and cannot suppress an Open Issue.
@@ -827,25 +1006,38 @@ pub fn try_apply_autonomous_eligibility(
     repo_slug: &str,
     repo_path: &Path,
     now: &str,
-) -> Result<(), IssueMonitorScanFailure> {
+) -> Result<Vec<IssueMonitorScanDegradation>, IssueMonitorScanFailure> {
     if !monitor.config.enabled || !monitor.autonomous_mode() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     // Only fetch branch protection for candidates whose transient-retry backoff
     // window has elapsed (retry_ready) — a backed-off issue is skipped this scan
     // without a network call (SPEC #3200 T-043/FR-029).
     let candidates = autonomous_eligibility_candidates(monitor, issues, now);
     if candidates.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let base_branch = try_resolve_default_base_branch(repo_path)?;
-    let protection = run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
+    // Issue #3933 AC-2: an unreadable protection snapshot is not a reason to
+    // throw the pass away. Every candidate keeps the eligibility decision the
+    // last successful scan gave it, and the launch stage still runs — inventing
+    // a decision from an absent snapshot is the one thing that stays forbidden.
+    let protection = match run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
         gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, &base_branch)
-    })?;
+    }) {
+        Ok(protection) => protection,
+        Err(failure) => {
+            return Ok(vec![IssueMonitorScanDegradation::new(
+                failure,
+                Some(base_branch),
+                IssueMonitorScanContinuation::PreviousCandidates,
+            )]);
+        }
+    };
     for issue in candidates {
         let _ = monitor.prepare_autonomous_candidate(issue, &protection, now);
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 fn autonomous_eligibility_candidates<'a>(
@@ -903,177 +1095,262 @@ pub fn try_advance_autonomous_in_flight(
     repo_path: &Path,
     daemon_secret: &[u8],
     now: &str,
-) -> Result<(), IssueMonitorScanFailure> {
+) -> Result<Vec<IssueMonitorScanDegradation>, IssueMonitorScanFailure> {
     if !monitor.config.enabled || !monitor.autonomous_mode() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let base_branch = try_resolve_default_base_branch(repo_path)?;
+    let mut degradations = Vec::new();
     for issue_number in monitor.autonomous_in_flight_issues() {
-        let Some(record) = monitor.autonomous_record(issue_number).cloned() else {
+        // The branch this candidate's readbacks are about, named up front so a
+        // failure can say which one went unknown even when it failed before the
+        // phase arm resolved it (Issue #3933 AC-4).
+        let target = autonomous_readback_target(monitor, issue_number);
+        // Issue #3933: the fan-out is bounded by the scan budget, not by the
+        // first slow call. Once too little is left to also run the launch
+        // stage, the remaining candidates stay unknown rather than starving the
+        // launch that fills free agent slots.
+        if !readback_fan_out_has_budget() {
+            degradations.push(IssueMonitorScanDegradation {
+                stage: IssueMonitorScanStage::OpenPrReadback,
+                target,
+                continuation: IssueMonitorScanContinuation::StaleReadback,
+                detail: "scan budget reserved for the launch stage".to_string(),
+            });
             continue;
-        };
-        match record.phase {
-            crate::AutonomousPhase::Implementing => {
-                let Some(branch) = monitor
-                    .inbox_item(issue_number)
-                    .and_then(|item| item.launch_plan.as_ref())
-                    .map(|plan| plan.branch_name.clone())
-                else {
-                    continue;
-                };
-                if let Some(pr) = run_scan_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        }
+        // Issue #3933 AC-1: one candidate's failed readback degrades that
+        // candidate alone. Its record is left exactly as the last successful
+        // scan wrote it, and the loop moves on to the next candidate.
+        if let Err(failure) = advance_one_autonomous_issue(
+            monitor,
+            issues,
+            repo_slug,
+            repo_path,
+            &base_branch,
+            daemon_secret,
+            issue_number,
+            now,
+        ) {
+            tracing::warn!(
+                issue = issue_number,
+                stage = %failure.stage,
+                error = %failure.detail,
+                "issue monitor readback degraded; keeping the previous value"
+            );
+            degradations.push(IssueMonitorScanDegradation::new(
+                failure,
+                target,
+                IssueMonitorScanContinuation::StaleReadback,
+            ));
+        }
+    }
+    Ok(degradations)
+}
+
+/// The launch branch a candidate's readbacks address, falling back to the issue
+/// itself when no launch plan has been recorded yet.
+fn autonomous_readback_target(monitor: &IssueMonitorState, issue_number: u64) -> Option<String> {
+    Some(
+        monitor
+            .inbox_item(issue_number)
+            .and_then(|item| item.launch_plan.as_ref())
+            .map(|plan| plan.branch_name.clone())
+            .unwrap_or_else(|| format!("issue #{issue_number}")),
+    )
+}
+
+/// Advance one in-flight autonomous issue by a single step. Every remote
+/// readback here runs under its own budget ([`run_budgeted_readback_stage`]), so
+/// a slow candidate cannot spend the budget the next candidate needs.
+#[allow(clippy::too_many_arguments)]
+fn advance_one_autonomous_issue(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    base_branch: &str,
+    daemon_secret: &[u8],
+    issue_number: u64,
+    now: &str,
+) -> Result<(), IssueMonitorScanFailure> {
+    let Some(record) = monitor.autonomous_record(issue_number).cloned() else {
+        return Ok(());
+    };
+    match record.phase {
+        crate::AutonomousPhase::Implementing => {
+            let Some(branch) = monitor
+                .inbox_item(issue_number)
+                .and_then(|item| item.launch_plan.as_ref())
+                .map(|plan| plan.branch_name.clone())
+            else {
+                return Ok(());
+            };
+            if let Some(pr) =
+                run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
                     gwt_git::pr_status::try_fetch_open_pr_number_for_branch(repo_path, &branch)
-                })? {
-                    if let Some(sha) =
-                        run_scan_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                            gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
-                        })?
-                    {
-                        monitor.begin_review(issue_number, pr, &sha);
-                        let criteria = issues
-                            .iter()
-                            .find(|issue| issue.number == issue_number)
-                            .and_then(|issue| issue.body.clone())
-                            .map(|body| {
-                                crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
-                            })
-                            .unwrap_or_default();
-                        let diff = run_scan_stage(IssueMonitorScanStage::PrDiffReadback, || {
+                })?
+            {
+                if let Some(sha) =
+                    run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                        gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                    })?
+                {
+                    let criteria = issues
+                        .iter()
+                        .find(|issue| issue.number == issue_number)
+                        .and_then(|issue| issue.body.clone())
+                        .map(|body| {
+                            crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
+                        })
+                        .unwrap_or_default();
+                    // Issue #3933 (review follow-up): every readback the dispatch
+                    // needs runs BEFORE the record is moved out of Implementing.
+                    // A degraded readback now leaves the phase alone; committing
+                    // `begin_review` first would strand the candidate in
+                    // Reviewing with no dispatch and therefore no verdict to
+                    // wait for, until the stuck sweep eventually reset it.
+                    let diff =
+                        run_budgeted_readback_stage(IssueMonitorScanStage::PrDiffReadback, || {
                             gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
                         })?
                         .unwrap_or_default();
-                        let linked_issue_kind = issues
-                            .iter()
-                            .find(|issue| issue.number == issue_number)
-                            .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
-                            .unwrap_or_default();
-                        monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
-                            issue_number,
-                            pr_number: pr,
-                            reviewed_sha: sha,
-                            required_criteria: criteria,
-                            diff,
-                            linked_issue_kind,
-                        });
-                    }
+                    monitor.begin_review(issue_number, pr, &sha);
+                    let linked_issue_kind = issues
+                        .iter()
+                        .find(|issue| issue.number == issue_number)
+                        .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
+                        .unwrap_or_default();
+                    monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
+                        issue_number,
+                        pr_number: pr,
+                        reviewed_sha: sha,
+                        required_criteria: criteria,
+                        diff,
+                        linked_issue_kind,
+                    });
                 }
             }
-            crate::AutonomousPhase::Reviewing => {
-                let Some(pr) = record.pr_number else { continue };
-                let protection = run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
-                    gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, &base_branch)
+        }
+        crate::AutonomousPhase::Reviewing => {
+            let Some(pr) = record.pr_number else {
+                return Ok(());
+            };
+            let protection =
+                run_budgeted_readback_stage(IssueMonitorScanStage::BranchProtection, || {
+                    gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, base_branch)
                 })?;
-                let rollup = run_scan_stage(IssueMonitorScanStage::StatusCheckReadback, || {
+            let rollup =
+                run_budgeted_readback_stage(IssueMonitorScanStage::StatusCheckReadback, || {
                     gwt_git::pr_status::try_fetch_pr_status_check_rollup(repo_path, pr)
                 })?;
-                let head = run_scan_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                    gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
-                })?
+            let head = run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+            })?
+            .unwrap_or_default();
+            let body = issues
+                .iter()
+                .find(|issue| issue.number == issue_number)
+                .and_then(|issue| issue.body.clone())
                 .unwrap_or_default();
-                let body = issues
-                    .iter()
-                    .find(|issue| issue.number == issue_number)
-                    .and_then(|issue| issue.body.clone())
-                    .unwrap_or_default();
-                let Some(inputs) =
-                    monitor.autonomous_gate_inputs(issue_number, protection, &rollup, &head, &body)
-                else {
-                    continue; // verdict not back yet → wait
-                };
-                match crate::issue_monitor_gate::route_autonomous_gate(&inputs) {
-                    crate::issue_monitor_gate::GateAction::Deliver => {
-                        // Audit: a daemon-signed authorization record bound to the
-                        // reviewed SHA (control-plane proof the gate authorized it).
-                        let token = crate::issue_monitor_authz::sign_merge_authorization(
-                            daemon_secret,
+            let Some(inputs) =
+                monitor.autonomous_gate_inputs(issue_number, protection, &rollup, &head, &body)
+            else {
+                return Ok(()); // verdict not back yet → wait
+            };
+            match crate::issue_monitor_gate::route_autonomous_gate(&inputs) {
+                crate::issue_monitor_gate::GateAction::Deliver => {
+                    // Audit: a daemon-signed authorization record bound to the
+                    // reviewed SHA (control-plane proof the gate authorized it).
+                    let token = crate::issue_monitor_authz::sign_merge_authorization(
+                        daemon_secret,
+                        issue_number,
+                        &inputs.reviewed_sha,
+                        base_branch,
+                    );
+                    tracing::info!(
+                        issue = issue_number,
+                        pr,
+                        reviewed_sha = %inputs.reviewed_sha,
+                        token = %token,
+                        "autonomous gate PASS — preparing auto-merge authority"
+                    );
+                    // The scan is a side-effect-free proposal builder. It
+                    // must never submit `gh pr merge --auto` from a cloned
+                    // monitor because the daemon may reject this result as
+                    // stale after a concurrent OFF/control transition. The
+                    // driver persists Prepared, fences Attempting in a
+                    // second transaction, then the serialized executor owns
+                    // the remote mutation and result reconciliation.
+                    let epoch = monitor.effect_authority_epoch();
+                    monitor.prepare_effect(crate::PendingIssueMonitorEffect {
+                        effect_id: format!(
+                            "arm:{issue_number}:{pr}:{}:{epoch}",
+                            inputs.reviewed_sha
+                        ),
+                        authority_epoch: epoch,
+                        attempt: 0,
+                        state: crate::IssueMonitorEffectState::Prepared,
+                        payload: crate::IssueMonitorEffectPayload::ArmAutoMerge {
                             issue_number,
-                            &inputs.reviewed_sha,
-                            &base_branch,
-                        );
-                        tracing::info!(
-                            issue = issue_number,
-                            pr,
-                            reviewed_sha = %inputs.reviewed_sha,
-                            token = %token,
-                            "autonomous gate PASS — preparing auto-merge authority"
-                        );
-                        // The scan is a side-effect-free proposal builder. It
-                        // must never submit `gh pr merge --auto` from a cloned
-                        // monitor because the daemon may reject this result as
-                        // stale after a concurrent OFF/control transition. The
-                        // driver persists Prepared, fences Attempting in a
-                        // second transaction, then the serialized executor owns
-                        // the remote mutation and result reconciliation.
-                        let epoch = monitor.effect_authority_epoch();
-                        monitor.prepare_effect(crate::PendingIssueMonitorEffect {
-                            effect_id: format!(
-                                "arm:{issue_number}:{pr}:{}:{epoch}",
-                                inputs.reviewed_sha
-                            ),
-                            authority_epoch: epoch,
-                            attempt: 0,
-                            state: crate::IssueMonitorEffectState::Prepared,
-                            payload: crate::IssueMonitorEffectPayload::ArmAutoMerge {
-                                issue_number,
-                                pr_number: pr,
-                                reviewed_sha: inputs.reviewed_sha,
-                            },
-                        });
-                    }
-                    crate::issue_monitor_gate::GateAction::WaitForCi => {}
-                    crate::issue_monitor_gate::GateAction::Remediate(reason) => {
-                        monitor.record_autonomous_failure(
-                            issue_number,
-                            crate::FailureClass::Transient,
-                            reason,
-                            now,
-                        );
-                    }
-                    crate::issue_monitor_gate::GateAction::Escalate(reason) => {
-                        monitor.escalate_to_needs_human(issue_number, reason);
-                    }
+                            pr_number: pr,
+                            reviewed_sha: inputs.reviewed_sha,
+                        },
+                    });
+                }
+                crate::issue_monitor_gate::GateAction::WaitForCi => {}
+                crate::issue_monitor_gate::GateAction::Remediate(reason) => {
+                    monitor.record_autonomous_failure(
+                        issue_number,
+                        crate::FailureClass::Transient,
+                        reason,
+                        now,
+                    );
+                }
+                crate::issue_monitor_gate::GateAction::Escalate(reason) => {
+                    monitor.escalate_to_needs_human(issue_number, reason);
                 }
             }
-            crate::AutonomousPhase::Delivering => {
-                let Some(pr) = record.pr_number else { continue };
-                // Merge completion is detected by the presence of a merge commit.
-                // The layer-4 identity check then compares the reviewed SHA to the
-                // PR's HEAD SHA (`headRefOid`) — NOT the merge commit oid: a squash
-                // / merge-commit produces a NEW oid, while `headRefOid` is the head
-                // tip that was actually merged (== reviewed SHA when HEAD did not
-                // advance). Live-verified against real GitHub (SPEC #3200 layer-4).
-                if run_scan_stage(IssueMonitorScanStage::MergeCommitReadback, || {
-                    gwt_git::pr_status::try_fetch_pr_merge_commit_sha(repo_path, pr)
-                })?
-                .is_some()
-                {
-                    let reviewed = record.reviewed_sha.clone().unwrap_or_default();
-                    let merged_head =
-                        run_scan_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                            gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
-                        })?
-                        .unwrap_or_default();
-                    if crate::issue_monitor_authz::merged_sha_matches_reviewed(
-                        &reviewed,
-                        &merged_head,
-                    ) {
-                        monitor.record_merged(issue_number);
-                    } else {
-                        tracing::error!(
-                            issue = issue_number,
-                            reviewed_sha = %reviewed,
-                            merged_head = %merged_head,
-                            "SECURITY: merged head SHA != reviewed SHA — escalating"
-                        );
-                        monitor.escalate_to_needs_human(
-                            issue_number,
-                            "merged head SHA does not match the reviewed SHA",
-                        );
-                    }
-                }
-            }
-            _ => {}
         }
+        crate::AutonomousPhase::Delivering => {
+            let Some(pr) = record.pr_number else {
+                return Ok(());
+            };
+            // Merge completion is detected by the presence of a merge commit.
+            // The layer-4 identity check then compares the reviewed SHA to the
+            // PR's HEAD SHA (`headRefOid`) — NOT the merge commit oid: a squash
+            // / merge-commit produces a NEW oid, while `headRefOid` is the head
+            // tip that was actually merged (== reviewed SHA when HEAD did not
+            // advance). Live-verified against real GitHub (SPEC #3200 layer-4).
+            if run_budgeted_readback_stage(IssueMonitorScanStage::MergeCommitReadback, || {
+                gwt_git::pr_status::try_fetch_pr_merge_commit_sha(repo_path, pr)
+            })?
+            .is_some()
+            {
+                let reviewed = record.reviewed_sha.clone().unwrap_or_default();
+                let merged_head =
+                    run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                        gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                    })?
+                    .unwrap_or_default();
+                if crate::issue_monitor_authz::merged_sha_matches_reviewed(&reviewed, &merged_head)
+                {
+                    monitor.record_merged(issue_number);
+                } else {
+                    tracing::error!(
+                        issue = issue_number,
+                        reviewed_sha = %reviewed,
+                        merged_head = %merged_head,
+                        "SECURITY: merged head SHA != reviewed SHA — escalating"
+                    );
+                    monitor.escalate_to_needs_human(
+                        issue_number,
+                        "merged head SHA does not match the reviewed SHA",
+                    );
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -2402,6 +2679,67 @@ mod tests {
         assert_eq!(
             parse_github_remote_url("https://example.com/owner/repo"),
             None
+        );
+    }
+
+    /// Issue #3933 AC-3: a per-candidate readback spends its own budget, not the
+    /// scan's. Under `run_scan_stage` the operation below would be handed the
+    /// whole remaining scan window and every later candidate would inherit an
+    /// exhausted one — the production fan-out failure this Issue is about.
+    #[test]
+    fn a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _budget = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS",
+            "50",
+        );
+        let scan_window = std::time::Duration::from_secs(30);
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + scan_window,
+        );
+
+        let observed = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            let remaining = gwt_core::operation_deadline::current()
+                .expect("the readback runs under a deadline")
+                .saturating_duration_since(std::time::Instant::now());
+            Ok::<_, String>(remaining)
+        })
+        .expect("the stage itself succeeds");
+
+        assert!(
+            observed <= std::time::Duration::from_millis(50),
+            "the call must see its own budget, got {observed:?}"
+        );
+
+        // The scan window is intact afterwards, so the next candidate is not
+        // paying for this one.
+        let remaining = gwt_core::operation_deadline::current()
+            .expect("the scan deadline is restored")
+            .saturating_duration_since(std::time::Instant::now());
+        assert!(
+            remaining > std::time::Duration::from_secs(20),
+            "the shared scan window must survive one readback, got {remaining:?}"
+        );
+    }
+
+    /// Issue #3933: the fan-out yields before it eats the launch stage's budget.
+    #[test]
+    fn the_readback_fan_out_stops_while_the_launch_stage_still_has_budget() {
+        assert!(
+            readback_fan_out_has_budget(),
+            "no ambient deadline imposes no fan-out limit"
+        );
+
+        let _almost_spent = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + ISSUE_MONITOR_LAUNCH_RESERVE
+                - std::time::Duration::from_millis(1),
+        );
+
+        assert!(
+            !readback_fan_out_has_budget(),
+            "the reserve belongs to the launch stage, not to another readback"
         );
     }
 
