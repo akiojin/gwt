@@ -253,10 +253,10 @@ fn dispatch_project_index_status_check_with(
     let Some(project_root) = project_root else {
         proxy.send(UserEvent::ProjectIndexStatus {
             project_root: String::new(),
-            status: gwt::ProjectIndexStatusView::new(
+            status: Box::new(gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 "No current directory",
-            ),
+            )),
         });
         return None;
     };
@@ -1439,7 +1439,7 @@ enum UserEvent {
     },
     ProjectIndexStatus {
         project_root: String,
-        status: gwt::ProjectIndexStatusView,
+        status: Box<gwt::ProjectIndexStatusView>,
     },
     LaunchComplete {
         window_id: String,
@@ -2640,10 +2640,10 @@ mod tests {
                     Some(project_root.clone());
                 proxy.send(UserEvent::ProjectIndexStatus {
                     project_root: project_root.display().to_string(),
-                    status: gwt::ProjectIndexStatusView::new(
+                    status: Box::new(gwt::ProjectIndexStatusView::new(
                         gwt::ProjectIndexStatusState::Ready,
                         "bootstrap status",
-                    ),
+                    )),
                 });
                 crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
             },
