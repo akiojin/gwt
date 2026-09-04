@@ -1971,6 +1971,46 @@ const ISSUE_MONITOR_SCAN_BUDGET: std::time::Duration = std::time::Duration::from
 /// everything it had just learned and the monitor never advanced.
 const ISSUE_MONITOR_COMMIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Issue #3934: run the generation reaper on the Issue Monitor scan cadence.
+///
+/// The scan worker has no `AppRuntime`, so it protects nothing by identity;
+/// it does not need to. Startup's protection list exists only for sessions it
+/// is about to restore, and every window this process already owns publishes a
+/// live runtime sidecar that the exact revalidation reads as `Live`.
+fn reap_scan_defunct_active_generations(project_root: &Path) {
+    let worktrees = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                %error,
+                "scan generation reaper worktree inventory failed; falling back to the project root"
+            );
+            vec![project_root.to_path_buf()]
+        }
+    };
+    let summary = startup::reap_defunct_active_generations(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &worktrees,
+        &[],
+        &std::collections::HashSet::new(),
+    );
+    if summary.reaped > 0 || summary.replayed > 0 || summary.failures > 0 {
+        tracing::info!(
+            project_root = %project_root.display(),
+            inspected = summary.inspected,
+            reaped = summary.reaped,
+            replayed = summary.replayed,
+            protected = summary.protected,
+            failures = summary.failures,
+            "scan Active generation reaper completed"
+        );
+    }
+}
+
 fn run_scheduled_issue_monitor_scan_with_budgets(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
@@ -2005,6 +2045,15 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     if !prefs.enabled && !cleanup_only {
         return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
     }
+    // Issue #3934: reclaim the execution generations of holders that are gone
+    // before this tick decides what it may launch. The startup reaper used to
+    // be the only one, so a holder Session that died between GUI restarts kept
+    // its owner permanently unlaunchable and the only recovery left was
+    // registering the same work under a fresh Issue number.
+    if !cleanup_only {
+        reap_scan_defunct_active_generations(project_root);
+    }
+
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
