@@ -1288,6 +1288,10 @@ pub struct IssueMonitorIssue {
     pub title: String,
     pub labels: Vec<String>,
     pub state: IssueMonitorIssueState,
+    /// The acceptance-criteria source text the autonomous gate classifies.
+    /// The Issue body; for a gwt-spec Issue whose `spec` section is routed to
+    /// a comment, the assembled section is appended so the block is seen
+    /// regardless of storage (Issue #3930 AC-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2088,14 +2092,15 @@ pub fn autonomous_eligibility(
         ));
     }
     if !criteria.machine_checkable {
+        // Issue #3930 AC-2: name the element that is actually missing.
         // Issue #3873 AC-6: a body edit alone never re-evaluates a needs_human
         // row, so the reason has to carry both the fix and the next operation.
-        return EligibilityDecision::NeedsHuman(
-            "no machine-checkable acceptance criteria block; add a `## 受け入れ基準` heading \
-             with `- [ ] AC-1: ...` items (`## 成功基準` is not scanned), then run \
-             issue.monitor.requeue to re-evaluate"
-                .to_string(),
-        );
+        let missing = criteria
+            .rejection_reason()
+            .unwrap_or_else(|| "no machine-checkable acceptance criteria".to_string());
+        return EligibilityDecision::NeedsHuman(format!(
+            "{missing}, then run issue.monitor.requeue to re-evaluate"
+        ));
     }
     if !protection.is_verified() {
         let reason = match protection {
@@ -16435,11 +16440,13 @@ mod tests {
             ids: vec!["AC-1".to_string()],
             machine_checkable: true,
             visual_surface: false,
+            defect: None,
         };
         let no_criteria = AcceptanceCriteria {
             ids: vec![],
             machine_checkable: false,
             visual_surface: false,
+            defect: Some(crate::issue_monitor_gate::AcceptanceDefect::MissingHeading),
         };
         let verified = BranchProtectionStatus::Verified {
             required_checks: vec!["ci".to_string()],
@@ -17773,12 +17780,16 @@ mod tests {
         );
         // Issue #3873 AC-6: the reason names the fix and the operation that
         // re-evaluates the Issue, because a body edit alone never does.
+        // Issue #3930 AC-2: it names the element that is actually missing
+        // (here: no recognized heading at all) instead of a vague "no block".
         assert!(
-            reason.contains("no machine-checkable acceptance criteria block"),
+            reason.contains("no acceptance criteria heading"),
             "reason = {reason}"
         );
         assert!(
-            reason.contains("受け入れ基準") && reason.contains("issue.monitor.requeue"),
+            reason.contains("受け入れ基準")
+                && reason.contains("受け入れ条件")
+                && reason.contains("issue.monitor.requeue"),
             "reason must carry the next action, got: {reason}"
         );
         // Issue #3873 AC-7: both status projections carry the row and its
