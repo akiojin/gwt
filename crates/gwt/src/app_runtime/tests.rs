@@ -7396,10 +7396,10 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
         |proxy, project_root| {
             proxy.send(UserEvent::ProjectIndexStatus {
                 project_root: project_root.display().to_string(),
-                status: gwt::ProjectIndexStatusView::new(
+                status: Box::new(gwt::ProjectIndexStatusView::new(
                     gwt::ProjectIndexStatusState::Ready,
                     "ready",
-                ),
+                )),
             });
         },
     );
