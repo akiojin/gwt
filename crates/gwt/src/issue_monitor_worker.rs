@@ -1300,15 +1300,13 @@ fn advance_one_autonomous_issue(
                 }
                 crate::issue_monitor_gate::GateAction::WaitForCi => {}
                 crate::issue_monitor_gate::GateAction::Remediate(reason) => {
-                    monitor.record_autonomous_failure(
-                        issue_number,
-                        crate::FailureClass::Transient,
-                        reason,
-                        now,
-                    );
+                    monitor.record_autonomous_failure(issue_number, reason, now);
                 }
-                crate::issue_monitor_gate::GateAction::Escalate(reason) => {
-                    monitor.escalate_to_needs_human(issue_number, reason);
+                // Issue #3944 AC-1: an environment hold is not a human
+                // decision — keep the PR in flight, ask the PM to steer,
+                // and re-evaluate on the next scan.
+                crate::issue_monitor_gate::GateAction::Hold(reason) => {
+                    monitor.request_autonomous_steering(issue_number, reason, now);
                 }
             }
         }
@@ -1343,9 +1341,15 @@ fn advance_one_autonomous_issue(
                         merged_head = %merged_head,
                         "SECURITY: merged head SHA != reviewed SHA — escalating"
                     );
+                    // Issue #3944 AC-5: the merge already happened, so the
+                    // only remaining decision is the human's: approve the
+                    // unreviewed merge or revert it.
                     monitor.escalate_to_needs_human(
                         issue_number,
-                        "merged head SHA does not match the reviewed SHA",
+                        crate::NeedsHumanKind::DestructiveChangeApproval,
+                        format!(
+                            "approve or revert the merge of PR #{pr}: merged head SHA {merged_head} does not match the reviewed SHA {reviewed}"
+                        ),
                     );
                 }
             }
@@ -2012,7 +2016,11 @@ mod tests {
             exclusion_reason: None,
         });
         monitor.record_attempt(42);
-        monitor.escalate_to_needs_human(42, "review rejected");
+        monitor.escalate_to_needs_human(
+            42,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "review rejected",
+        );
 
         let payloads = issue_monitor_daemon_payloads(&mut monitor, false);
 
@@ -2084,7 +2092,11 @@ mod tests {
         );
         monitor.set_gui_connected(true);
         monitor.record_attempt(42);
-        monitor.escalate_to_needs_human(42, "review rejected");
+        monitor.escalate_to_needs_human(
+            42,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "review rejected",
+        );
 
         let payloads = issue_monitor_daemon_payloads(&mut monitor, true);
 
@@ -2127,7 +2139,7 @@ mod tests {
             },
         );
         monitor.record_attempt(42);
-        monitor.escalate_to_needs_human(42, "boom");
+        monitor.escalate_to_needs_human(42, crate::NeedsHumanKind::UserChoiceRequired, "boom");
 
         let offline = issue_monitor_daemon_payloads(&mut monitor, false);
         assert!(
@@ -2301,12 +2313,7 @@ mod tests {
         monitor.record_candidate(issue(42));
         monitor.complete_active_launch(42, "tab-1::agent-42");
         assert_eq!(
-            monitor.record_autonomous_failure(
-                42,
-                crate::issue_monitor::FailureClass::Transient,
-                "retry later",
-                "2026-08-26T00:00:00Z",
-            ),
+            monitor.record_autonomous_failure(42, "retry later", "2026-08-26T00:00:00Z",),
             crate::issue_monitor::AutonomousFailureOutcome::Retry { attempt: 1 }
         );
 

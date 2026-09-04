@@ -436,22 +436,25 @@ pub enum GateAction {
     /// CI is still running — re-check on the next scan. Consumes NO attempt
     /// (waiting is not a failure).
     WaitForCi,
-    /// Agent-remediable failure (CI failed, review rejected, or HEAD advanced so
-    /// the review is stale) — run a bounded Deliver-Fix / re-review attempt.
+    /// Agent-remediable failure (CI failed, review rejected, HEAD advanced so
+    /// the review is stale, or the acceptance criteria changed after launch) —
+    /// run a bounded Deliver-Fix / re-review attempt.
     Remediate(String),
-    /// Structural failure the agent cannot fix (branch protection unavailable, or
-    /// the human edited the acceptance criteria after launch) — escalate to a
-    /// human.
-    Escalate(String),
+    /// Environment failure neither the agent nor a retry can fix right now
+    /// (branch protection unavailable). Issue #3944 AC-1: not a human decision
+    /// the agent asked for, so it never parks the Issue — the gate holds
+    /// without consuming an attempt, asks the PM to steer, and re-evaluates on
+    /// the next scan.
+    Hold(String),
 }
 
 /// Route a strong-gate evaluation to the monitor action (SPEC #3200 T-086).
 ///
 /// - all conditions hold ⇒ [`GateAction::Deliver`];
-/// - branch protection not verifiable ⇒ [`GateAction::Escalate`] (repo settings
-///   are not agent-fixable);
-/// - acceptance criteria changed after launch ⇒ [`GateAction::Escalate`] (a human
-///   moved the spec — autonomy must not chase a moving target);
+/// - branch protection not verifiable ⇒ [`GateAction::Hold`] (repo settings
+///   are not agent-fixable; Issue #3944 keeps it out of `needs_human`);
+/// - acceptance criteria changed after launch ⇒ [`GateAction::Remediate`] (a
+///   fresh attempt implements the moved spec against a new snapshot);
 /// - HEAD advanced past the reviewed SHA ⇒ [`GateAction::Remediate`] (re-review
 ///   the new SHA, bounded by attempts);
 /// - CI still pending ⇒ [`GateAction::WaitForCi`] (no attempt consumed);
@@ -461,10 +464,13 @@ pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
         return GateAction::Deliver;
     }
     if !inputs.branch_protection.is_verified() {
-        return GateAction::Escalate("base-branch protection is not verified".to_string());
+        return GateAction::Hold("base-branch branch protection is not verified".to_string());
     }
     if !inputs.acceptance_unchanged {
-        return GateAction::Escalate("acceptance criteria changed after launch".to_string());
+        return GateAction::Remediate(
+            "acceptance criteria changed after launch — relaunch against the new criteria"
+                .to_string(),
+        );
     }
     if inputs.reviewed_sha.is_empty() || inputs.reviewed_sha != inputs.head_sha {
         return GateAction::Remediate(
@@ -825,27 +831,37 @@ mod tests {
         }
 
         #[test]
-        fn route_unverified_protection_escalates() {
+        fn route_unverified_protection_holds_without_escalating() {
+            // Issue #3944 AC-1: repo settings are not a human decision the
+            // agent asked for — the gate holds (no attempt, no merge) and the
+            // PM is asked to steer; it is re-evaluated on the next scan.
             let inputs = AutonomousGateInputs {
                 branch_protection: BranchProtectionStatus::Absent,
                 ..all_pass_inputs()
             };
-            assert!(matches!(
-                route_autonomous_gate(&inputs),
-                GateAction::Escalate(_)
-            ));
+            match route_autonomous_gate(&inputs) {
+                GateAction::Hold(reason) => {
+                    assert!(reason.contains("branch protection"), "{reason}")
+                }
+                other => panic!("expected Hold, got {other:?}"),
+            }
         }
 
         #[test]
-        fn route_acceptance_drift_escalates() {
+        fn route_acceptance_drift_remediates() {
+            // Issue #3944 AC-1: a spec edited after launch is implemented by a
+            // fresh attempt against the new criteria — an automatic recovery,
+            // never a park.
             let inputs = AutonomousGateInputs {
                 acceptance_unchanged: false,
                 ..all_pass_inputs()
             };
-            assert!(matches!(
-                route_autonomous_gate(&inputs),
-                GateAction::Escalate(_)
-            ));
+            match route_autonomous_gate(&inputs) {
+                GateAction::Remediate(reason) => {
+                    assert!(reason.contains("acceptance criteria"), "{reason}")
+                }
+                other => panic!("expected Remediate, got {other:?}"),
+            }
         }
 
         #[test]
