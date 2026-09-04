@@ -1834,24 +1834,30 @@ mod tests {
             .expect_err("foreign-HOME Host pane authority must fail closed");
 
         assert!(error.contains("different GWT home"), "{error}");
+        let normalized_error = if cfg!(windows) {
+            error.to_lowercase()
+        } else {
+            error.clone()
+        };
+        let normalized_path = |path: &Path| {
+            let rendered = path.display().to_string();
+            if cfg!(windows) {
+                rendered.replace('/', "\\").to_lowercase()
+            } else {
+                rendered
+            }
+        };
+        let production_sessions = dunce::canonicalize(production_home.path())
+            .expect("canonical production home")
+            .join(".gwt/sessions");
         assert!(
-            error.contains(
-                &production_home
-                    .path()
-                    .join(".gwt/sessions")
-                    .display()
-                    .to_string()
-            ),
+            normalized_error.contains(&normalized_path(&production_sessions)),
             "{error}"
         );
         assert!(
-            error.contains(
-                &isolated_home
-                    .path()
-                    .join(".gwt/sessions")
-                    .display()
-                    .to_string()
-            ),
+            normalized_error.contains(&normalized_path(
+                &isolated_home.path().join(".gwt/sessions")
+            )),
             "{error}"
         );
         assert!(error.contains("relaunch the Session"), "{error}");
