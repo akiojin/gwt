@@ -20108,10 +20108,10 @@ mod tests {
         };
         assert!(provider_reports_healthy_for_agent(
             "codex",
-            &[healthy.clone()]
+            std::slice::from_ref(&healthy)
         ));
         assert!(
-            !provider_reports_healthy_for_agent("claude", &[healthy.clone()]),
+            !provider_reports_healthy_for_agent("claude", std::slice::from_ref(&healthy)),
             "a Codex reading says nothing about Claude"
         );
         let stale = ProviderUsage {
