@@ -9,7 +9,7 @@ use crate::{
 };
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
-const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -716,6 +716,45 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     summary
 }
 
+/// Issue #3933 AC-2 (review follow-up): read one candidate's authoritative state
+/// before the launch stage acts on a previous scan's result.
+///
+/// [`try_issue_completed_by_merged_pr`] decides an ordinary Issue purely from the
+/// loaded row's own `state`, so a previous-result row that GitHub has since
+/// closed would still read as launchable. A targeted single-issue refresh is far
+/// cheaper than the issue list whose failure put the scan on this path, and an
+/// unreadable state is reported as a failure rather than assumed Open.
+pub fn try_refresh_issue_monitor_candidate(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    issue: &IssueMonitorIssue,
+) -> Result<IssueMonitorIssue, IssueMonitorScanFailure> {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
+        .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
+    let number = IssueNumber(issue.number);
+    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+        crate::issue_cache::refresh_issue_cache_entry_from_remote(repo_path, &cache_root, number)
+    })?;
+    let entry = Cache::new(cache_root).load_entry(number).ok_or_else(|| {
+        IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::CandidateLoad,
+            format!(
+                "issue #{number} has no cache entry after a targeted refresh",
+                number = issue.number
+            ),
+        )
+    })?;
+    Ok(IssueMonitorIssue {
+        state: match entry.snapshot.state {
+            IssueState::Open => IssueMonitorIssueState::Open,
+            IssueState::Closed => IssueMonitorIssueState::Closed,
+        },
+        updated_at: Some(entry.snapshot.updated_at.0),
+        ..issue.clone()
+    })
+}
+
 /// Issue #3225 / #3832: GitHub-derived completion probe for the claim loop.
 /// Ordinary Issues are terminal only when GitHub reports `Closed`; linked PR
 /// evidence remains delivery evidence and cannot suppress an Open Issue.
@@ -1129,7 +1168,6 @@ fn advance_one_autonomous_issue(
                         gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
                     })?
                 {
-                    monitor.begin_review(issue_number, pr, &sha);
                     let criteria = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
@@ -1138,11 +1176,18 @@ fn advance_one_autonomous_issue(
                             crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
                         })
                         .unwrap_or_default();
+                    // Issue #3933 (review follow-up): every readback the dispatch
+                    // needs runs BEFORE the record is moved out of Implementing.
+                    // A degraded readback now leaves the phase alone; committing
+                    // `begin_review` first would strand the candidate in
+                    // Reviewing with no dispatch and therefore no verdict to
+                    // wait for, until the stuck sweep eventually reset it.
                     let diff =
                         run_budgeted_readback_stage(IssueMonitorScanStage::PrDiffReadback, || {
                             gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
                         })?
                         .unwrap_or_default();
+                    monitor.begin_review(issue_number, pr, &sha);
                     let linked_issue_kind = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)

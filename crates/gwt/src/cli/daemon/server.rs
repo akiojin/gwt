@@ -303,7 +303,15 @@ async fn run_server_with_shutdown_and_worker_config(
     // The worker owns authority revocation, durable compensations, and child
     // reaping. Do not let the server return (and drop the Tokio runtime) before
     // that shutdown protocol has had its bounded opportunity to complete.
+    // Issue #3933 (review follow-up): the grace must cover the largest scan
+    // deadline the worker can actually install, not the base timeout. A scan is
+    // sized by its readback fan-out (`issue_monitor_scan_budget`) and the
+    // shutdown path waits on that same deadline, so deriving the grace from
+    // `operation_timeout` alone would abort the worker mid-shutdown — and a
+    // started `spawn_blocking` scan cannot be cancelled, leaving authority
+    // settlement and child reaping unfinished.
     let worker_grace = operation_timeout
+        .max(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
         .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT)
         .saturating_add(ISSUE_MONITOR_PREFS_TIMEOUT);
     match tokio::time::timeout(worker_grace, &mut issue_monitor_worker).await {
@@ -3573,7 +3581,7 @@ fn scan_issue_monitor_once_blocking(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
     )?;
-    let loaded = crate::issue_monitor_worker::run_scan_stage(
+    let mut loaded = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::CandidateLoad,
         || {
             crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
@@ -3616,6 +3624,55 @@ fn scan_issue_monitor_once_blocking(
         &scope.project_root,
         &now,
     );
+    // Issue #3933 AC-2 (review follow-up): a previous-result row carries the
+    // state GitHub reported when the list last succeeded, and the launch policy
+    // for an ordinary Issue is "terminal only when GitHub reports Closed". Read
+    // each claimable candidate authoritatively before that row reaches the
+    // inbox, so the launch stage decides on GitHub's current answer rather than
+    // a remembered one. A targeted single-issue read is far cheaper than the
+    // list whose failure put the scan on this path.
+    let confirmed_previous_candidates = if candidates_are_from_previous_result {
+        let claimable_cap = if monitor.has_launch_profile() {
+            monitor.config.max_active.max(1)
+        } else {
+            0
+        };
+        let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
+        let mut confirmed = std::collections::BTreeSet::new();
+        for issue_number in claimable
+            .into_iter()
+            .take(crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT)
+        {
+            let Some(index) = loaded
+                .issues
+                .iter()
+                .position(|issue| issue.number == issue_number)
+            else {
+                continue;
+            };
+            loaded.issues[index] =
+                crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
+                    &scope.project_root,
+                    &owner,
+                    &repo,
+                    &loaded.issues[index],
+                )?;
+            confirmed.insert(issue_number);
+        }
+        if !confirmed.is_empty() {
+            // Re-apply the canonical transition so the inbox rows the launch
+            // stage reads carry the confirmed state, not the remembered one.
+            crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                &mut monitor,
+                &loaded,
+                &scope.project_root,
+                &now,
+            );
+        }
+        confirmed
+    } else {
+        std::collections::BTreeSet::new()
+    };
     crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
@@ -3717,6 +3774,19 @@ fn scan_issue_monitor_once_blocking(
                     else {
                         return Ok(false);
                     };
+                    // Issue #3933 AC-2 (review follow-up): only a candidate whose
+                    // state was confirmed above may authorize a claim from a
+                    // previous result. An unconfirmed one fails closed.
+                    if candidates_are_from_previous_result
+                        && !confirmed_previous_candidates.contains(&issue_number)
+                    {
+                        return Err(crate::issue_monitor_worker::IssueMonitorScanFailure::new(
+                            IssueMonitorScanStage::CandidateLoad,
+                            format!(
+                                "issue #{issue_number} state was not confirmed for a previous-result launch"
+                            ),
+                        ));
+                    }
                     crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
                         &owner, &repo, issue,
                     )
@@ -4718,6 +4788,17 @@ if [ "$GWT_FAKE_GH_MODE" = "issue_list_fail" ]; then
     *"issue list"*)
       printf '%s\n' 'gh issue list failed' >&2
       exit 1
+      ;;
+    *"issue view"*)
+      # Issue #3933: the targeted per-candidate readback the launch stage runs
+      # before it may act on a previous scan's result. Cheaper than the list
+      # whose failure put the scan on this path, and authoritative.
+      if [ "$GWT_FAKE_GH_ISSUE_VIEW_FAILS" = "1" ]; then
+        printf '%s\n' 'gh issue view failed' >&2
+        exit 1
+      fi
+      printf '{"number":44,"title":"Previously loaded issue","body":"Queued body","labels":[{"name":"bug"}],"state":"%s","updatedAt":"2026-08-15T00:00:00Z","comments":[]}\n' "${GWT_FAKE_GH_ISSUE_STATE:-OPEN}"
+      exit 0
       ;;
   esac
   printf '%s\n' '[]'
@@ -8539,6 +8620,146 @@ exit 0
         assert!(
             last_error.contains("continued_with_previous_candidates"),
             "{last_error}"
+        );
+    }
+
+    /// Issue #3933 AC-2 (review follow-up): a previous scan's result may name an
+    /// issue GitHub has since closed. The completion probe decides an ordinary
+    /// Issue from the loaded row's own state, so the fallback must re-read that
+    /// state authoritatively rather than launch on a stale `Open`.
+    #[test]
+    fn a_candidate_closed_since_the_previous_scan_is_not_launched_from_the_fallback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+        // GitHub closed #44 after the scan that produced the cached result.
+        let _state = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_STATE", "CLOSED");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed a previous result that is now stale");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("the scan still completes");
+
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "a closed issue must never be claimed from a stale previous result: {:?}",
+            scanned.pending_effects()
+        );
+    }
+
+    /// Issue #3933 AC-2 (review follow-up): if the authoritative state cannot be
+    /// read either, the fallback has nothing trustworthy to launch from and the
+    /// scan fails closed rather than guessing the candidate is still open.
+    #[test]
+    fn the_fallback_fails_closed_when_the_candidate_state_cannot_be_confirmed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+        let _view = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_VIEW_FAILS", "1");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed the previous result");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let failure = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect_err("an unconfirmable candidate state must not authorize a launch");
+
+        assert_eq!(
+            failure.stage,
+            crate::issue_monitor_worker::IssueMonitorScanStage::CandidateLoad
         );
     }
 
