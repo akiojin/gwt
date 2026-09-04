@@ -116,7 +116,7 @@ pub(super) fn classify_issue_monitor_failure(
 /// only anchor available.
 pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
     let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
-    Some(provider_usage_limit_failure(&notice, None))
+    Some(provider_usage_limit_failure(&notice, None, None))
 }
 
 /// `pane_agent_id` is the agent the pane is actually running, and it wins over
@@ -126,12 +126,14 @@ pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMo
 pub(super) fn provider_usage_limit_failure(
     notice: &gwt_core::usage::ProviderLimitNotice,
     pane_agent_id: Option<&str>,
+    evidence: Option<gwt::IssueMonitorProviderQuotaHoldEvidence>,
 ) -> gwt::IssueMonitorFailure {
     gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider: provider_label(notice, pane_agent_id),
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        evidence,
     }
 }
 
@@ -738,14 +740,30 @@ impl AppRuntime {
         // torn down. A clean exit discards the screen entirely (the branch
         // below only composes a detail for `Error`), which is exactly why a
         // quota-dead Codex pane looked like finished work.
-        let quota_notice =
-            self.provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail);
         let quota_agent_id = self.pane_agent_id(&id);
+        // Issue #3923 AC-3: a notice left on the final screen is not a block
+        // while the poller reads the account as usable — the pane exited for
+        // some other reason and the text is stale.
+        let quota_notice = self
+            .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
         match quota_notice.as_ref() {
             Some(notice) => {
+                let recorded_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let screen_text = self
+                    .screen_tail(&id, QUOTA_NOTICE_TAIL_LINES, "\n")
+                    .or_else(|| detail.clone())
+                    .unwrap_or_default();
+                let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    &recorded_at,
+                    &id,
+                    &screen_text,
+                )
+                .with_poller(quota_agent_id.as_deref(), &self.provider_usage_accounts);
                 self.provider_quota_holds.insert(
                     id.clone(),
-                    provider_usage_limit_failure(notice, quota_agent_id.as_deref()),
+                    provider_usage_limit_failure(notice, quota_agent_id.as_deref(), Some(evidence)),
                 );
             }
             None => {
@@ -1064,6 +1082,13 @@ impl AppRuntime {
             .entry(window_id.to_string())
             .or_insert_with(|| super::ProviderQuotaCandidate { first_seen: now })
             .first_seen;
+        // Issue #3923 AC-3: the poller reading the account as usable
+        // contradicts the screen, so the settle window alone must not promote
+        // the notice. The candidate stays pending: a later poller reading can
+        // still corroborate it, and the notice leaving the screen abandons it.
+        if self.provider_reports_healthy_for_pane(agent_id.as_deref(), window_id) {
+            return Vec::new();
+        }
         let corroborated = agent_id.as_deref().is_some_and(|agent_id| {
             gwt::issue_monitor::provider_limit_reached_for_agent(
                 agent_id,
@@ -1078,7 +1103,33 @@ impl AppRuntime {
             return Vec::new();
         }
         self.provider_quota_candidates.remove(window_id);
-        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref())
+        let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+            &now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            window_id,
+            screen.unwrap_or_default(),
+        )
+        .with_poller(agent_id.as_deref(), &self.provider_usage_accounts);
+        self.commit_provider_quota_hold(window_id, &notice, agent_id.as_deref(), evidence)
+    }
+
+    /// Issue #3923 AC-3: whether the usage poller currently contradicts a
+    /// quota notice on `window_id`'s screen. Logged when it does, because the
+    /// suppressed hold is itself the diagnosis of a stale notice.
+    fn provider_reports_healthy_for_pane(&self, agent_id: Option<&str>, window_id: &str) -> bool {
+        let healthy = agent_id.is_some_and(|agent_id| {
+            gwt::issue_monitor::provider_reports_healthy_for_agent(
+                agent_id,
+                &self.provider_usage_accounts,
+            )
+        });
+        if healthy {
+            tracing::info!(
+                window_id = %window_id,
+                agent_id = ?agent_id,
+                "provider limit notice on screen but the usage poller reads the account as usable; not holding (Issue #3923)"
+            );
+        }
+        healthy
     }
 
     /// Latch the block, project the pane as waiting, and tell the Monitor the
@@ -1094,8 +1145,18 @@ impl AppRuntime {
         window_id: &str,
         notice: &gwt_core::usage::ProviderLimitNotice,
         agent_id: Option<&str>,
+        evidence: gwt::IssueMonitorProviderQuotaHoldEvidence,
     ) -> Vec<OutboundEvent> {
-        let failure = provider_usage_limit_failure(notice, agent_id);
+        tracing::warn!(
+            window_id = %window_id,
+            agent_id = ?agent_id,
+            screen_text = ?evidence.screen_text,
+            poller_state = ?evidence.poller_state,
+            poller_limit_reached = ?evidence.poller_limit_reached,
+            poller_windows = ?evidence.poller_windows,
+            "provider quota hold committed from the pane screen (Issue #3923)"
+        );
+        let failure = provider_usage_limit_failure(notice, agent_id, Some(evidence));
         let detail = gwt_core::usage::describe_provider_limit_notice(
             notice,
             Some(provider_label(notice, agent_id).as_str()),

@@ -1914,6 +1914,7 @@ fn try_apply_typed_issue_monitor_failure(
                 Some(crate::IssueMonitorFailure::ProviderUsageLimit {
                     provider,
                     resets_at,
+                    evidence,
                 }),
         } => {
             let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
@@ -1928,6 +1929,7 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
+                    evidence,
                     &now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
@@ -2107,6 +2109,7 @@ fn apply_routine_issue_monitor_control(
             Some(crate::IssueMonitorFailure::ProviderUsageLimit {
                 provider,
                 resets_at,
+                evidence,
             }) => {
                 let issue_number =
                     issue_number.or_else(|| monitor.launched_window_issue(&window_id));
@@ -2120,6 +2123,7 @@ fn apply_routine_issue_monitor_control(
                     &provider,
                     message,
                     resets_at.as_deref(),
+                    evidence,
                     &now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
@@ -7755,6 +7759,7 @@ exit 0
                 failure: Some(crate::IssueMonitorFailure::ProviderUsageLimit {
                     provider: "codex".to_string(),
                     resets_at: Some(resets_at.to_string()),
+                    evidence: None,
                 }),
             },
         ));

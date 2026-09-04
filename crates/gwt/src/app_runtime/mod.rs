@@ -3975,6 +3975,7 @@ impl AppRuntime {
                             Some(gwt::IssueMonitorFailure::ProviderUsageLimit {
                                 provider,
                                 resets_at,
+                                evidence,
                             }) => {
                                 let issue_number = issue_number_hint
                                     .or_else(|| monitor.launched_window_issue(window_id));
@@ -3987,6 +3988,7 @@ impl AppRuntime {
                                     provider,
                                     message.to_string(),
                                     resets_at.as_deref(),
+                                    evidence.clone(),
                                     &now,
                                 ) {
                                     gwt::IssueMonitorProviderUsageLimitOutcome::Held => {

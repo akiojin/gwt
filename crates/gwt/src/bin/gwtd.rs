@@ -224,6 +224,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
         "  issue.monitor.wait",
+        "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -239,6 +240,8 @@ fn format_issue_help() -> String {
         "  reason, resume_condition, clear       issue.monitor.wait declares that the",
         "                                        current launch is waiting (stuck detection",
         "                                        pauses, max 3h); clear=true when resumed",
+        "  provider, reason                      issue.monitor.quota_hold.clear releases a",
+        "                                        provider-wide quota hold (codex / claude)",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
@@ -1064,6 +1067,9 @@ mod tests {
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",
+            // Issue #3923: the only release for a provider-wide quota hold.
+            "issue.monitor.quota_hold.list",
+            "issue.monitor.quota_hold.clear",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",

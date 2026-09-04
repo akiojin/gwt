@@ -297,6 +297,23 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+- `issue.monitor.quota_hold.list` and `issue.monitor.quota_hold.clear`
+  are how you handle a **provider-wide quota hold**. A hold stops every
+  launch on that provider until the reset the provider printed, which
+  can be days out, and it is formed from a notice on a pane screen plus
+  the usage poller's reading. The list shows each hold with its
+  evidence (`screen_text`, `poller_state`, `poller_windows` with
+  `used_percent`), which is also what `issue.monitor.status` reports
+  under `provider_quota_holds`. When the evidence contradicts reality —
+  the poller reads the account far below 100% and a fresh pane on that
+  provider works — the hold is false: clear it with `params.provider`
+  (`codex` / `claude`) and a `params.reason`. The clear is a durable
+  release, so the daemon cannot re-stamp the old hold from memory, and
+  every issue the hold was holding is admitted again. A hold formed
+  after the release is new evidence and stands. Do not wait for the
+  reset or switch the whole fleet's profile to work around a hold you
+  can release by name.
+
 ## Steering the running agents
 
 Observing is not enough. Every resident cycle you steer the launches
@@ -934,6 +951,10 @@ mod tests {
             // prohibition below has to name the operation that replaces it.
             "`issue.monitor.requeue`",
             "there is no launch",
+            // Issue #3923: a false provider quota hold has a PM-side release.
+            "`issue.monitor.quota_hold.list`",
+            "`issue.monitor.quota_hold.clear`",
+            "quota_hold",
             "resets the persisted autonomous attempt counter to zero",
             "starts a fresh bounded retry cycle",
             "launch_live",
