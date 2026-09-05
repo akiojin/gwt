@@ -138,6 +138,36 @@ struct IssueMonitorLaunchProfileChoice {
     skipped: Vec<gwt::LaunchProfileSkip>,
 }
 
+/// SPEC #3914 FR-007: make a non-head selection visible, with the reason each
+/// earlier candidate was passed over. `None` when the pool head launched, so
+/// both the fresh-launch and the exact-Resume paths can append it verbatim.
+fn issue_monitor_non_head_selection_toast(
+    issue_number: u64,
+    selected_agent_id: Option<&str>,
+    skipped_candidates: &[gwt::LaunchProfileSkip],
+) -> Option<OutboundEvent> {
+    let selected_agent_id = selected_agent_id?;
+    if skipped_candidates.is_empty() {
+        return None;
+    }
+    let reasons = skipped_candidates
+        .iter()
+        .map(|skip| skip.reason.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    tracing::info!(
+        issue = issue_number,
+        agent = %selected_agent_id,
+        reasons = %reasons,
+        "Issue Monitor selected a non-head launch candidate"
+    );
+    Some(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        level: "info".to_string(),
+        message: format!("Issue #{issue_number} launches with {selected_agent_id}: {reasons}"),
+        issue_number: Some(issue_number),
+    }))
+}
+
 struct SilentIssueMonitorLaunchRequest {
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
@@ -2472,6 +2502,11 @@ impl AppRuntime {
             selected_agent_id,
             skipped: skipped_candidates,
         } = self.issue_monitor_launch_profile_choice(&project_root, None);
+        let non_head_selection_toast = issue_monitor_non_head_selection_toast(
+            issue_number,
+            selected_agent_id.as_deref(),
+            &skipped_candidates,
+        );
         let Some(profile_agent_id) = previous_profiles
             .preferred_profile()
             .map(|profile| profile.agent_id.clone())
@@ -2527,7 +2562,13 @@ impl AppRuntime {
                 delivery_id.clone(),
                 &profile_agent_id,
             )?;
-            if let Some(events) = events {
+            if let Some(mut events) = events {
+                // SPEC #3914 FR-007: a resumed launch reports its skipped
+                // candidates like a fresh one. An empty vector means the
+                // delivery stays pending, so nothing launched to report on.
+                if !events.is_empty() {
+                    events.extend(non_head_selection_toast);
+                }
                 return Ok(Some(events));
             }
             holder_window_id
@@ -2644,29 +2685,7 @@ impl AppRuntime {
                 issue_number: Some(issue_number),
             }));
         }
-        // SPEC #3914 FR-007: make a non-head selection visible, with the
-        // reason each earlier candidate was passed over.
-        if let (Some(selected_agent_id), false) = (selected_agent_id, skipped_candidates.is_empty())
-        {
-            let reasons = skipped_candidates
-                .iter()
-                .map(|skip| skip.reason.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::info!(
-                issue = issue_number,
-                agent = %selected_agent_id,
-                reasons = %reasons,
-                "Issue Monitor selected a non-head launch candidate"
-            );
-            events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                level: "info".to_string(),
-                message: format!(
-                    "Issue #{issue_number} launches with {selected_agent_id}: {reasons}"
-                ),
-                issue_number: Some(issue_number),
-            }));
-        }
+        events.extend(non_head_selection_toast);
         let message = if review_prompt.is_some() {
             "Issue Monitor independent review launched".to_string()
         } else {

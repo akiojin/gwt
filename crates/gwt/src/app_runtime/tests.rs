@@ -47856,6 +47856,69 @@ fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why(
     assert!(toast.1.contains("04:00"), "{}", toast.1);
 }
 
+/// SPEC #3914 FR-007 (PR #3968 review): a non-head selection is reported on
+/// the exact-Resume path too, not only when a fresh session is spawned.
+#[test]
+fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "resume-skip-reason",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    // Pool [claude, codex] with claude held: codex is the non-head selection
+    // and owns the stored resumable conversation.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Monitor prefs");
+    prefs.set_launch_profile_pool(vec![
+        claude_issue_monitor_launch_profile(),
+        codex_issue_monitor_launch_profile(),
+    ]);
+    prefs
+        .provider_quota_holds
+        .insert("claude".to_string(), "2999-01-01T04:00:00Z".to_string());
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save pooled Monitor prefs");
+
+    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        None,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result =
+        take_monitor_launch_complete("resume with a skipped head", &fixture.recorded_events);
+    assert_monitor_exact_resume(result, &fixture);
+    let toast = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast {
+                level,
+                message,
+                issue_number: Some(3165),
+            } if message.contains("Held claude") => Some((level.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("skip reason toast on the resume path");
+    assert_eq!(toast.0, "info");
+    assert!(toast.1.contains("codex"), "{}", toast.1);
+    assert!(toast.1.contains("04:00"), "{}", toast.1);
+}
+
 #[test]
 fn app_runtime_issue_monitor_profile_save_appends_a_second_candidate() {
     // SPEC #3914 FR-003 / US-7: saving a second provider from Agent settings
