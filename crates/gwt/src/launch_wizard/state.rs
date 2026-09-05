@@ -2613,7 +2613,8 @@ mod tests {
         );
 
         // The launch still proceeds, carrying the fallback model.
-        assert!(state.build_launch_config().is_some());
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.model.as_deref(), Some("gpt-6-astra"));
 
         state.set_model("gpt-5.6-sol");
         assert!(
