@@ -10,10 +10,16 @@ use sha2::{Digest, Sha256};
 
 use crate::settings_local::{
     codex_event_hook_commands, codex_event_hook_commands_with_bin,
-    codex_hooks_paths_for_codex_discovery, write_text_atomically, CodexHookDiscoveryMode,
+    codex_hooks_paths_for_codex_discovery, codex_self_improvement_stop_hook_commands,
+    write_text_atomically, CodexHookDiscoveryMode,
 };
 
 const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
+/// Distinctive substrings that mark a command as a dispatch into gwt's own hook
+/// transports. Recognising the transport says only "gwt owns this hook", never
+/// "this hook is safe" — trust still requires an exact match against a command
+/// gwt emits.
+const GWT_HOOK_TRANSPORT_MARKERS: &[&str] = &[" hook event ", " hook gwt-self-improvement-stop"];
 const MANAGED_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
@@ -32,6 +38,12 @@ pub struct CodexHookTrustEntry {
 pub struct CodexHookTrustReport {
     pub config_path: PathBuf,
     pub trusted_entries: Vec<CodexHookTrustEntry>,
+    /// Issue #3967 AC-4: gwt hooks the pre-registration could not vouch for,
+    /// as `<hooks.json>:<event>:<group>:<handler>`. Each one is a Codex
+    /// `Hooks need review` prompt waiting to happen, so the caller must fail
+    /// loudly instead of launching an unattended agent into it. User hooks are
+    /// never listed here — reviewing those is the user's own business.
+    pub untrusted_gwt_hooks: Vec<String>,
 }
 
 pub fn collect_codex_managed_hook_trust_entries(
@@ -67,22 +79,43 @@ fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
     mode: CodexHookDiscoveryMode,
     expected_gwt_bin: Option<&str>,
 ) -> io::Result<Vec<CodexHookTrustEntry>> {
-    let mut entries = Vec::new();
-    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
-        entries.extend(collect_codex_managed_hook_trust_entries_from_path(
-            &hooks_path,
-            expected_gwt_bin,
-        )?);
-    }
-    Ok(entries)
+    Ok(scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?.trusted)
 }
 
-fn collect_codex_managed_hook_trust_entries_from_path(
+/// Everything one scan of the discovered `.codex/hooks.json` files learned:
+/// the hooks gwt can vouch for, and the gwt hooks it could not.
+#[derive(Debug, Default)]
+struct CodexHookTrustScan {
+    trusted: Vec<CodexHookTrustEntry>,
+    untrusted_gwt_hooks: Vec<String>,
+}
+
+fn scan_codex_hook_trust_for_mode(
+    worktree: &Path,
+    mode: CodexHookDiscoveryMode,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<CodexHookTrustScan> {
+    let mut scan = CodexHookTrustScan::default();
+    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
+        let path_scan = scan_codex_hook_trust_from_path(&hooks_path, expected_gwt_bin)?;
+        scan.trusted.extend(path_scan.trusted);
+        scan.untrusted_gwt_hooks
+            .extend(path_scan.untrusted_gwt_hooks);
+    }
+    Ok(scan)
+}
+
+/// Walk every hook group and every handler in the file. Codex keys its trust
+/// state by `<path>:<event>:<group index>:<handler index>`, so a gwt hook that
+/// does not sit at `0:0` — the repo-owned `gwt-self-improvement-stop` Stop hook
+/// is appended after the managed group — is a hook Codex still asks a human
+/// about (Issue #3967 AC-1).
+fn scan_codex_hook_trust_from_path(
     hooks_path: &Path,
     expected_gwt_bin: Option<&str>,
-) -> io::Result<Vec<CodexHookTrustEntry>> {
+) -> io::Result<CodexHookTrustScan> {
     if !hooks_path.exists() {
-        return Ok(Vec::new());
+        return Ok(CodexHookTrustScan::default());
     }
 
     let key_source = fs::canonicalize(hooks_path)?;
@@ -95,10 +128,10 @@ fn collect_codex_managed_hook_trust_entries_from_path(
     })?;
 
     let Some(hooks_by_event) = root.get("hooks").and_then(Value::as_object) else {
-        return Ok(Vec::new());
+        return Ok(CodexHookTrustScan::default());
     };
 
-    let mut entries = Vec::new();
+    let mut scan = CodexHookTrustScan::default();
     for (event_json_name, event_snake_name) in MANAGED_EVENTS {
         let Some(groups) = hooks_by_event
             .get(*event_json_name)
@@ -106,40 +139,48 @@ fn collect_codex_managed_hook_trust_entries_from_path(
         else {
             continue;
         };
-        let Some(group) = groups.first().and_then(Value::as_object) else {
-            continue;
-        };
-        let matcher = group
-            .get("matcher")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if matcher != "*" {
-            continue;
+        for (group_index, group) in groups.iter().enumerate() {
+            let Some(group) = group.as_object() else {
+                continue;
+            };
+            let matcher = group
+                .get("matcher")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let Some(hooks) = group.get("hooks").and_then(Value::as_array) else {
+                continue;
+            };
+            for (handler_index, hook) in hooks.iter().enumerate() {
+                let Some(hook) = hook.as_object() else {
+                    continue;
+                };
+                let Some(command) = hook.get("command").and_then(Value::as_str) else {
+                    continue;
+                };
+                if hook.get("type").and_then(Value::as_str) != Some("command") {
+                    continue;
+                }
+                let key = hook_key(&key_source, event_snake_name, group_index, handler_index);
+                if matcher == "*"
+                    && is_trusted_gwt_hook_command(
+                        command,
+                        event_json_name,
+                        event_snake_name,
+                        expected_gwt_bin,
+                    )
+                {
+                    scan.trusted.push(CodexHookTrustEntry {
+                        key,
+                        trusted_hash: command_hook_trusted_hash(event_snake_name, matcher, command),
+                    });
+                } else if is_gwt_hook_transport_command(command) {
+                    scan.untrusted_gwt_hooks.push(key);
+                }
+            }
         }
-        let Some(hook) = group
-            .get("hooks")
-            .and_then(Value::as_array)
-            .and_then(|hooks| hooks.first())
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-        let Some(command) = hook.get("command").and_then(Value::as_str) else {
-            continue;
-        };
-        if hook.get("type").and_then(Value::as_str) != Some("command")
-            || !is_generated_gwt_event_command(command, event_json_name, expected_gwt_bin)
-        {
-            continue;
-        }
-
-        entries.push(CodexHookTrustEntry {
-            key: hook_key(&key_source, event_snake_name, 0, 0),
-            trusted_hash: command_hook_trusted_hash(event_snake_name, matcher, command),
-        });
     }
 
-    Ok(entries)
+    Ok(scan)
 }
 
 pub fn register_codex_managed_hook_trust(
@@ -158,11 +199,15 @@ pub fn register_codex_managed_hook_trust_for_mode(
     config_path: &Path,
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<CodexHookTrustReport> {
-    let trusted_entries = collect_codex_managed_hook_trust_entries_for_mode(worktree, mode)?;
+    let CodexHookTrustScan {
+        trusted: trusted_entries,
+        untrusted_gwt_hooks,
+    } = scan_codex_hook_trust_for_mode(worktree, mode, None)?;
     if trusted_entries.is_empty() {
         return Ok(CodexHookTrustReport {
             config_path: config_path.to_path_buf(),
             trusted_entries,
+            untrusted_gwt_hooks,
         });
     }
 
@@ -192,6 +237,7 @@ pub fn register_codex_managed_hook_trust_for_mode(
     Ok(CodexHookTrustReport {
         config_path: config_path.to_path_buf(),
         trusted_entries,
+        untrusted_gwt_hooks,
     })
 }
 
@@ -313,6 +359,33 @@ fn sort_json_objects(value: &mut Value) {
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
+}
+
+/// A hook gwt may pre-trust on the user's behalf: either a generated managed
+/// event command, or the repo-owned `gwt-self-improvement-stop` Stop hook that
+/// this repository ships as tracked content. Both are matched against the exact
+/// strings gwt itself emits — never by shape — so a tampered command or a
+/// swapped binary path is still left for Codex's `/hooks` review.
+fn is_trusted_gwt_hook_command(
+    command: &str,
+    event_json_name: &str,
+    event_snake_name: &str,
+    expected_gwt_bin: Option<&str>,
+) -> bool {
+    is_generated_gwt_event_command(command, event_json_name, expected_gwt_bin)
+        || (event_snake_name == "stop"
+            && codex_self_improvement_stop_hook_commands()
+                .iter()
+                .any(|expected| expected == command))
+}
+
+/// Does this command dispatch one of gwt's own hook transports? Used only to
+/// decide whether an untrusted hook is gwt's problem (Issue #3967 AC-4) or the
+/// user's own hook, which gwt must not vouch for either way.
+fn is_gwt_hook_transport_command(command: &str) -> bool {
+    GWT_HOOK_TRANSPORT_MARKERS
+        .iter()
+        .any(|marker| command.contains(marker))
 }
 
 fn is_generated_gwt_event_command(
@@ -640,6 +713,200 @@ mod tests {
         assert!(
             entries.iter().all(|entry| !entry.key.contains(":stop:")),
             "unexpected fallback Stop hook must not be trusted; got {entries:?}"
+        );
+    }
+
+    /// The exact repo-owned Stop hook committed in this repository's
+    /// `.codex/hooks.json`. Kept verbatim so the fixture drifts loudly if the
+    /// committed command ever changes shape.
+    const REPO_OWNED_SELF_IMPROVEMENT_STOP_COMMAND: &str =
+        "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true";
+
+    fn self_improvement_stop_group() -> Value {
+        json!({
+            "matcher": "*",
+            "hooks": [
+                {
+                    "command": REPO_OWNED_SELF_IMPROVEMENT_STOP_COMMAND,
+                    "type": "command"
+                }
+            ]
+        })
+    }
+
+    /// Issue #3967 AC-1: the repo-owned `gwt-self-improvement-stop` hook lives
+    /// at Stop group index 1, which the trust collector never reached. Codex
+    /// then reported it as "new or changed" and blocked the pane on
+    /// `Hooks need review`.
+    #[test]
+    fn repo_owned_self_improvement_stop_hook_is_trusted_at_group_index_one() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let mut hooks_json: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        hooks_json["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(self_improvement_stop_group());
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+        let canonical = fs::canonicalize(&hooks_path).unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries(dir.path()).unwrap();
+
+        assert_eq!(
+            entries.len(),
+            6,
+            "every gwt hook in the file must be trusted, including Stop group 1: {entries:?}"
+        );
+        let expected_key = format!("{}:stop:1:0", canonical.display());
+        let entry = entries
+            .iter()
+            .find(|entry| entry.key == expected_key)
+            .unwrap_or_else(|| panic!("missing repo-owned Stop trust key {expected_key}"));
+        assert_eq!(
+            entry.trusted_hash,
+            "sha256:77ebe50138a4b5c5260d141ae62f91964676abd81a49780101e5f5685e6b0685"
+        );
+    }
+
+    /// Issue #3967 AC-2: a Windows PowerShell hook command carrying a
+    /// machine-local absolute path must produce the exact Codex trust identity,
+    /// and every hook in the file must be covered so no `Hooks need review`
+    /// prompt remains.
+    #[test]
+    fn windows_powershell_absolute_path_hooks_are_fully_trusted_with_codex_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let windows_bin = r"C:\Users\akiojin\AppData\Local\Programs\GWT\gwtd.exe";
+        let powershell_command = |event: &str| {
+            codex_event_hook_commands_with_bin(windows_bin, event)
+                .into_iter()
+                .nth(1)
+                .expect("PowerShell generated command")
+        };
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [{ "command": powershell_command(event), "type": "command" }]
+                    }
+                ]),
+            );
+        }
+        hooks.insert(
+            "Stop".to_string(),
+            json!([
+                {
+                    "matcher": "*",
+                    "hooks": [{ "command": powershell_command("Stop"), "type": "command" }]
+                },
+                self_improvement_stop_group()
+            ]),
+        );
+        fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            dir.path(),
+            Some(windows_bin),
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries.len(),
+            6,
+            "PowerShell + machine-local absolute path hooks must all be trusted: {entries:?}"
+        );
+        let stop = entries
+            .iter()
+            .find(|entry| entry.key.ends_with(":stop:0:0"))
+            .expect("PowerShell Stop trust entry");
+        assert_eq!(
+            stop.trusted_hash,
+            "sha256:9d5d048e34bba9a9bc1fc4086052911570757a132a439f7d43f578359136c38a",
+            "trusted hash must match the Codex identity for the PowerShell command"
+        );
+    }
+
+    /// Issue #3967 AC-4: a gwt hook the pre-registration could not vouch for is
+    /// reported, so the launch can fail loudly instead of dropping the agent
+    /// into a human-only `Hooks need review` prompt.
+    #[test]
+    fn gwt_hook_left_untrusted_is_reported_as_untrusted_managed() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let mut hooks_json: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        hooks_json["hooks"]["Stop"][0]["hooks"][0]["command"] =
+            Value::String("'/tmp/attacker/gwtd' hook event Stop".to_string());
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(report.trusted_entries.len(), 4);
+        assert_eq!(
+            report.untrusted_gwt_hooks.len(),
+            1,
+            "the unvouched gwt hook must be reported: {report:?}"
+        );
+        assert!(
+            report.untrusted_gwt_hooks[0].contains("stop:0:0"),
+            "report must name the untrusted hook: {report:?}"
+        );
+    }
+
+    /// A user's own hook is not gwt's business: Codex may prompt for it, but it
+    /// must never be reported as a gwt pre-registration failure.
+    #[test]
+    fn user_hook_is_not_reported_as_untrusted_managed() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let mut hooks_json: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        hooks_json["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "matcher": "Bash",
+                "hooks": [{ "command": "echo user-hook", "type": "command" }]
+            }));
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(report.trusted_entries.len(), 5);
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "user hooks must not be reported as gwt trust failures: {report:?}"
         );
     }
 
