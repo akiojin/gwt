@@ -1812,6 +1812,77 @@ where
     Ok(parse_open_pr_number(&output.stdout))
 }
 
+/// Issue #3963 AC-2: every open PR's number keyed by its head branch, read in
+/// ONE `gh pr list` call so the open-PR readback costs the same for one
+/// in-flight candidate as for a queue-scale set. When a branch has several open
+/// PRs the highest number wins (the most recent reopen), matching
+/// [`parse_open_pr_number`]. Checked like the per-branch readback: a runner
+/// failure, a failed `gh` exit, or unparseable output is an error, never
+/// "no open PRs".
+pub fn try_fetch_open_pr_numbers_by_branch(
+    repo_path: &Path,
+) -> Result<std::collections::HashMap<String, u64>> {
+    try_fetch_open_pr_numbers_by_branch_with(repo_path, run_gh_command)
+}
+
+fn try_fetch_open_pr_numbers_by_branch_with<F>(
+    repo_path: &Path,
+    mut run_gh: F,
+) -> Result<std::collections::HashMap<String, u64>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,headRefName",
+            "--limit",
+            "999",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr list open inventory: {}",
+            output.stderr.trim()
+        )));
+    }
+    parse_open_pr_numbers_by_branch(&output.stdout)
+}
+
+/// Parse `gh pr list --json number,headRefName` into `branch -> open PR
+/// number`. Rows without a head ref are dropped; the highest number per branch
+/// wins.
+pub fn parse_open_pr_numbers_by_branch(
+    json: &str,
+) -> Result<std::collections::HashMap<String, u64>> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json)
+        .map_err(|error| GwtError::Other(format!("gh pr list open inventory JSON: {error}")))?;
+    let mut index = std::collections::HashMap::new();
+    for value in &arr {
+        let Some(branch) = value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let Some(number) = value.get("number").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let best = index.entry(branch.to_string()).or_insert(number);
+        if *best < number {
+            *best = number;
+        }
+    }
+    Ok(index)
+}
+
 #[cfg(test)]
 fn fetch_open_pr_number_for_branch_with<F>(repo_path: &Path, branch: &str, run_gh: F) -> Option<u64>
 where
@@ -2290,6 +2361,82 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #3963 AC-2: the scan reads every open PR in ONE `gh pr list` call
+    /// and resolves each candidate branch from that index, so the number of
+    /// GitHub calls no longer grows with the queue.
+    #[test]
+    fn open_pr_numbers_by_branch_are_read_in_one_call_and_keep_the_highest_number() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let index = try_fetch_open_pr_numbers_by_branch_with(Path::new("/repo"), |_, args| {
+            calls.push(args.iter().map(|arg| arg.to_string()).collect());
+            Ok(GhCliOutput {
+                success: true,
+                stdout: r#"[{"number":7,"headRefName":"work/issue-43"},{"number":9,"headRefName":"work/issue-43"},{"number":8,"headRefName":"work/issue-44"},{"number":10,"headRefName":""}]"#.to_string(),
+                stderr: String::new(),
+            })
+        })
+        .expect("open PR inventory");
+
+        assert_eq!(calls.len(), 1, "one call regardless of candidate count");
+        assert_eq!(
+            calls[0],
+            [
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,headRefName",
+                "--limit",
+                "999"
+            ]
+        );
+        assert_eq!(
+            index.get("work/issue-43"),
+            Some(&9),
+            "most recent reopen wins"
+        );
+        assert_eq!(index.get("work/issue-44"), Some(&8));
+        assert_eq!(index.get(""), None, "rows without a head ref are dropped");
+        assert_eq!(
+            index.get("work/issue-45"),
+            None,
+            "no open PR is an absent key"
+        );
+    }
+
+    /// Issue #3963 AC-3: the inventory is a checked readback. A runner failure,
+    /// a failed `gh` exit, or unparseable output must surface as an error so the
+    /// scan degrades that readback instead of mistaking it for "no open PRs".
+    #[test]
+    fn open_pr_inventory_preserves_runner_failures_and_rejects_bad_output() {
+        let failure = try_fetch_open_pr_numbers_by_branch_with(Path::new("/repo"), |_, _| {
+            Err(GwtError::Git("operation deadline expired".to_string()))
+        })
+        .expect_err("inventory must preserve the runner failure");
+        assert!(failure.to_string().contains("deadline"), "{failure}");
+
+        let failure = try_fetch_open_pr_numbers_by_branch_with(Path::new("/repo"), |_, _| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "gh exploded".to_string(),
+            })
+        })
+        .expect_err("a failed gh exit is not an empty inventory");
+        assert!(failure.to_string().contains("gh exploded"), "{failure}");
+
+        assert!(
+            try_fetch_open_pr_numbers_by_branch_with(Path::new("/repo"), |_, _| Ok(GhCliOutput {
+                success: true,
+                stdout: "not json".to_string(),
+                stderr: String::new(),
+            }))
+            .is_err(),
+            "unparseable output is a failure, not an empty inventory"
+        );
+    }
 
     #[test]
     fn checked_pr_readbacks_preserve_runner_failures() {
