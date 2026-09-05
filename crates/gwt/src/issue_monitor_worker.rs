@@ -119,6 +119,11 @@ pub enum IssueMonitorScanContinuation {
     /// A shared prerequisite failed, so the stage kept the previous scan's
     /// successful result rather than throwing this pass away.
     PreviousCandidates,
+    /// Issue #3928 AC-2: the pre-launch readback of a candidate was refused by
+    /// GitHub's rate limit. That candidate is left unconfirmed — it cannot be
+    /// claimed from cache alone — and stays queued for the scan after the
+    /// backoff window; every other candidate and stage is unaffected.
+    DeferredCandidates,
 }
 
 impl IssueMonitorScanContinuation {
@@ -126,8 +131,18 @@ impl IssueMonitorScanContinuation {
         match self {
             Self::StaleReadback => "continued_with_stale_readback",
             Self::PreviousCandidates => "continued_with_previous_candidates",
+            Self::DeferredCandidates => "continued_with_deferred_candidates",
         }
     }
+}
+
+/// Issue #3928: whether a stage failure is GitHub's rate limit — either the
+/// identified refusal (`github_rate_limited: … reset_at=…`) or GitHub's own
+/// wording — as opposed to a transport or lookup failure. A rate limit is a
+/// wait, not a fault, so the scan degrades the stage instead of aborting.
+pub fn is_rate_limit_failure(detail: &str) -> bool {
+    detail.contains(gwt_core::github_quota::RATE_LIMITED_ERROR_CODE)
+        || gwt_core::github_quota::is_rate_limit_stderr(detail)
 }
 
 impl fmt::Display for IssueMonitorScanContinuation {

@@ -1748,6 +1748,13 @@ pub struct IssueMonitorAgentStatus {
     /// a monitor that has stopped while every field still reads healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_stall: Option<String>,
+    /// Issue #3928 AC-4: the GitHub API budget per resource — whether it is
+    /// throttled, until when the persisted backoff runs, and who spent the
+    /// last minute — so the PM can tell a quiet queue from a rate-limited one
+    /// and find the caller behind a burst. Filled in by the `issue.monitor.status`
+    /// surface from the machine-local ledger; `None` in daemon projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_budget: Option<BTreeMap<String, gwt_core::github_budget::ResourceBudgetStatus>>,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -7089,6 +7096,7 @@ impl IssueMonitorState {
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             scan_stall: None,
+            github_budget: None,
         }
     }
 
@@ -7995,6 +8003,27 @@ impl IssueMonitorState {
         owner: &str,
         now: &str,
         active_cap: usize,
+        completed_probe: impl FnMut(u64) -> Result<bool, E>,
+    ) -> Result<usize, E> {
+        self.try_prepare_claim_effects_with_probe_deferring(
+            owner,
+            now,
+            active_cap,
+            &BTreeSet::new(),
+            completed_probe,
+        )
+    }
+
+    /// [`Self::try_prepare_claim_effects_with_probe`] with candidates the scan
+    /// has deferred (Issue #3928 AC-2): a candidate whose pre-launch readback
+    /// was rate-limited is skipped for this pass — never probed, never claimed
+    /// from its cached state — while the candidates after it are still planned.
+    pub fn try_prepare_claim_effects_with_probe_deferring<E>(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        deferred: &BTreeSet<u64>,
         mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
     ) -> Result<usize, E> {
         // Issue #3683: expired claim blocks re-enter the queue before slots
@@ -8012,6 +8041,9 @@ impl IssueMonitorState {
         for issue_number in candidates {
             if available == 0 {
                 break;
+            }
+            if deferred.contains(&issue_number) {
+                continue;
             }
             if !self.retry_ready_for_saved_profile(issue_number, now) {
                 continue;
@@ -10692,6 +10724,7 @@ mod tests {
                 // `agent_status` reports the queue; the scan-cadence check is
                 // applied by `agent_status_at`, which needs a clock.
                 scan_stall: None,
+                github_budget: None,
             }
         );
     }
