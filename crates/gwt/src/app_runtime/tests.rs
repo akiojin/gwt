@@ -4927,11 +4927,13 @@ fn agent_pane_sync_completion_distinguishes_snapshot_unavailable_and_poisoned() 
     assert!(failed_log.fields.contains_key("elapsed_ms"));
 }
 
-/// Issue #3755 AC-3: removing mutex waits must not hide a new multi-pane
-/// serialization stall. Four panes at the replay cap still finish as one
-/// bounded GUI dispatch on the debug build used by regression tests.
+/// Issue #3882 AC-1/AC-2: full-scrollback synchronization is bounded by the
+/// number of panes and the terminal replay cap, independent of host load.
 #[test]
 fn agent_pane_sync_with_full_scrollback_stays_bounded() {
+    const REPLAY_LIMIT: usize = 5_000;
+    const EXCESS_HISTORY: usize = 100;
+
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
@@ -4956,8 +4958,8 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
         .map(|window| combined_window_id("tab-project", &window.id))
         .collect::<Vec<_>>();
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let replay = (0..5_000)
-        .map(|line| format!("snapshot-line-{line:04}\n"))
+    let replay = (0..REPLAY_LIMIT + EXCESS_HISTORY)
+        .map(|line| format!("snapshot-line-{line:04}\r\n"))
         .collect::<String>();
     for window_id in &window_ids {
         let mut pane = long_running_test_pane(window_id);
@@ -4973,28 +4975,49 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
     let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
         .expect("authenticated principal");
 
-    let started = Instant::now();
     let events = runtime.handle_agent_frontend_event(
         "pane-client".to_string(),
         principal,
         AgentFrontendRequest::Ready,
     );
-    let elapsed = started.elapsed();
 
-    assert!(
-        elapsed < Duration::from_millis(300),
-        "four full-scrollback snapshots blocked the GUI dispatch for {elapsed:?}"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|outbound| matches!(outbound.event, BackendEvent::TerminalSnapshot { .. }))
-            .count(),
-        window_ids.len()
-    );
-    assert!(events
+    let snapshots = events
         .iter()
-        .any(|outbound| matches!(outbound.event, BackendEvent::PaneSyncComplete { .. })));
+        .filter_map(|outbound| match &outbound.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } => Some((id, data_base64)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), window_ids.len());
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect::<HashSet<_>>(),
+        window_ids.iter().cloned().collect::<HashSet<_>>(),
+        "each pane emits exactly one snapshot"
+    );
+
+    let newest_line = format!("snapshot-line-{:04}", REPLAY_LIMIT + EXCESS_HISTORY - 1);
+    for (window_id, data_base64) in snapshots {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .expect("decode terminal snapshot");
+        let snapshot = String::from_utf8_lossy(&decoded);
+        assert!(
+            !snapshot.contains("snapshot-line-0000"),
+            "{window_id} replayed history beyond the terminal cap"
+        );
+        assert!(
+            snapshot.contains(&newest_line),
+            "{window_id} omitted the newest terminal line"
+        );
+    }
+
+    assert!(matches!(
+        events.last().map(|outbound| &outbound.event),
+        Some(BackendEvent::PaneSyncComplete { .. })
+    ));
 }
 
 /// Issue #3755 AC-2/AC-3: close removes the runtime and window synchronously,
