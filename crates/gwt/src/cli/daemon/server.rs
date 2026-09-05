@@ -3802,49 +3802,82 @@ fn scan_issue_monitor_once_blocking(
     // inbox, so the launch stage decides on GitHub's current answer rather than
     // a remembered one. A targeted single-issue read is far cheaper than the
     // list whose failure put the scan on this path.
-    let confirmed_previous_candidates = if candidates_are_from_previous_result {
-        let claimable_cap = if monitor.has_launch_profile() {
-            monitor.config.max_active.max(1)
-        } else {
-            0
-        };
-        let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
-        let mut confirmed = std::collections::BTreeSet::new();
-        for issue_number in claimable
-            .into_iter()
-            .take(crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT)
-        {
-            let Some(index) = loaded
-                .issues
-                .iter()
-                .position(|issue| issue.number == issue_number)
-            else {
-                continue;
+    // Issue #3928 AC-2: candidates whose readback GitHub's rate limit refused.
+    // They are neither confirmed nor launched this pass — the claim planner
+    // skips them — and stay queued for the scan after the backoff window.
+    let mut deferred_candidates = std::collections::BTreeSet::new();
+    let confirmed_previous_candidates =
+        if candidates_are_from_previous_result {
+            let claimable_cap = if monitor.has_launch_profile() {
+                monitor.config.max_active.max(1)
+            } else {
+                0
             };
-            loaded.issues[index] =
-                crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
+            let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
+            let mut confirmed = std::collections::BTreeSet::new();
+            let mut deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> = None;
+            for issue_number in claimable
+                .into_iter()
+                .take(crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT)
+            {
+                let Some(index) = loaded
+                    .issues
+                    .iter()
+                    .position(|issue| issue.number == issue_number)
+                else {
+                    continue;
+                };
+                match crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
                     &scope.project_root,
                     &owner,
                     &repo,
                     &loaded.issues[index],
-                )?;
-            confirmed.insert(issue_number);
-        }
-        if !confirmed.is_empty() {
-            // Re-apply the canonical transition so the inbox rows the launch
-            // stage reads carry the confirmed state, not the remembered one.
-            crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
-                &mut monitor,
-                &loaded,
-                &scope.project_root,
-                &now,
-            );
-        }
-        confirmed
-    } else {
-        std::collections::BTreeSet::new()
-    };
-    crate::issue_monitor_worker::run_scan_stage(
+                ) {
+                    Ok(refreshed) => {
+                        loaded.issues[index] = refreshed;
+                        confirmed.insert(issue_number);
+                    }
+                    Err(failure)
+                        if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) =>
+                    {
+                        deferred_candidates.insert(issue_number);
+                        deferral.get_or_insert(failure);
+                    }
+                    Err(failure) => return Err(failure),
+                }
+            }
+            if let Some(failure) = deferral {
+                degradations.push(crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
+                failure,
+                Some(
+                    deferred_candidates
+                        .iter()
+                        .map(|issue_number| format!("#{issue_number}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                crate::issue_monitor_worker::IssueMonitorScanContinuation::DeferredCandidates,
+            ));
+            }
+            if !confirmed.is_empty() {
+                // Re-apply the canonical transition so the inbox rows the launch
+                // stage reads carry the confirmed state, not the remembered one.
+                crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                    &mut monitor,
+                    &loaded,
+                    &scope.project_root,
+                    &now,
+                );
+            }
+            confirmed
+        } else {
+            std::collections::BTreeSet::new()
+        };
+    // Issue #3928 AC-2: inside a rate-limit window the merged-PR readback is
+    // refused before it spawns. That is a wait, not a fault: the slots it
+    // would have freed stay occupied until the window ends, and the scan
+    // still reaches its inbox, status, and launch stages.
+    match crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
@@ -3854,7 +3887,19 @@ fn scan_issue_monitor_once_blocking(
                 &repo,
             )
         },
-    )?;
+    ) {
+        Ok(_) => {}
+        Err(failure) if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) => {
+            degradations.push(
+                crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
+                    failure,
+                    Some(format!("{owner}/{repo}")),
+                    crate::issue_monitor_worker::IssueMonitorScanContinuation::PreviousCandidates,
+                ),
+            );
+        }
+        Err(failure) => return Err(failure),
+    }
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
@@ -3933,36 +3978,67 @@ fn scan_issue_monitor_once_blocking(
             0
         };
         if monitor.active_count() < active_cap {
-            monitor.try_prepare_claim_effects_with_probe(
+            // Issue #3933 AC-2 (review follow-up) / Issue #3928 AC-2: on a
+            // previous-result pass only the candidates re-read authoritatively
+            // above may authorize a claim. Passing them as an allowlist keeps
+            // that fail-closed contract without turning an unconfirmed
+            // candidate — every one past the targeted-refresh limit, and every
+            // one the rate limit deferred — into an abort of the whole pass.
+            let claimable_candidates =
+                candidates_are_from_previous_result.then_some(&confirmed_previous_candidates);
+            // Issue #3928 AC-2: the completion readback below is a live GitHub
+            // call for a gwt-spec candidate, so the rate limit can refuse it
+            // after the pass already started. Collect those candidates instead
+            // of letting one refusal abort the pass.
+            let mut probe_deferred = std::collections::BTreeSet::new();
+            let mut probe_deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> =
+                None;
+            let prepared = monitor.try_prepare_claim_effects_with_probe_confirmed(
                 &monitor_owner,
                 &now,
                 active_cap,
+                claimable_candidates,
                 |issue_number| {
                     let Some(issue) = loaded
                         .issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
                     else {
-                        return Ok(false);
+                        return Ok(crate::issue_monitor::ClaimProbeOutcome::Claimable);
                     };
-                    // Issue #3933 AC-2 (review follow-up): only a candidate whose
-                    // state was confirmed above may authorize a claim from a
-                    // previous result. An unconfirmed one fails closed.
-                    if candidates_are_from_previous_result
-                        && !confirmed_previous_candidates.contains(&issue_number)
-                    {
-                        return Err(crate::issue_monitor_worker::IssueMonitorScanFailure::new(
-                            IssueMonitorScanStage::CandidateLoad,
-                            format!(
-                                "issue #{issue_number} state was not confirmed for a previous-result launch"
-                            ),
-                        ));
-                    }
-                    crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
+                    match crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
                         &owner, &repo, issue,
-                    )
+                    ) {
+                        Ok(completed) => Ok(
+                            crate::issue_monitor::ClaimProbeOutcome::from_completed(completed),
+                        ),
+                        Err(failure)
+                            if crate::issue_monitor_worker::is_rate_limit_failure(
+                                &failure.detail,
+                            ) =>
+                        {
+                            probe_deferred.insert(issue_number);
+                            probe_deferral.get_or_insert(failure);
+                            Ok(crate::issue_monitor::ClaimProbeOutcome::Deferred)
+                        }
+                        Err(failure) => Err(failure),
+                    }
                 },
             )?;
+            let _ = prepared;
+            if let Some(failure) = probe_deferral {
+                degradations.push(crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
+                    failure,
+                    Some(
+                        probe_deferred
+                            .iter()
+                            .map(|issue_number| format!("#{issue_number}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    crate::issue_monitor_worker::IssueMonitorScanContinuation::DeferredCandidates,
+                ));
+            }
         }
     }
     // Issue #3933 AC-4: a scan that survived a stage failure must say so where a
@@ -4942,6 +5018,16 @@ if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
       ;;
   esac
 fi
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_rate_limited" ]; then
+  case "$*" in
+    *"timelineItems"*)
+      # Issue #3928: GitHub refuses the pre-claim readback mid-pass. That is a
+      # wait for this candidate, not a fault that may discard the scan.
+      printf '%s\n' 'GraphQL: API rate limit already exceeded for user ID 965624.' >&2
+      exit 1
+      ;;
+  esac
+fi
 if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   # Issue #3963: every gh call is journaled so a test can prove the open-PR
   # readback is ONE inventory call per scan, not one call per candidate branch.
@@ -4994,7 +5080,7 @@ if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
   printf '%s\n' '[{"number":43,"title":"Live issue","body":"## Acceptance Criteria\n- [ ] AC-1: verified by tests","labels":[{"name":"auto-improve"},{"name":"auto-merge"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
   exit 0
 fi
-if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ] || [ "$GWT_FAKE_GH_MODE" = "claim_probe_rate_limited" ]; then
   printf '%s\n' '[{"number":43,"title":"Live SPEC","body":"Live body","labels":[{"name":"auto-improve"},{"name":"gwt-spec"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"}]'
   exit 0
 fi
@@ -9413,6 +9499,377 @@ exit 0
             failure.stage,
             crate::issue_monitor_worker::IssueMonitorScanStage::CandidateLoad
         );
+    }
+
+    /// Issue #3928 AC-1 / AC-2: while a rate-limit window persisted by another
+    /// process is open, the scan issues no GraphQL call at all, still completes
+    /// from the cached candidates, defers the candidate whose pre-launch
+    /// readback was refused instead of aborting the pass, and reports the
+    /// throttle together with the next attempt time.
+    #[test]
+    fn a_persisted_rate_limit_window_defers_the_readback_and_the_scan_completes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(44),
+                title: "Previously loaded issue".to_string(),
+                body: "Queued body".to_string(),
+                labels: vec!["bug".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed the previous successful candidate result");
+        // The previous gwtd process observed a secondary refusal and persisted
+        // its backoff window; this process's in-memory gate is empty.
+        let now = chrono::Utc::now();
+        let window = gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 0,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(60),
+            },
+            now,
+        );
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            // An active launch makes merge reconciliation spend GraphQL too.
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "window-43".to_string(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("a throttled scan completes from the cached candidates");
+
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "a candidate whose readback was throttled must not be launched from cache: {:?}",
+            scanned.pending_effects()
+        );
+        assert!(
+            scanned.status_view().queue_len >= 1,
+            "the deferred candidate stays queued for the next scan"
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a throttled scan still reports why");
+        for expected in [
+            "candidate-load",
+            "continued_with_previous_candidates",
+            "continued_with_deferred_candidates",
+            "#44",
+            "merge-reconciliation",
+            gwt_core::github_quota::RATE_LIMITED_ERROR_CODE,
+            "retry_after_secs=",
+        ] {
+            assert!(last_error.contains(expected), "{expected}: {last_error}");
+        }
+        assert!(
+            last_error.contains(&format!(
+                "reset_at={}",
+                window
+                    .reset_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )),
+            "the next attempt time is the persisted window: {last_error}"
+        );
+        assert_no_graphql_spawn_was_recorded();
+        gwt_core::github_budget::BudgetLedger::global()
+            .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
+    /// Issue #3928 AC-2 at incident scale: the production queue held 184
+    /// issues, and the refresh loop only ever confirms the first
+    /// `ISSUE_MONITOR_TARGETED_REFRESH_LIMIT` claimable candidates. The launch
+    /// planner walks the *whole* queue, so a throttled pass reached a candidate
+    /// that was neither confirmed nor deferred and aborted there — the scan
+    /// still never completed, which is the symptom this Issue is about. A queue
+    /// larger than that limit must still finish the pass, claim nothing, and
+    /// report the throttle with its next attempt time.
+    #[test]
+    fn a_throttled_scan_completes_when_the_queue_exceeds_the_targeted_refresh_limit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = gwt_github::Cache::new(cache_root);
+        // Comfortably past the targeted-refresh limit, the way the real queue was.
+        let queued: Vec<u64> = (1
+            ..=crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT as u64 + 5)
+            .collect();
+        for issue_number in &queued {
+            cache
+                .write_snapshot(&gwt_github::IssueSnapshot {
+                    number: gwt_github::IssueNumber(*issue_number),
+                    title: format!("Previously loaded issue {issue_number}"),
+                    body: "Queued body".to_string(),
+                    labels: vec!["bug".to_string()],
+                    state: gwt_github::IssueState::Open,
+                    updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                    comments: Vec::new(),
+                })
+                .expect("seed the previous successful candidate result");
+        }
+        let now = chrono::Utc::now();
+        let window = gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 0,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(60),
+            },
+            now,
+        );
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            // More than one free slot, so the planner keeps walking the queue
+            // past every deferred candidate instead of stopping at the first.
+            max_active_agents: 3,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut preserved =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        preserved.set_gui_connected(true);
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("a queue larger than the refresh limit must not abort a throttled scan");
+
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "no candidate was confirmed, so none may be claimed: {:?}",
+            scanned.pending_effects()
+        );
+        assert_eq!(
+            scanned.status_view().queue_len,
+            queued.len(),
+            "every deferred candidate stays queued for the scan after the window"
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a throttled scan still reports why");
+        for expected in [
+            "continued_with_deferred_candidates",
+            gwt_core::github_quota::RATE_LIMITED_ERROR_CODE,
+            "retry_after_secs=",
+        ] {
+            assert!(last_error.contains(expected), "{expected}: {last_error}");
+        }
+        assert!(
+            last_error.contains(&format!(
+                "reset_at={}",
+                window
+                    .reset_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )),
+            "the next attempt time is the persisted window: {last_error}"
+        );
+        assert_no_graphql_spawn_was_recorded();
+        gwt_core::github_budget::BudgetLedger::global()
+            .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
+    /// Assert that this test's scan issued no budget-spending `gh` call.
+    ///
+    /// Reads the machine-local spawn ledger rather than a log the fake `gh`
+    /// writes: the ledger lives under [`ScopedGwtHome`], so it counts only the
+    /// spawns this test's thread made, while an env-var log path is
+    /// process-wide and collects whatever a concurrently running test spawns
+    /// through the same fake. The pre-spawn gate refuses before recording, so a
+    /// zero count is exactly "nothing was spawned".
+    fn assert_no_graphql_spawn_was_recorded() {
+        let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
+        assert_eq!(
+            snapshot.local["graphql"].calls_last_hour, 0,
+            "no GraphQL call may be issued inside the backoff window: {:?}",
+            snapshot.local
+        );
+    }
+
+    /// Drop the rate-limit window a test drove through the real `gh` spawn path.
+    ///
+    /// [`gwt_core::github_quota::global`] is process-global and, unlike the
+    /// budget ledger, is not scoped by [`ScopedGwtHome`]. A test that makes a
+    /// spawn fail with GitHub's rate-limit wording therefore suppresses every
+    /// later GraphQL spawn in this binary for the whole backoff window, which
+    /// shows up as unrelated scan tests failing at `candidate-load`. Clearing
+    /// both memories keeps the window inside the test that created it.
+    fn clear_process_global_rate_limit_window() {
+        gwt_core::github_quota::global()
+            .record_success(gwt_core::github_quota::GitHubQuota::GraphQl);
+        gwt_core::github_budget::BudgetLedger::global()
+            .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
+    /// Issue #3928 AC-2: the pre-claim completion readback is a live GitHub call
+    /// for a gwt-spec candidate, so the rate limit can refuse it after the pass
+    /// has already loaded its candidates. Propagating that refusal aborted the
+    /// whole pass — the same stall as the candidate-load path, on the stage that
+    /// runs last. The refused candidate must be deferred, the pass must finish,
+    /// and the throttle must be reported. A non-rate-limit failure on the same
+    /// stage still fails closed, which the sibling test below pins.
+    #[test]
+    fn a_rate_limited_claim_completion_readback_defers_its_candidate_and_completes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "claim_probe_rate_limited");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(43),
+                title: "Live SPEC".to_string(),
+                body: "<!-- gwt-spec id=43 version=1 -->\n\
+                       <!-- sections:\n\
+                       spec=body\n\
+                       plan=body\n\
+                       tasks=body\n\
+                       -->\n\n\
+                       <!-- artifact:spec BEGIN -->\nSpec\n<!-- artifact:spec END -->\n\n\
+                       <!-- artifact:plan BEGIN -->\nPlan\n<!-- artifact:plan END -->\n\n\
+                       <!-- artifact:tasks BEGIN -->\n- [x] Complete\n<!-- artifact:tasks END -->"
+                    .to_string(),
+                labels: vec!["gwt-spec".to_string()],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-15T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("seed completed SPEC cache generation");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let mut preserved = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 1,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        preserved.set_gui_connected(true);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &preserved.prefs(),
+        )
+        .expect("seed issue monitor prefs");
+
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("a rate-limited completion readback must not discard the scan");
+
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "a candidate whose completion state could not be read must not be claimed: {:?}",
+            scanned.pending_effects()
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        for expected in [
+            "claim-completion-readback",
+            "continued_with_deferred_candidates",
+            "#43",
+            "rate limit",
+        ] {
+            assert!(last_error.contains(expected), "{expected}: {last_error}");
+        }
+        clear_process_global_rate_limit_window();
     }
 
     #[test]
