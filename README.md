@@ -322,12 +322,13 @@ the `gwtd` JSON operations `issue.monitor.status`,
 mode, or set a positive `max_active` limit. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
 an explicit action in the GUI. `issue.monitor.profiles` reads the launch
-candidate pool (one profile per provider, in priority order, with any active
-rate-limit holds) and `issue.monitor.profiles.set` replaces it whole; with two
-or more candidates the Monitor launches each Issue with the first candidate
-whose provider is not held, so one rate-limited provider no longer stops the
-queue. Saving Agent settings for a second provider in the GUI appends it to the
-same pool. All operations accept an optional
+candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidates the Monitor launches each Issue with the first eligible candidate
+(rate-limit holds, the usage threshold, and `prefer_for` routing decide
+eligibility; the exact rules are specified in SPEC
+[#3914](https://github.com/akiojin/gwt/issues/3914)), so one rate-limited
+provider no longer stops the queue. Saving Agent settings for a second provider
+in the GUI appends it to the same pool. All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.

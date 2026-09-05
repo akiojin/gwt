@@ -304,9 +304,10 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
 `autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
-`issue.monitor.profiles` は起動候補プール（provider ごとに 1 件、優先順、rate limit
-による hold 付き）を返し、`issue.monitor.profiles.set` はプール全体を置き換えます。
-候補が 2 件以上あると、Monitor は各 Issue を hold されていない最初の候補で起動する
+`issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
+プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
+詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
 ため、1 つの provider が rate limit に入ってもキューは止まりません。GUI の Agent
 settings で別 provider を保存すると同じプールに追加されます。各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。

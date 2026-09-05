@@ -175,10 +175,11 @@ body cannot hold `plan` / `tasks` sections.
   `params.profiles` (`[{"agent_id":"codex"},{"agent_id":"claude"}]`, unique
   per provider, known agents only, optional `prefer_for` tags such as
   `type:fix` / `kind:spec` / `label:bug`) and optionally
-  `params.usage_threshold_percent` (1-100). The Monitor picks the first
-  candidate that is not rate-limited, so a held provider never stalls the
-  queue while another candidate exists. Prefer adding a candidate over stopping
-  the Monitor when one provider hits its limit.
+  `params.usage_threshold_percent` (1-100). The Monitor skips held providers
+  and launches the first eligible candidate (`prefer_for` routing and the
+  usage threshold apply), so a held provider never stalls the queue while
+  another candidate exists. Prefer adding a candidate over stopping the
+  Monitor when one provider hits its limit.
 
 ## Observing the running agents
 

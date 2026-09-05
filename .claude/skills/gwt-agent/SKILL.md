@@ -143,8 +143,12 @@ JSON
 
 Read the launch candidate pool (ordered providers, their rate-limit holds, and
 the usage threshold), or replace it whole. With two or more candidates the
-Monitor launches each Issue with the first candidate whose provider is not
-held, so one rate-limited provider does not stop the queue. `agent_id` is the
+Monitor skips held and `limit_reached` providers, ranks the rest by
+`prefer_for` match (soft-avoiding the implementer's provider for an
+independent review), and launches the first candidate whose usage is unknown
+or below `usage_threshold_percent` (when every candidate is above it, the
+lowest known usage wins), so one rate-limited provider does not stop the
+queue. `agent_id` is the
 only required field per candidate; providers must be unique and known, and
 `prefer_for` tags use `type:<cc-type>` / `kind:spec|issue` / `label:<name>`:
 
