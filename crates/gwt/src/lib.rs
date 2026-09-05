@@ -33,6 +33,7 @@ pub mod issue_monitor;
 pub mod issue_monitor_authz;
 pub mod issue_monitor_gate;
 pub mod issue_monitor_review;
+pub mod issue_monitor_settlement;
 pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
@@ -123,12 +124,13 @@ pub use index_worker::{
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
     bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
-    establish_issue_monitor_authority_fence, is_auto_improve_candidate,
-    is_legacy_git_launch_failure_for_project, issue_monitor_authority_fence_path,
-    issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
-    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
-    issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
-    load_issue_monitor_prefs, mark_autonomous_handoff_delivered_from_prefs,
+    decide_merged_issue_settlement, delegation_recorded, establish_issue_monitor_authority_fence,
+    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
+    issue_monitor_authority_fence_path, issue_monitor_launch_plan,
+    issue_monitor_launch_profile_pool_summary, issue_monitor_launch_profile_summary,
+    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path,
+    load_issue_monitor_authority_fence, load_issue_monitor_prefs,
+    mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, mutate_issue_monitor_prefs,
     mutate_issue_monitor_prefs_recovering, pending_autonomous_handoff_resumption_from_prefs,
     persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
@@ -159,9 +161,9 @@ pub use issue_monitor::{
     IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanSummary, IssueMonitorState,
     IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
     IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts, IssueMonitorWaitSummary,
-    LaunchProfileSelection, LaunchProfileSkip, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement,
+    MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect,
+    AUTONOMOUS_WAIT_MAX_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

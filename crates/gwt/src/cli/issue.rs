@@ -286,6 +286,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            auto_close_merged_issues,
             launch_agent,
         } => run_monitor_config_set(
             env,
@@ -293,6 +294,7 @@ pub(super) fn run<E: CliEnv>(
             enabled,
             autonomous_mode,
             max_active,
+            auto_close_merged_issues,
             launch_agent.as_deref(),
             out,
         )?,
@@ -1426,9 +1428,16 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    auto_close_merged_issues: Option<bool>,
     launch_agent: Option<&str>,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)?;
+    validate_monitor_config_set(
+        enabled,
+        autonomous_mode,
+        max_active,
+        auto_close_merged_issues,
+        launch_agent,
+    )?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -1444,6 +1453,11 @@ fn apply_monitor_config_set(
     if let Some(max_active) = max_active {
         candidate.set_max_active_agents(max_active);
     }
+    if let Some(auto_close_merged_issues) = auto_close_merged_issues {
+        candidate
+            .set_auto_close_merged_issues_with_effect_revocation(Some(auto_close_merged_issues))
+            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+    }
     if let Some(launch_agent) = launch_agent {
         candidate
             .switch_launch_profile_agent(launch_agent)
@@ -1457,6 +1471,7 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    auto_close_merged_issues: Option<bool>,
     launch_agent: Option<&str>,
 ) -> io::Result<()> {
     if launch_agent.is_some_and(|agent| agent.trim().is_empty()) {
@@ -1468,6 +1483,7 @@ fn validate_monitor_config_set(
     if enabled.is_none()
         && autonomous_mode.is_none()
         && max_active.is_none()
+        && auto_close_merged_issues.is_none()
         && launch_agent.is_none()
     {
         return Err(io::Error::new(
@@ -1492,18 +1508,29 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
+// One optional parameter per settable config field: the arity tracks the
+// wire schema of `issue.monitor.config.set`, so bundling them into a struct
+// would only move the same list one indirection away.
+#[allow(clippy::too_many_arguments)]
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    auto_close_merged_issues: Option<bool>,
     launch_agent: Option<&str>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    validate_monitor_config_set(enabled, autonomous_mode, max_active, launch_agent)
-        .map_err(io_as_api_error)?;
+    validate_monitor_config_set(
+        enabled,
+        autonomous_mode,
+        max_active,
+        auto_close_merged_issues,
+        launch_agent,
+    )
+    .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
     // before publishing so the daemon never has to reject a control it
     // cannot explain back to the caller.
@@ -1527,6 +1554,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 "enabled": enabled,
                 "autonomous_mode": autonomous_mode,
                 "max_active_agents": max_active,
+                "auto_close_merged_issues": auto_close_merged_issues,
                 "launch_agent": launch_agent,
             }
         }),
@@ -1539,7 +1567,14 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, launch_agent)
+            apply_monitor_config_set(
+                prefs,
+                enabled,
+                autonomous_mode,
+                max_active,
+                auto_close_merged_issues,
+                launch_agent,
+            )
         })
         .map_err(io_as_api_error)?;
     }
@@ -1552,6 +1587,10 @@ fn run_monitor_config_set<E: CliEnv>(
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
             "max_active": prefs.max_active_agents.max(1),
+            "auto_close_merged_issues": prefs.auto_close_merged_issues,
+            "auto_close_merged_issues_effective": prefs
+                .auto_close_merged_issues
+                .unwrap_or(prefs.autonomous_mode),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
             }),
@@ -4321,6 +4360,7 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                auto_close_merged_issues: None,
                 launch_agent: None,
             },
             &mut out,
@@ -4343,6 +4383,7 @@ mod tests {
                 enabled: Some(true),
                 autonomous_mode: None,
                 max_active: None,
+                auto_close_merged_issues: None,
                 launch_agent: None,
             },
             &mut out,
@@ -4583,6 +4624,7 @@ mod tests {
                     enabled,
                     autonomous_mode,
                     max_active: None,
+                    auto_close_merged_issues: None,
                     launch_agent: None,
                 },
                 &mut out,
@@ -5639,6 +5681,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                auto_close_merged_issues: None,
                 launch_agent: Some("claude".to_string()),
             },
             &mut out,
@@ -5677,6 +5720,7 @@ mod tests {
                 enabled: None,
                 autonomous_mode: None,
                 max_active: None,
+                auto_close_merged_issues: None,
                 launch_agent: Some("Claude".to_string()),
             },
             &mut out,
