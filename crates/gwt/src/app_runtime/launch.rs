@@ -178,7 +178,7 @@ pub(crate) fn apply_best_effort_agent_resource_policy(
 ) {
     if let Err(error) = outcome {
         tracing::warn!(
-            window_id,
+            window_id = %window_id,
             error = %error,
             "agent resource policy was not applied; continuing launch at the inherited priority"
         );

@@ -93,27 +93,6 @@ mod imp {
             apply_group_nice(pid, policy.priority.unix_nice(), set_group_nice)
         }
 
-        /// Describe a rejected renice with the platform reason. Issue #3942:
-        /// `setpriority` returns EPERM whenever the caller may not renice the
-        /// target group, so the reason has to reach the launch route's warning.
-        pub(super) fn apply_group_nice(
-            pid: u32,
-            nice: i32,
-            set: impl Fn(u32, i32) -> Result<(), std::io::Error>,
-        ) -> Result<(), String> {
-            set(pid, nice).map_err(|error| format!("setpriority(pgrp {pid}, nice {nice}): {error}"))
-        }
-
-        fn set_group_nice(pid: u32, nice: i32) -> Result<(), std::io::Error> {
-            // SAFETY: setpriority has no memory-safety preconditions.
-            let status =
-                unsafe { libc::setpriority(libc::PRIO_PGRP as _, pid as libc::id_t, nice) };
-            if status != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        }
-
         /// Signal every process in the group without waiting for reap.
         ///
         /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
@@ -135,6 +114,26 @@ mod imp {
         fn drop(&mut self) {
             self.terminate();
         }
+    }
+
+    /// Describe a rejected renice with the platform reason. Issue #3942:
+    /// `setpriority` returns EPERM whenever the caller may not renice the
+    /// target group, so the reason has to reach the launch route's warning.
+    pub(super) fn apply_group_nice(
+        pid: u32,
+        nice: i32,
+        set: impl Fn(u32, i32) -> Result<(), std::io::Error>,
+    ) -> Result<(), String> {
+        set(pid, nice).map_err(|error| format!("setpriority(pgrp {pid}, nice {nice}): {error}"))
+    }
+
+    fn set_group_nice(pid: u32, nice: i32) -> Result<(), std::io::Error> {
+        // SAFETY: setpriority has no memory-safety preconditions.
+        let status = unsafe { libc::setpriority(libc::PRIO_PGRP as _, pid as libc::id_t, nice) };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 
