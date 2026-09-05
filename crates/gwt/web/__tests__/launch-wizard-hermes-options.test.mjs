@@ -18,7 +18,10 @@ const css = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 function hermesSection() {
   const start = surface.indexOf("launchWizard.show_hermes_options)");
-  const end = surface.indexOf("SPEC-3151 FR-008/009/010", start);
+  // SPEC-3864 moved the OpenCode "not set up" hint (FR-009/010) out to the
+  // agent-independent setup affordance, so the OpenCode options comment that
+  // closes the Hermes section now names FR-008 only.
+  const end = surface.indexOf("SPEC-3151 FR-008", start);
   assert.ok(start > 0 && end > start, "Hermes options section must exist");
   return surface.slice(start, end);
 }
