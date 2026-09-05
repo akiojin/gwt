@@ -33135,6 +33135,128 @@ fn startup_reaper_reclaims_a_durably_idle_holder_the_prefilter_calls_unknown() {
     );
 }
 
+/// Issue #3964 AC-2: a launch that died before its agent ever ran leaves the
+/// Session durably `Running` with no runtime sidecar anywhere (four of the
+/// production rows: #3619 / #3620 / #3623 / #3807). The prefilter reads a
+/// Running holder as "cannot tell" and the durable state does not permit
+/// reclaim on its own, so the exact stage — which would have found no runtime
+/// at all — was never consulted.
+#[test]
+fn startup_reaper_reclaims_a_durably_running_holder_with_no_runtime() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("running-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/running-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3964,
+    };
+    let session_id = "startup-running-holder-without-runtime";
+    let worktrees = seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/running-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+    );
+
+    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+
+    assert_eq!(
+        summary.reaped, 1,
+        "a Running holder with no runtime anywhere is not running: {summary:?}"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
+}
+
+/// Issue #3964 AC-1: a refused relaunch materializes the worktree again but
+/// publishes nothing into it, so the owner ledger is Active while the
+/// worktree's trusted pointer/projection pair is missing (production rows
+/// #3465 / #3481 / #3567 / #3624 ...). The holder identity used to be read
+/// from that missing publication, which silently counted the owner as
+/// unchanged on every startup and every scan.
+#[test]
+fn startup_reaper_heals_a_lost_worktree_publication_before_judging_the_holder() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("unpublished-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/unpublished-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3465,
+    };
+    let session_id = "startup-unpublished-holder";
+    let worktrees = seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/unpublished-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let trusted_dir =
+        gwt::cli::trusted_store::trusted_dir_for_worktree(&worktree).expect("trusted worktree dir");
+    fs::remove_file(trusted_dir.join("execution-generation-pointer.json")).expect("drop pointer");
+    fs::remove_file(trusted_dir.join("execution-control.json")).expect("drop projection");
+
+    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+
+    assert_eq!(
+        summary.reaped, 1,
+        "the owner ledger is the authority; a lost publication is republished, not skipped: {summary:?}"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    );
+}
+
 /// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
 /// generation reaper. The selected exact holder remains Active while another
 /// stale owner in the same repository is audited Blocked in the same batch.
@@ -60822,6 +60944,85 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
         "the scan must release a generation whose holder is gone"
+    );
+}
+
+/// Issue #3964 AC-1: in production a live daemon owns the scan, so the GUI
+/// worker answered `DeferredToLiveDaemon` before it ever reached the reaper —
+/// and the daemon has no reaper. The scan-cadence recovery therefore never ran
+/// after startup; 38 stranded generations survived every scan. The reaper is
+/// local recovery, not a scan effect, and must run on every tick regardless of
+/// who holds scan authority.
+#[test]
+fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the_scan() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3964,
+    };
+    let session_id = "deferred-scan-defunct-holder";
+    seed_defunct_active_owner(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &repo,
+        &repo,
+        "work/deferred-scan-defunct-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Interrupted,
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    let daemon = gwt::IssueMonitorAuthorityFence::current_process();
+    let (_, _daemon_lease) =
+        gwt::establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+            .expect("live daemon authority");
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        "2026-09-05T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scan runs");
+
+    assert!(
+        matches!(
+            outcome,
+            ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon
+        ),
+        "scan authority still belongs to the daemon"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the reaper must run before the scan defers to the daemon"
     );
 }
 
