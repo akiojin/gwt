@@ -154,6 +154,13 @@ fn build_self_match_keys(session: &Session) -> Vec<String> {
 }
 
 fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
+    // Issue #3984: an independent-review dispatch window owns no Workspace
+    // Work, so `workspace.update` is permanently rejected there — the same
+    // unfollowable-instruction case as the detached-HEAD probe below, only
+    // known up front from the launch marker instead of from git.
+    if crate::issue_monitor_review::review_dispatch_session_active() {
+        return Ok(false);
+    }
     let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
         session,
         &session.worktree_path,
