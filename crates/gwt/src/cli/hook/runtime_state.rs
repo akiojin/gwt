@@ -685,6 +685,57 @@ mod tests {
         assert_no_board_entries_or_events(dir.path());
     }
 
+    /// SPEC-3966 AC-2: a Claude Code Session (the resident PM's agent) must
+    /// come out of SessionStart with a resume handle written into its durable
+    /// record. Everything above this hook — the PM restore path — reads the
+    /// TOML, so the field has to survive a reload, not just an in-memory write.
+    #[test]
+    fn claude_session_start_persists_agent_session_id_into_session_toml() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("pm-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let session = Session::new(&worktree, "work", AgentId::ClaudeCode);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        assert!(
+            Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                .unwrap()
+                .exact_resume_session_id()
+                .is_none(),
+            "a freshly registered Session starts without a resume handle"
+        );
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        handle_with_input(
+            "SessionStart",
+            r#"{"session_id":"pm-conversation-3966","cwd":"pm-worktree"}"#,
+        )
+        .expect("SessionStart must persist the provider conversation id");
+
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(
+            loaded.exact_resume_session_id(),
+            Some("pm-conversation-3966"),
+            "the reloaded Session must expose the handle the restore path resumes from"
+        );
+        assert_eq!(
+            loaded
+                .session_history
+                .iter()
+                .map(|entry| entry.agent_session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pm-conversation-3966"],
+        );
+    }
+
     #[test]
     fn sync_agent_session_id_persists_value_into_session_toml() {
         let _lock = env_lock();
