@@ -110,6 +110,10 @@ impl std::error::Error for IssueMonitorScanFailure {}
 /// took the launch stage down with it and free agent slots sat idle. These
 /// dispositions name what the scan fell back on instead, so a reader can tell a
 /// degraded scan (launch still ran) from a stopped one (launch never ran).
+///
+/// The `last_error` vocabulary is fixed (Issue #3963 AC-4): a line carrying one
+/// of these `continued_with_*` tokens means the launch stage still ran, and a
+/// line carrying `launch_suppressed` means the scan aborted before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueMonitorScanContinuation {
     /// A per-candidate readback exceeded its own budget. That candidate keeps
@@ -1121,7 +1125,14 @@ pub fn try_advance_autonomous_in_flight(
     }
     let base_branch = try_resolve_default_base_branch(repo_path)?;
     let mut degradations = Vec::new();
-    for issue_number in monitor.autonomous_in_flight_issues() {
+    let in_flight = monitor.autonomous_in_flight_issues();
+    // Issue #3963 AC-2: the open-PR readback is ONE inventory per scan. The
+    // eligibility gate marks every eligible queued candidate Implementing before
+    // it is launched, so the in-flight set is queue-sized, not slot-sized, and a
+    // `gh pr list --head` per candidate grew with the queue until the fan-out
+    // could not finish inside any scan budget.
+    let open_prs = read_open_pr_inventory(monitor, &in_flight, repo_path, &mut degradations);
+    for issue_number in in_flight {
         // The branch this candidate's readbacks are about, named up front so a
         // failure can say which one went unknown even when it failed before the
         // phase arm resolved it (Issue #3933 AC-4).
@@ -1148,6 +1159,7 @@ pub fn try_advance_autonomous_in_flight(
             repo_slug,
             repo_path,
             &base_branch,
+            open_prs.as_ref(),
             daemon_secret,
             issue_number,
             now,
@@ -1180,9 +1192,69 @@ fn autonomous_readback_target(monitor: &IssueMonitorState, issue_number: u64) ->
     )
 }
 
+/// Issue #3963 AC-2/AC-3: the one open-PR inventory a scan reads for its
+/// Implementing candidates, keyed by head branch.
+///
+/// `None` when no candidate needs it or the readback degraded. A degraded
+/// inventory is recorded once, naming how many candidates it left unknown; the
+/// Implementing arm then leaves every one of them on the phase the last
+/// successful scan gave it, and the launch stage still runs.
+fn read_open_pr_inventory(
+    monitor: &IssueMonitorState,
+    in_flight: &[u64],
+    repo_path: &Path,
+    degradations: &mut Vec<IssueMonitorScanDegradation>,
+) -> Option<std::collections::HashMap<String, u64>> {
+    let implementing = in_flight
+        .iter()
+        .filter(|issue_number| {
+            monitor
+                .autonomous_record(**issue_number)
+                .is_some_and(|record| record.phase == crate::AutonomousPhase::Implementing)
+        })
+        .count();
+    if implementing == 0 {
+        return None;
+    }
+    let target = Some(if implementing == 1 {
+        "1 implementing candidate".to_string()
+    } else {
+        format!("{implementing} implementing candidates")
+    });
+    if !readback_fan_out_has_budget() {
+        degradations.push(IssueMonitorScanDegradation {
+            stage: IssueMonitorScanStage::OpenPrReadback,
+            target,
+            continuation: IssueMonitorScanContinuation::StaleReadback,
+            detail: "scan budget reserved for the launch stage".to_string(),
+        });
+        return None;
+    }
+    match run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch(repo_path)
+    }) {
+        Ok(index) => Some(index),
+        Err(failure) => {
+            tracing::warn!(
+                stage = %failure.stage,
+                error = %failure.detail,
+                implementing,
+                "issue monitor open-PR inventory degraded; keeping the previous phases"
+            );
+            degradations.push(IssueMonitorScanDegradation::new(
+                failure,
+                target,
+                IssueMonitorScanContinuation::StaleReadback,
+            ));
+            None
+        }
+    }
+}
+
 /// Advance one in-flight autonomous issue by a single step. Every remote
 /// readback here runs under its own budget ([`run_budgeted_readback_stage`]), so
-/// a slow candidate cannot spend the budget the next candidate needs.
+/// a slow candidate cannot spend the budget the next candidate needs. The
+/// open-PR lookup itself is served from `open_prs`, the scan's one inventory.
 #[allow(clippy::too_many_arguments)]
 fn advance_one_autonomous_issue(
     monitor: &mut IssueMonitorState,
@@ -1190,6 +1262,7 @@ fn advance_one_autonomous_issue(
     repo_slug: &str,
     repo_path: &Path,
     base_branch: &str,
+    open_prs: Option<&std::collections::HashMap<String, u64>>,
     daemon_secret: &[u8],
     issue_number: u64,
     now: &str,
@@ -1206,11 +1279,10 @@ fn advance_one_autonomous_issue(
             else {
                 return Ok(());
             };
-            if let Some(pr) =
-                run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-                    gwt_git::pr_status::try_fetch_open_pr_number_for_branch(repo_path, &branch)
-                })?
-            {
+            // Issue #3963 AC-2/AC-3: resolved from the scan's one inventory. No
+            // inventory (the readback degraded) and no row (no open PR) both
+            // leave the phase where the last successful readback put it.
+            if let Some(pr) = open_prs.and_then(|index| index.get(&branch).copied()) {
                 if let Some(sha) =
                     run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
                         gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)

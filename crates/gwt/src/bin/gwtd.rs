@@ -220,6 +220,7 @@ fn format_issue_help() -> String {
         "  issue.spec.repair | issue.spec.rename",
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
+        "  issue.monitor.profiles | issue.monitor.profiles.set",
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
@@ -1060,6 +1061,9 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            // SPEC #3914 FR-011: the launch candidate pool.
+            "issue.monitor.profiles",
+            "issue.monitor.profiles.set",
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",
