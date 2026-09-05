@@ -3774,6 +3774,18 @@ fn sample_runtime_with_events(
     let log_dir = temp_root.join("logs");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::create_dir_all(&log_dir).expect("create log dir");
+    // Issue #3972: any test that drives a real launch from this runtime
+    // health-checks the host package runner before spawning a provider, and on
+    // a loaded host that check misses its five-second budget. Pin the launch
+    // PATH to fixture runners here so the whole class is hermetic rather than
+    // depending on which CLIs happen to be installed on the machine running the
+    // suite. Tests that pre-write their own profile config keep it.
+    let profile_config_path = temp_root.join("profile-config.toml");
+    if !profile_config_path.exists() {
+        let mut settings = Settings::default();
+        pin_launch_package_runners(&mut settings, &write_fixture_package_runners(temp_root));
+        write_profile_config(&profile_config_path, &settings);
+    }
     let launch_wizard_cache =
         LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, sample_agent_options());
     let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -3784,7 +3796,7 @@ fn sample_runtime_with_events(
         active_tab_id: active_tab_id.map(str::to_owned),
         recent_projects: Vec::new(),
         profile_selections: HashMap::new(),
-        profile_config_path: Some(temp_root.join("profile-config.toml")),
+        profile_config_path: Some(profile_config_path),
         runtimes: HashMap::new(),
         window_details: HashMap::new(),
         launch_error_terminal_details: HashMap::new(),
