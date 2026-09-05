@@ -9620,9 +9620,8 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         let cache = gwt_github::Cache::new(cache_root);
         // Comfortably past the targeted-refresh limit, the way the real queue was.
-        let queued: Vec<u64> = (1..=crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT
-            as u64
-            + 5)
+        let queued: Vec<u64> = (1
+            ..=crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT as u64 + 5)
             .collect();
         for issue_number in &queued {
             cache
