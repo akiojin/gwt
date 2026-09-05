@@ -4665,12 +4665,16 @@ impl IssueMonitorState {
     /// Issue #3917: settlements are monotonic facts; the newest per Issue wins.
     fn merge_merged_issue_settlements_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
         for settlement in &disk.merged_issue_settlements {
+            // Order by the parsed instant, not the string: a writer that
+            // stamps a non-`Z` offset would otherwise sort after a later `Z`
+            // instant and keep the older settlement.
+            let incoming_at = parse_rfc3339_utc(&settlement.settled_at);
             let newer = self
                 .merged_issue_settlements
                 .get(&settlement.issue_number)
                 .is_none_or(|current| {
-                    (settlement.settled_at.as_str(), settlement.pr_number)
-                        > (current.settled_at.as_str(), current.pr_number)
+                    (incoming_at, settlement.pr_number)
+                        > (parse_rfc3339_utc(&current.settled_at), current.pr_number)
                 });
             if newer {
                 self.merged_issue_settlements

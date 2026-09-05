@@ -1364,6 +1364,10 @@ pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BT
     fetch_merged_pr_deliveries_with(repo_path, run_gh_command).map(|merged| merged.branches)
 }
 
+/// The base branch whose merges deliver a work branch (Issue #3917). `main`
+/// merges are release integration, not delivery, so they never settle an Issue.
+pub const SETTLEMENT_BASE_BRANCH: &str = "develop";
+
 /// One merged pull request for a head branch (Issue #3917). The merge SHA
 /// and base branch are optional because `gh` may omit them for old or
 /// unusual merges; the PR number is what identifies the delivery.
@@ -1464,6 +1468,12 @@ pub fn parse_merged_pr_deliveries(json: &str) -> Result<MergedPrDeliveries> {
             base_ref: text("baseRefName"),
             merged_at: text("mergedAt"),
         };
+        // Issue #3917: only a merge into the integration branch delivers the
+        // work. A later merge of the same head branch into `main` (release) or
+        // any other base must not become the branch's settlement delivery.
+        if delivery.base_ref.as_deref() != Some(SETTLEMENT_BASE_BRANCH) {
+            continue;
+        }
         let newer = match merged.deliveries.get(branch) {
             None => true,
             Some(current) => match (&delivery.merged_at, &current.merged_at) {
@@ -2641,13 +2651,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_merged_pr_deliveries_ignores_merges_into_other_bases() {
+        // Issue #3917: only a merge into `develop` delivers the work. A newer
+        // merge of the same head branch into another base must neither replace
+        // the develop delivery nor become one on its own.
+        let json = r#"[
+            {"headRefName":"work/issue-42","state":"MERGED","number":7,"mergeCommit":{"oid":"aaa"},"mergedAt":"2026-09-01T00:00:00Z","baseRefName":"develop"},
+            {"headRefName":"work/issue-42","state":"MERGED","number":9,"mergeCommit":{"oid":"bbb"},"mergedAt":"2026-09-02T00:00:00Z","baseRefName":"release/9.90"},
+            {"headRefName":"work/issue-50","state":"MERGED","number":11,"mergeCommit":{"oid":"ccc"},"mergedAt":"2026-09-02T00:00:00Z","baseRefName":"main"},
+            {"headRefName":"work/issue-51","state":"MERGED","number":12,"mergeCommit":{"oid":"ddd"},"mergedAt":"2026-09-02T00:00:00Z"}
+        ]"#;
+        let parsed = parse_merged_pr_deliveries(json).unwrap();
+        let delivery = parsed.deliveries.get("work/issue-42").expect("delivery");
+        assert_eq!(
+            delivery.number, 7,
+            "the develop merge stays the delivery even though a later merge exists"
+        );
+        assert_eq!(delivery.merge_sha.as_deref(), Some("aaa"));
+        assert!(
+            !parsed.deliveries.contains_key("work/issue-50"),
+            "a merge into main is release integration, not delivery"
+        );
+        assert!(
+            !parsed.deliveries.contains_key("work/issue-51"),
+            "an unknown base fails closed"
+        );
+        assert!(
+            parsed.branches.contains("work/issue-50") && parsed.branches.contains("work/issue-51"),
+            "branch-only reconciliation keeps every merged head branch"
+        );
+    }
+
+    #[test]
     fn fetch_merged_pr_deliveries_requests_delivery_fields() {
         let mut seen = Vec::new();
         let parsed = fetch_merged_pr_deliveries_with(Path::new("/repo"), |_, args| {
             seen.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"[{"headRefName":"work/issue-1","state":"MERGED","number":3,"mergeCommit":{"oid":"c0ffee"}}]"#.to_string(),
+                stdout: r#"[{"headRefName":"work/issue-1","state":"MERGED","number":3,"mergeCommit":{"oid":"c0ffee"},"baseRefName":"develop"}]"#.to_string(),
                 stderr: String::new(),
             })
         })

@@ -163,7 +163,24 @@ pub fn fetch_issue_comment_bodies(owner: &str, repo: &str, number: u64) -> Resul
     parse_gh_issue_comment_bodies(&output.stdout)
 }
 
-/// Parse `gh issue view --json comments` into the comment bodies in order.
+/// Repository roles whose comment may carry a delegation record (Issue #3917
+/// AC-2). A settlement can close an Issue with unchecked criteria on the
+/// strength of such a comment, so a drive-by commenter must not be able to
+/// author one. Anything else — including a missing association — fails closed.
+const TRUSTED_COMMENT_AUTHOR_ASSOCIATIONS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
+
+/// Whether `association` (GitHub's `authorAssociation`) is a repository role
+/// gwt trusts to record decisions about the Issue.
+fn comment_author_is_trusted(association: Option<&str>) -> bool {
+    association.is_some_and(|association| {
+        TRUSTED_COMMENT_AUTHOR_ASSOCIATIONS
+            .iter()
+            .any(|trusted| association.eq_ignore_ascii_case(trusted))
+    })
+}
+
+/// Parse `gh issue view --json comments` into the comment bodies in order,
+/// keeping only comments written by a trusted repository role.
 pub fn parse_gh_issue_comment_bodies(json: &str) -> Result<Vec<String>> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| GwtError::Other(e.to_string()))?;
@@ -173,6 +190,13 @@ pub fn parse_gh_issue_comment_bodies(json: &str) -> Result<Vec<String>> {
         .map(|comments| {
             comments
                 .iter()
+                .filter(|comment| {
+                    comment_author_is_trusted(
+                        comment
+                            .get("authorAssociation")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                })
                 .filter_map(|comment| comment.get("body").and_then(serde_json::Value::as_str))
                 .map(String::from)
                 .collect()
@@ -273,11 +297,30 @@ mod tests {
     #[test]
     fn parse_gh_issue_comment_bodies_reads_comments_array() {
         // Issue #3917 AC-2: delegation records may live in Issue comments.
-        let json = r#"{"comments":[{"body":"first"},{"body":"残 AC は別 Issue に委譲 (#77)"},{"author":{"login":"x"}}]}"#;
+        let json = r#"{"comments":[{"authorAssociation":"OWNER","body":"first"},{"authorAssociation":"collaborator","body":"残 AC は別 Issue に委譲 (#77)"},{"authorAssociation":"MEMBER","author":{"login":"x"}}]}"#;
         let bodies = parse_gh_issue_comment_bodies(json).unwrap();
         assert_eq!(bodies, vec!["first", "残 AC は別 Issue に委譲 (#77)"]);
         assert!(parse_gh_issue_comment_bodies("{}").unwrap().is_empty());
         assert!(parse_gh_issue_comment_bodies("not json").is_err());
+    }
+
+    #[test]
+    fn parse_gh_issue_comment_bodies_drops_untrusted_authors() {
+        // A delegation record can close an Issue whose criteria are unchecked,
+        // so only a repository role may author one. Everything else — an
+        // outside contributor, a first-time commenter, a missing association —
+        // fails closed.
+        let json = r#"{"comments":[
+            {"authorAssociation":"NONE","body":"残 AC は別 Issue に委譲 (#77)"},
+            {"authorAssociation":"CONTRIBUTOR","body":"残 AC は別 Issue に委譲 (#78)"},
+            {"authorAssociation":"FIRST_TIME_CONTRIBUTOR","body":"残 AC は別 Issue に委譲 (#79)"},
+            {"body":"残 AC は別 Issue に委譲 (#80)"},
+            {"authorAssociation":"OWNER","body":"owner note"}
+        ]}"#;
+        assert_eq!(
+            parse_gh_issue_comment_bodies(json).unwrap(),
+            vec!["owner note"]
+        );
     }
 
     #[test]
