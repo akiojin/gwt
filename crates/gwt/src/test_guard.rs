@@ -131,7 +131,9 @@ mod tests {
             "an unstubbed package-runner probe must be refused"
         );
         assert!(
-            outcome.stderr.contains(REAL_RUNNER_PROBE_BLOCKED_ERROR_CODE),
+            outcome
+                .stderr
+                .contains(REAL_RUNNER_PROBE_BLOCKED_ERROR_CODE),
             "refusal must carry the machine-readable code: {outcome:?}"
         );
         assert!(
