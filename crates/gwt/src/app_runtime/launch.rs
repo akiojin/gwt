@@ -164,15 +164,28 @@ fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
     Ok((gate_program, gate_args))
 }
 
-/// Record a rejected agent resource policy without failing the launch.
+/// Apply an agent resource policy to a gated launch without letting a
+/// rejection fail it.
 ///
 /// Issue #3942: the tree-wide priority of SPEC #1921 Phase 86 (#3813) is an
 /// optimization for GUI responsiveness, not a precondition for running an
 /// agent. `setpriority` returns EPERM on every host where the launcher may not
 /// renice the target's process group, and propagating that turned an ordinary
 /// launch into a user-facing `PTY creation failed: setpriority permission
-/// denied`. Warn instead and let the target run at the inherited priority.
-pub(crate) fn apply_best_effort_agent_resource_policy(
+/// denied`. This returns nothing on purpose: the spawn routes never hold an
+/// outcome they could propagate, panic on, or drop silently.
+pub(crate) fn best_effort_apply_policy(
+    window_id: &str,
+    pending: &gwt_terminal::PendingPane,
+    policy: gwt_terminal::pty::ProcessPolicy,
+) {
+    note_unapplied_agent_resource_policy(window_id, pending.apply_policy(policy));
+}
+
+/// Warn about a rejected policy and let the target run at the inherited
+/// priority. Split from `best_effort_apply_policy` so the warning contract is
+/// testable without a live PTY.
+pub(crate) fn note_unapplied_agent_resource_policy(
     window_id: &str,
     outcome: Result<(), gwt_terminal::TerminalError>,
 ) {
@@ -3802,7 +3815,7 @@ impl AppRuntime {
                 uuid::Uuid::new_v4().to_string(),
             )
             .map_err(|error| error.to_string())?;
-            apply_best_effort_agent_resource_policy(id, pending.apply_policy(policy));
+            best_effort_apply_policy(id, &pending, policy);
             pending.release().map_err(|error| error.to_string())?
         } else {
             Pane::new_with_spawn_config(id.to_string(), spawn_config)
@@ -3891,7 +3904,7 @@ impl AppRuntime {
         // after identity proof and before release, so the target never runs
         // ungoverned.
         if let Some(policy) = resource_policy {
-            apply_best_effort_agent_resource_policy(id, pending.apply_policy(policy));
+            best_effort_apply_policy(id, &pending, policy);
         }
         let pane = pending.release().map_err(|error| error.to_string())?;
         self.install_process_window(id, incarnation, pane, console_kind);

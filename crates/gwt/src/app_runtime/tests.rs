@@ -155,20 +155,31 @@ fn agent_resource_policy_failure_never_fails_the_spawn_routes() {
         .expect("bound spawn route body");
 
     for (route, body) in [("direct", direct), ("bound", bound)] {
-        assert!(
-            body.contains("apply_best_effort_agent_resource_policy("),
-            "{route} route must apply the resource policy as best effort"
-        );
         let apply = body
-            .find("apply_policy(policy)")
-            .expect("apply_policy call");
+            .find("best_effort_apply_policy(")
+            .expect("best-effort policy application");
         let statement_end = body[apply..].find(';').expect("apply_policy statement end");
         let statement = &body[apply..apply + statement_end];
-        assert!(
-            !statement.contains('?'),
-            "{route} route must not propagate a resource policy failure: {statement}"
-        );
+        for propagation in ["?", ".unwrap(", ".expect(", "map_err"] {
+            assert!(
+                !statement.contains(propagation),
+                "{route} route must not turn a resource policy failure into a launch failure: \
+                 {statement}"
+            );
+        }
     }
+
+    // The routes cannot re-introduce the failure path even by editing the
+    // statement: the helper owns the call and hands no outcome back.
+    let helper = source
+        .split("pub(crate) fn best_effort_apply_policy(")
+        .nth(1)
+        .expect("best-effort helper");
+    let signature = &helper[..helper.find('{').expect("helper body")];
+    assert!(
+        !signature.contains("->"),
+        "the best-effort helper must not return an outcome the routes could propagate: {signature}"
+    );
 }
 
 /// Issue #3942 AC-2 / AC-3: a rejected policy is a single warning, never an
@@ -176,7 +187,7 @@ fn agent_resource_policy_failure_never_fails_the_spawn_routes() {
 #[test]
 fn agent_resource_policy_failure_warns_once_and_keeps_the_launch() {
     let events = capture_tracing_events(|| {
-        super::launch::apply_best_effort_agent_resource_policy(
+        super::launch::note_unapplied_agent_resource_policy(
             "window-3942",
             Err(gwt_terminal::TerminalError::PtyCreationFailed {
                 reason: "apply process policy: setpriority(pgrp 4242, nice 10): \
@@ -213,7 +224,7 @@ fn agent_resource_policy_failure_warns_once_and_keeps_the_launch() {
     );
 
     let applied = capture_tracing_events(|| {
-        super::launch::apply_best_effort_agent_resource_policy("window-3942", Ok(()));
+        super::launch::note_unapplied_agent_resource_policy("window-3942", Ok(()));
     });
     assert!(
         applied.iter().all(|event| !matches!(
