@@ -51557,11 +51557,8 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     // Both copies exist on disk in a real worktree: the workspace-home copy is
     // written by the launch refresh, the worktree-local copy is tracked content
     // refreshed by the `Both`-mode managed-asset writers.
-    gwt_skills::generate_codex_hooks_for_mode(
-        &worktree,
-        gwt_skills::CodexHookDiscoveryMode::Both,
-    )
-    .expect("refresh managed codex hooks");
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, gwt_skills::CodexHookDiscoveryMode::Both)
+        .expect("refresh managed codex hooks");
 
     let report = super::maybe_register_codex_managed_hook_trust_for_launch(
         &profile_config_path,

@@ -19,8 +19,7 @@ const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
 /// transports. Recognising the transport says only "gwt owns this hook", never
 /// "this hook is safe" — trust still requires an exact match against a command
 /// gwt emits.
-const GWT_HOOK_TRANSPORT_MARKERS: &[&str] =
-    &[" hook event ", " hook gwt-self-improvement-stop"];
+const GWT_HOOK_TRANSPORT_MARKERS: &[&str] = &[" hook event ", " hook gwt-self-improvement-stop"];
 const MANAGED_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
@@ -824,9 +823,11 @@ mod tests {
         )
         .unwrap();
 
-        let entries =
-            collect_codex_managed_hook_trust_entries_with_expected_bin(dir.path(), Some(windows_bin))
-                .unwrap();
+        let entries = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            dir.path(),
+            Some(windows_bin),
+        )
+        .unwrap();
 
         assert_eq!(
             entries.len(),
