@@ -493,7 +493,6 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "board.show"
             | "board.config.show"
             | "board.config-show"
-            | "improvement.list"
             | "issue.view"
             | "issue.comments"
             | "issue.linked_prs"
