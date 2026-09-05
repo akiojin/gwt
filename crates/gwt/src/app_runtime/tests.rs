@@ -43066,8 +43066,6 @@ fn app_runtime_recovery_blocked_control_never_recovers_or_mutates_corrupt_prefs(
 #[cfg(unix)]
 #[test]
 fn app_runtime_issue_monitor_cache_only_control_bounds_origin_probe() {
-    use std::os::unix::fs::PermissionsExt;
-
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -43089,7 +43087,9 @@ fn app_runtime_issue_monitor_cache_only_control_bounds_origin_probe() {
     let fake_bin = temp.path().join("fake-bin");
     fs::create_dir_all(&fake_bin).expect("create fake bin");
     let fake_git = fake_bin.join("git");
-    fs::write(
+    // Issue #3521: written by a child shell so no fork in a sibling test can
+    // inherit a writable descriptor and turn the exec into ETXTBSY.
+    gwt_core::test_support::write_executable_script(
         &fake_git,
         r#"#!/bin/sh
 if [ "$1" = "rev-parse" ] && [ "$2" = "--path-format=absolute" ]; then
@@ -43105,7 +43105,6 @@ exit 1
 "#,
     )
     .expect("write fake git");
-    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).expect("chmod fake git");
     let _path = prepend_tool_parent_to_path(&fake_git);
 
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
