@@ -865,7 +865,8 @@ fn existing_generation_conflict_detail(
         format!(" held by Session {session_id} ({session_state})")
     });
     format!(
-        "an execution generation already exists for {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        "{} {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        gwt::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX,
         owner.kind.as_str(),
         owner.number,
         status,

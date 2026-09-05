@@ -2007,14 +2007,16 @@ fn reap_scan_defunct_active_generations(project_root: &Path) {
         &worktrees,
         &[],
         &std::collections::HashSet::new(),
+        startup::GenerationReaperFailureLog::Debug,
     );
-    if summary.reaped > 0 || summary.replayed > 0 || summary.failures > 0 {
+    if summary.reaped > 0 || summary.replayed > 0 {
         tracing::info!(
             project_root = %project_root.display(),
             inspected = summary.inspected,
             reaped = summary.reaped,
             replayed = summary.replayed,
             protected = summary.protected,
+            unchanged = summary.unchanged,
             failures = summary.failures,
             "scan Active generation reaper completed"
         );
@@ -2037,6 +2039,23 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // `crates/gwt/tests/bin_gwt_home_isolation_contract_test.rs`.
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
 
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+        .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
+    // Issue #3934: reclaim the execution generations of holders that are gone
+    // before this tick decides what it may launch. The startup reaper used to
+    // be the only one, so a holder Session that died between GUI restarts kept
+    // its owner permanently unlaunchable and the only recovery left was
+    // registering the same work under a fresh Issue number.
+    //
+    // Issue #3964 AC-1: this runs before the authority probe on purpose. The
+    // reaper is local recovery under its own leases, not a scan effect, and a
+    // live daemon — which owns scan authority in production and has no reaper
+    // of its own — used to make this worker defer before it ever got here, so
+    // the scan-cadence recovery never ran after startup.
+    if prefs.enabled {
+        reap_scan_defunct_active_generations(project_root);
+    }
+
     // Cheap authority probe before any remote I/O. The lease is intentionally
     // dropped before the side-effect-free GitHub scan so daemon startup is not
     // held off by a slow network. Authority is acquired again immediately
@@ -2049,19 +2068,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         Err(error) => return Err(format!("Issue Monitor authority probe failed: {error}")),
     }
 
-    let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-        .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
     let cleanup_only = !prefs.enabled && issue_monitor_prefs_need_local_claim_cleanup(&prefs);
     if !prefs.enabled && !cleanup_only {
         return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
-    }
-    // Issue #3934: reclaim the execution generations of holders that are gone
-    // before this tick decides what it may launch. The startup reaper used to
-    // be the only one, so a holder Session that died between GUI restarts kept
-    // its owner permanently unlaunchable and the only recovery left was
-    // registering the same work under a fresh Issue number.
-    if !cleanup_only {
-        reap_scan_defunct_active_generations(project_root);
     }
 
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
