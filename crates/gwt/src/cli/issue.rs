@@ -682,22 +682,28 @@ fn run_monitor_launch_now<E: CliEnv>(
     Ok(if delivery.scan_requested { 0 } else { 1 })
 }
 
-/// Issue #3923 AC-1: list every provider quota hold in force with the evidence
-/// it was formed from.
+/// Issue #3923 AC-1 / Issue #3961 AC-3: list every provider quota hold in
+/// force with the evidence it was formed from.
 ///
-/// Read from the daemon's live projection when one is up (the same snapshot
-/// `issue.monitor.status` serves), otherwise from the durable prefs. Expired
-/// holds are not listed: they no longer gate anything.
+/// Read from the durable prefs — the store every Issue Monitor process
+/// persists to and the file the PM inspects — so the list can never disagree
+/// with that file the way a live projection served by a daemon that predates
+/// the hold fields did (it answered `[]` while the file held two providers).
+/// Expired and released holds are not listed: they no longer gate anything.
 fn run_monitor_quota_hold_list<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let holds = live_provider_quota_holds(&project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     out.push_str(
         &serde_json::json!({
-            "provider_quota_holds": holds,
+            "provider_quota_holds": monitor.agent_status_at(&now).provider_quota_holds,
+            "source": "durable_prefs",
         })
         .to_string(),
     );
@@ -705,31 +711,20 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
     Ok(0)
 }
 
-fn live_provider_quota_holds(
-    project_root: &std::path::Path,
-) -> Result<Vec<crate::IssueMonitorProviderQuotaHold>, SpecOpsError> {
-    #[cfg(unix)]
-    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
-        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
-    {
-        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
-            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
-        return Ok(status.provider_quota_holds);
-    }
-    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
-    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    Ok(monitor.agent_status_at(&now).provider_quota_holds)
-}
-
-/// Issue #3923 AC-1: release one provider's quota hold.
+/// Issue #3923 AC-1 / Issue #3961 AC-4: release one provider's quota
+/// hold on the operator's authority.
 ///
-/// The release is committed under the prefs lock as a durable fence, so the
-/// daemon (which joins holds by the later reset and would otherwise re-stamp
-/// the hold from memory) adopts the release on its next rebase. Every issue
-/// the hold was holding is readmitted, and one immediate scan is requested so
-/// the queue moves without waiting for the next tick.
+/// The release is applied to the authoritative state. When a daemon owns the
+/// control lane, the control lands in its in-memory state inside the same
+/// lock-protected commit that persists it — a release that only reached disk
+/// was joined away again by the daemon's own rebase, or dropped outright by a
+/// daemon that predates the fence. Only when no daemon transport exists (and
+/// no authority fence is held) are the durable prefs the authority and
+/// written directly. Either way the durable prefs are read back and must
+/// carry this release's fence with the provider no longer held; otherwise the
+/// operation refuses instead of reporting a release nobody adopted. Every
+/// issue the hold was holding is readmitted, and one immediate scan is
+/// requested so the queue moves without waiting for the next tick.
 fn run_monitor_quota_hold_clear<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -739,63 +734,183 @@ fn run_monitor_quota_hold_clear<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Refuse before publishing so the daemon never has to reject a control it
+    // cannot explain back to the caller.
+    let Some(provider) = crate::issue_monitor::normalize_issue_monitor_provider(provider) else {
+        return refuse_quota_hold_clear(
+            out,
+            provider,
+            "unknown_provider",
+            "provider must name the held agent (for example codex or claude)",
+        );
+    };
     // Millisecond precision: the fence orders holds by instant, and a hold
     // formed right after this clear must not share its second.
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
-        let outcome = monitor.clear_provider_quota_hold(provider, reason, &now);
-        if matches!(
-            outcome,
-            crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
-        ) {
-            *prefs = monitor.prefs();
-        }
-        Ok(outcome)
-    })
-    .map_err(io_as_api_error)?;
+    let released_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let before = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let held_before = issues_held_by_provider(&before, &provider);
 
-    let crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
-        released_reset_at,
-        released_issues,
-    } = outcome
-    else {
-        out.push_str(
-            &serde_json::json!({
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "quota_hold_clear": {
                 "provider": provider,
-                "status": "refused",
-                "refusal": "unknown_provider",
-                "detail": "provider must name the held agent (for example codex or claude)",
-            })
-            .to_string(),
-        );
-        out.push('\n');
-        return Ok(1);
+                "reason": reason,
+                "released_at": released_at,
+            }
+        }),
+        std::process::id(),
+    );
+    let delivery = match publish_monitor_config_set(&project_root, payload) {
+        Ok(()) => "daemon",
+        Err(error) if error.allows_local_fallback() => {
+            // No daemon transport: the durable prefs are the authority — unless
+            // a fence says a daemon still owns them, in which case the write
+            // is refused rather than forked.
+            let written = crate::try_mutate_issue_monitor_prefs_without_authority_fence(
+                &prefs_path,
+                |prefs| {
+                    let mut monitor = crate::IssueMonitorState::with_prefs(
+                        crate::IssueMonitorConfig::default(),
+                        prefs.clone(),
+                    );
+                    if matches!(
+                        monitor.clear_provider_quota_hold(&provider, reason, &released_at),
+                        crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+                    ) {
+                        *prefs = monitor.prefs();
+                    }
+                    Ok(())
+                },
+            );
+            if let Err(error) = written {
+                return refuse_quota_hold_clear(
+                    out,
+                    &provider,
+                    "durable_write_refused",
+                    &format!(
+                        "no daemon transport and the durable prefs refused the release: {error}"
+                    ),
+                );
+            }
+            "durable_prefs"
+        }
+        Err(error) => {
+            return refuse_quota_hold_clear(
+                out,
+                &provider,
+                quota_hold_clear_publish_refusal(&error),
+                &format!(
+                    "the live Issue Monitor daemon did not adopt the release ({error}); \
+                     a daemon that predates this control rejects it — restart the GWT app and retry"
+                ),
+            );
+        }
     };
-    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+
+    // Adoption proof: the durable prefs must carry this release's fence and
+    // must no longer hold the provider. An acknowledgment alone is not it.
+    let after = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let release = after
+        .provider_quota_hold_releases
+        .get(&provider)
+        .filter(|release| release.released_at == released_at)
+        .cloned();
     let remaining =
-        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs)
-            .agent_status_at(&now)
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), after.clone())
+            .agent_status_at(&released_at)
             .provider_quota_holds;
+    let still_held = remaining.iter().any(|hold| hold.provider == provider);
+    let Some(release) = release.filter(|_| !still_held) else {
+        return refuse_quota_hold_clear(
+            out,
+            &provider,
+            "not_adopted",
+            &format!(
+                "{delivery} accepted the release but the durable prefs do not carry it \
+                 (fence recorded: {}, provider still held: {still_held}); the process owning \
+                 the Issue Monitor state may predate this operation — restart the GWT app and retry",
+                after.provider_quota_hold_releases.contains_key(&provider)
+            ),
+        );
+    };
+    let held_after = issues_held_by_provider(&after, &provider);
+    let released_issues = held_before
+        .difference(&held_after)
+        .copied()
+        .collect::<Vec<_>>();
+    let scan = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
     out.push_str(
         &serde_json::json!({
             "provider": provider,
-            "status": if released_reset_at.is_some() { "cleared" } else { "not_held" },
+            "status": if release.released_reset_at.is_some() { "cleared" } else { "not_held" },
             "reason": reason,
-            "released_reset_at": released_reset_at,
+            "released_at": released_at,
+            "released_reset_at": release.released_reset_at,
             "released_issues": released_issues,
             "provider_quota_holds": remaining,
-            "scan_requested": delivery.scan_requested,
-            "scan_delivery": delivery.scan_delivery,
-            "scan_error": delivery.scan_error,
+            "delivery": delivery,
+            "scan_requested": scan.scan_requested,
+            "scan_delivery": scan.scan_delivery,
+            "scan_error": scan.scan_error,
         })
         .to_string(),
     );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #3961 AC-4: a stable, greppable name for each way the release can
+/// fail to reach the authoritative state.
+fn quota_hold_clear_publish_refusal(
+    error: &crate::runtime_daemon_events::IssueMonitorControlPublishError,
+) -> &'static str {
+    use crate::runtime_daemon_events::IssueMonitorControlPublishError as PublishError;
+    match error {
+        PublishError::Rejected(_) => "daemon_rejected",
+        PublishError::OutcomeUnknown(_) => "daemon_outcome_unknown",
+        PublishError::Busy(_) => "daemon_busy",
+        PublishError::RecoveryBlocked => "authority_recovery_blocked",
+        PublishError::TransportUnavailable(_) => "daemon_unavailable",
+    }
+}
+
+fn refuse_quota_hold_clear(
+    out: &mut String,
+    provider: &str,
+    refusal: &str,
+    detail: &str,
+) -> Result<i32, SpecOpsError> {
+    out.push_str(
+        &serde_json::json!({
+            "provider": provider,
+            "status": "refused",
+            "refusal": refusal,
+            "detail": detail,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(1)
+}
+
+/// Issues whose retry hold mirrors `provider`'s quota hold.
+fn issues_held_by_provider(
+    prefs: &crate::IssueMonitorPrefs,
+    provider: &str,
+) -> std::collections::BTreeSet<u64> {
+    prefs
+        .autonomous_records
+        .iter()
+        .filter(|record| {
+            record
+                .retry_hold_provider
+                .as_deref()
+                .and_then(crate::issue_monitor::normalize_issue_monitor_provider)
+                .is_some_and(|held| held == provider)
+        })
+        .map(|record| record.issue_number)
+        .collect()
 }
 
 /// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
@@ -5287,6 +5402,9 @@ mod tests {
         assert_eq!(cleared["released_reset_at"], reset_at);
         assert_eq!(cleared["released_issues"], serde_json::json!([42]));
         assert_eq!(cleared["provider_quota_holds"], serde_json::json!([]));
+        // Issue #3961: no daemon owns the state here, so the durable prefs
+        // are the authority and the response says which path was taken.
+        assert_eq!(cleared["delivery"], "durable_prefs");
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
         assert!(persisted.provider_quota_holds.is_empty());
@@ -5349,5 +5467,208 @@ mod tests {
         let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
         assert_eq!(refused["status"], "refused");
         assert_eq!(refused["refusal"], "unknown_provider");
+    }
+
+    /// Issue #3961: one prefs file holding a live `codex` quota hold, as the
+    /// PM sees it before a release.
+    #[cfg(unix)]
+    fn seed_codex_quota_hold(prefs_path: &Path) -> crate::IssueMonitorPrefs {
+        let reset_at = (chrono::Utc::now() + chrono::Duration::days(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let seed = crate::IssueMonitorPrefs {
+            enabled: true,
+            provider_quota_holds: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                reset_at,
+            )]),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(prefs_path, &seed).expect("seed prefs");
+        seed
+    }
+
+    /// Issue #3961: a fake daemon that owns the control lane and answers one
+    /// `quota_hold_clear` publish with `reply` without touching the prefs —
+    /// the shape of a daemon that predates the control (rejects) and of one
+    /// that acknowledges without adopting the release.
+    #[cfg(unix)]
+    fn spawn_quota_hold_clear_daemon(
+        tmp: &Path,
+        repo: &Path,
+        reply: gwt_core::daemon::DaemonFrame,
+    ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            repo,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .expect("runtime scope");
+        let socket_path = tmp.join("quota-hold.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind live daemon");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking live daemon");
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.to_string_lossy().to_string(),
+            "quota-hold-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .expect("persist live daemon endpoint");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !server_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                let (stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("accept control client: {error}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking control client stream");
+                let mut reader =
+                    std::io::BufReader::new(stream.try_clone().expect("clone control stream"));
+                let mut writer = stream;
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read control handshake");
+                let request: gwt_core::daemon::IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end()).expect("parse control handshake");
+                assert_eq!(request.scope, scope);
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                        protocol_version: gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                        daemon_version: "test-daemon".to_string(),
+                        accepted: true,
+                        rejection_reason: None,
+                    })
+                    .expect("serialize control handshake")
+                )
+                .expect("write control handshake");
+                line.clear();
+                reader.read_line(&mut line).expect("read control publish");
+                let gwt_core::daemon::ClientFrame::Publish { channel, payload } =
+                    serde_json::from_str::<gwt_core::daemon::ClientFrame>(line.trim_end())
+                        .expect("parse control publish")
+                else {
+                    panic!("expected a control publish, got {line}");
+                };
+                assert_eq!(
+                    channel,
+                    crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                );
+                assert_eq!(payload["payload"]["quota_hold_clear"]["provider"], "codex");
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&reply).expect("serialize control reply")
+                )
+                .expect("write control reply");
+                return;
+            }
+        });
+        (stop, server)
+    }
+
+    /// Issue #3961 AC-4: the live daemon owns the authoritative hold
+    /// state. When it rejects the release — a daemon that predates the control
+    /// does exactly this — the CLI must neither fall back to a disk write the
+    /// daemon would overwrite nor report `cleared`.
+    #[test]
+    #[cfg(unix)]
+    fn quota_hold_clear_fails_closed_when_the_live_daemon_rejects_the_release() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let seed = seed_codex_quota_hold(&prefs_path);
+        let (stop, server) = spawn_quota_hold_clear_daemon(
+            tmp.path(),
+            &repo,
+            gwt_core::daemon::DaemonFrame::Error {
+                message: "unknown issue monitor control".to_string(),
+            },
+        );
+
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM ruling".to_string(),
+            },
+            &mut out,
+        );
+        stop.store(true, Ordering::Release);
+        server.join().expect("live daemon joins");
+        let code = result.expect("clear result");
+        assert_eq!(code, 1, "clear output: {out}");
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "daemon_rejected");
+        assert!(
+            refused["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown issue monitor control"),
+            "the daemon's reason reaches the caller: {refused}"
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs");
+        assert_eq!(
+            persisted.provider_quota_holds, seed.provider_quota_holds,
+            "a refused release must leave the durable hold untouched"
+        );
+        assert!(persisted.provider_quota_hold_releases.is_empty());
+    }
+
+    /// Issue #3961 AC-4: an acknowledgment is not adoption. When the daemon
+    /// acks but the durable prefs still hold the provider and carry no release
+    /// fence, `cleared` would be exactly the silent no-op this Issue is about.
+    #[test]
+    #[cfg(unix)]
+    fn quota_hold_clear_refuses_when_an_acking_daemon_does_not_adopt_the_release() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let seed = seed_codex_quota_hold(&prefs_path);
+        let (stop, server) =
+            spawn_quota_hold_clear_daemon(tmp.path(), &repo, gwt_core::daemon::DaemonFrame::Ack);
+
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "PM ruling".to_string(),
+            },
+            &mut out,
+        );
+        stop.store(true, Ordering::Release);
+        server.join().expect("live daemon joins");
+        let code = result.expect("clear result");
+        assert_eq!(code, 1, "clear output: {out}");
+        let refused: serde_json::Value = serde_json::from_str(out.trim()).expect("refusal JSON");
+        assert_eq!(refused["status"], "refused");
+        assert_eq!(refused["refusal"], "not_adopted");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs");
+        assert_eq!(persisted.provider_quota_holds, seed.provider_quota_holds);
+        assert!(persisted.provider_quota_hold_releases.is_empty());
     }
 }
