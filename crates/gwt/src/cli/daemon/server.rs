@@ -1491,7 +1491,7 @@ enum IssueMonitorControl {
     /// order takes effect now instead of at the next interval tick. The
     /// launch itself still goes through the ordinary claim/slot path.
     ScanNow,
-    /// Issue #3961 AC-6: release one provider's quota hold on the operator's
+    /// Issue #3961 AC-4: release one provider's quota hold on the operator's
     /// authority. Applied to the authoritative in-memory state under the
     /// prefs lock, so the daemon's own rebase cannot restore the hold the way
     /// it did when the release only reached disk. `released_at` is the fence
@@ -2170,7 +2170,7 @@ fn apply_routine_issue_monitor_control(
             reason,
             released_at,
         } => {
-            // Issue #3961 AC-6: the release lands in the authoritative state
+            // Issue #3961 AC-4: the release lands in the authoritative state
             // inside the same lock-protected commit that persists it, so no
             // later rebase can join the hold back. The decoder already refused
             // a blank provider; the scan readmits the issues the hold held.
@@ -8464,7 +8464,7 @@ exit 0
         }
     }
 
-    /// Issue #3961 AC-1 / AC-2 / AC-6: a `quota_hold_clear` control releases
+    /// Issue #3961 AC-1 / AC-2 / AC-4: a `quota_hold_clear` control releases
     /// the hold in the daemon's authoritative in-memory state and in the
     /// durable prefs inside one commit, and asks for an immediate scan so the
     /// held queue moves without waiting for the interval tick.

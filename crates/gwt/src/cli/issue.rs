@@ -711,7 +711,7 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
     Ok(0)
 }
 
-/// Issue #3923 AC-1 / Issue #3961 AC-4, AC-6: release one provider's quota
+/// Issue #3923 AC-1 / Issue #3961 AC-4: release one provider's quota
 /// hold on the operator's authority.
 ///
 /// The release is applied to the authoritative state. When a daemon owns the
@@ -5580,7 +5580,7 @@ mod tests {
         (stop, server)
     }
 
-    /// Issue #3961 AC-4 / AC-6: the live daemon owns the authoritative hold
+    /// Issue #3961 AC-4: the live daemon owns the authoritative hold
     /// state. When it rejects the release — a daemon that predates the control
     /// does exactly this — the CLI must neither fall back to a disk write the
     /// daemon would overwrite nor report `cleared`.
