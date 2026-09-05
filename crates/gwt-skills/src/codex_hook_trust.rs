@@ -379,13 +379,34 @@ fn is_trusted_gwt_hook_command(
                 .any(|expected| expected == command))
 }
 
-/// Does this command dispatch one of gwt's own hook transports? Used only to
+/// Does this command *dispatch* one of gwt's own hook transports? Used only to
 /// decide whether an untrusted hook is gwt's problem (Issue #3967 AC-4) or the
 /// user's own hook, which gwt must not vouch for either way.
+///
+/// The transport marker has to sit where an argument list begins — directly
+/// after a token that names the gwt binary. A bare substring test would let a
+/// user hook that merely quotes the token (`echo ' hook event '`) abort every
+/// Codex launch in the worktree, and this answer gates a launch failure.
+/// Tampered invocations (`'/tmp/attacker/gwtd' hook event Stop`) still count:
+/// they are gwt hooks that gwt refuses to vouch for, which is exactly what the
+/// caller must surface.
 fn is_gwt_hook_transport_command(command: &str) -> bool {
-    GWT_HOOK_TRANSPORT_MARKERS
-        .iter()
-        .any(|marker| command.contains(marker))
+    GWT_HOOK_TRANSPORT_MARKERS.iter().any(|marker| {
+        command.match_indices(marker).any(|(index, _)| {
+            command[..index]
+                .split_whitespace()
+                .next_back()
+                .is_some_and(references_gwt_hook_binary)
+        })
+    })
+}
+
+fn references_gwt_hook_binary(token: &str) -> bool {
+    let token = token.trim_matches(|character| matches!(character, '\'' | '"' | '&'));
+    token.ends_with("gwtd")
+        || token.ends_with("gwtd.exe")
+        || token.ends_with("$gwt_bin")
+        || token.ends_with("$gwtBin")
 }
 
 fn is_generated_gwt_event_command(
@@ -908,6 +929,64 @@ mod tests {
             report.untrusted_gwt_hooks.is_empty(),
             "user hooks must not be reported as gwt trust failures: {report:?}"
         );
+    }
+
+    /// A user hook that merely quotes a gwt transport token is still a user
+    /// hook. Reporting it would abort every Codex launch in the worktree over
+    /// text gwt does not own.
+    #[test]
+    fn user_hook_quoting_a_gwt_transport_token_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let mut hooks_json: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        hooks_json["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "matcher": "*",
+                "hooks": [
+                    { "command": "echo ' hook event '", "type": "command" }
+                ]
+            }));
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(report.trusted_entries.len(), 5);
+        assert!(
+            report.untrusted_gwt_hooks.is_empty(),
+            "quoting a transport token must not make a user hook gwt's problem: {report:?}"
+        );
+    }
+
+    /// The PowerShell dispatch form invokes the binary through `& $gwtBin`, so
+    /// the token preceding the transport marker is the variable, not a path.
+    #[test]
+    fn powershell_dispatch_form_is_recognised_as_a_gwt_transport() {
+        let windows_bin = r"C:\Program Files\GWT\gwtd.exe";
+        let powershell_stop = codex_event_hook_commands_with_bin(windows_bin, "Stop")
+            .into_iter()
+            .nth(1)
+            .expect("PowerShell generated command");
+
+        assert!(
+            is_gwt_hook_transport_command(&powershell_stop),
+            "PowerShell dispatch must be recognised: {powershell_stop}"
+        );
+        assert!(is_gwt_hook_transport_command(
+            "'/tmp/attacker/gwtd' hook event Stop"
+        ));
+        assert!(is_gwt_hook_transport_command(
+            REPO_OWNED_SELF_IMPROVEMENT_STOP_COMMAND
+        ));
+        assert!(!is_gwt_hook_transport_command("echo ' hook event '"));
     }
 
     #[test]
