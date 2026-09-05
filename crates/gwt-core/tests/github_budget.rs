@@ -317,3 +317,273 @@ fn gh_spawns_are_recorded_in_the_machine_local_budget_ledger() {
         "the free rate_limit probe must not be counted: {after:?}"
     );
 }
+
+// ── Issue #3928 AC-1: refusals back off exponentially, and the backoff is
+//    persisted so a fresh gwtd process honours it before spawning ──
+
+fn secondary_refusal(now: DateTime<Utc>) -> RateLimitBlock {
+    // What `block_from_probe` produces for a secondary (per-minute) refusal:
+    // the primary budget still has room, so no measured reset exists.
+    RateLimitBlock {
+        resource: "graphql".to_string(),
+        limit: 0,
+        remaining: 0,
+        reset_at: now + Duration::seconds(60),
+    }
+}
+
+#[test]
+fn consecutive_refusals_back_off_exponentially_up_to_the_cap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let mut now = at(0);
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        let effective = ledger.record_block(&secondary_refusal(now), now);
+        waits.push(effective.retry_after_secs(now));
+        // The next refusal arrives right after the window it was told to wait.
+        now = effective.reset_at + Duration::seconds(1);
+    }
+    assert_eq!(
+        waits,
+        vec![60, 120, 240, 480, 900, 900],
+        "1 → 2 → 4 → 8 minutes, capped at 15"
+    );
+    let block = ledger.snapshot(now).last_block.expect("block persisted");
+    assert_eq!(block.consecutive_refusals, 6);
+}
+
+#[test]
+fn a_measured_primary_exhaustion_keeps_its_probed_reset() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+    let primary = RateLimitBlock {
+        resource: "graphql".to_string(),
+        limit: 5000,
+        remaining: 0,
+        reset_at: at(2400),
+    };
+    let effective = ledger.record_block(&primary, at(61));
+    assert_eq!(
+        effective.reset_at,
+        at(2400),
+        "GitHub's own window is authoritative; the schedule only fills in for unmeasured ones"
+    );
+}
+
+#[test]
+fn a_persisted_block_suppresses_graphql_spawns_in_a_fresh_process_but_not_rest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+    // A fresh process starts with an empty in-memory gate; only the ledger
+    // knows about the refusal.
+    let gate = gwt_core::github_quota::QuotaGate::default();
+
+    let detail = github_budget::suppressed_spawn_detail(&gate, &ledger, &["issue", "list"], at(30))
+        .expect("the persisted window suppresses the GraphQL spawn");
+    assert!(detail.contains("github_rate_limited"), "{detail}");
+    assert!(detail.contains("reset_at="), "{detail}");
+    assert!(detail.contains("retry_after_secs=30"), "{detail}");
+    assert!(
+        github_budget::suppressed_spawn_detail(&gate, &ledger, &["api", "repos/o/r/pulls"], at(30))
+            .is_none(),
+        "REST keeps its own budget"
+    );
+    assert!(
+        github_budget::suppressed_spawn_detail(&gate, &ledger, &["issue", "list"], at(61))
+            .is_none(),
+        "an elapsed window no longer suppresses"
+    );
+}
+
+#[test]
+fn a_successful_call_clears_the_persisted_block_and_restarts_the_schedule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+    ledger.record_block(&secondary_refusal(at(61)), at(61));
+    assert_eq!(
+        ledger
+            .snapshot(at(62))
+            .last_block
+            .expect("block")
+            .consecutive_refusals,
+        2
+    );
+
+    ledger.clear_block(GitHubQuota::Rest);
+    assert!(
+        ledger.snapshot(at(62)).last_block.is_some(),
+        "a success on another resource leaves the GraphQL window alone"
+    );
+    ledger.clear_block(GitHubQuota::GraphQl);
+    assert!(ledger.snapshot(at(62)).last_block.is_none());
+    assert!(ledger.active_block(GitHubQuota::GraphQl, at(62)).is_none());
+
+    let effective = ledger.record_block(&secondary_refusal(at(300)), at(300));
+    assert_eq!(
+        effective.retry_after_secs(at(300)),
+        60,
+        "the schedule starts over"
+    );
+}
+
+#[test]
+fn a_refusal_long_after_the_last_window_starts_the_schedule_over() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+    ledger.record_block(&secondary_refusal(at(61)), at(61));
+    let much_later = at(61 + 120 + 2 * 15 * 60 + 1);
+    let effective = ledger.record_block(&secondary_refusal(much_later), much_later);
+    assert_eq!(effective.retry_after_secs(much_later), 60);
+}
+
+#[test]
+fn a_persisted_refusal_is_annotated_and_recorded_through_observe_refusal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let gate = gwt_core::github_quota::QuotaGate::default();
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+
+    let annotated = github_budget::observe_refusal(
+        &gate,
+        &ledger,
+        &["pr", "list", "--json", "number"],
+        "GraphQL: API rate limit already exceeded for user ID 965624.",
+        at(61),
+        || None,
+    )
+    .expect("a rate-limit refusal is identified");
+    assert!(annotated.contains("github_rate_limited"), "{annotated}");
+    assert!(annotated.contains("retry_after_secs=120"), "{annotated}");
+    assert!(annotated.contains("already exceeded"), "{annotated}");
+    let gate_block = gate
+        .active_block(GitHubQuota::GraphQl, at(62))
+        .expect("the in-process gate learns the same window");
+    assert_eq!(gate_block.reset_at, at(61 + 120));
+    assert_eq!(
+        github_budget::observe_refusal(
+            &gate,
+            &ledger,
+            &["pr", "list"],
+            "could not resolve to a PullRequest",
+            at(62),
+            || None,
+        ),
+        None,
+        "an ordinary failure is left alone"
+    );
+}
+
+// ── Issue #3928 AC-4: the per-minute count carries its sources ──
+
+#[test]
+fn spawn_sources_are_broken_down_per_minute() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_spawn_from(GitHubQuota::GraphQl, "gwt gh issue view", at(-120));
+    for second in 0..3 {
+        ledger.record_spawn_from(GitHubQuota::GraphQl, "gwt gh issue view", at(second));
+    }
+    ledger.record_spawn_from(GitHubQuota::GraphQl, "gwtd gh pr list", at(5));
+    ledger.record_spawn_from(GitHubQuota::Rest, "gwtd gh api repos", at(6));
+    ledger.record_spawn(GitHubQuota::GraphQl, at(7));
+
+    let snapshot = ledger.snapshot(at(30));
+    let graphql = &snapshot.local["graphql"];
+    assert_eq!(graphql.calls_last_minute, 5);
+    assert_eq!(graphql.calls_last_hour, 6);
+    assert_eq!(graphql.sources_last_minute["gwt gh issue view"], 3);
+    assert_eq!(graphql.sources_last_minute["gwtd gh pr list"], 1);
+    assert_eq!(
+        graphql.sources_last_minute["unknown"], 1,
+        "a legacy record without a source still counts"
+    );
+    assert_eq!(
+        snapshot.local["core"].sources_last_minute["gwtd gh api repos"],
+        1
+    );
+}
+
+#[test]
+fn spawn_source_names_the_process_and_the_gh_command_shape() {
+    let source = github_budget::spawn_source(&["issue", "view", "42", "--json", "body"]);
+    assert!(source.ends_with(" gh issue view"), "{source}");
+    assert!(
+        github_budget::spawn_source(&["api", "repos/o/r/pulls?state=all"])
+            .ends_with(" gh api repos")
+    );
+    assert!(
+        github_budget::spawn_source(&["api", "graphql", "-f", "q"]).ends_with(" gh api graphql")
+    );
+    assert!(github_budget::spawn_source(&["--version"]).ends_with(" gh"));
+}
+
+#[test]
+fn budget_status_names_the_throttle_the_backoff_and_the_sources() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+    ledger.record_block(&secondary_refusal(at(61)), at(61));
+    ledger.record_spawn_from(GitHubQuota::GraphQl, "gwt gh issue view", at(62));
+    ledger.record_spawn_from(GitHubQuota::GraphQl, "gwt gh issue view", at(63));
+
+    let policy = ThrottlePolicy::default();
+    let status = github_budget::status_by_resource(&ledger.snapshot(at(90)), &policy, at(90));
+    let graphql = &status["graphql"];
+    assert!(graphql.throttled);
+    assert!(graphql
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("github_rate_limited")));
+    assert_eq!(graphql.backoff_until, Some(at(61 + 120)));
+    assert_eq!(graphql.retry_after_secs, Some(91));
+    assert_eq!(graphql.consecutive_refusals, 2);
+    assert_eq!(graphql.calls_last_minute, 2);
+    assert_eq!(graphql.burst_limit, policy.burst_calls_per_minute);
+    assert_eq!(graphql.sources_last_minute["gwt gh issue view"], 2);
+    let core = &status["core"];
+    assert!(!core.throttled);
+    assert_eq!(core.backoff_until, None);
+    assert_eq!(core.consecutive_refusals, 0);
+}
+
+// ── Issue #3928 AC-3: the cache resync paces itself under the burst limit ──
+
+#[test]
+fn burst_wait_keeps_the_next_call_strictly_under_the_per_minute_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let policy = ThrottlePolicy::default();
+    for second in 0..58 {
+        ledger.record_spawn(GitHubQuota::GraphQl, at(second));
+    }
+    assert_eq!(
+        ledger.burst_wait(GitHubQuota::GraphQl, &policy, at(59)),
+        None,
+        "58 calls plus this one stay under 60"
+    );
+    ledger.record_spawn(GitHubQuota::GraphQl, at(58));
+    assert_eq!(
+        ledger.burst_wait(GitHubQuota::GraphQl, &policy, at(59)),
+        Some(std::time::Duration::from_secs(2)),
+        "wait until the oldest call leaves the window (plus one second of slack)"
+    );
+    ledger.record_spawn(GitHubQuota::GraphQl, at(59));
+    assert_eq!(
+        ledger.burst_wait(GitHubQuota::GraphQl, &policy, at(59)),
+        Some(std::time::Duration::from_secs(3))
+    );
+    assert_eq!(
+        ledger.burst_wait(GitHubQuota::Rest, &policy, at(59)),
+        None,
+        "another resource's burst does not pace this one"
+    );
+    assert_eq!(
+        ledger.burst_wait(GitHubQuota::GraphQl, &policy, at(130)),
+        None
+    );
+}
