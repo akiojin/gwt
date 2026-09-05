@@ -5788,9 +5788,12 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
       assert.ok(defined.has(m[1]), `notification center references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`);
     }
   }
-  // level → accent rim via state tokens
-  assert.match(frontendStyle, /\.notification-center__item\[data-level="error"\]\s*\{[^}]*--color-state-blocked/);
-  assert.match(frontendStyle, /\.notification-center__item\[data-level="warn"\]\s*\{[^}]*--color-state-needs-input/);
+  // Issue #3979 — triage rows: the rim is driven by the row's severity (which
+  // the level maps onto), not by the level itself, and the same severity also
+  // shapes the marker chip so color is never the only cue.
+  assert.match(frontendStyle, /\.notification-center__item\[data-severity="critical"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(frontendStyle, /\.notification-center__item\[data-severity="warning"\]\s*\{[^}]*--color-state-needs-input/);
+  assert.match(frontendStyle, /\.notification-center__severity\[data-severity="critical"\]\s*\{[^}]*border-radius/);
   assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
   // history scrolls inside the drawer body
   assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);
