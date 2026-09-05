@@ -1491,6 +1491,16 @@ enum IssueMonitorControl {
     /// order takes effect now instead of at the next interval tick. The
     /// launch itself still goes through the ordinary claim/slot path.
     ScanNow,
+    /// Issue #3961 AC-4: release one provider's quota hold on the operator's
+    /// authority. Applied to the authoritative in-memory state under the
+    /// prefs lock, so the daemon's own rebase cannot restore the hold the way
+    /// it did when the release only reached disk. `released_at` is the fence
+    /// instant chosen by the caller (millisecond precision).
+    QuotaHoldClear {
+        provider: String,
+        reason: String,
+        released_at: String,
+    },
     ConfigSet {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
@@ -2155,6 +2165,20 @@ fn apply_routine_issue_monitor_control(
                 true
             }
         },
+        IssueMonitorControl::QuotaHoldClear {
+            provider,
+            reason,
+            released_at,
+        } => {
+            // Issue #3961 AC-4: the release lands in the authoritative state
+            // inside the same lock-protected commit that persists it, so no
+            // later rebase can join the hold back. The decoder already refused
+            // a blank provider; the scan readmits the issues the hold held.
+            matches!(
+                monitor.clear_provider_quota_hold(&provider, &reason, &released_at),
+                crate::IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
+            )
+        }
         IssueMonitorControl::WindowClosed { target, .. } => match target {
             Some(target) => monitor.requeue_exact_window(&target).is_some(),
             // Pre-generation publishers can still be decoded for wire
@@ -2445,6 +2469,26 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
             // the whole request.
             if payload.get("scan_now").is_some() {
                 return Some(IssueMonitorControl::ScanNow);
+            }
+            // Issue #3961: the PM's release reaches the authoritative state
+            // instead of only the durable prefs. A blank provider or fence
+            // instant is a malformed control, not a release of nothing.
+            if let Some(clear) = payload.get("quota_hold_clear") {
+                let provider = clear.get("provider")?.as_str()?.trim();
+                let released_at = clear.get("released_at")?.as_str()?.trim();
+                if provider.is_empty() || released_at.is_empty() {
+                    return None;
+                }
+                let reason = clear
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return Some(IssueMonitorControl::QuotaHoldClear {
+                    provider: provider.to_string(),
+                    reason,
+                    released_at: released_at.to_string(),
+                });
             }
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
@@ -8436,6 +8480,110 @@ exit 0
             );
             assert!(decode_issue_monitor_control(payload).is_none());
         }
+    }
+
+    /// Issue #3961 AC-1 / AC-2 / AC-4: a `quota_hold_clear` control releases
+    /// the hold in the daemon's authoritative in-memory state and in the
+    /// durable prefs inside one commit, and asks for an immediate scan so the
+    /// held queue moves without waiting for the interval tick.
+    #[test]
+    fn quota_hold_clear_control_releases_the_hold_in_the_authoritative_state_and_prefs() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let reset_at = "2026-09-07T03:58:00Z";
+        let seed = crate::IssueMonitorPrefs {
+            enabled: true,
+            launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_id: "codex".to_string(),
+                ..sample_issue_monitor_profile()
+            }),
+            provider_quota_holds: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                reset_at.to_string(),
+            )]),
+            autonomous_records: vec![crate::AutonomousIssueRecord {
+                issue_number: 42,
+                retry_not_before: Some(reset_at.to_string()),
+                retry_hold_reason: Some("Codex usage limit reached".to_string()),
+                retry_hold_provider: Some("codex".to_string()),
+                ..crate::AutonomousIssueRecord::new(42)
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &seed).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), seed);
+        let now = "2026-09-05T01:26:00Z";
+        assert!(
+            monitor.agent_status_at(now).quota_hold.is_some(),
+            "the seeded hold gates the saved profile"
+        );
+
+        let released_at = "2026-09-05T01:26:30.123Z";
+        let control =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "quota_hold_clear": {
+                        "provider": "codex",
+                        "reason": "PM: Codex is not rate limited",
+                        "released_at": released_at,
+                    }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("quota_hold_clear decodes");
+        assert_eq!(
+            control,
+            IssueMonitorControl::QuotaHoldClear {
+                provider: "codex".to_string(),
+                reason: "PM: Codex is not rate limited".to_string(),
+                released_at: released_at.to_string(),
+            }
+        );
+
+        assert!(
+            super::apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                control
+            ),
+            "a released hold must trigger an immediate scan"
+        );
+
+        let status = monitor.agent_status_at(now);
+        assert_eq!(status.quota_hold, None);
+        assert!(status.provider_quota_holds.is_empty());
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
+        assert!(persisted.provider_quota_holds.is_empty());
+        let release = persisted
+            .provider_quota_hold_releases
+            .get("codex")
+            .expect("release fence is durable");
+        assert_eq!(release.released_at, released_at);
+        assert_eq!(release.released_reset_at.as_deref(), Some(reset_at));
+        let record = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .expect("the record survives");
+        assert_eq!(record.retry_hold_provider, None);
+
+        // A blank provider is a malformed control, not a release of nothing.
+        assert!(
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "quota_hold_clear": {
+                        "provider": "   ",
+                        "reason": "x",
+                        "released_at": released_at,
+                    }
+                }),
+                std::process::id() + 1,
+            ))
+            .is_none()
+        );
     }
 
     #[test]
