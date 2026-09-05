@@ -4908,9 +4908,6 @@ mod tests {
         fs::write(
             &fake_gh,
             r###"#!/bin/sh
-if [ -n "$GWT_FAKE_GH_LOG" ]; then
-  printf '%s\n' "$*" >> "$GWT_FAKE_GH_LOG"
-fi
 case "$*" in
   *"--method POST"*|*"--method PATCH"*|*"-X POST"*|*"-X PATCH"*|*"pr merge"*)
     if [ -n "$GWT_FAKE_GH_MUTATION_MARKER" ]; then
@@ -9522,8 +9519,6 @@ exit 0
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
-        let invocation_log = temp.path().join("gh-invocations.log");
-        let _log = ScopedEnvVar::set("GWT_FAKE_GH_LOG", &invocation_log);
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -9621,13 +9616,7 @@ exit 0
             )),
             "the next attempt time is the persisted window: {last_error}"
         );
-        let invocations = fs::read_to_string(&invocation_log).unwrap_or_default();
-        assert!(
-            !invocations
-                .lines()
-                .any(|line| line.starts_with("issue ") || line.starts_with("pr ")),
-            "no GraphQL call may be issued inside the backoff window: {invocations}"
-        );
+        assert_no_graphql_spawn_was_recorded();
         gwt_core::github_budget::BudgetLedger::global()
             .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
     }
@@ -9653,8 +9642,6 @@ exit 0
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
-        let invocation_log = temp.path().join("gh-invocations.log");
-        let _log = ScopedEnvVar::set("GWT_FAKE_GH_LOG", &invocation_log);
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -9751,13 +9738,39 @@ exit 0
             )),
             "the next attempt time is the persisted window: {last_error}"
         );
-        let invocations = fs::read_to_string(&invocation_log).unwrap_or_default();
-        assert!(
-            !invocations
-                .lines()
-                .any(|line| line.starts_with("issue ") || line.starts_with("pr ")),
-            "no GraphQL call may be issued inside the backoff window: {invocations}"
+        assert_no_graphql_spawn_was_recorded();
+        gwt_core::github_budget::BudgetLedger::global()
+            .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+    }
+
+    /// Assert that this test's scan issued no budget-spending `gh` call.
+    ///
+    /// Reads the machine-local spawn ledger rather than a log the fake `gh`
+    /// writes: the ledger lives under [`ScopedGwtHome`], so it counts only the
+    /// spawns this test's thread made, while an env-var log path is
+    /// process-wide and collects whatever a concurrently running test spawns
+    /// through the same fake. The pre-spawn gate refuses before recording, so a
+    /// zero count is exactly "nothing was spawned".
+    fn assert_no_graphql_spawn_was_recorded() {
+        let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
+        assert_eq!(
+            snapshot.local["graphql"].calls_last_hour, 0,
+            "no GraphQL call may be issued inside the backoff window: {:?}",
+            snapshot.local
         );
+    }
+
+    /// Drop the rate-limit window a test drove through the real `gh` spawn path.
+    ///
+    /// [`gwt_core::github_quota::global`] is process-global and, unlike the
+    /// budget ledger, is not scoped by [`ScopedGwtHome`]. A test that makes a
+    /// spawn fail with GitHub's rate-limit wording therefore suppresses every
+    /// later GraphQL spawn in this binary for the whole backoff window, which
+    /// shows up as unrelated scan tests failing at `candidate-load`. Clearing
+    /// both memories keeps the window inside the test that created it.
+    fn clear_process_global_rate_limit_window() {
+        gwt_core::github_quota::global()
+            .record_success(gwt_core::github_quota::GitHubQuota::GraphQl);
         gwt_core::github_budget::BudgetLedger::global()
             .clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
     }
@@ -9856,6 +9869,7 @@ exit 0
         ] {
             assert!(last_error.contains(expected), "{expected}: {last_error}");
         }
+        clear_process_global_rate_limit_window();
     }
 
     #[test]
