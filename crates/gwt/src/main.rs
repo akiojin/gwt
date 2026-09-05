@@ -1961,6 +1961,9 @@ mod tests {
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
             quota_hold: None,
+            launch_profile_candidates: Vec::new(),
+            provider_quota_holds: Vec::new(),
+            usage_threshold_percent: 80,
         };
         let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "status",

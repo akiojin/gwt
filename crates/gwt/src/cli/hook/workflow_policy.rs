@@ -502,6 +502,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.section"
             | "issue.spec.list"
             | "issue.monitor.status"
+            | "issue.monitor.profiles"
             | "pr.current"
             | "pr.list"
             | "github.budget"
@@ -1165,10 +1166,16 @@ mod tests {
     #[test]
     fn issue_monitor_json_operations_have_the_expected_policy_classification() {
         assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
+        // SPEC #3914 FR-011: reading the candidate pool mutates nothing.
+        assert!(is_read_only_json_envelope_operation(
+            "issue.monitor.profiles"
+        ));
         for operation in [
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            // SPEC #3914 FR-011: replacing the pool is a config write.
+            "issue.monitor.profiles.set",
             // SPEC-3431 FR-006: launch_now mutates priority order, so it is
             // not read-only — but it must stay ownerless-safe like its siblings.
             "issue.monitor.launch_now",
@@ -1191,6 +1198,8 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            "issue.monitor.profiles",
+            "issue.monitor.profiles.set",
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",

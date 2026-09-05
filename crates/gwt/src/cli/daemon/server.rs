@@ -1508,6 +1508,11 @@ enum IssueMonitorControl {
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
     },
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole.
+    ProfilesSet {
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        usage_threshold_percent: Option<u8>,
+    },
     ClaimLaunchDelivery {
         issue_number: u64,
         delivery_id: String,
@@ -1871,6 +1876,26 @@ fn try_apply_issue_monitor_control(
             *monitor = candidate;
             Some(true)
         }
+        IssueMonitorControl::ProfilesSet {
+            profiles,
+            usage_threshold_percent,
+        } => {
+            if crate::cli::issue::validate_monitor_profiles_set(&profiles, usage_threshold_percent)
+                .is_err()
+            {
+                return None;
+            }
+            let mut candidate = monitor.clone();
+            // Same revocation as the GUI save: proposals prepared against the
+            // previous pool must not commit under the new one.
+            candidate.advance_effect_authority_epoch()?;
+            candidate.set_launch_profile_pool(profiles);
+            if let Some(percent) = usage_threshold_percent {
+                candidate.set_launch_usage_threshold_percent(percent);
+            }
+            *monitor = candidate;
+            Some(true)
+        }
         control @ (IssueMonitorControl::LaunchFailed {
             failure: Some(_), ..
         }
@@ -1989,7 +2014,8 @@ fn apply_routine_issue_monitor_control(
     match control {
         IssueMonitorControl::Enabled(_)
         | IssueMonitorControl::AutonomousMode(_)
-        | IssueMonitorControl::ConfigSet { .. } => false,
+        | IssueMonitorControl::ConfigSet { .. }
+        | IssueMonitorControl::ProfilesSet { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
         IssueMonitorControl::ScanNow => true,
         IssueMonitorControl::ClaimLaunchDelivery {
@@ -2463,6 +2489,28 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                     launch_agent,
+                });
+            }
+            if let Some(profiles_set) = payload
+                .get("profiles_set")
+                .and_then(serde_json::Value::as_object)
+            {
+                let profiles = serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfile>>(
+                    profiles_set.get("profiles")?.clone(),
+                )
+                .ok()?;
+                let usage_threshold_percent = match profiles_set.get("usage_threshold_percent") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(u8::try_from(value.as_u64()?).ok()?),
+                };
+                crate::cli::issue::validate_monitor_profiles_set(
+                    &profiles,
+                    usage_threshold_percent,
+                )
+                .ok()?;
+                return Some(IssueMonitorControl::ProfilesSet {
+                    profiles,
+                    usage_threshold_percent,
                 });
             }
             // SPEC-3431 FR-006: `scan_now` carries no fields — its presence is
@@ -6025,6 +6073,7 @@ exit 0
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
             windows_shell: None,
+            prefer_for: Vec::new(),
         }
     }
 
@@ -8392,6 +8441,71 @@ exit 0
         assert_eq!(persisted.effect_authority_epoch, 9);
     }
 
+    /// SPEC #3914 FR-011: `profiles_set` reaches the daemon as one atomic
+    /// control frame, exactly like `config_set`.
+    #[test]
+    fn issue_monitor_profiles_set_decodes_and_commits_atomically() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "profiles_set": {
+                    "profiles": [{"agent_id": "codex"}, {"agent_id": "claude"}],
+                    "usage_threshold_percent": 70,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("profiles control");
+        let IssueMonitorControl::ProfilesSet {
+            profiles,
+            usage_threshold_percent,
+        } = &control
+        else {
+            panic!("expected ProfilesSet, got {control:?}");
+        };
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[1].agent_id, "claude");
+        assert_eq!(*usage_threshold_percent, Some(70));
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            launch_profile: Some(sample_issue_monitor_profile()),
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        let pool = persisted.launch_profile_pool();
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool[0].agent_id, "codex");
+        assert_eq!(persisted.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(persisted.launch_usage_threshold_percent, 70);
+        assert_eq!(persisted.effect_authority_epoch, 8);
+        assert_eq!(monitor.launch_profile_pool().len(), 2);
+
+        for profiles_set in [
+            serde_json::json!({"profiles": []}),
+            serde_json::json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": 0}),
+            serde_json::json!({"profiles": [{"model": "opus"}]}),
+        ] {
+            let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"profiles_set": profiles_set}),
+                std::process::id() + 1,
+            );
+            assert!(decode_issue_monitor_control(payload).is_none());
+        }
+    }
+
     /// Issue #3923 AC-5: the daemon applies a launch-agent switch to the
     /// saved profile and refuses one when no profile was ever saved.
     #[test]
@@ -8440,6 +8554,7 @@ exit 0
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
                 windows_shell: None,
+                prefer_for: Vec::new(),
             }),
             ..crate::IssueMonitorPrefs::default()
         };
@@ -13856,6 +13971,39 @@ exit 1
     }
 
     #[test]
+    fn persist_daemon_state_preserves_the_gui_owned_candidate_pool() {
+        // SPEC #3914 FR-012 / AC-7: the pool is saved by the GUI / gwtd straight
+        // to disk; the daemon's stale in-memory copy must not shrink it back to
+        // one candidate or drop the usage threshold.
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut on_disk = crate::IssueMonitorPrefs {
+            launch_usage_threshold_percent: 65,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut codex = sample_issue_monitor_profile();
+        codex.agent_id = "codex".to_string();
+        on_disk.set_launch_profile_pool(vec![codex, sample_issue_monitor_profile()]);
+        crate::save_issue_monitor_prefs(&prefs_path, &on_disk).expect("seed disk");
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_candidate(sample_closed_issue_monitor_issue(42));
+        monitor.record_merged(42);
+        assert!(monitor.prefs().launch_profile_pool().is_empty());
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload");
+        let pool = persisted.launch_profile_pool();
+        assert_eq!(pool.len(), 2, "both candidates survive the daemon persist");
+        assert_eq!(pool[0].agent_id, "codex");
+        assert_eq!(pool[1].agent_id, "claude");
+        assert_eq!(persisted.launch_profile.as_ref(), Some(&pool[0]));
+        assert_eq!(persisted.launch_usage_threshold_percent, 65);
+        assert_eq!(monitor.prefs().launch_profile_pool().len(), 2);
+    }
+
+    #[test]
     fn persist_daemon_state_preserves_gui_owned_launch_profile_and_tuning() {
         // adversarial review (launch_profile clobber): launch_profile and
         // autonomous_tuning have no daemon control channel, so the daemon's
@@ -13879,6 +14027,7 @@ exit 1
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
                 windows_shell: None,
+                prefer_for: Vec::new(),
             }),
             autonomous_tuning: crate::issue_monitor::AutonomousTuning {
                 max_attempts: 9,
