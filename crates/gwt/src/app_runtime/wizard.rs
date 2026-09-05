@@ -130,6 +130,44 @@ fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     }
 }
 
+/// SPEC #3914 FR-007: the profile chosen for one silent launch, plus the
+/// candidates ranked ahead of it that were passed over (empty for the head).
+struct IssueMonitorLaunchProfileChoice {
+    profiles: gwt::LaunchWizardPreviousProfiles,
+    selected_agent_id: Option<String>,
+    skipped: Vec<gwt::LaunchProfileSkip>,
+}
+
+/// SPEC #3914 FR-007: make a non-head selection visible, with the reason each
+/// earlier candidate was passed over. `None` when the pool head launched, so
+/// both the fresh-launch and the exact-Resume paths can append it verbatim.
+fn issue_monitor_non_head_selection_toast(
+    issue_number: u64,
+    selected_agent_id: Option<&str>,
+    skipped_candidates: &[gwt::LaunchProfileSkip],
+) -> Option<OutboundEvent> {
+    let selected_agent_id = selected_agent_id?;
+    if skipped_candidates.is_empty() {
+        return None;
+    }
+    let reasons = skipped_candidates
+        .iter()
+        .map(|skip| skip.reason.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    tracing::info!(
+        issue = issue_number,
+        agent = %selected_agent_id,
+        reasons = %reasons,
+        "Issue Monitor selected a non-head launch candidate"
+    );
+    Some(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        level: "info".to_string(),
+        message: format!("Issue #{issue_number} launches with {selected_agent_id}: {reasons}"),
+        issue_number: Some(issue_number),
+    }))
+}
+
 struct SilentIssueMonitorLaunchRequest {
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
@@ -1947,18 +1985,70 @@ impl AppRuntime {
         &self,
         project_root: &Path,
     ) -> gwt::LaunchWizardPreviousProfiles {
+        self.issue_monitor_launch_profile_choice(project_root, None)
+            .profiles
+    }
+
+    /// SPEC #3914 FR-007: choose the launch candidate for one Issue Monitor
+    /// launch. A non-empty pool goes through [`gwt::select_launch_profile`]
+    /// (usage telemetry arrives in Phase 2); an empty pool keeps the
+    /// pre-#3914 Last-settings fallback from the Launch Wizard cache.
+    ///
+    /// When every candidate is held the head still launches: the daemon gate
+    /// already withholds launch requests in that state, so this only happens
+    /// on a race, and the existing limit-notice path re-holds the provider.
+    fn issue_monitor_launch_profile_choice(
+        &self,
+        project_root: &Path,
+        avoid_provider: Option<&str>,
+    ) -> IssueMonitorLaunchProfileChoice {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
-            if let Some(profile) = prefs.launch_profile {
-                return gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.into()));
+            let pool = prefs.launch_profile_pool();
+            if !pool.is_empty() {
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let selection = gwt::select_launch_profile(
+                    &pool,
+                    &prefs.provider_quota_holds,
+                    &[],
+                    prefs.launch_usage_threshold_percent,
+                    &[],
+                    avoid_provider,
+                    &now,
+                );
+                let (index, skipped) = match selection.selected {
+                    Some(index) => (index, selection.skipped),
+                    None => {
+                        tracing::warn!(
+                            project_root = %project_root.display(),
+                            skipped = ?selection.skipped,
+                            "every Issue Monitor launch candidate is held; launching the pool head"
+                        );
+                        (0, Vec::new())
+                    }
+                };
+                let profile = pool[index].clone();
+                return IssueMonitorLaunchProfileChoice {
+                    profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
+                        profile.clone().into(),
+                    )),
+                    selected_agent_id: Some(profile.agent_id),
+                    skipped,
+                };
             }
         }
         let profiles = self.launch_wizard_cache.previous_profiles(project_root);
-        if profiles.repo_local().is_some() {
-            return profiles;
+        let profiles = if profiles.repo_local().is_some() {
+            profiles
+        } else {
+            let fallback_profile = profiles.preferred_profile().cloned();
+            profiles.with_repo_local(fallback_profile)
+        };
+        IssueMonitorLaunchProfileChoice {
+            profiles,
+            selected_agent_id: None,
+            skipped: Vec::new(),
         }
-        let fallback_profile = profiles.preferred_profile().cloned();
-        profiles.with_repo_local(fallback_profile)
     }
 
     #[cfg(test)]
@@ -2407,7 +2497,16 @@ impl AppRuntime {
         }
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
-        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        let IssueMonitorLaunchProfileChoice {
+            profiles: previous_profiles,
+            selected_agent_id,
+            skipped: skipped_candidates,
+        } = self.issue_monitor_launch_profile_choice(&project_root, None);
+        let non_head_selection_toast = issue_monitor_non_head_selection_toast(
+            issue_number,
+            selected_agent_id.as_deref(),
+            &skipped_candidates,
+        );
         let Some(profile_agent_id) = previous_profiles
             .preferred_profile()
             .map(|profile| profile.agent_id.clone())
@@ -2463,7 +2562,13 @@ impl AppRuntime {
                 delivery_id.clone(),
                 &profile_agent_id,
             )?;
-            if let Some(events) = events {
+            if let Some(mut events) = events {
+                // SPEC #3914 FR-007: a resumed launch reports its skipped
+                // candidates like a fresh one. An empty vector means the
+                // delivery stays pending, so nothing launched to report on.
+                if !events.is_empty() {
+                    events.extend(non_head_selection_toast);
+                }
                 return Ok(Some(events));
             }
             holder_window_id
@@ -2580,6 +2685,7 @@ impl AppRuntime {
                 issue_number: Some(issue_number),
             }));
         }
+        events.extend(non_head_selection_toast);
         let message = if review_prompt.is_some() {
             "Issue Monitor independent review launched".to_string()
         } else {
@@ -4381,7 +4487,9 @@ impl AppRuntime {
             &gwt::IssueMonitorPrefs::recovery_default(),
             |prefs| {
                 if prefs.advance_effect_authority_epoch().is_some() {
-                    prefs.launch_profile = Some(launch_profile);
+                    // SPEC #3914 FR-003: Agent settings saves upsert into the
+                    // candidate pool instead of replacing the single profile.
+                    prefs.upsert_launch_profile(launch_profile);
                     true
                 } else {
                     false
