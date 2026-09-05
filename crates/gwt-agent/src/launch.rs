@@ -629,7 +629,7 @@ pub enum ManualLaunchSuccessorPredecessor {
 /// malformed, escaping, non-Bun, non-host, and unsupported-platform entries
 /// leave the launch untouched so the existing bunx/npx path remains the
 /// authoritative fallback.
-pub fn apply_host_bunx_cache_fast_path(config: &mut LaunchConfig) -> bool {
+pub fn apply_host_bunx_cache_fast_path(config: &mut LaunchConfig) -> HostBunxCacheFastPath {
     #[cfg(unix)]
     {
         let temp_root = config
@@ -643,8 +643,96 @@ pub fn apply_host_bunx_cache_fast_path(config: &mut LaunchConfig) -> bool {
     #[cfg(not(unix))]
     {
         let _ = config;
-        false
+        HostBunxCacheFastPath::NotApplicable
     }
+}
+
+/// Outcome of [`apply_host_bunx_cache_fast_path`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostBunxCacheFastPath {
+    /// The launch now runs the validated cached entrypoint.
+    Applied,
+    /// No usable cache entry exists; the package runner stays authoritative.
+    NotApplicable,
+    /// A validated cache entry resolved to `executable`, but that bin target
+    /// cannot be launched for `reason` (Issue #3857 AC-5). The launch is left
+    /// on the package runner so the operator can see why the cache was
+    /// bypassed.
+    Rejected { executable: PathBuf, reason: String },
+}
+
+impl HostBunxCacheFastPath {
+    pub fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+}
+
+/// How a cached package `bin` target must be launched, decided from the file
+/// content (shebang / executable magic), never from its name or extension
+/// (Issue #3857 AC-2: `opencode-ai` ships a Mach-O/ELF binary as
+/// `bin/opencode.exe` on every platform).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedEntrypointKind {
+    /// A JavaScript entrypoint (node/bun shebang, or a shebang-less text
+    /// file): run it with the Bun runtime.
+    JavaScript,
+    /// A native executable or a script for another interpreter: exec the file
+    /// itself and let the kernel dispatch it.
+    Direct,
+}
+
+#[cfg(unix)]
+fn classify_cached_entrypoint(path: &Path) -> Result<CachedEntrypointKind, String> {
+    use std::io::Read;
+
+    let mut header = [0u8; 512];
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("cannot open for reading: {error}"))?;
+    let len = file
+        .read(&mut header)
+        .map_err(|error| format!("cannot read: {error}"))?;
+    let header = &header[..len];
+    if header.is_empty() {
+        return Err("the file is empty".to_string());
+    }
+    if let Some(interpreter) = header.strip_prefix(b"#!") {
+        let line = interpreter
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        let line = String::from_utf8_lossy(line);
+        return Ok(if line.contains("node") || line.contains("bun") {
+            CachedEntrypointKind::JavaScript
+        } else {
+            CachedEntrypointKind::Direct
+        });
+    }
+    if is_native_executable_header(header) {
+        return Ok(CachedEntrypointKind::Direct);
+    }
+    if header.contains(&0) {
+        return Err(
+            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE)"
+                .to_string(),
+        );
+    }
+    Ok(CachedEntrypointKind::JavaScript)
+}
+
+#[cfg(unix)]
+fn is_native_executable_header(header: &[u8]) -> bool {
+    const MAGICS: &[&[u8]] = &[
+        b"\x7fELF",
+        &[0xfe, 0xed, 0xfa, 0xce],
+        &[0xfe, 0xed, 0xfa, 0xcf],
+        &[0xce, 0xfa, 0xed, 0xfe],
+        &[0xcf, 0xfa, 0xed, 0xfe],
+        &[0xca, 0xfe, 0xba, 0xbe],
+        &[0xbe, 0xba, 0xfe, 0xca],
+        b"MZ",
+    ];
+    MAGICS.iter().any(|magic| header.starts_with(magic))
 }
 
 #[cfg(unix)]
@@ -652,7 +740,7 @@ fn apply_host_bunx_cache_fast_path_from(
     config: &mut LaunchConfig,
     temp_root: &Path,
     now: std::time::SystemTime,
-) -> bool {
+) -> HostBunxCacheFastPath {
     apply_host_bunx_cache_fast_path_from_uid(config, temp_root, now, current_effective_uid())
 }
 
@@ -668,18 +756,20 @@ fn apply_host_bunx_cache_fast_path_from_uid(
     temp_root: &Path,
     now: std::time::SystemTime,
     effective_uid: u32,
-) -> bool {
+) -> HostBunxCacheFastPath {
+    use HostBunxCacheFastPath::NotApplicable;
+
     if config.runtime_target != LaunchRuntimeTarget::Host
         || command_basename(&config.command) != "bunx"
     {
-        return false;
+        return NotApplicable;
     }
 
     let Some(package) = config.agent_id.package_name() else {
-        return false;
+        return NotApplicable;
     };
     let Some(version) = config.tool_version.as_deref() else {
-        return false;
+        return NotApplicable;
     };
     if version.is_empty()
         || version == "installed"
@@ -688,12 +778,12 @@ fn apply_host_bunx_cache_fast_path_from_uid(
         || version == "."
         || version == ".."
     {
-        return false;
+        return NotApplicable;
     }
 
     let version_spec = format!("{package}@{version}");
     let Some(args) = strip_package_runner_prefix(&config.args, &version_spec) else {
-        return false;
+        return NotApplicable;
     };
     let Some(executable) = find_valid_bunx_cached_executable(
         temp_root,
@@ -703,17 +793,33 @@ fn apply_host_bunx_cache_fast_path_from_uid(
         version,
         now,
     ) else {
-        return false;
-    };
-    let Some(bun_runtime) = resolve_bun_runtime_for_cache_fast_path(config) else {
-        return false;
+        return NotApplicable;
     };
 
-    config.command = bun_runtime.to_string_lossy().into_owned();
-    config.args = std::iter::once(executable.to_string_lossy().into_owned())
-        .chain(args)
-        .collect();
-    true
+    let rejected = |reason: String| HostBunxCacheFastPath::Rejected {
+        executable: executable.clone(),
+        reason,
+    };
+    match classify_cached_entrypoint(&executable) {
+        Ok(CachedEntrypointKind::Direct) => {
+            config.command = executable.to_string_lossy().into_owned();
+            config.args = args;
+        }
+        Ok(CachedEntrypointKind::JavaScript) => {
+            let Some(bun_runtime) = resolve_bun_runtime_for_cache_fast_path(config) else {
+                return rejected(format!(
+                    "the entrypoint is a JavaScript file but no Bun runtime was found next to {}",
+                    config.command
+                ));
+            };
+            config.command = bun_runtime.to_string_lossy().into_owned();
+            config.args = std::iter::once(executable.to_string_lossy().into_owned())
+                .chain(args)
+                .collect();
+        }
+        Err(reason) => return rejected(reason),
+    }
+    HostBunxCacheFastPath::Applied
 }
 
 #[cfg(unix)]
@@ -3433,7 +3539,12 @@ mod tests {
                 .expect("executable target parent"),
         )
         .expect("create executable target parent");
-        write_test_runner(&executable_target);
+        // Mirror the real package bin: a node-shebang JavaScript entrypoint.
+        std::fs::write(
+            &executable_target,
+            "#!/usr/bin/env node\nprocess.exit(0);\n",
+        )
+        .expect("write JavaScript entrypoint");
         let mut target_permissions = std::fs::metadata(&executable_target)
             .expect("target metadata")
             .permissions();
@@ -3475,7 +3586,8 @@ mod tests {
             &mut config,
             temp.path(),
             modified + std::time::Duration::from_secs(60),
-        );
+        )
+        .is_applied();
 
         assert!(changed);
         assert_eq!(
@@ -3507,7 +3619,8 @@ mod tests {
             &mut stale,
             temp.path(),
             modified + std::time::Duration::from_secs(24 * 60 * 60 + 1),
-        ));
+        )
+        .is_applied());
         assert_eq!(stale.command, original_command);
         assert_eq!(stale.args, original_args);
 
@@ -3516,7 +3629,8 @@ mod tests {
             &mut stale,
             missing.path(),
             modified + std::time::Duration::from_secs(60),
-        ));
+        )
+        .is_applied());
 
         let wrong = tempfile::tempdir().expect("wrong tempdir");
         let (_executable, wrong_modified) =
@@ -3525,7 +3639,8 @@ mod tests {
             &mut stale,
             wrong.path(),
             wrong_modified + std::time::Duration::from_secs(60),
-        ));
+        )
+        .is_applied());
     }
 
     #[cfg(all(not(windows), unix))]
@@ -3550,7 +3665,8 @@ mod tests {
             &mut config,
             temp.path(),
             modified + std::time::Duration::from_secs(60),
-        );
+        )
+        .is_applied();
         std::fs::set_permissions(temp.path(), original_permissions)
             .expect("restore temp root permissions");
 
@@ -3602,7 +3718,8 @@ mod tests {
                 temp.path(),
                 modified + std::time::Duration::from_secs(60),
                 foreign_uid,
-            ),
+            )
+            .is_applied(),
             "a cache temp root not owned by the effective user must be ignored"
         );
     }
@@ -3630,7 +3747,8 @@ mod tests {
                 &mut config,
                 temp.path(),
                 modified + std::time::Duration::from_secs(60),
-            ),
+            )
+            .is_applied(),
             "a replaceable .bin entry must fall back to the package runner"
         );
     }
@@ -3655,7 +3773,8 @@ mod tests {
                 &mut config,
                 temp.path(),
                 modified + std::time::Duration::from_secs(60),
-            ),
+            )
+            .is_applied(),
             "cache lookup must use the exact effective-uid Bun root name"
         );
     }
@@ -3676,7 +3795,8 @@ mod tests {
             &mut config,
             temp.path(),
             modified + std::time::Duration::from_secs(30 * 24 * 60 * 60),
-        ));
+        )
+        .is_applied());
         assert_eq!(
             std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
             std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
@@ -3686,6 +3806,310 @@ mod tests {
             std::fs::canonicalize(executable).expect("canonical cached executable")
         );
         assert!(!config.args.iter().any(|arg| arg == "@openai/codex@0.145.0"));
+    }
+
+    /// Materialize a Bun-style `bunx` cache whose package `bin` target has the
+    /// given bytes, so tests can drive the entrypoint classification by file
+    /// content rather than by name.
+    #[cfg(all(not(windows), unix))]
+    fn write_test_bunx_cache_with_entrypoint(
+        temp_root: &Path,
+        agent_id: &AgentId,
+        target_relative: &str,
+        target_bytes: &[u8],
+    ) -> (PathBuf, std::time::SystemTime) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let package = agent_id.package_name().expect("package runner agent");
+        let uid = current_effective_uid();
+        let cache_root = match package.split_once('/') {
+            Some((scope, name)) => temp_root
+                .join(format!("bunx-{uid}-{scope}"))
+                .join(format!("{name}@latest")),
+            None => temp_root.join(format!("bunx-{uid}-{package}@latest")),
+        };
+        let bin_name = Path::new(agent_id.command())
+            .file_name()
+            .expect("bin name")
+            .to_owned();
+        let executable = cache_root.join("node_modules/.bin").join(&bin_name);
+        std::fs::create_dir_all(executable.parent().expect("bin parent")).expect("create bin dir");
+        let installed_package_dir = cache_root.join("node_modules").join(package);
+        std::fs::create_dir_all(&installed_package_dir).expect("create installed package dir");
+        std::fs::write(
+            cache_root.join("package.json"),
+            format!(r#"{{"dependencies":{{"{package}":"^1.0.0"}}}}"#),
+        )
+        .expect("write cache package");
+        std::fs::write(
+            installed_package_dir.join("package.json"),
+            format!(r#"{{"name":"{package}","version":"1.0.0"}}"#),
+        )
+        .expect("write installed package");
+        let target = installed_package_dir.join(target_relative);
+        std::fs::create_dir_all(target.parent().expect("target parent")).expect("target dir");
+        std::fs::write(&target, target_bytes).expect("write entrypoint");
+        let mut permissions = std::fs::metadata(&target)
+            .expect("target metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&target, permissions).expect("chmod entrypoint");
+        let link_target = Path::new("..").join(package).join(target_relative);
+        std::os::unix::fs::symlink(link_target, &executable).expect("create .bin symlink");
+        let modified = std::fs::metadata(cache_root.join("package.json"))
+            .expect("cache metadata")
+            .modified()
+            .expect("cache modified time");
+        (executable, modified)
+    }
+
+    /// Minimal Mach-O 64-bit little-endian header magic (`opencode.exe` on
+    /// macOS arm64 is exactly this kind of file).
+    #[cfg(all(not(windows), unix))]
+    const MACHO_64_LE_MAGIC: &[u8] = &[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
+    #[cfg(all(not(windows), unix))]
+    const ELF_MAGIC: &[u8] = &[0x7f, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00];
+
+    // Issue #3857 AC-1: OpenCode's `opencode-ai` package ships a native binary
+    // as its bin target. A fresh Bun cache must exec it directly instead of
+    // handing it to the Bun runtime as a script argument.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn fresh_bunx_latest_cache_execs_native_entrypoint_directly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (executable, modified) = write_test_bunx_cache_with_entrypoint(
+            temp.path(),
+            &AgentId::OpenCode,
+            "bin/opencode.exe",
+            MACHO_64_LE_MAGIC,
+        );
+        let (bun, bunx) = write_test_bun_runtime(temp.path());
+        let mut config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .version("latest")
+            .working_dir("/tmp/project")
+            .build();
+        config.command = bunx.to_string_lossy().into_owned();
+        config.args = vec![
+            "opencode-ai@latest".to_string(),
+            "--model".to_string(),
+            "x".to_string(),
+        ];
+
+        let outcome = apply_host_bunx_cache_fast_path_from(
+            &mut config,
+            temp.path(),
+            modified + std::time::Duration::from_secs(60),
+        );
+
+        assert_eq!(outcome, HostBunxCacheFastPath::Applied);
+        assert_eq!(
+            PathBuf::from(&config.command),
+            std::fs::canonicalize(&executable).expect("canonical native entrypoint")
+        );
+        assert_eq!(config.args, ["--model", "x"]);
+        assert!(
+            !config
+                .args
+                .iter()
+                .any(|arg| Path::new(arg) == bun.as_path()),
+            "native entrypoint must not be passed to the Bun runtime"
+        );
+        assert_eq!(config.working_dir, Some(PathBuf::from("/tmp/project")));
+    }
+
+    // Issue #3857 AC-2: the native-vs-script decision follows file content
+    // (shebang / executable magic), never the file extension.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_entrypoint_kind_is_decided_by_content_not_extension() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let write = |name: &str, bytes: &[u8]| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, bytes).expect("write entrypoint");
+            path
+        };
+
+        let native_named_js = write("native.js", ELF_MAGIC);
+        let macho_named_exe = write("opencode.exe", MACHO_64_LE_MAGIC);
+        let node_shim_named_exe = write("shim.exe", b"#!/usr/bin/env node\nconsole.log(1)\n");
+        let bun_shim = write("shim", b"#!/usr/bin/env bun\nconsole.log(1)\n");
+        let shell_shim = write("shim.sh", b"#!/bin/sh\nexec true\n");
+        let bare_js = write("entry", b"console.log(1)\n");
+
+        assert_eq!(
+            classify_cached_entrypoint(&native_named_js),
+            Ok(CachedEntrypointKind::Direct)
+        );
+        assert_eq!(
+            classify_cached_entrypoint(&macho_named_exe),
+            Ok(CachedEntrypointKind::Direct)
+        );
+        assert_eq!(
+            classify_cached_entrypoint(&node_shim_named_exe),
+            Ok(CachedEntrypointKind::JavaScript)
+        );
+        assert_eq!(
+            classify_cached_entrypoint(&bun_shim),
+            Ok(CachedEntrypointKind::JavaScript)
+        );
+        assert_eq!(
+            classify_cached_entrypoint(&shell_shim),
+            Ok(CachedEntrypointKind::Direct)
+        );
+        assert_eq!(
+            classify_cached_entrypoint(&bare_js),
+            Ok(CachedEntrypointKind::JavaScript)
+        );
+    }
+
+    // Issue #3857 AC-2 (end to end): a Codex-style `.js` bin that is really a
+    // native binary is exec'd directly, and an `.exe` bin that is really a
+    // node shim still runs through the Bun runtime.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_routes_by_entrypoint_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bun, bunx) = write_test_bun_runtime(temp.path());
+
+        let (native_js, modified) = write_test_bunx_cache_with_entrypoint(
+            temp.path(),
+            &AgentId::Codex,
+            "bin/codex.js",
+            ELF_MAGIC,
+        );
+        let mut codex = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .build();
+        codex.command = bunx.to_string_lossy().into_owned();
+        assert_eq!(
+            apply_host_bunx_cache_fast_path_from(
+                &mut codex,
+                temp.path(),
+                modified + std::time::Duration::from_secs(60),
+            ),
+            HostBunxCacheFastPath::Applied
+        );
+        assert_eq!(
+            PathBuf::from(&codex.command),
+            std::fs::canonicalize(&native_js).expect("canonical native js")
+        );
+
+        let (shim_exe, modified) = write_test_bunx_cache_with_entrypoint(
+            temp.path(),
+            &AgentId::OpenCode,
+            "bin/opencode.exe",
+            b"#!/usr/bin/env node\nconsole.log(1)\n",
+        );
+        let mut opencode = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .version("latest")
+            .build();
+        opencode.command = bunx.to_string_lossy().into_owned();
+        opencode.args = vec!["opencode-ai@latest".to_string()];
+        assert_eq!(
+            apply_host_bunx_cache_fast_path_from(
+                &mut opencode,
+                temp.path(),
+                modified + std::time::Duration::from_secs(60),
+            ),
+            HostBunxCacheFastPath::Applied
+        );
+        assert_eq!(
+            std::fs::canonicalize(&opencode.command).expect("canonical Bun runtime"),
+            std::fs::canonicalize(&bun).expect("canonical expected Bun runtime")
+        );
+        assert_eq!(
+            PathBuf::from(opencode.args.first().expect("script arg")),
+            std::fs::canonicalize(&shim_exe).expect("canonical shim")
+        );
+    }
+
+    // Issue #3857 AC-5: when a validated cache entry resolves to a bin target
+    // that cannot be launched, the outcome names the resolved path and the
+    // reason so the launch surface can show it, and the launch is left on the
+    // package runner.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_reports_an_unlaunchable_entrypoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (executable, modified) = write_test_bunx_cache_with_entrypoint(
+            temp.path(),
+            &AgentId::OpenCode,
+            "bin/opencode.exe",
+            &[0u8; 64],
+        );
+        let (_bun, bunx) = write_test_bun_runtime(temp.path());
+        let mut config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .version("latest")
+            .build();
+        config.command = bunx.to_string_lossy().into_owned();
+        config.args = vec!["opencode-ai@latest".to_string()];
+        let original = (config.command.clone(), config.args.clone());
+
+        let outcome = apply_host_bunx_cache_fast_path_from(
+            &mut config,
+            temp.path(),
+            modified + std::time::Duration::from_secs(60),
+        );
+
+        let HostBunxCacheFastPath::Rejected {
+            executable: reported,
+            reason,
+        } = outcome
+        else {
+            panic!("expected a rejected outcome, got {outcome:?}");
+        };
+        assert_eq!(
+            reported,
+            std::fs::canonicalize(&executable).expect("canonical entrypoint")
+        );
+        assert!(
+            reason.contains("neither"),
+            "reason must say why the file is not launchable: {reason}"
+        );
+        assert_eq!((config.command, config.args), original);
+        assert!(!HostBunxCacheFastPath::NotApplicable.is_applied());
+    }
+
+    // Issue #3857 AC-5: a script entrypoint without a resolvable Bun runtime
+    // is reported with the resolved path instead of silently ignored.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_reports_a_missing_bun_runtime_for_script_entrypoints() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (executable, modified) = write_test_bunx_cache_with_entrypoint(
+            temp.path(),
+            &AgentId::OpenCode,
+            "bin/opencode.exe",
+            b"#!/usr/bin/env node\nconsole.log(1)\n",
+        );
+        let mut config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .version("latest")
+            .build();
+        config.command = temp
+            .path()
+            .join("nowhere/bunx")
+            .to_string_lossy()
+            .into_owned();
+        config.args = vec!["opencode-ai@latest".to_string()];
+
+        let outcome = apply_host_bunx_cache_fast_path_from(
+            &mut config,
+            temp.path(),
+            modified + std::time::Duration::from_secs(60),
+        );
+
+        let HostBunxCacheFastPath::Rejected {
+            executable: reported,
+            reason,
+        } = outcome
+        else {
+            panic!("expected a rejected outcome, got {outcome:?}");
+        };
+        assert_eq!(
+            reported,
+            std::fs::canonicalize(&executable).expect("canonical entrypoint")
+        );
+        assert!(reason.contains("Bun runtime"), "{reason}");
     }
 
     #[cfg(all(not(windows), unix))]

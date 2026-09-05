@@ -1919,11 +1919,26 @@ fn persist_lazy_tool_runtime_provenance_migration(
     }
 }
 
-fn apply_post_resolution_bun_cache_fast_path(config: &mut gwt_agent::LaunchConfig) -> bool {
+fn apply_post_resolution_bun_cache_fast_path(
+    config: &mut gwt_agent::LaunchConfig,
+) -> gwt_agent::HostBunxCacheFastPath {
     if config.tool_runtime_provenance.is_some() {
-        return false;
+        return gwt_agent::HostBunxCacheFastPath::NotApplicable;
     }
     gwt_agent::apply_host_bunx_cache_fast_path(config)
+}
+
+/// Issue #3857 AC-5: terminal line shown in the agent window when a validated
+/// Bun package cache entry resolved to a bin target gwt could not launch. It
+/// names the resolved path and the reason, then states that the launch falls
+/// back to the package runner.
+fn bun_cache_fast_path_rejection_terminal_bytes(executable: &Path, reason: &str) -> Vec<u8> {
+    format!(
+        "[gwt] Bun package cache entry {} was not launched directly: {}. Falling back to the bunx package runner.\r\n",
+        executable.display(),
+        reason.trim().trim_end_matches('.')
+    )
+    .into_bytes()
 }
 
 fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
@@ -4515,14 +4530,32 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_post_resolution_bun_cache_fast_path(&mut config)
-            {
-                tracing::debug!(
-                    agent = %config.agent_id,
-                    command = %config.command,
-                    "reusing fresh Bun agent package cache"
-                );
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                match apply_post_resolution_bun_cache_fast_path(&mut config) {
+                    gwt_agent::HostBunxCacheFastPath::Applied => {
+                        tracing::debug!(
+                            agent = %config.agent_id,
+                            command = %config.command,
+                            "reusing fresh Bun agent package cache"
+                        );
+                    }
+                    gwt_agent::HostBunxCacheFastPath::Rejected { executable, reason } => {
+                        tracing::warn!(
+                            agent = %config.agent_id,
+                            executable = %executable.display(),
+                            reason = %reason,
+                            "Bun agent package cache entry is not launchable; falling back to the package runner"
+                        );
+                        proxy.send(UserEvent::LaunchTerminalOutput {
+                            window_id: window_id.clone(),
+                            data: bun_cache_fast_path_rejection_terminal_bytes(
+                                &executable,
+                                &reason,
+                            ),
+                        });
+                    }
+                    gwt_agent::HostBunxCacheFastPath::NotApplicable => {}
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC #1921 Phase 86 (#3813): resolve the resource policy and
@@ -8157,8 +8190,34 @@ mod tool_runtime_integration_tests {
         config.args = vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()];
         let expected = (config.command.clone(), config.args.clone());
 
-        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config));
+        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config).is_applied());
         assert_eq!((config.command, config.args), expected);
+    }
+
+    // Issue #3857 AC-5: a rejected cache entry is explained in the agent
+    // terminal with the resolved path and the reason it could not be launched.
+    #[test]
+    fn bun_cache_fast_path_rejection_names_the_path_and_reason_in_the_terminal() {
+        let executable =
+            Path::new("/tmp/bunx-501-opencode-ai@latest/node_modules/opencode-ai/bin/opencode.exe");
+
+        let bytes = bun_cache_fast_path_rejection_terminal_bytes(
+            executable,
+            "the file is neither a script nor a recognized native executable (ELF, Mach-O, PE).",
+        );
+        let text = String::from_utf8(bytes).expect("utf8 terminal line");
+
+        assert!(text.starts_with("[gwt] "), "{text}");
+        assert!(text.contains("opencode-ai/bin/opencode.exe"), "{text}");
+        assert!(
+            text.contains("neither a script nor a recognized native executable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Falling back to the bunx package runner"),
+            "{text}"
+        );
+        assert!(text.ends_with("\r\n"), "{text}");
     }
 
     #[cfg(windows)]
