@@ -8390,25 +8390,38 @@ impl IssueMonitorState {
         active_cap: usize,
         completed_probe: impl FnMut(u64) -> Result<bool, E>,
     ) -> Result<usize, E> {
-        self.try_prepare_claim_effects_with_probe_deferring(
+        self.try_prepare_claim_effects_with_probe_confirmed(
             owner,
             now,
             active_cap,
-            &BTreeSet::new(),
+            None,
             completed_probe,
         )
     }
 
-    /// [`Self::try_prepare_claim_effects_with_probe`] with candidates the scan
-    /// has deferred (Issue #3928 AC-2): a candidate whose pre-launch readback
-    /// was rate-limited is skipped for this pass — never probed, never claimed
-    /// from its cached state — while the candidates after it are still planned.
-    pub fn try_prepare_claim_effects_with_probe_deferring<E>(
+    /// [`Self::try_prepare_claim_effects_with_probe`] restricted to the
+    /// candidates whose GitHub state this scan actually confirmed.
+    ///
+    /// `confirmed` is `None` when the live issue list succeeded: every queued
+    /// candidate carries fresh state and may be claimed. It is `Some(set)` when
+    /// the pass is running on a previous scan's result (Issue #3933), where only
+    /// a candidate re-read authoritatively this pass may authorize a claim.
+    ///
+    /// The set is an allowlist rather than a list of exclusions on purpose
+    /// (Issue #3928 AC-2). A scan only ever re-reads the first
+    /// `ISSUE_MONITOR_TARGETED_REFRESH_LIMIT` claimable candidates, so with the
+    /// 184-issue queue from the incident every candidate past that limit is
+    /// unconfirmed for an ordinary, non-exceptional reason. Treating those as an
+    /// error aborted the whole pass — the launch stage never ran, which is the
+    /// stall this Issue is about. Skipping them keeps #3933's fail-closed
+    /// contract (an unconfirmed candidate is never launched) while the pass
+    /// completes and the candidate stays queued for the next scan.
+    pub fn try_prepare_claim_effects_with_probe_confirmed<E>(
         &mut self,
         owner: &str,
         now: &str,
         active_cap: usize,
-        deferred: &BTreeSet<u64>,
+        confirmed: Option<&BTreeSet<u64>>,
         mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
     ) -> Result<usize, E> {
         // Issue #3683: expired claim blocks re-enter the queue before slots
@@ -8427,7 +8440,7 @@ impl IssueMonitorState {
             if available == 0 {
                 break;
             }
-            if deferred.contains(&issue_number) {
+            if confirmed.is_some_and(|confirmed| !confirmed.contains(&issue_number)) {
                 continue;
             }
             if !self.retry_ready_for_saved_profile(issue_number, now) {

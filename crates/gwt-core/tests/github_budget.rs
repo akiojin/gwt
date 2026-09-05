@@ -478,6 +478,49 @@ fn a_persisted_refusal_is_annotated_and_recorded_through_observe_refusal() {
     );
 }
 
+/// The two budgets are independent (Issue #3604 measured GraphQL at 0/5000
+/// while REST still had 4994). A refusal on one must not reopen the other's
+/// window or reset its streak — during the incident both were under pressure,
+/// and a REST refusal that wiped the GraphQL window let the Monitor resume
+/// spawning straight back into the secondary limit.
+#[test]
+fn a_refusal_on_one_resource_leaves_the_other_resources_window_intact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_block(&secondary_refusal(at(0)), at(0));
+    let graphql = ledger.record_block(&secondary_refusal(at(61)), at(61));
+    assert_eq!(graphql.retry_after_secs(at(61)), 120);
+
+    let rest_refusal = RateLimitBlock {
+        resource: "core".to_string(),
+        limit: 0,
+        remaining: 0,
+        reset_at: at(90),
+    };
+    ledger.record_block(&rest_refusal, at(70));
+
+    let still_open = ledger
+        .active_block(GitHubQuota::GraphQl, at(100))
+        .expect("the GraphQL window outlives a REST refusal");
+    assert_eq!(still_open.reset_at, at(181));
+    assert!(ledger.active_block(GitHubQuota::Rest, at(100)).is_some());
+
+    // The GraphQL streak is untouched, so its next refusal waits 4 minutes.
+    let next = ledger.record_block(&secondary_refusal(at(182)), at(182));
+    assert_eq!(next.retry_after_secs(at(182)), 240);
+
+    // Clearing one resource leaves the other's window in force.
+    ledger.clear_block(GitHubQuota::Rest);
+    assert!(ledger.active_block(GitHubQuota::Rest, at(100)).is_none());
+    assert!(ledger.active_block(GitHubQuota::GraphQl, at(200)).is_some());
+
+    let policy = ThrottlePolicy::default();
+    let status = github_budget::status_by_resource(&ledger.snapshot(at(200)), &policy, at(200));
+    assert!(status["graphql"].throttled);
+    assert_eq!(status["graphql"].consecutive_refusals, 3);
+    assert!(!status["core"].throttled);
+}
+
 // ── Issue #3928 AC-4: the per-minute count carries its sources ──
 
 #[test]

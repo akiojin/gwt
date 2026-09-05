@@ -180,8 +180,13 @@ pub struct BudgetSnapshot {
     pub probe_age_secs: Option<i64>,
     /// Local consumption per resource (`graphql`, `core`), always present.
     pub local: BTreeMap<String, LocalConsumption>,
-    /// The newest rate-limit refusal observed on this machine.
+    /// The newest rate-limit refusal observed on this machine, whichever
+    /// resource it was against.
     pub last_block: Option<ObservedBlock>,
+    /// Issue #3928: the open refusal window per resource. The two budgets are
+    /// independent, so a REST refusal must not answer a question about GraphQL
+    /// — which is what reading only [`Self::last_block`] would do.
+    pub blocks: BTreeMap<String, ObservedBlock>,
     /// Always [`SECONDARY_LIMIT_NOTE`].
     pub secondary_note: &'static str,
 }
@@ -311,9 +316,8 @@ impl BudgetLedger {
     /// row this one is. A measured primary exhaustion keeps GitHub's own reset.
     /// Either way an active window is never shortened.
     pub fn record_block(&self, block: &RateLimitBlock, now: DateTime<Utc>) -> RateLimitBlock {
-        let previous = self
-            .read_block()
-            .filter(|observed| observed.resource == block.resource);
+        let mut blocks = self.read_blocks();
+        let previous = blocks.get(&block.resource).cloned();
         let consecutive_refusals = match &previous {
             Some(observed)
                 if now <= observed.reset_at + Duration::seconds(RATE_LIMIT_STREAK_WINDOW_SECS) =>
@@ -339,31 +343,38 @@ impl BudgetLedger {
             observed_at: now,
             consecutive_refusals,
         };
-        let _ = write_json_atomic(&self.dir.join(BLOCK_FILE), &observed);
-        observed.to_rate_limit_block()
+        let recorded = observed.to_rate_limit_block();
+        blocks.insert(block.resource.clone(), observed);
+        let _ = write_json_atomic(&self.dir.join(BLOCK_FILE), &blocks);
+        recorded
     }
 
     /// Forget `quota`'s persisted window after a call against it succeeded:
-    /// GitHub answered, so the schedule starts over at the next refusal.
+    /// GitHub answered, so the schedule starts over at the next refusal. The
+    /// other resource's window is left in force — the budgets are independent.
     pub fn clear_block(&self, quota: GitHubQuota) {
         let Some(resource) = quota.resource_name() else {
             return;
         };
-        if self
-            .read_block()
-            .is_some_and(|observed| observed.resource == resource)
-        {
-            let _ = std::fs::remove_file(self.dir.join(BLOCK_FILE));
+        let mut blocks = self.read_blocks();
+        if blocks.remove(resource).is_none() {
+            return;
         }
+        if blocks.is_empty() {
+            let _ = std::fs::remove_file(self.dir.join(BLOCK_FILE));
+            return;
+        }
+        let _ = write_json_atomic(&self.dir.join(BLOCK_FILE), &blocks);
     }
 
     /// The persisted window still open for `quota`, or `None` when the budget
     /// is usable as far as this machine knows.
     pub fn active_block(&self, quota: GitHubQuota, now: DateTime<Utc>) -> Option<RateLimitBlock> {
         let resource = quota.resource_name()?;
-        self.read_block()
-            .filter(|observed| observed.resource == resource && observed.reset_at > now)
-            .map(|observed| observed.to_rate_limit_block())
+        self.read_blocks()
+            .get(resource)
+            .filter(|observed| observed.reset_at > now)
+            .map(ObservedBlock::to_rate_limit_block)
     }
 
     /// Issue #3928 AC-3: how long a bulk reader must wait before its next
@@ -401,8 +412,19 @@ impl BudgetLedger {
         (frees_at - now).to_std().ok()
     }
 
-    fn read_block(&self) -> Option<ObservedBlock> {
-        read_json(&self.dir.join(BLOCK_FILE))
+    /// Every persisted refusal window, keyed by GitHub resource.
+    ///
+    /// Reads the pre-Issue #3928 shape too — a bare [`ObservedBlock`] for the
+    /// single newest refusal — so an upgrade does not silently drop an open
+    /// window and resume spawning into it.
+    fn read_blocks(&self) -> BTreeMap<String, ObservedBlock> {
+        let path = self.dir.join(BLOCK_FILE);
+        if let Some(blocks) = read_json::<BTreeMap<String, ObservedBlock>>(&path) {
+            return blocks;
+        }
+        read_json::<ObservedBlock>(&path)
+            .map(|observed| BTreeMap::from([(observed.resource.clone(), observed)]))
+            .unwrap_or_default()
     }
 
     /// Read everything back. A missing or corrupt ledger is an empty one.
@@ -435,12 +457,17 @@ impl BudgetLedger {
                 *entry.sources_last_minute.entry(source).or_default() += 1;
             }
         }
+        let blocks = self.read_blocks();
         BudgetSnapshot {
             taken_at: now,
             probe,
             probe_age_secs,
             local,
-            last_block: read_json(&self.dir.join(BLOCK_FILE)),
+            last_block: blocks
+                .values()
+                .max_by_key(|observed| observed.observed_at)
+                .cloned(),
+            blocks,
             secondary_note: SECONDARY_LIMIT_NOTE,
         }
     }
@@ -556,9 +583,9 @@ pub fn throttle_reason(
 ) -> Option<String> {
     let resource = quota.resource_name()?;
     if let Some(block) = snapshot
-        .last_block
-        .as_ref()
-        .filter(|block| block.resource == resource && block.reset_at > now)
+        .blocks
+        .get(resource)
+        .filter(|block| block.reset_at > now)
     {
         return Some(format!(
             "{RATE_LIMITED_ERROR_CODE}: resource={resource} reset_at={} retry_after_secs={}",
@@ -679,9 +706,9 @@ pub fn status_by_resource(
             let resource = quota.resource_name()?;
             let reason = throttle_reason(snapshot, quota, policy, now);
             let window = snapshot
-                .last_block
-                .as_ref()
-                .filter(|block| block.resource == resource && block.reset_at > now);
+                .blocks
+                .get(resource)
+                .filter(|block| block.reset_at > now);
             let local = snapshot.local.get(resource).cloned().unwrap_or_default();
             Some((
                 resource.to_string(),
