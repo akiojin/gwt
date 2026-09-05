@@ -1,6 +1,48 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.90.0] - 2026-09-05
+
+### Bug Fixes
+
+- **issue-monitor:** Stranded generation を各スキャンで回収し agent_failed 行を自動 requeue する
+- **issue-monitor:** Open-pr-readback を scan あたり 1 回の一括取得にしてキュー長に比例した deadline 超過を防ぐ (#3963)
+- **issue-monitor:** Quota_hold.clear を daemon の権威状態へ届け、採用を確認できなければ拒否する
+- **issue-monitor:** Resume 経路でも候補 skip 理由の toast を出す
+- **issue-monitor:** CodeRabbit 指摘に沿って自動 requeue に live launch guard を入れ reclaim 比較を RFC3339 で行う
+
+### Documentation
+
+- **issue-monitor:** Quota_hold_clear の doc comment の AC 参照を Issue #3961 の AC-4 に揃える
+- **issue-monitor:** Launch pool の選択ルール文言を selector 契約と SPEC 参照に揃える
+
+### Features
+
+- **issue-monitor:** 起動プロファイルを候補プール化し hold 中の provider を避けて自動選択する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3964 作業中に生成された Work event shard を追跡に追加
+- **work:** Issue #3963 の Work events shard を追加
+- **work:** Issue #3963 の Work events shard を追加
+- **work:** Issue #3961 作業中に生成された Work event shard を追跡に追加
+- **work:** Issue #3961 の PR 作成時に生成された Work event shard を追跡に追加
+- **work:** Issue #3961 の完了処理で生成された Work event shard を追跡に追加
+- **work:** Issue #3914 の Work event shard を記録
+- **work:** Issue #3914 の Work event shard を記録
+- **work:** Issue #3914 の Work event shard を記録
+- **work:** Issue #3914 の terminal Work event shard を記録
+- **work:** Issue #3963 の Work events shard を追加
+- **work:** Issue #3964 の完了処理で生成された Work event shard を追跡に追加
+- **ci:** Npx package-runner probe timeout の既知 flake で落ちた Test (Rust) を再走させる
+- **work:** Issue #3521 の Work event shard を記録
+- **work:** Issue #3521 の Work event shard を記録
+- **work:** Issue #3521 の Work event shard を記録
+
+### Testing
+
+- **gwt:** Deadline テストの fake git を子プロセス書き出しにして ETXTBSY 競合を排除する
+
 ## [9.89.0] - 2026-09-04
 
 ### Bug Fixes
