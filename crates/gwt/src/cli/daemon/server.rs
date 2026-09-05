@@ -2870,7 +2870,10 @@ fn scan_failure_fallback(
     failure: crate::issue_monitor_worker::IssueMonitorScanFailure,
     now: String,
 ) -> crate::IssueMonitorState {
-    preserved.record_scan_error(now, failure.to_string());
+    // Issue #3963 AC-4: an aborted scan never reached the launch stage. Say so
+    // in the same line, so a reader can tell it from a degraded scan
+    // (`continued_with_*`) without knowing either message by heart.
+    preserved.record_scan_error(now, format!("{failure} (launch_suppressed)"));
     preserved
 }
 
@@ -4939,11 +4942,26 @@ if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
       ;;
   esac
 fi
+if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
+  # Issue #3963: every gh call is journaled so a test can prove the open-PR
+  # readback is ONE inventory call per scan, not one call per candidate branch.
+  if [ -n "$GWT_FAKE_GH_CALL_LOG" ]; then
+    printf '%s\n' "$*" >> "$GWT_FAKE_GH_CALL_LOG"
+  fi
+  case "$*" in
+    *"issue list"*)
+      cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
+      exit 0
+      ;;
+  esac
+  printf '%s\n' '[]'
+  exit 0
+fi
 if [ "$GWT_FAKE_GH_MODE" = "open_pr_readback_hang" ]; then
   case "$*" in
-    *"--head work/issue-"*)
-      # Issue #3933: one per-branch open-PR readback that outlives every
-      # plausible budget. It must degrade that branch alone, not the scan.
+    *"pr list --state open --json number,headRefName"*)
+      # Issue #3933 / #3963: the one open-PR inventory readback outlives every
+      # plausible budget. It must degrade that readback alone, not the scan.
       sleep 30
       exit 0
       ;;
@@ -8858,10 +8876,11 @@ exit 0
         assert!(!monitor.prefs().merged_issues.contains(&43));
     }
 
-    /// Issue #3933 AC-1/AC-4/AC-5: one per-branch open-PR readback that outlives
-    /// its budget degrades that branch alone. The scan keeps every other finding,
-    /// still reaches the launch stage in the SAME pass, and says in `last_error`
-    /// which stage/branch degraded and that the scan continued — so an operator
+    /// Issue #3933 AC-1/AC-4/AC-5 and Issue #3963 AC-3: the one open-PR
+    /// inventory readback that outlives its budget degrades that readback alone.
+    /// The scan keeps every other finding, still reaches the launch stage in the
+    /// SAME pass, and says in `last_error` which stage degraded, how many
+    /// candidates it left unknown, and that the scan continued — so an operator
     /// can tell a degraded scan from a stopped one.
     #[test]
     fn daemon_scan_continues_to_launch_when_open_pr_readback_exceeds_its_budget() {
@@ -8949,10 +8968,148 @@ exit 0
             .last_error
             .expect("a degraded scan still reports why");
         assert!(last_error.contains("open-pr-readback"), "{last_error}");
-        assert!(last_error.contains("work/issue-43"), "{last_error}");
+        assert!(
+            last_error.contains("1 implementing candidate"),
+            "{last_error}"
+        );
         assert!(
             last_error.contains("continued_with_stale_readback"),
             "{last_error}"
+        );
+    }
+
+    /// Issue #3963 AC-1/AC-2: with a queue-scale in-flight set (150 Implementing
+    /// candidates) the open-PR readback is ONE inventory call per scan, never one
+    /// `gh pr list --head` per branch, and the scan still reaches the launch
+    /// stage in the same pass.
+    #[test]
+    fn daemon_scan_reads_open_prs_once_for_a_150_issue_in_flight_queue() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_inventory");
+        let call_log = temp.path().join("gh-calls.log");
+        let _call_log = ScopedEnvVar::set("GWT_FAKE_GH_CALL_LOG", &call_log);
+
+        const IN_FLIGHT_COUNT: u64 = 150;
+        const QUEUED_ISSUE: u64 = 44;
+        let in_flight: Vec<u64> = (1000..1000 + IN_FLIGHT_COUNT).collect();
+        let issue_row = |number: u64, title: &str| {
+            serde_json::json!({
+                "number": number,
+                "title": title,
+                "body": "Issue body",
+                "labels": [{"name": "bug"}],
+                "state": "OPEN",
+                "url": format!("https://example.test/issues/{number}"),
+                "updatedAt": "2026-08-15T00:00:00Z",
+            })
+        };
+        let mut issues: Vec<serde_json::Value> = in_flight
+            .iter()
+            .map(|number| issue_row(*number, "In-flight issue"))
+            .collect();
+        issues.push(issue_row(QUEUED_ISSUE, "Queued issue"));
+        let issue_list = temp.path().join("issues.json");
+        fs::write(
+            &issue_list,
+            serde_json::to_string(&issues).expect("issue list json"),
+        )
+        .expect("write issue list");
+        let _issue_list = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_LIST_FILE", &issue_list);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let symbolic_ref = gwt_core::process::hidden_command("git")
+            .args([
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("set origin HEAD");
+        assert!(symbolic_ref.success());
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            autonomous_records: in_flight
+                .iter()
+                .map(|number| crate::AutonomousIssueRecord {
+                    phase: crate::AutonomousPhase::Implementing,
+                    ..crate::AutonomousIssueRecord::new(*number)
+                })
+                .collect(),
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_secs(20),
+        );
+        let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("a queue-scale readback must not abort the scan");
+
+        let calls = fs::read_to_string(&call_log).expect("gh call log");
+        let open_pr_reads = calls
+            .lines()
+            .filter(|line| line.starts_with("pr list") && line.contains("--state open"))
+            .count();
+        assert_eq!(
+            open_pr_reads, 1,
+            "one open-PR inventory per scan, not one per candidate:\n{calls}"
+        );
+        assert!(
+            !calls.lines().any(|line| line.contains("--head")),
+            "no per-branch open-PR readback may remain:\n{calls}"
+        );
+        assert!(
+            scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "the launch stage must still run with a 150-issue in-flight set: {:?}",
+            scanned.pending_effects()
+        );
+        assert!(
+            in_flight.iter().all(|number| {
+                scanned
+                    .autonomous_record(*number)
+                    .map(|record| record.phase)
+                    == Some(crate::AutonomousPhase::Implementing)
+            }),
+            "no open PR keeps every candidate Implementing"
+        );
+        let last_error = scanned.status_view().last_error.unwrap_or_default();
+        assert!(
+            !last_error.contains("open-pr-readback"),
+            "a clean inventory is not a degraded readback: {last_error}"
         );
     }
 
@@ -11541,11 +11698,15 @@ exit 1
 
         assert_eq!(failed.effect_authority_epoch(), 7);
         assert_eq!(failed.pending_effects(), &[effect]);
-        assert!(failed
+        let last_error = failed
             .status_view()
             .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("branch-protection")));
+            .expect("an aborted scan reports its failure");
+        assert!(last_error.contains("branch-protection"), "{last_error}");
+        // Issue #3963 AC-4: the aborted form says the launch stage did not run,
+        // so a reader can tell it from a degraded scan (`continued_with_*`)
+        // without knowing either message by heart.
+        assert!(last_error.contains("launch_suppressed"), "{last_error}");
     }
 
     #[tokio::test]
