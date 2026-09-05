@@ -2455,7 +2455,7 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 mod check_status_tests {
     use super::{
         check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
-        HttpResponse, HttpTransport,
+        HttpResponse, HttpTransport, ResolutionDeadline,
     };
     use crate::client::{ApiError, IssueClient, SpecListFilter};
 
@@ -2521,14 +2521,27 @@ mod check_status_tests {
     #[test]
     fn a_rate_limited_graphql_body_is_typed_even_on_the_plain_query_path() {
         struct RateLimitedBody;
-        impl HttpTransport for RateLimitedBody {
-            fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
-                Ok(HttpResponse {
+        impl RateLimitedBody {
+            fn response() -> HttpResponse {
+                HttpResponse {
                     status: 200,
                     headers: Vec::new(),
                     body: r#"{"errors":[{"type":"RATE_LIMIT","message":"API rate limit already exceeded for user ID 965624."}]}"#
                         .to_string(),
-                })
+                }
+            }
+        }
+        impl HttpTransport for RateLimitedBody {
+            fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+
+            fn execute_with_deadline(
+                &self,
+                _request: HttpRequest,
+                _deadline: &ResolutionDeadline,
+            ) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
             }
         }
 
